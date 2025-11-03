@@ -1,0 +1,19 @@
+# INS401 IMU Publisher Configuration
+ins401_imu_publisher:
+  ros__parameters:
+    # Network interface configuration
+    interface_name: "eth0"              # Network interface connected to INS401
+    target_mac: "00:04:4b:e7:b5:0a"    # MAC address of your INS401 device
+
+    # ROS configuration
+    frame_id: "imu_link"                # TF frame ID for IMU messages
+    publish_rate: 200.0                 # Publishing rate in Hz (max 200Hz)
+
+    # Data logging
+    save_to_file: false                 # Enable/disable saving to file
+    output_file: "imu_data.txt"         # Output file path if save_to_file is true
+
+# Topic remappings (configured in launch file)
+# /imu/data_raw -> /ins401/imu/data_raw
+# /imu/accel -> /ins401/imu/accel
+# /imu/gyro -> /ins401/imu/gyro
