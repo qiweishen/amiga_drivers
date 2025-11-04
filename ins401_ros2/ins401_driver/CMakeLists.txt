@@ -1,26 +1,41 @@
 cmake_minimum_required(VERSION 3.22...3.25)
 project(INS401_Driver LANGUAGES CXX)
 
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+find_package(Boost REQUIRED)
+
+
+add_subdirectory(deps)
+
+
 include_directories(
         ${PROJECT_SOURCE_DIR}/include
+        ${Boost_INCLUDE_DIRS}
 )
 
+
 set(SOURCES
-        ${PROJECT_SOURCE_DIR}/src/tool.cpp
-        ${PROJECT_SOURCE_DIR}/src/ins_device_finder.cpp
-        ${PROJECT_SOURCE_DIR}/src/ins_driver.cpp
-        ${PROJECT_SOURCE_DIR}/main.cpp
-        include/ins_device_finder.h
-        include/ins_driver.h
+        src/tool.cpp
+        src/ins_discover.cpp
+        src/ins_receiver.cpp
         src/ntrip_client.cpp
-        src/ntrip_client.h
+        main.cpp
 )
+
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-find_package(Threads REQUIRED)
-target_link_libraries(INS401_Driver Threads::Threads)
+
+target_link_libraries(${PROJECT_NAME}
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+        Boost::boost
+)

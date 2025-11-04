@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -9,102 +10,169 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
+#include <netdb.h>
+#include <algorithm>
+#include <iomanip>
 
+// OpenSSL headers for HTTPS support
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
+#include "data_type.h"
 
-// RTCM数据回调函数类型
-using RTCMCallback = std::function<void(const std::vector<uint8_t>& data, size_t length)>;
-
-
-// Mountpoint信息结构
-struct MountPoint {
-    std::string name;
-    std::string identifier;
-    std::string format;
-    std::string nav_system;
-    std::string network;
-    std::string country;
-    double latitude;
-    double longitude;
-    int carrier;
-    std::string solution;
-    std::string generator;
-    std::string compression;
-    std::string authentication;
-    int fee;
-    int bitrate;
-};
 
 
 class NTRIPClient {
 public:
-    NTRIPClient(std::string &host, int port,
-                         std::string &username,
-                         std::string &password,
-                         std::string &mountpoint);
-    ~NTRIPClient();
+	using RTCMCallback = std::function<void(const uint8_t *, size_t)>;
+	/**
+	 * Constructor for NTRIP Client
+	 * @param host NTRIP caster hostname
+	 * @param port NTRIP caster port
+	 * @param is_ssl Use HTTPS connection if true
+	 * @param username Authentication username
+	 * @param password Authentication password
+	 * @param mountpoint NTRIP mountpoint name
+	 */
+	NTRIPClient(std::string host, int port, bool is_ssl,
+	            std::string username,
+	            std::string password,
+	            std::string mountpoint);
 
-    // 连接控制
-    bool Connect();
-    void Disconnect();
-    bool isConnected() const;
+	~NTRIPClient();
 
-    // 获取可用的挂载点列表
-    std::vector<MountPoint> GetSourceTable();
+	// Connection management
+	bool Connect();
 
-    // 数据接收
-    void SetRTCMCallback(RTCMCallback callback);
-    void StartReceiving();
-    void StopReceiving();
+	void Disconnect();
 
-    // 连接状态和统计
-    double GetDataRate() const; // KB/s
+	[[nodiscard]] bool IsConnected() const { return connected_.load(); }
 
-    // 设置超时和重连参数
-    void SetConnectionTimeout(int seconds);
-    void SetReceiveTimeout(int seconds);
-    void SetAutoReconnect(bool enable);
-    void SetReconnectInterval(int seconds);
+	// Data receiving control
+	void StartReceiving();
 
+	void StopReceiving();
+
+	void SetRTCMCallback(RTCMCallback callback) { rtcm_callback_ = std::move(callback); }
+
+	// Configuration methods
+	void SetNMEA(const std::string &nmea) { nmea_gga_ = nmea; }
+	void SetUserAgent(const std::string &agent) { user_agent_ = agent; }
+	void SetConnectionTimeout(int seconds) { connection_timeout_ = seconds; }
+	void SetAutoReconnect(bool enable) { auto_reconnect_ = enable; }
+	void SetReconnectInterval(int seconds) { reconnect_interval_ = seconds; }
+	void SetSSLVerification(bool verify) { verify_ssl_ = verify; }
+
+	// Information retrieval
+	std::vector<MountPoint> GetSourceTable();
+
+	[[nodiscard]] std::string GetLastError() const { return last_error_; }
+
+	[[nodiscard]] double GetDataRate() const;
+
+	[[nodiscard]] size_t GetBytesReceived() const { return bytes_received_.load(); }
+	[[nodiscard]] size_t GetMessagesReceived() const { return messages_received_.load(); }
 
 private:
-    int socket_fd_;
-    std::string host_;
-    int port_;
-    std::string username_;
-    std::string password_;
-    std::string mountpoint_;
-    std::string user_agent_;
-    std::string gga_string_;
+	// Socket and SSL members
+	int socket_fd_; // Socket file descriptor
+	SSL_CTX *ssl_ctx_; // SSL context
+	SSL *ssl_; // SSL connection
+	bool socket_initialized_; // Socket initialization flag
 
-    std::atomic<bool> connected_;
-    std::atomic<bool> receiving_;
-    std::string last_error_;
+	// Connection parameters
+	std::string host_;
+	int port_;
+	bool is_ssl_;
+	std::string username_;
+	std::string password_;
+	std::string mountpoint_;
+	std::string user_agent_ = "NTRIP Socket Client/2.0";
+	std::string nmea_gga_;
 
-    std::unique_ptr<std::thread> receive_thread_;
-    std::unique_ptr<std::thread> process_thread_;
+	// Connection state
+	std::atomic<bool> connected_{false};
+	std::atomic<bool> receiving_{false};
+	std::string last_error_;
 
-    std::queue<std::vector<uint8_t>> data_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
+	// Configuration options
+	int connection_timeout_ = 10; // Connection timeout in seconds
+	int read_timeout_ = 10; // Read timeout in seconds
+	int reconnect_interval_ = 5; // Reconnection interval in seconds
+	bool auto_reconnect_ = true; // Auto reconnection flag
+	bool verify_ssl_ = false; // SSL certificate verification flag
 
-    RTCMCallback rtcm_callback_;
+	// Statistics
+	std::atomic<size_t> bytes_received_{0};
+	std::atomic<size_t> messages_received_{0};
+	std::chrono::steady_clock::time_point start_time_;
 
-    std::atomic<size_t> bytes_received_;
-    std::atomic<size_t> messages_received_;
-    std::chrono::steady_clock::time_point start_time_;
+	// Data processing
+	RTCMCallback rtcm_callback_;
+	std::queue<std::vector<uint8_t> > data_queue_;
+	std::mutex queue_mutex_;
+	std::condition_variable queue_cv_;
 
-    int connection_timeout_;
-    int receive_timeout_;
-    bool auto_reconnect_;
-    int reconnect_interval_;
+	// Thread management
+	std::unique_ptr<std::thread> receive_thread_;
+	std::unique_ptr<std::thread> process_thread_;
 
-    bool CreateSocket();
-    bool SendNTRIPRequest();
-    bool ParseNTRIPResponse();
-    void ReceiveLoop();
-    void ProcessLoop();
-    bool ParseRTCMFrame(const std::vector<uint8_t>& buffer, size_t& offset, std::vector<uint8_t>& message);
-    void HandleReconnection();
-    std::string EncodeBase64(const std::string& input);
+	// Socket operations
+	bool InitializeSocket();
+
+	bool ConnectSocket();
+
+	void CloseSocket();
+
+	bool SetSocketTimeout(int timeout_sec);
+
+	// SSL operations
+	bool InitializeSSL();
+
+	bool ConnectSSL();
+
+	void CleanupSSL();
+
+	// Network I/O operations
+	ssize_t SendData(const void *data, size_t size) const;
+
+	ssize_t ReceiveData(void *buffer, size_t size) const;
+
+	// HTTP protocol handling
+	[[nodiscard]] std::string BuildHTTPRequest(const std::string &method, const std::string &path) const;
+
+	[[nodiscard]] std::string BuildAuthHeader() const;
+
+	bool SendHTTPRequest(const std::string &method, const std::string &path);
+
+	bool ReceiveHTTPResponse(HTTPResponse &response);
+
+	bool ParseHTTPResponse(const std::string &data, HTTPResponse &response);
+
+	// RTCM data processing
+	static bool ParseRTCMFrame(const std::vector<uint8_t> &buffer, size_t &offset, std::vector<uint8_t> &message);
+
+	// Thread functions
+	void ReceiveLoop();
+
+	void ProcessLoop();
+
+	void HandleReconnection();
+
+	// Utility functions
+	static MountPoint ParseMountPointLine(const std::string &line);
+
+	static std::string Base64Encode(const std::string &input);
+
+	static std::string Trim(const std::string &str);
+
+	static std::vector<std::string> Split(const std::string &str, char delimiter);
+
+	// Static initialization for SSL
+	static void InitializeOpenSSL();
+
+	static void CleanupOpenSSL();
+
+	static std::once_flag openssl_init_flag_;
 };
