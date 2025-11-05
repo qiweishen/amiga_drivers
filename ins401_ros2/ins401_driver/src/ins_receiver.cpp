@@ -35,7 +35,6 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 void INSDeviceReceiver::Run() {
 	if (save_to_file_) {
 		InitializeFiles();
-		writer_thread_ = std::thread(&INSDeviceReceiver::WriterThread, this);
 	}
 	Initialize();
 	ReceiveLoop();
