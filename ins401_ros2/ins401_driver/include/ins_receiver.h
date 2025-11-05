@@ -22,7 +22,7 @@ public:
 	bool GetGNSSData(std::vector<GNSSSolutionData> &data, size_t max_count = 10);
 	bool GetIMUData(std::vector<RawIMUData> &data, size_t max_count = 500);
 	bool isRunning() const { return running_; }
-	// void HandleRTCMMessage(const uint8_t *data, size_t size);
+	void HandleRTCMMessage(const uint8_t *data, size_t size);
 
 private:
 	int sock_fd_{};

@@ -11,7 +11,6 @@
 
 INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &mac_addr, bool save_to_file) :
 	sock_fd_(-1), interface_name_(iface), running_(true), save_to_file_(save_to_file) {
-
 	Tool::Ethernet::ConvertUint16ToUint8(COMMAND_START, command_start_, LSB);
 	Tool::Ethernet::ParseMACAddressToUint8(mac_addr, target_mac_);
 }
@@ -76,19 +75,19 @@ bool INSDeviceReceiver::GetIMUData(std::vector<RawIMUData> &data, size_t max_cou
 }
 
 
-// void INSDeviceReceiver::HandleRTCMMessage(const uint8_t *data, size_t size) {
-// 	if (size >= 6) {
-// 		// Get the payload
-// 		const uint8_t *payload = data + 3;
-// 		const size_t payload_size = size - 3;
-// 		// Send via raw socket
-// 		if (sock_fd_ >= 0) {
-// 			ssize_t sent_bytes = send(sock_fd_, payload,
-// payload_size, 0); 			if (sent_bytes < 0) {
-// 			}
-// 		}
-// 	}
-// }
+void INSDeviceReceiver::HandleRTCMMessage(const uint8_t *data, size_t size) {
+	if (size >= 6) {
+		// Get the payload
+		const uint8_t *payload = data + 3;
+		const size_t payload_size = size - 3;
+		// Send via raw socket
+		if (sock_fd_ >= 0) {
+			ssize_t sent_bytes = send(sock_fd_, payload, payload_size, 0);
+			if (sent_bytes < 0) {
+			}
+		}
+	}
+}
 
 
 bool INSDeviceReceiver::Initialize() {
