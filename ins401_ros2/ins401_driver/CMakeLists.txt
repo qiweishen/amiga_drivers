@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22...3.25)
+cmake_minimum_required(VERSION 3.15...3.25)
 project(INS401_Driver LANGUAGES CXX)
 
 
@@ -24,8 +24,8 @@ include_directories(
 set(SOURCES
         src/tool.cpp
         src/ins_discover.cpp
-        src/ins_receiver.cpp
-        src/ntrip_client.cpp
+#        src/ins_receiver.cpp
+#        src/ntrip_client.cpp
         main.cpp
 )
 

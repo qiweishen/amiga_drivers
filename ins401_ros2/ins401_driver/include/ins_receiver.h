@@ -5,6 +5,7 @@
 #include <queue>
 #include <thread>
 #include <condition_variable>
+#include <atomic>
 
 #include "tool.h"
 #include "data_type.h"
@@ -25,10 +26,10 @@ public:
 
 private:
 	int sock_fd_{};
-	uint8_t *COMMAND_START_;
+	std::array<uint8_t, 2> command_start_{};
 	std::string interface_name_;
-	uint8_t target_mac_[6]{};
-	std::atomic<bool> running_;
+	std::array<uint8_t, 6> target_mac_{};
+	std::atomic<bool> running_{false};
 	size_t buffer_size_{64 * 1024};
 	std::queue<GNSSSolutionData> gnss_queue_;
 	std::queue<RawIMUData> imu_queue_;

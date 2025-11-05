@@ -190,8 +190,6 @@ namespace Tool {
 		        std::cerr << "Warning: Failed to set packet fanout - "
 		                  << strerror(errno) << std::endl;
 		    }
-		    std::cout << "Async raw socket initialized on interface: "
-		              << interface << " (fd=" << raw_socket << ")" << std::endl;
 
 		    guard.release();
 		    return true;
