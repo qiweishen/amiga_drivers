@@ -1,23 +1,23 @@
 #pragma once
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <iomanip>
+#include <memory>
+#include <mutex>
+#include <netdb.h>
+#include <queue>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
-#include <memory>
-#include <functional>
-#include <thread>
-#include <atomic>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <chrono>
-#include <netdb.h>
-#include <algorithm>
-#include <iomanip>
 
 // OpenSSL headers for HTTPS support
-#include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 
 #include "data_type.h"
 
@@ -35,10 +35,7 @@ public:
 	 * @param password Authentication password
 	 * @param mountpoint NTRIP mountpoint name
 	 */
-	NTRIPClient(std::string host, int port, bool is_ssl,
-	            std::string username,
-	            std::string password,
-	            std::string mountpoint);
+	NTRIPClient(std::string host, int port, bool is_ssl, std::string username, std::string password, std::string mountpoint);
 
 	~NTRIPClient();
 
@@ -76,10 +73,10 @@ public:
 
 private:
 	// Socket and SSL members
-	int socket_fd_; // Socket file descriptor
-	SSL_CTX *ssl_ctx_; // SSL context
-	SSL *ssl_; // SSL connection
-	bool socket_initialized_; // Socket initialization flag
+	int socket_fd_;			   // Socket file descriptor
+	SSL_CTX *ssl_ctx_;		   // SSL context
+	SSL *ssl_;				   // SSL connection
+	bool socket_initialized_;  // Socket initialization flag
 
 	// Connection parameters
 	std::string host_;
@@ -92,20 +89,20 @@ private:
 	std::string nmea_gga_;
 
 	// Connection state
-	std::atomic<bool> connected_{false};
-	std::atomic<bool> receiving_{false};
+	std::atomic<bool> connected_{ false };
+	std::atomic<bool> receiving_{ false };
 	std::string last_error_;
 
 	// Configuration options
-	int connection_timeout_ = 10; // Connection timeout in seconds
-	int read_timeout_ = 10; // Read timeout in seconds
-	int reconnect_interval_ = 5; // Reconnection interval in seconds
-	bool auto_reconnect_ = true; // Auto reconnection flag
-	bool verify_ssl_ = false; // SSL certificate verification flag
+	int connection_timeout_ = 10;  // Connection timeout in seconds
+	int read_timeout_ = 10;		   // Read timeout in seconds
+	int reconnect_interval_ = 5;   // Reconnection interval in seconds
+	bool auto_reconnect_ = true;   // Auto reconnection flag
+	bool verify_ssl_ = false;	   // SSL certificate verification flag
 
 	// Statistics
-	std::atomic<size_t> bytes_received_{0};
-	std::atomic<size_t> messages_received_{0};
+	std::atomic<size_t> bytes_received_{ 0 };
+	std::atomic<size_t> messages_received_{ 0 };
 	std::chrono::steady_clock::time_point start_time_;
 
 	// Data processing

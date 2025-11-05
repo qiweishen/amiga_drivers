@@ -1,14 +1,14 @@
 #pragma once
 
-#include <unistd.h>
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <queue>
 #include <thread>
-#include <condition_variable>
-#include <atomic>
+#include <unistd.h>
 
-#include "tool.h"
 #include "data_type.h"
+#include "tool.h"
 
 
 
@@ -17,22 +17,26 @@ public:
 	INSDeviceReceiver(const std::string &iface, const std::string &mac_addr, bool save_to_file);
 	~INSDeviceReceiver();
 
-	void Stop();
 	void Run();
+	void Stop();
 	bool GetGNSSData(std::vector<GNSSSolutionData> &data, size_t max_count = 10);
 	bool GetIMUData(std::vector<RawIMUData> &data, size_t max_count = 500);
 	bool isRunning() const { return running_; }
-	void HandleRTCMMessage(const uint8_t *data, size_t size);
+	// void HandleRTCMMessage(const uint8_t *data, size_t size);
 
 private:
 	int sock_fd_{};
 	std::array<uint8_t, 2> command_start_{};
 	std::string interface_name_;
 	std::array<uint8_t, 6> target_mac_{};
-	std::atomic<bool> running_{false};
-	size_t buffer_size_{64 * 1024};
+	std::atomic<bool> running_{ false };
+	const size_t gnss_hz_ = 1;
+	const size_t imu_hz_ = 100;
+	const size_t buffer_size_ = { 8 * 1024 };
 	std::queue<GNSSSolutionData> gnss_queue_;
+	const size_t max_gnss_queue_size_ = gnss_hz_ * 5 * 60;	// 5 minutes of GNSS data
 	std::queue<RawIMUData> imu_queue_;
+	const size_t max_imu_queue_size_ = imu_hz_ * 5 * 60;	// 5 minutes of IMU data
 	mutable std::mutex queue_mutex_;
 	std::condition_variable cv_;
 	std::thread writer_thread_;
@@ -40,10 +44,22 @@ private:
 	std::ofstream imu_file_;
 	bool save_to_file_;
 
+	// Write buffers
+	const size_t gnss_batch_size_ = gnss_hz_ * 5;  // 5 seconds of GNSS data at 1Hz
+	const size_t imu_batch_size_ = imu_hz_ * 5;	   // 5 seconds of IMU data at 100Hz
+	const size_t write_buffer_size_ = 128 * 1024;  // 128 KB buffer
+	std::vector<char> gnss_file_buffer_;
+	std::vector<char> imu_file_buffer_;
+	size_t last_flush_time_ = 0;
+
 	bool Initialize();
+	void InitializeFiles();
 	void ReceiveLoop();
 	void VerifyData(const uint8_t *data, size_t len);
-	void ProcessGNSSSolutionData(const uint8_t *packet);
-	void ProcessRawIMUData(const uint8_t *packet);
+	void ProcessGNSSSolutionData(const uint8_t *packet, uint32_t data_length);
+	void ProcessRawIMUData(const uint8_t *packet, uint32_t data_length);
 	void WriterThread();
+	void WriteIMUBatch(const std::vector<RawIMUData> &batch, std::string &buffer);
+	void WriteGNSSBatch(const std::vector<GNSSSolutionData> &batch, std::string &buffer);
+	// void WriteIMUBinary(const std::vector<RawIMUData> &batch);
 };

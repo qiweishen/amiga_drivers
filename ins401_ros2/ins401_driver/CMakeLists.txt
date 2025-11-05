@@ -24,8 +24,8 @@ include_directories(
 set(SOURCES
         src/tool.cpp
         src/ins_discover.cpp
-#        src/ins_receiver.cpp
-#        src/ntrip_client.cpp
+        src/ins_receiver.cpp
+        src/ntrip_client.cpp
         main.cpp
 )
 

@@ -1,14 +1,15 @@
-#include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <iostream>
-#include <sstream>
-#include <cstring>
-#include <map>
-#include <sys/socket.h>
-#include <openssl/bio.h>
-
 #include "ntrip_client.h"
+
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <map>
+#include <openssl/bio.h>
+#include <poll.h>
+#include <sstream>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "tool.h"
 
 
@@ -17,14 +18,17 @@
 std::once_flag NTRIPClient::openssl_init_flag_;
 
 
-NTRIPClient::NTRIPClient(std::string host, const int port, const bool is_ssl,
-                         std::string username, std::string password,
-                         std::string mountpoint)
-	: host_(std::move(host)), port_(port), is_ssl_(is_ssl),
-	  username_(std::move(username)), password_(std::move(password)),
-	  mountpoint_(std::move(mountpoint)),
-	  socket_fd_(-1), ssl_ctx_(nullptr), ssl_(nullptr),
-	  socket_initialized_(false) {
+NTRIPClient::NTRIPClient(std::string host, const int port, const bool is_ssl, std::string username, std::string password, std::string mountpoint) :
+	host_(std::move(host)),
+	port_(port),
+	is_ssl_(is_ssl),
+	username_(std::move(username)),
+	password_(std::move(password)),
+	mountpoint_(std::move(mountpoint)),
+	socket_fd_(-1),
+	ssl_ctx_(nullptr),
+	ssl_(nullptr),
+	socket_initialized_(false) {
 	// Initialize OpenSSL once for all instances
 	std::call_once(openssl_init_flag_, InitializeOpenSSL);
 }
@@ -81,7 +85,8 @@ bool NTRIPClient::Connect() {
 		// Send HTTP request for the mountpoint
 		if (!SendHTTPRequest("GET", "/" + mountpoint_)) {
 			last_error_ = "Failed to send HTTP request";
-			if (is_ssl_) CleanupSSL();
+			if (is_ssl_)
+				CleanupSSL();
 			CloseSocket();
 			return false;
 		}
@@ -89,7 +94,8 @@ bool NTRIPClient::Connect() {
 		HTTPResponse response;
 		if (!ReceiveHTTPResponse(response)) {
 			last_error_ = "Failed to receive HTTP response";
-			if (is_ssl_) CleanupSSL();
+			if (is_ssl_)
+				CleanupSSL();
 			CloseSocket();
 			return false;
 		}
@@ -111,7 +117,8 @@ bool NTRIPClient::Connect() {
 				default:
 					last_error_ = "HTTP error: " + std::to_string(response.status_code);
 			}
-			if (is_ssl_) CleanupSSL();
+			if (is_ssl_)
+				CleanupSSL();
 			CloseSocket();
 			return false;
 		}
@@ -120,12 +127,12 @@ bool NTRIPClient::Connect() {
 		start_time_ = std::chrono::steady_clock::now();
 		bytes_received_ = 0;
 		messages_received_ = 0;
-		std::cout << "Connected to NTRIP caster: " << host_ << ":" << port_
-				<< "/" << mountpoint_ << std::endl;
+		std::cout << "Connected to NTRIP caster: " << host_ << ":" << port_ << "/" << mountpoint_ << std::endl;
 		return true;
 	} catch (const std::exception &e) {
 		last_error_ = "Connection error: " + std::string(e.what());
-		if (is_ssl_) CleanupSSL();
+		if (is_ssl_)
+			CleanupSSL();
 		CloseSocket();
 		return false;
 	}
@@ -448,8 +455,7 @@ bool NTRIPClient::ParseHTTPResponse(const std::string &data, HTTPResponse &respo
 		}
 	}
 	// Check for chunked transfer encoding
-	if (auto transfer_encoding = response.headers.find("transfer-encoding");
-		transfer_encoding != response.headers.end()) {
+	if (auto transfer_encoding = response.headers.find("transfer-encoding"); transfer_encoding != response.headers.end()) {
 		response.is_chunked = (transfer_encoding->second.find("chunked") != std::string::npos);
 	}
 	return true;
@@ -500,7 +506,7 @@ void NTRIPClient::ReceiveLoop() {
 	rtcm_buffer.reserve(8192);
 	uint8_t temp_buffer[4096];
 	// Set socket to non-blocking mode for better control
-	SetSocketTimeout(1); // 1 second timeout for checking stop condition
+	SetSocketTimeout(1);  // 1 second timeout for checking stop condition
 	while (receiving_ && connected_) {
 		try {
 			// Receive data from socket
@@ -570,9 +576,7 @@ void NTRIPClient::ProcessLoop() {
 		std::unique_lock<std::mutex> lock(queue_mutex_);
 
 		// Wait for data or stop signal
-		queue_cv_.wait(lock, [this] {
-			return !data_queue_.empty() || !receiving_;
-		});
+		queue_cv_.wait(lock, [this] { return !data_queue_.empty() || !receiving_; });
 		// Process all available messages
 		while (!data_queue_.empty() && receiving_) {
 			auto message = std::move(data_queue_.front());
@@ -588,8 +592,7 @@ void NTRIPClient::ProcessLoop() {
 }
 
 
-bool NTRIPClient::ParseRTCMFrame(const std::vector<uint8_t> &buffer, size_t &offset,
-                                 std::vector<uint8_t> &message) {
+bool NTRIPClient::ParseRTCMFrame(const std::vector<uint8_t> &buffer, size_t &offset, std::vector<uint8_t> &message) {
 	const size_t buff_size = buffer.size();
 	// Find RTCM3 preamble byte (0xD3)
 	while (offset < buff_size && buffer[offset] != RTCM3PREAMB) {
@@ -606,22 +609,20 @@ bool NTRIPClient::ParseRTCMFrame(const std::vector<uint8_t> &buffer, size_t &off
 	uint16_t length = ((buffer[offset + 1] & 0x03) << 8) | buffer[offset + 2];
 	// Validate length (RTCM3 maximum is 1023 bytes)
 	if (length > 1023) {
-		offset++; // Skip invalid sync byte
+		offset++;  // Skip invalid sync byte
 		return false;
 	}
 	// Check for complete frame (header + message + CRC)
 	size_t frame_size = 3 + length + 3;
 	if (offset + frame_size > buffer.size()) {
-		return false; // Wait for more data
+		return false;  // Wait for more data
 	}
 	// Validate CRC-24
 	uint32_t computed_crc = Tool::CRC::CalculateRTCM3_CRC24(&buffer[offset], 3 + length);
-	uint32_t received_crc = (buffer[offset + 3 + length] << 16) |
-	                        (buffer[offset + 3 + length + 1] << 8) |
-	                        (buffer[offset + 3 + length + 2]);
+	uint32_t received_crc = (buffer[offset + 3 + length] << 16) | (buffer[offset + 3 + length + 1] << 8) | (buffer[offset + 3 + length + 2]);
 	if (computed_crc != received_crc) {
 		std::cerr << "CRC error in RTCM message" << std::endl;
-		offset++; // Skip invalid sync byte
+		offset++;  // Skip invalid sync byte
 		return false;
 	}
 	// Extract complete message
@@ -672,14 +673,16 @@ std::vector<MountPoint> NTRIPClient::GetSourceTable() {
 		}
 		// Request source table
 		if (!SendHTTPRequest("GET", "/")) {
-			if (is_ssl_) CleanupSSL();
+			if (is_ssl_)
+				CleanupSSL();
 			CloseSocket();
 			return mountpoints;
 		}
 		// Receive response
 		HTTPResponse response;
 		if (!ReceiveHTTPResponse(response)) {
-			if (is_ssl_) CleanupSSL();
+			if (is_ssl_)
+				CleanupSSL();
 			CloseSocket();
 			return mountpoints;
 		}
@@ -720,23 +723,34 @@ MountPoint NTRIPClient::ParseMountPointLine(const std::string &line) {
 	MountPoint mp;
 	std::vector<std::string> fields = Split(line, ';');
 	// Parse SOURCETABLE fields
-	if (fields.size() > 1) mp.mountpoint = fields[1];
-	if (fields.size() > 2) mp.city = fields[2];
-	if (fields.size() > 3) mp.data_format = fields[3];
-	if (fields.size() > 4) mp.format_details = fields[4];
-	if (fields.size() > 5 && !fields[5].empty()) mp.carrier = std::stoi(fields[5]);
-	if (fields.size() > 6) mp.nav_system = fields[6];
-	if (fields.size() > 7) mp.network = fields[7];
-	if (fields.size() > 8) mp.country = fields[8];
-	if (fields.size() > 9 && !fields[9].empty()) mp.latitude = std::stod(fields[9]);
-	if (fields.size() > 10 && !fields[10].empty()) mp.longitude = std::stod(fields[10]);
+	if (fields.size() > 1)
+		mp.mountpoint = fields[1];
+	if (fields.size() > 2)
+		mp.city = fields[2];
+	if (fields.size() > 3)
+		mp.data_format = fields[3];
+	if (fields.size() > 4)
+		mp.format_details = fields[4];
+	if (fields.size() > 5 && !fields[5].empty())
+		mp.carrier = std::stoi(fields[5]);
+	if (fields.size() > 6)
+		mp.nav_system = fields[6];
+	if (fields.size() > 7)
+		mp.network = fields[7];
+	if (fields.size() > 8)
+		mp.country = fields[8];
+	if (fields.size() > 9 && !fields[9].empty())
+		mp.latitude = std::stod(fields[9]);
+	if (fields.size() > 10 && !fields[10].empty())
+		mp.longitude = std::stod(fields[10]);
 	return mp;
 }
 
 
 std::string NTRIPClient::Trim(const std::string &str) {
 	size_t first = str.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos) return "";
+	if (first == std::string::npos)
+		return "";
 	size_t last = str.find_last_not_of(" \t\r\n");
 	return str.substr(first, (last - first + 1));
 }
@@ -760,10 +774,9 @@ double NTRIPClient::GetDataRate() const {
 		return 0.0;
 	}
 	auto now = std::chrono::steady_clock::now();
-	auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-		now - start_time_).count();
+	auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
 	if (duration == 0) {
 		return 0.0;
 	}
-	return static_cast<double>(bytes_received_.load()) / duration / 1024.0; // KB/s
+	return static_cast<double>(bytes_received_.load()) / duration / 1024.0;	 // KB/s
 }

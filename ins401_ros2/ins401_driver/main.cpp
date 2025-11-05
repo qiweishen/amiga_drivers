@@ -1,21 +1,22 @@
 #include "ins_discover.h"
-// #include "ins_receiver.h"
+#include "ins_receiver.h"
 // #include "ntrip_client.h"
 #include <iostream>
 
 
 int main() {
-	INSDeviceDiscover discovery;
-	std::map<std::string, DeviceInfo> devices = discovery.GetDiscoveredDevices();
-	for (const auto& [mac, device] : devices) {
-		std::cout << "Discovered INS401 device on interface "
-				  << device.interface_name << " with MAC " << device.mac_address << std::endl;
+	INSDeviceDiscover discover;
+	std::map<std::string, DeviceInfo> devices = discover.GetDiscoveredDevices();
+	for (const auto& [mac, device]: devices) {
+		std::cout << "Discovered INS401 device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
 	}
+	DeviceInfo device = devices.begin()->second;
+	std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
 
-	// std::unique_ptr<INSDeviceReceiver> receiverPtr = std::make_unique<INSDeviceReceiver>(device.interface_name, device.mac_address, true);
-	// std::thread receiver_thread([&receiverPtr]() {
-	// 	receiverPtr->Run();
-	// });
+	INSDeviceReceiver receiver(device.interface_name, device.mac_address, true);
+	std::thread receiver_thread([&receiver]() {
+		receiver.Run();
+	});
 
 	// std::string host = "ntrip.data.gnss.ga.gov.au";
 	// int port = 443;

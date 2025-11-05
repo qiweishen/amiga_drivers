@@ -1,10 +1,10 @@
 #pragma once
 
-#include <vector>
 #include <iomanip>
-#include <unistd.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <unistd.h>
+#include <vector>
 
 #include "data_type.h"
 
@@ -29,7 +29,7 @@ namespace Tool {
 		 * @param mac_ptr Pointer to 6-byte MAC address
 		 * @return Formatted string like "xx:xx:xx:xx:xx:xx"
 		 */
-		std::string FormatMacAddress(const uint8_t* mac_ptr);
+		std::string FormatMacAddress(const uint8_t *mac_ptr);
 
 		/**
 		 * Convert uint16 to 2-byte array with specified endianness
@@ -55,8 +55,7 @@ namespace Tool {
 		 * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
 		 * @return true on success, false on failure
 		 */
-		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface,
-								  size_t buffer_size=4 * 1024 * 1024);
+		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, size_t buffer_size = 4 * 1024 * 1024);
 
 		/**
 		 * Send a broadcast Ethernet packet
@@ -67,9 +66,8 @@ namespace Tool {
 		 * @param packet Packet data to send
 		 * @return true on success, false on failure
 		 */
-		bool SendBroadcastPacket(const std::string &interface, const std::string &dest_mac_str,
-		                       const std::string &src_mac_str, const int &raw_socket,
-		                       const std::vector<uint8_t> &packet);
+		bool SendBroadcastPacket(const std::string &interface, const std::string &dest_mac_str, const std::string &src_mac_str, const int &raw_socket,
+								 const std::vector<uint8_t> &packet);
 
 
 		/**
@@ -84,19 +82,21 @@ namespace Tool {
 
 		class EpollGuard {
 			int epfd_;
+
 		public:
 			explicit EpollGuard(int fd) : epfd_(fd) {}
 			~EpollGuard() {
-				if (epfd_ >= 0) ::close(epfd_);
+				if (epfd_ >= 0)
+					::close(epfd_);
 			}
 			[[nodiscard]] int get() const { return epfd_; }
 		};
-	}
+	}  // namespace Ethernet
 
 
 	namespace CRC {
 		uint16_t CalculateINS401_CRC16(const uint8_t *buf, const uint16_t &length);
 
 		uint32_t CalculateRTCM3_CRC24(const void *data, std::size_t nBytes);
-	}
-}
+	}  // namespace CRC
+}  // namespace Tool
