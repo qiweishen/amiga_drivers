@@ -3,4 +3,5 @@
 /log
 *cmake-build-*/
 *.idea/
+*.vscode/
 *.DS_Store
