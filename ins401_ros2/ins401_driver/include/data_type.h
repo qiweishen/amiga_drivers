@@ -50,68 +50,6 @@ struct DeviceInfo {
 };
 
 
-struct GNSSSolutionData {
-	uint16_t gps_week;
-	uint32_t gps_millisecs;	 // ms
-	uint8_t position_type;
-	double latitude;		 // deg
-	double longitude;
-	double height;			 // m
-	float latitude_std;		 // m
-	float longitude_std;
-	float height_std;
-	uint8_t num_of_SVs;
-	uint8_t num_of_SVs_in_solution;
-	float hdop;
-	float diffage;	  // s
-	float north_vel;  // m/s
-	float east_vel;
-	float up_vel;
-	float north_vel_std;
-	float east_vel_std;
-	float up_vel_std;
-};
-
-
-struct RawIMUData {
-	uint16_t gps_week;
-	uint32_t gps_millisecs;	 // ms
-	float acc_x;			 // m/s²
-	float acc_y;
-	float acc_z;
-	float gyro_x;			 // deg/s
-	float gyro_y;
-	float gyro_z;
-};
-
-
-struct INSSolutionData {
-	// TODO
-};
-
-
-// NTRIP mount point structure
-struct MountPoint {
-	std::string mountpoint;
-	std::string city;
-	std::string data_format;
-	std::string format_details;
-	int carrier;
-	std::string nav_system;
-	std::string network;
-	std::string country;
-	double latitude;
-	double longitude;
-	int nmea;
-	int solution;
-	std::string generator;
-	std::string compression;
-	std::string authentication;
-	int fee;
-	int bitrate;
-};
-
-
 // HTTP response structure
 struct HTTPResponse {
 	int status_code;

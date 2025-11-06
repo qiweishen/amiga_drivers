@@ -4,274 +4,149 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
-#include <map>
-#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
 
-// OpenSSL forward declarations
+// Forward declarations for OpenSSL
 typedef struct ssl_st SSL;
 typedef struct ssl_ctx_st SSL_CTX;
 
-// ==================== NTRIP Client - Simplified & Clear ====================
+// ==================== Simplified NTRIP Client ====================
 
 class NTRIPClient {
 public:
-	// ---------- Configuration ----------
+	// Configuration
 	struct Config {
-		// Connection
 		std::string host;
-		int port = 2101;
-		std::string mountpoint;
-
-		// Authentication
+		int port;
+		std::string mount_point;
 		std::string username;
 		std::string password;
-
-		// SSL/TLS
-		bool use_ssl = false;
-		bool verify_ssl = true;
-
-		// Behavior
+		bool use_ssl = true;
+		bool verify_ssl = false;
 		bool auto_reconnect = true;
-		int reconnect_interval = 5;	  // seconds
-		int connection_timeout = 10;  // seconds
-		int receive_timeout = 30;	  // seconds
-
-		// Performance
-		int receive_buffer_size = 256 * 1024;  // 256KB
-		bool use_nonblocking = false;
-
-		// Protocol
-		std::string user_agent = "NTRIP Client/2.0";
-		std::string nmea_gga;  // Optional NMEA GGA string for VRS
+		int reconnect_interval = 5;
+		int timeout = 10;
+		std::string user_agent = "NTRIP/2.0";
+		std::string nmea_gga;
 	};
 
-	// ---------- Mount Point Info ----------
+	// NTRIP mount point information
 	struct MountPoint {
-		std::string mountpoint;
+		std::string mount_point;
 		std::string city;
 		std::string data_format;
 		std::string format_details;
-		int carrier = 0;
+		int carrier;
 		std::string nav_system;
 		std::string network;
 		std::string country;
-		double latitude = 0.0;
-		double longitude = 0.0;
+		double latitude;
+		double longitude;
+		int nmea;
+		int solution;
+		std::string generator;
+		std::string compression;
+		std::string authentication;
+		int fee;
+		int bitrate;
 	};
 
-	// ---------- Statistics ----------
-	struct Statistics {
-		std::chrono::steady_clock::time_point connect_time;
-		size_t bytes_received = 0;
-		size_t messages_received = 0;
-		size_t crc_errors = 0;
-		size_t reconnect_count = 0;
-
-		double GetDataRate() const;	 // KB/s
-		std::chrono::seconds GetUptime() const;
-		void Reset();
-	};
-
-	// ---------- Callbacks ----------
+	// Callback for received data
 	using DataCallback = std::function<void(const uint8_t*, size_t)>;
-	using ErrorCallback = std::function<void(const std::string&)>;
-	using StatusCallback = std::function<void(const std::string&)>;
 
-	// ---------- Constructor & Destructor ----------
+	// Constructor & Destructor
 	explicit NTRIPClient(const Config& config);
 	~NTRIPClient();
 
-	// Disable copy
-	NTRIPClient(const NTRIPClient&) = delete;
-	NTRIPClient& operator=(const NTRIPClient&) = delete;
-
-	// ---------- Connection Management ----------
+	// Main functions
 	bool Connect();
 	void Disconnect();
-	bool IsConnected() const { return connected_.load(); }
+	bool IsConnected() const { return connected_; }
 
-	// ---------- Data Streaming ----------
 	void StartReceiving();
 	void StopReceiving();
-	bool IsReceiving() const { return receiving_.load(); }
 
-	// ---------- Source Table ----------
+	// Get mount points from caster
 	std::vector<MountPoint> GetSourceTable();
 
-	// ---------- Configuration ----------
-	void SetConfig(const Config& config);
-	Config GetConfig() const;
+	// Set callback for data reception
+	void SetCallback(DataCallback callback) { callback_ = callback; }
 
-	// ---------- Callbacks ----------
-	void SetDataCallback(DataCallback cb) { data_callback_ = cb; }
-	void SetErrorCallback(ErrorCallback cb) { error_callback_ = cb; }
-	void SetStatusCallback(StatusCallback cb) { status_callback_ = cb; }
-
-	// ---------- Information ----------
-	Statistics GetStatistics() const { return stats_; }
+	// Get error message
 	std::string GetLastError() const { return last_error_; }
 
-	// ---------- NMEA GGA Update (for VRS) ----------
-	void UpdateNMEA(const std::string& gga);
+	// Statistics
+	size_t GetBytesReceived() const { return bytes_received_; }
+	size_t GetMessagesReceived() const { return messages_received_; }
+	double GetDataRate() const;	 // KB/s
 
 private:
-	// ========== Internal Classes ==========
+	// Network operations
+	bool CreateSocket();
+	bool ConnectSocket();
+	bool InitSSL();
+	bool SendRequest();
+	bool ReceiveResponse();
+	void CloseConnection();
 
-	// ---------- Socket Manager (RAII) ----------
-	class SocketManager {
-	public:
-		SocketManager();
-		~SocketManager();
-
-		bool Create();
-		bool Configure(const Config& config);
-		bool Connect(const std::string& host, int port, int timeout_sec);
-		void Close();
-
-		ssize_t Send(const void* data, size_t size);
-		ssize_t Receive(void* buffer, size_t size);
-
-		int GetFD() const { return fd_; }
-		bool IsValid() const { return fd_ >= 0; }
-
-	private:
-		int fd_ = -1;
-		bool SetSocketOptions(const Config& config);
-		bool SetTimeouts(int timeout_sec);
-		bool SetNonBlocking(bool enable);
-	};
-
-	// ---------- SSL Manager (RAII) ----------
-	class SSLManager {
-	public:
-		SSLManager();
-		~SSLManager();
-
-		bool Initialize(int socket_fd, bool verify_ssl);
-		bool Connect();
-		void Shutdown();
-
-		ssize_t Send(const void* data, size_t size);
-		ssize_t Receive(void* buffer, size_t size);
-
-		bool IsValid() const { return ssl_ != nullptr; }
-
-	private:
-		SSL_CTX* ctx_ = nullptr;
-		SSL* ssl_ = nullptr;
-		static std::once_flag openssl_init_flag_;
-		static void InitializeOpenSSL();
-	};
-
-	// ---------- HTTP Protocol Handler ----------
-	class HTTPHandler {
-	public:
-		struct Response {
-			int status_code = 0;
-			std::string status_text;
-			std::map<std::string, std::string> headers;
-			std::string body;
-		};
-
-		static std::string BuildRequest(const Config& config, const std::string& method, const std::string& path);
-		static Response ParseResponse(const std::string& data);
-		static std::string EncodeBase64(const std::string& input);
-
-	private:
-		static std::string BuildAuthHeader(const Config& config);
-	};
-
-	// ---------- RTCM Parser ----------
-	class RTCMParser {
-	public:
-		struct Message {
-			uint16_t type;
-			std::vector<uint8_t> data;
-		};
-
-		RTCMParser();
-		void Reset();
-		std::vector<Message> Parse(const uint8_t* data, size_t size);
-
-	private:
-		std::vector<uint8_t> buffer_;
-
-		bool FindFrame(size_t& offset, std::vector<uint8_t>& frame);
-		bool ValidateCRC(const std::vector<uint8_t>& frame);
-		uint16_t ExtractMessageType(const std::vector<uint8_t>& frame);
-
-		static constexpr uint8_t PREAMBLE = 0xD3;
-		static constexpr size_t MAX_MESSAGE_SIZE = 1023;
-	};
-
-	// ---------- Data Buffer ----------
-	struct DataPacket {
-		std::vector<uint8_t> data;
-		std::chrono::steady_clock::time_point timestamp;
-	};
-
-	// ========== Private Methods ==========
-
-	// Connection
-	bool ConnectInternal();
-	bool PerformHandshake();
-	bool SendHTTPRequest();
-	bool ReceiveHTTPResponse();
-	void HandleReconnection();
-
-	// Data handling
-	void ReceiveThread();
-	void ProcessThread();
+	// Data operations
 	ssize_t SendData(const void* data, size_t size);
 	ssize_t ReceiveData(void* buffer, size_t size);
 
-	// Utility
-	void ReportError(const std::string& error);
-	void ReportStatus(const std::string& status);
-	static std::string Trim(const std::string& str);
-	static std::vector<std::string> Split(const std::string& str, char delimiter);
-	static MountPoint ParseMountPoint(const std::string& line);
+	// RTCM parsing
+	std::vector<std::vector<uint8_t>> ParseRTCM(const uint8_t* data, size_t size);
+	bool ValidateRTCMFrame(const uint8_t* frame, size_t size);
 
-	// ========== Member Variables ==========
+	// Thread functions
+	void ReceiveThread();
+	void ProcessThread();
+
+	// Reconnection
+	void HandleReconnect();
+
+	// Utility
+	std::string BuildHTTPRequest(const std::string& path);
+	std::string Base64Encode(const std::string& input);
+	static uint32_t CalculateCRC24(const uint8_t* data, size_t length);
 
 	// Configuration
 	Config config_;
-	mutable std::mutex config_mutex_;
 
-	// Connection
-	std::unique_ptr<SocketManager> socket_;
-	std::unique_ptr<SSLManager> ssl_;
+	// Network
+	int socket_fd_ = -1;
+	SSL_CTX* ssl_ctx_ = nullptr;
+	SSL* ssl_ = nullptr;
+
+	// State
 	std::atomic<bool> connected_{ false };
 	std::atomic<bool> receiving_{ false };
+	std::string last_error_;
 
 	// Threading
 	std::unique_ptr<std::thread> receive_thread_;
 	std::unique_ptr<std::thread> process_thread_;
 
 	// Data queue
-	std::queue<DataPacket> data_queue_;
-	mutable std::mutex queue_mutex_;
+	std::queue<std::vector<uint8_t>> data_queue_;
+	std::mutex queue_mutex_;
 	std::condition_variable queue_cv_;
-	static constexpr size_t MAX_QUEUE_SIZE = 100;
 
-	// RTCM Parser
-	std::unique_ptr<RTCMParser> parser_;
+	// Callback
+	DataCallback callback_;
 
-	// Callbacks
-	DataCallback data_callback_;
-	ErrorCallback error_callback_;
-	StatusCallback status_callback_;
+	// Statistics
+	std::atomic<size_t> bytes_received_{ 0 };
+	std::atomic<size_t> messages_received_{ 0 };
+	std::chrono::steady_clock::time_point start_time_;
 
-	// Statistics & State
-	Statistics stats_;
-	mutable std::string last_error_;
+	// RTCM buffer
+	std::vector<uint8_t> rtcm_buffer_;
 
-	// Reconnection
-	std::atomic<int> reconnect_attempts_{ 0 };
-	std::chrono::steady_clock::time_point last_reconnect_time_;
+	// OpenSSL initialization
+	static std::once_flag ssl_init_flag_;
+	static void InitOpenSSL();
 };

@@ -142,6 +142,7 @@ namespace Tool {
 				std::cerr << "Error: Failed to set non-blocking mode - " << strerror(errno) << std::endl;
 				return false;
 			}
+
 			// Get network interface index
 			ifreq ifr{};
 			strncpy(ifr.ifr_name, interface.c_str(), IFNAMSIZ - 1);

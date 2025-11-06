@@ -3,23 +3,25 @@
 #include "ins_discover.h"
 #include "ins_receiver.h"
 #include "ntrip_client.h"
+#include "utility/logger.h"
+
 
 
 int main() {
-	// // Find INS401 device
-	// INSDeviceDiscover discover;
-	// std::map<std::string, DeviceInfo> devices = discover.GetDiscoveredDevices();
-	// for (const auto& [mac, device]: devices) {
-	// 	std::cout << "Discovered INS401 device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
-	// }
-	// DeviceInfo device = devices.begin()->second;
-	// std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
-	//
-	// // Start receiving INS401 data
-	// INSDeviceReceiver receiver(device.interface_name, device.mac_address, true);
-	// std::thread receiver_thread([&receiver]() {
-	// 	receiver.Run();
-	// });
+	Logger::Instance().SetLogFile("./log.txt");
+
+	// Find INS401 device
+	INSDeviceDiscover discover;
+	std::map<std::string, DeviceInfo> devices = discover.GetDiscoveredDevices();
+	for (const auto& [mac, device]: devices) {
+		std::cout << "Discovered INS401 device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
+	}
+	DeviceInfo device = devices.begin()->second;
+	std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
+
+	// Start receiving INS401 data
+	INSDeviceReceiver receiver(device.interface_name, device.mac_address, true);
+	std::thread receiver_thread([&receiver]() { receiver.Run(); });
 
 	std::string host = "ntrip.data.gnss.ga.gov.au";
 	int port = 443;
