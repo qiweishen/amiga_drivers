@@ -374,6 +374,21 @@ bool NTRIPClient::SendRequest() {
 bool NTRIPClient::ReceiveResponse() {
 	char buffer[4 * 1024];
 	std::string response;
+
+	// Waite data using select
+	fd_set read_fds;
+	FD_ZERO(&read_fds);
+	FD_SET(socket_fd_, &read_fds);
+	timeval tv{};
+	tv.tv_sec = config_.timeout;
+	tv.tv_usec = 0;
+	int sel = select(socket_fd_ + 1, &read_fds, nullptr, nullptr, &tv);
+	if (sel <= 0) {
+		last_error_ = (sel == 0) ? "Timeout waiting for response" : "Select error";
+		CloseConnection();
+		return false;
+	}
+
 	// Read until we have complete headers
 	while (response.find("\r\n\r\n") == std::string::npos) {
 		ssize_t received = ReceiveData(buffer, sizeof(buffer) - 1);
@@ -462,7 +477,7 @@ std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t *data, si
 		}
 		// Validate frame
 		if (ValidateRTCMFrame(&rtcm_buffer_[offset], frame_size)) {
-			std::vector<uint8_t> message(rtcm_buffer_.begin() + offset, rtcm_buffer_.begin() + offset + frame_size);
+			std::vector message(rtcm_buffer_.begin() + offset + 3, rtcm_buffer_.begin() + offset + 3 + length);
 			messages.push_back(message);
 			messages_received_++;
 		}
@@ -498,9 +513,9 @@ void NTRIPClient::ReceiveThread() {
 		if (received > 0) {
 			bytes_received_ += received;
 			// Add to queue
-			std::vector<uint8_t> data(buffer, buffer + received);
+			std::vector data(buffer, buffer + received);
 			{
-				std::lock_guard<std::mutex> lock(queue_mutex_);
+				std::lock_guard lock(queue_mutex_);
 				data_queue_.push(std::move(data));
 			}
 			queue_cv_.notify_one();
@@ -511,7 +526,6 @@ void NTRIPClient::ReceiveThread() {
 				HandleReconnect();
 			}
 		} else {
-			// Error
 			if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ETIMEDOUT) {
 				connected_ = false;
 				if (config_.auto_reconnect && receiving_) {
