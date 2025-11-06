@@ -51,7 +51,8 @@ public:
 		// TODO
 	};
 
-	INSDeviceReceiver(const std::string &iface, const std::string &mac_addr, bool save_to_file);
+	explicit INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
+							   bool save_to_file);
 	~INSDeviceReceiver();
 
 	void Run();
@@ -59,13 +60,12 @@ public:
 	bool GetGNSSData(std::vector<GNSSSolutionData> &data, size_t max_count = 10);
 	bool GetIMUData(std::vector<RawIMUData> &data, size_t max_count = 500);
 	bool isRunning() const { return running_; }
-	void HandleRTCMMessage(const uint8_t *data, size_t size);
 
 private:
-	int sock_fd_{};
-	std::array<uint8_t, 2> command_start_{};
+	int sock_fd_;
 	std::string interface_name_;
 	std::array<uint8_t, 6> target_mac_{};
+	std::array<uint8_t, 6> local_mac_{};
 	std::atomic<bool> running_{ false };
 	const size_t gnss_hz_ = 1;
 	const size_t imu_hz_ = 100;

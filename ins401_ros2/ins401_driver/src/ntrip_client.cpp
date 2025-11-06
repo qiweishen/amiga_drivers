@@ -12,17 +12,20 @@
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
-#include <openssl/ssl.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
+
+#include "data_type.h"
+#include "tool.h"
 
 
 
 std::once_flag NTRIPClient::ssl_init_flag_;
 
 
-NTRIPClient::NTRIPClient(const Config& config) : config_(config) {
+NTRIPClient::NTRIPClient(Config config) : config_(std::move(config)) {
 	rtcm_buffer_.reserve(8 * 1024);
 	std::call_once(ssl_init_flag_, InitOpenSSL);
 }
@@ -50,7 +53,7 @@ bool NTRIPClient::Connect() {
 		return false;
 	}
 	// Initialize SSL if needed
-	if (config_.use_ssl && !InitSSL()) {
+	if (config_.is_ssl && !InitSSL()) {
 		CloseConnection();
 		return false;
 	}
@@ -79,15 +82,16 @@ void NTRIPClient::Disconnect() {
 	CloseConnection();
 }
 
+
 void NTRIPClient::StartReceiving() {
 	if (!connected_ || receiving_) {
 		return;
 	}
-
 	receiving_ = true;
 	receive_thread_ = std::make_unique<std::thread>(&NTRIPClient::ReceiveThread, this);
 	process_thread_ = std::make_unique<std::thread>(&NTRIPClient::ProcessThread, this);
 }
+
 
 void NTRIPClient::StopReceiving() {
 	receiving_ = false;
@@ -104,15 +108,13 @@ void NTRIPClient::StopReceiving() {
 	}
 }
 
+
 std::vector<NTRIPClient::MountPoint> NTRIPClient::GetSourceTable() {
 	std::vector<MountPoint> result;
-
-	// Temporarily connect to get source table
 	if (!CreateSocket() || !ConnectSocket()) {
 		return result;
 	}
-
-	if (config_.use_ssl && !InitSSL()) {
+	if (config_.is_ssl && !InitSSL()) {
 		CloseConnection();
 		return result;
 	}
@@ -124,8 +126,22 @@ std::vector<NTRIPClient::MountPoint> NTRIPClient::GetSourceTable() {
 		return result;
 	}
 
+	// Waite data using select
+	fd_set read_fds;
+	FD_ZERO(&read_fds);
+	FD_SET(socket_fd_, &read_fds);
+	timeval tv{};
+	tv.tv_sec = config_.timeout;
+	tv.tv_usec = 0;
+	int sel = select(socket_fd_ + 1, &read_fds, nullptr, nullptr, &tv);
+	if (sel <= 0) {
+		last_error_ = (sel == 0) ? "Timeout waiting for response" : "Select error";
+		CloseConnection();
+		return result;
+	}
+
 	// Receive response
-	char buffer[4096];
+	char buffer[4 * 1024];
 	std::string response;
 	while (true) {
 		ssize_t received = ReceiveData(buffer, sizeof(buffer) - 1);
@@ -141,49 +157,47 @@ std::vector<NTRIPClient::MountPoint> NTRIPClient::GetSourceTable() {
 	while (std::getline(stream, line)) {
 		if (line.find("STR;") == 0) {
 			// Parse mount point line
-			MountPoint mp;
-			std::vector<std::string> fields;
-			std::stringstream ss(line);
-			std::string field;
-
-			while (std::getline(ss, field, ';')) {
-				fields.push_back(field);
+			MountPoint mount_point;
+			std::vector<std::string> fields = Tool::Utility::SplitString(line, ';');
+			// Parse SOURCETABLE fields
+			if (fields.size() > 1) {
+				mount_point.mount_point = fields[1];
 			}
-
-			if (fields.size() > 1)
-				mp.mountpoint = fields[1];
-			if (fields.size() > 2)
-				mp.city = fields[2];
-			if (fields.size() > 3)
-				mp.format = fields[3];
-			if (fields.size() > 4)
-				mp.details = fields[4];
-			if (fields.size() > 6)
-				mp.nav_system = fields[6];
-			if (fields.size() > 8)
-				mp.country = fields[8];
+			if (fields.size() > 2) {
+				mount_point.city = fields[2];
+			}
+			if (fields.size() > 3) {
+				mount_point.data_format = fields[3];
+			}
+			if (fields.size() > 4) {
+				mount_point.format_details = fields[4];
+			}
+			if (fields.size() > 5) {
+				mount_point.carrier = std::stoi(fields[5]);
+			}
+			if (fields.size() > 6) {
+				mount_point.nav_system = fields[6];
+			}
+			if (fields.size() > 7) {
+				mount_point.network = fields[7];
+			}
+			if (fields.size() > 8) {
+				mount_point.country = fields[8];
+			}
 			if (fields.size() > 9) {
-				try {
-					mp.latitude = std::stod(fields[9]);
-				} catch (...) {
-				}
+				mount_point.latitude = std::stod(fields[9]);
 			}
 			if (fields.size() > 10) {
-				try {
-					mp.longitude = std::stod(fields[10]);
-				} catch (...) {
-				}
+				mount_point.longitude = std::stod(fields[10]);
 			}
-
-			if (!mp.mountpoint.empty()) {
-				result.push_back(mp);
-			}
+			result.push_back(mount_point);
 		}
 	}
-
 	CloseConnection();
 	return result;
 }
+
+
 
 double NTRIPClient::GetDataRate() const {
 	if (!connected_)
@@ -208,9 +222,9 @@ bool NTRIPClient::CreateSocket() {
 
 	// RAII guard for automatic cleanup on failure
 	struct SocketGuard {
-		int& fd;
+		int &fd;
 		bool released = false;
-		explicit SocketGuard(int& socket_fd) : fd(socket_fd) {}
+		explicit SocketGuard(int &socket_fd) : fd(socket_fd) {}
 		~SocketGuard() {
 			if (!released && fd >= 0) {
 				close(fd);
@@ -232,7 +246,6 @@ bool NTRIPClient::CreateSocket() {
 		last_error_ = "Failed to set TCP_NODELAY: " + std::string(strerror(errno));
 		return false;
 	}
-
 	// Set socket timeout
 	timeval tv{};
 	tv.tv_sec = config_.timeout;
@@ -245,14 +258,12 @@ bool NTRIPClient::CreateSocket() {
 		last_error_ = "Failed to set send timeout: " + std::string(strerror(errno));
 		return false;
 	}
-
 	// Set keep-alive
 	constexpr int keepalive = 1;
 	if (setsockopt(socket_fd_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
 		last_error_ = "Failed to set keep-alive" + std::string(strerror(errno));
 		return false;
 	}
-
 	// Set non-blocking mode
 	int flags = fcntl(socket_fd_, F_GETFL, 0);
 	if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -271,7 +282,7 @@ bool NTRIPClient::ConnectSocket() {
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
 
-	addrinfo* result = nullptr;
+	addrinfo *result = nullptr;
 	std::string port_str = std::to_string(config_.port);
 	int ret = getaddrinfo(config_.host.c_str(), port_str.c_str(), &hints, &result);
 	if (ret != 0) {
@@ -281,60 +292,73 @@ bool NTRIPClient::ConnectSocket() {
 
 	// RAII for addrinfo cleanup
 	struct AddrInfoGuard {
-		addrinfo* info;
-		explicit AddrInfoGuard(addrinfo* ai) : info(ai) {}
+		addrinfo *info;
+		explicit AddrInfoGuard(addrinfo *ai) : info(ai) {}
 		~AddrInfoGuard() {
 			if (info)
 				freeaddrinfo(info);
 		}
 	} addr_guard(result);
 
-	// 尝试连接到所有返回的地址，直到成功
-	// TODO
-	if (!connected_) {
-		if (socket_fd_ >= 0) {
-			close(socket_fd_);
-			socket_fd_ = -1;
+	bool local_connected = false;
+	for (const addrinfo *rp = result; rp != nullptr; rp = rp->ai_next) {
+		ret = connect(socket_fd_, rp->ai_addr, rp->ai_addrlen);
+		if (ret == 0) {
+			local_connected = true;
+		} else if (errno == EINPROGRESS) {
+			// handle non-blocking connect with select or poll
+			fd_set write_fds;
+			FD_ZERO(&write_fds);
+			FD_SET(socket_fd_, &write_fds);
+			timeval tv{};
+			tv.tv_sec = config_.timeout;
+			tv.tv_usec = 0;
+			int sel = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &tv);
+			if (sel > 0 && FD_ISSET(socket_fd_, &write_fds)) {
+				int err = 0;
+				socklen_t len = sizeof(err);
+				getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &err, &len);
+				if (err == 0) {
+					local_connected = true;
+				}
+			}
 		}
-		last_error_ = "Failed to connect to any address for " + config_.host + ". Errors: " + connect_errors;
-		return false;
+		if (!local_connected) {
+			last_error_ = "Unable to connect to host '" + config_.host + "' on port " + port_str;
+			return false;
+		}
 	}
 	return true;
 }
 
 
 bool NTRIPClient::InitSSL() {
-	const SSL_METHOD* method = TLS_client_method();
+	const SSL_METHOD *method = TLS_client_method();
 	ssl_ctx_ = SSL_CTX_new(method);
 	if (!ssl_ctx_) {
 		last_error_ = "Failed to create SSL context";
 		return false;
 	}
-
 	if (!config_.verify_ssl) {
 		SSL_CTX_set_verify(ssl_ctx_, SSL_VERIFY_NONE, nullptr);
 	}
-
 	ssl_ = SSL_new(ssl_ctx_);
 	if (!ssl_) {
 		last_error_ = "Failed to create SSL connection";
 		return false;
 	}
-
 	SSL_set_fd(ssl_, socket_fd_);
-
 	if (SSL_connect(ssl_) <= 0) {
 		last_error_ = "SSL handshake failed";
 		return false;
 	}
-
 	return true;
 }
+
 
 bool NTRIPClient::SendRequest() {
 	std::string request = BuildHTTPRequest("/" + config_.mount_point);
 	size_t total_sent = 0;
-
 	while (total_sent < request.size()) {
 		ssize_t sent = SendData(request.c_str() + total_sent, request.size() - total_sent);
 		if (sent <= 0) {
@@ -343,14 +367,13 @@ bool NTRIPClient::SendRequest() {
 		}
 		total_sent += sent;
 	}
-
 	return true;
 }
 
-bool NTRIPClient::ReceiveResponse() {
-	char buffer[1024];
-	std::string response;
 
+bool NTRIPClient::ReceiveResponse() {
+	char buffer[4 * 1024];
+	std::string response;
 	// Read until we have complete headers
 	while (response.find("\r\n\r\n") == std::string::npos) {
 		ssize_t received = ReceiveData(buffer, sizeof(buffer) - 1);
@@ -361,7 +384,6 @@ bool NTRIPClient::ReceiveResponse() {
 		buffer[received] = '\0';
 		response += buffer;
 	}
-
 	// Parse status code
 	if (response.find("200 OK") == std::string::npos) {
 		if (response.find("401") != std::string::npos) {
@@ -373,9 +395,9 @@ bool NTRIPClient::ReceiveResponse() {
 		}
 		return false;
 	}
-
 	return true;
 }
+
 
 void NTRIPClient::CloseConnection() {
 	if (ssl_) {
@@ -383,115 +405,98 @@ void NTRIPClient::CloseConnection() {
 		SSL_free(ssl_);
 		ssl_ = nullptr;
 	}
-
 	if (ssl_ctx_) {
 		SSL_CTX_free(ssl_ctx_);
 		ssl_ctx_ = nullptr;
 	}
-
 	if (socket_fd_ >= 0) {
 		close(socket_fd_);
 		socket_fd_ = -1;
 	}
 }
 
-ssize_t NTRIPClient::SendData(const void* data, size_t size) {
+
+ssize_t NTRIPClient::SendData(const void *data, size_t size) const {
 	if (ssl_) {
 		return SSL_write(ssl_, data, size);
 	}
-	return send(socket_fd_, data, size, MSG_NOSIGNAL);
+	return send(socket_fd_, data, size, 0);
 }
 
-ssize_t NTRIPClient::ReceiveData(void* buffer, size_t size) {
+
+ssize_t NTRIPClient::ReceiveData(void *buffer, size_t size) const {
 	if (ssl_) {
 		return SSL_read(ssl_, buffer, size);
 	}
 	return recv(socket_fd_, buffer, size, 0);
 }
 
-// ==================== RTCM Parsing ====================
 
-std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t* data, size_t size) {
+std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t *data, size_t size) {
 	std::vector<std::vector<uint8_t>> messages;
-
 	// Add to buffer
 	rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
-
 	size_t offset = 0;
 	while (offset < rtcm_buffer_.size()) {
 		// Find RTCM3 preamble (0xD3)
-		while (offset < rtcm_buffer_.size() && rtcm_buffer_[offset] != 0xD3) {
+		while (offset < rtcm_buffer_.size() && rtcm_buffer_[offset] != RTCM3PREAMB) {
 			offset++;
 		}
-
-		if (offset >= rtcm_buffer_.size())
+		if (offset >= rtcm_buffer_.size()) {
 			break;
-
-		// Need at least 3 bytes for header
-		if (offset + 3 > rtcm_buffer_.size())
+		}
+		// Need at least 3 bytes for (preamble + 2 length bytes)
+		if (offset + 3 > rtcm_buffer_.size()) {
 			break;
-
+		}
 		// Get message length
 		uint16_t length = ((rtcm_buffer_[offset + 1] & 0x03) << 8) | rtcm_buffer_[offset + 2];
-
-		// Check for complete frame
-		size_t frame_size = 3 + length + 3;	 // header + payload + CRC
-		if (offset + frame_size > rtcm_buffer_.size())
+		// Validate length (RTCM3 maximum is 1023 bytes)
+		if (length > 1023) {
 			break;
-
+		}
+		// Check for complete frame
+		const size_t frame_size = 3 + length + 3;  // header + payload + CRC
+		if (offset + frame_size > rtcm_buffer_.size()) {
+			break;
+		}
 		// Validate frame
 		if (ValidateRTCMFrame(&rtcm_buffer_[offset], frame_size)) {
 			std::vector<uint8_t> message(rtcm_buffer_.begin() + offset, rtcm_buffer_.begin() + offset + frame_size);
 			messages.push_back(message);
 			messages_received_++;
 		}
-
 		offset += frame_size;
 	}
-
 	// Remove processed data
 	if (offset > 0) {
 		rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + offset);
 	}
-
 	// Prevent buffer overflow
 	if (rtcm_buffer_.size() > 16384) {
 		rtcm_buffer_.clear();
 	}
-
 	return messages;
 }
 
-bool NTRIPClient::ValidateRTCMFrame(const uint8_t* frame, size_t size) {
-	if (size < 6)
+
+bool NTRIPClient::ValidateRTCMFrame(const uint8_t *frame, size_t size) {
+	if (size < 6) {
 		return false;
-
+	}
 	size_t length = size - 3;
-	uint32_t computed = CalculateCRC24(frame, length);
+	uint32_t computed = Tool::CRC::CalculateRTCM3_CRC24(frame, length);
 	uint32_t received = (frame[length] << 16) | (frame[length + 1] << 8) | frame[length + 2];
-
 	return computed == received;
 }
 
-uint32_t NTRIPClient::CalculateCRC24(const uint8_t* data, size_t length) {
-	uint32_t crc = 0;
-	for (size_t i = 0; i < length; i++) {
-		crc = ((crc << 8) ^ CRC24_TABLE[((crc >> 16) ^ data[i]) & 0xFF]) & 0xFFFFFF;
-	}
-	return crc;
-}
-
-// ==================== Thread Functions ====================
 
 void NTRIPClient::ReceiveThread() {
 	uint8_t buffer[4096];
-
 	while (receiving_ && connected_) {
 		ssize_t received = ReceiveData(buffer, sizeof(buffer));
-
 		if (received > 0) {
 			bytes_received_ += received;
-
 			// Add to queue
 			std::vector<uint8_t> data(buffer, buffer + received);
 			{
@@ -499,7 +504,6 @@ void NTRIPClient::ReceiveThread() {
 				data_queue_.push(std::move(data));
 			}
 			queue_cv_.notify_one();
-
 		} else if (received == 0) {
 			// Connection closed
 			connected_ = false;
@@ -518,6 +522,7 @@ void NTRIPClient::ReceiveThread() {
 	}
 }
 
+
 void NTRIPClient::ProcessThread() {
 	while (receiving_) {
 		std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -527,33 +532,27 @@ void NTRIPClient::ProcessThread() {
 			auto data = std::move(data_queue_.front());
 			data_queue_.pop();
 			lock.unlock();
-
 			// Parse RTCM messages
 			auto messages = ParseRTCM(data.data(), data.size());
-
 			// Deliver via callback
 			if (callback_) {
-				for (const auto& msg: messages) {
+				for (const auto &msg: messages) {
 					callback_(msg.data(), msg.size());
 				}
 			}
-
 			lock.lock();
 		}
 	}
 }
 
+
 void NTRIPClient::HandleReconnect() {
 	int attempts = 0;
-
 	while (config_.auto_reconnect && receiving_) {
 		std::this_thread::sleep_for(std::chrono::seconds(config_.reconnect_interval));
-
 		attempts++;
 		std::cout << "Reconnection attempt #" << attempts << std::endl;
-
 		CloseConnection();
-
 		if (Connect()) {
 			std::cout << "Reconnected successfully" << std::endl;
 			return;
@@ -561,36 +560,32 @@ void NTRIPClient::HandleReconnect() {
 	}
 }
 
-// ==================== Utility Functions ====================
 
-std::string NTRIPClient::BuildHTTPRequest(const std::string& path) {
+std::string NTRIPClient::BuildHTTPRequest(const std::string &path) {
 	std::stringstream request;
-
 	request << "GET " << path << " HTTP/1.1\r\n";
 	request << "Host: " << config_.host << ":" << config_.port << "\r\n";
 	request << "User-Agent: " << config_.user_agent << "\r\n";
 	request << "Accept: */*\r\n";
 	request << "Connection: keep-alive\r\n";
 	request << "Ntrip-Version: Ntrip/2.0\r\n";
-
 	// Authentication
 	if (!config_.username.empty() && !config_.password.empty()) {
 		std::string credentials = config_.username + ":" + config_.password;
 		request << "Authorization: Basic " << Base64Encode(credentials) << "\r\n";
 	}
-
 	// NMEA GGA
 	if (!config_.nmea_gga.empty()) {
 		request << "Ntrip-GGA: " << config_.nmea_gga << "\r\n";
 	}
-
 	request << "\r\n";
 	return request.str();
 }
 
-std::string NTRIPClient::Base64Encode(const std::string& input) {
+
+std::string NTRIPClient::Base64Encode(const std::string &input) {
 	BIO *bio, *b64;
-	BUF_MEM* buffer_ptr;
+	BUF_MEM *buffer_ptr;
 
 	b64 = BIO_new(BIO_f_base64());
 	bio = BIO_new(BIO_s_mem());
@@ -605,4 +600,24 @@ std::string NTRIPClient::Base64Encode(const std::string& input) {
 	BIO_free_all(bio);
 
 	return result;
+}
+
+
+NTRIP_Callback::NTRIP_Callback(const std::string &interface, const std::string &target_mac_str, const std::string &local_mac_str) :
+	sock_fd_(-1), interface_(interface) {
+	Tool::Ethernet::ParseMACAddressToUint8(target_mac_str, target_mac_);
+	Tool::Ethernet::ParseMACAddressToUint8(local_mac_str, local_mac_);
+}
+
+
+NTRIP_Callback::~NTRIP_Callback() {}
+
+
+void NTRIP_Callback::SendToINS401(const uint8_t *payload, size_t payload_length) {
+	if (!Tool::Ethernet::CreateAsyncRawSocket(sock_fd_, interface_)) {
+		std::cerr << "Failed to initialize socket on " << interface_ << std::endl;
+	}
+	std::vector<uint8_t> rtcm_base_packet = Tool::Ethernet::BuildPacket(COMMAND_START_BYTES, RTCM_BASE_DATA_MESSAGE_ID_BYTES, payload,
+																		payload_length, target_mac_, local_mac_);
+	Tool::Ethernet::SendBroadcastPacket(interface_, target_mac_, sock_fd_, rtcm_base_packet);
 }

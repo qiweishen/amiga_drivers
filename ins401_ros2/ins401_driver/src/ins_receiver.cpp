@@ -9,10 +9,11 @@
 
 
 
-INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &mac_addr, bool save_to_file) :
+INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
+									 bool save_to_file) :
 	sock_fd_(-1), interface_name_(iface), running_(true), save_to_file_(save_to_file) {
-	Tool::Ethernet::ConvertUint16ToUint8(COMMAND_START, command_start_, LSB);
-	Tool::Ethernet::ParseMACAddressToUint8(mac_addr, target_mac_);
+	Tool::Ethernet::ParseMACAddressToUint8(target_mac, target_mac_);
+	Tool::Ethernet::ParseMACAddressToUint8(local_mac, local_mac_);
 }
 
 
@@ -75,23 +76,8 @@ bool INSDeviceReceiver::GetIMUData(std::vector<RawIMUData> &data, size_t max_cou
 }
 
 
-void INSDeviceReceiver::HandleRTCMMessage(const uint8_t *data, size_t size) {
-	if (size >= 6) {
-		// Get the payload
-		const uint8_t *payload = data + 3;
-		const size_t payload_size = size - 3;
-		// Send via raw socket
-		if (sock_fd_ >= 0) {
-			ssize_t sent_bytes = send(sock_fd_, payload, payload_size, 0);
-			if (sent_bytes < 0) {
-			}
-		}
-	}
-}
-
-
 bool INSDeviceReceiver::Initialize() {
-	if (!Tool::Ethernet::CreateAsyncRawSocket(sock_fd_, interface_name_)) {
+	if (!Tool::Ethernet::CreateAsyncRawSocket(sock_fd_, interface_name_, target_mac_, local_mac_)) {
 		return false;
 	}
 	return true;
@@ -147,7 +133,7 @@ void INSDeviceReceiver::VerifyData(const uint8_t *data, const size_t len) {
 	}
 	const uint8_t *packet = data + ETH_HEADER_LEN;
 	// Check command start
-	if (packet[0] != command_start_[0] || packet[1] != command_start_[1]) {
+	if (packet[0] != COMMAND_START_BYTES[0] || packet[1] != COMMAND_START_BYTES[1]) {
 		return;
 	}
 	const uint16_t recv_msg_id = packet[2] | (packet[3] << 8);
@@ -157,13 +143,15 @@ void INSDeviceReceiver::VerifyData(const uint8_t *data, const size_t len) {
 			if (data_length == GNSS_SOLUTION_PACKET_LENGTH) {
 				ProcessGNSSSolutionData(packet, data_length);
 			} else {
-				std::cerr << "Invalid GNSS solution data length: " << data_length << ", expected: " << GNSS_SOLUTION_PACKET_LENGTH << std::endl;
+				std::cerr << "Invalid GNSS solution data length: " << data_length << ", expected: " << GNSS_SOLUTION_PACKET_LENGTH
+						  << std::endl;
 			}
 		case RAW_IMU_DATA_PACKET_ID:
 			if (data_length == RAW_IMU_DATA_PACKET_LENGTH) {
 				ProcessRawIMUData(packet, data_length);
 			} else {
-				std::cerr << "Invalid raw IMU data length: " << data_length << ", expected: " << RAW_IMU_DATA_PACKET_LENGTH << std::endl;
+				std::cerr << "Invalid raw IMU data length: " << data_length << ", expected: " << RAW_IMU_DATA_PACKET_LENGTH
+						  << std::endl;
 			}
 		default:
 			break;
@@ -176,8 +164,8 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet, const uin
 	constexpr size_t crc_offset = ACENINNA_HEADER_LEN + GNSS_SOLUTION_PACKET_LENGTH;
 	const uint16_t recv_crc = (packet[crc_offset] << 8) | packet[crc_offset + 1];  // MSB-first
 	if (const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + data_length); recv_crc != calc_crc) {
-		std::cerr << "GNSS solution data CRC mismatch! Received: 0x" << std::hex << recv_crc << " Calculated: 0x" << calc_crc << std::dec
-				  << std::endl;
+		std::cerr << "GNSS solution data CRC mismatch! Received: 0x" << std::hex << recv_crc << " Calculated: 0x" << calc_crc
+				  << std::dec << std::endl;
 		return;
 	}
 	// Parse GNSS solution data
@@ -218,7 +206,8 @@ void INSDeviceReceiver::ProcessRawIMUData(const uint8_t *packet, const uint32_t 
 	constexpr size_t crc_offset = ACENINNA_HEADER_LEN + RAW_IMU_DATA_PACKET_LENGTH;
 	const uint16_t recv_crc = (packet[crc_offset] << 8) | packet[crc_offset + 1];  // MSB-first
 	if (const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + data_length); recv_crc != calc_crc) {
-		std::cerr << "Raw IMU data CRC mismatch! Received: 0x" << std::hex << recv_crc << " Calculated: 0x" << calc_crc << std::dec << std::endl;
+		std::cerr << "Raw IMU data CRC mismatch! Received: 0x" << std::hex << recv_crc << " Calculated: 0x" << calc_crc << std::dec
+				  << std::endl;
 		return;
 	}
 	// Parse IMU data
@@ -259,7 +248,8 @@ void INSDeviceReceiver::WriterThread() {
 	while (running_.load()) {
 		{
 			std::unique_lock lock(queue_mutex_);
-			cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !imu_queue_.empty() || !gnss_queue_.empty() || !running_.load(); });
+			cv_.wait_for(lock, std::chrono::milliseconds(50),
+						 [this] { return !imu_queue_.empty() || !gnss_queue_.empty() || !running_.load(); });
 			imu_batch.clear();
 			size_t imu_to_take = std::min(imu_batch_size_, imu_queue_.size());
 			for (size_t i = 0; i < imu_to_take; ++i) {
@@ -317,8 +307,8 @@ void INSDeviceReceiver::WriteIMUBatch(const std::vector<RawIMUData> &batch, std:
 	buffer.clear();
 	char line[256];
 	for (const auto &imu: batch) {
-		int len = snprintf(line, sizeof(line), "%u,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", imu.gps_week, imu.gps_millisecs, imu.acc_x, imu.acc_y,
-						   imu.acc_z, imu.gyro_x, imu.gyro_y, imu.gyro_z);
+		int len = snprintf(line, sizeof(line), "%u,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", imu.gps_week, imu.gps_millisecs, imu.acc_x,
+						   imu.acc_y, imu.acc_z, imu.gyro_x, imu.gyro_y, imu.gyro_z);
 		if (len > 0 && len < sizeof(line)) {
 			buffer.append(line, len);
 		}
@@ -337,10 +327,10 @@ void INSDeviceReceiver::WriteGNSSBatch(const std::vector<GNSSSolutionData> &batc
 		int len = snprintf(line, sizeof(line),
 						   "%u,%u,%d,%.9f,%.9f,%.3f,%.3f,%.3f,%.3f,%d,%d,"
 						   "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-						   gnss.gps_week, gnss.gps_millisecs, static_cast<int>(gnss.position_type), gnss.latitude, gnss.longitude, gnss.height,
-						   gnss.latitude_std, gnss.longitude_std, gnss.height_std, static_cast<int>(gnss.num_of_SVs),
-						   static_cast<int>(gnss.num_of_SVs_in_solution), gnss.hdop, gnss.diffage, gnss.north_vel, gnss.east_vel, gnss.up_vel,
-						   gnss.north_vel_std, gnss.east_vel_std, gnss.up_vel_std);
+						   gnss.gps_week, gnss.gps_millisecs, static_cast<int>(gnss.position_type), gnss.latitude, gnss.longitude,
+						   gnss.height, gnss.latitude_std, gnss.longitude_std, gnss.height_std, static_cast<int>(gnss.num_of_SVs),
+						   static_cast<int>(gnss.num_of_SVs_in_solution), gnss.hdop, gnss.diffage, gnss.north_vel, gnss.east_vel,
+						   gnss.up_vel, gnss.north_vel_std, gnss.east_vel_std, gnss.up_vel_std);
 		if (len > 0 && len < sizeof(line)) {
 			buffer.append(line, len);
 		}
@@ -362,7 +352,6 @@ void INSDeviceReceiver::InitializeFiles() {
 		gnss_file_buffer_.resize(write_buffer_size_);
 		gnss_file_.open(gnss_filename, std::ios::out);
 		if (gnss_file_.is_open()) {
-			// 设置缓冲区大小
 			gnss_file_.rdbuf()->pubsetbuf(gnss_file_buffer_.data(), gnss_file_buffer_.size());
 			gnss_file_ << "GPS_Week,GPS_MS,Position_Type,Latitude,Longitude,Height,"
 					   << "Latitude_STD,Longitude_STD,Height_STD,Num_of_SVs,"
@@ -380,11 +369,11 @@ void INSDeviceReceiver::InitializeFiles() {
 	}
 }
 //
-// // 可选：提供二进制格式写入以获得最佳性能
+//
 // void INSDeviceReceiver::WriteIMUBinary(const std::vector<RawIMUData>& batch) {
 // 	if (!imu_binary_file_.is_open() || batch.empty()) return;
 //
-// 	// 直接写入二进制数据，性能最佳
+//
 // 	imu_binary_file_.write(reinterpret_cast<const char*>(batch.data()),
 // 						   batch.size() * sizeof(RawIMUData));
 // }

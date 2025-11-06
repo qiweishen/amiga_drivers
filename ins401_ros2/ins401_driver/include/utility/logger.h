@@ -57,21 +57,21 @@ public:
 	 * @brief Retrieves the singleton instance of Logger.
 	 * @return Reference to the Logger instance.
 	 */
-	static Logger& Instance() {
+	static Logger &Instance() {
 		static Logger instance;
 		return instance;
 	}
 
-	Logger(const Logger&) = delete;
+	Logger(const Logger &) = delete;
 
-	Logger& operator=(const Logger&) = delete;
+	Logger &operator=(const Logger &) = delete;
 
 	/**
 	 * @brief Sets the log file path and opens the file for appending logs.
 	 * @param log_file_path The path to the log file.
 	 * @throws std::runtime_error If the log file cannot be opened.
 	 */
-	void SetLogFile(const std::filesystem::path& log_file_path) {
+	void SetLogFile(const std::filesystem::path &log_file_path) {
 		std::lock_guard lock(file_mutex_);
 		if (log_file_.is_open()) {
 			log_file_.close();
@@ -98,8 +98,8 @@ public:
 	 * @param with_timestamp Whether to include a timestamp in the message.
 	 * @throws std::runtime_error If the log log_level is `LogLevel::ERROR`.
 	 */
-	void Log(std::string_view message, LogLevel log_level = LogLevel::INFO, IndentLevel indent_level = IndentLevel::ONE, bool to_console = true,
-			 bool with_timestamp = true) {
+	void Log(std::string_view message, LogLevel log_level = LogLevel::INFO, IndentLevel indent_level = IndentLevel::ONE,
+			 bool to_console = true, bool with_timestamp = true) {
 		std::string formatted_message = FormatMessage(message, log_level, indent_level, with_timestamp);
 
 		// Output to log file if it is open
@@ -184,7 +184,8 @@ private:
 	 * @param with_timestamp Whether to include a timestamp.
 	 * @return The formatted log message.
 	 */
-	static std::string FormatMessage(std::string_view message, LogLevel log_level, IndentLevel indent_level, bool with_timestamp) {
+	static std::string FormatMessage(std::string_view message, LogLevel log_level, IndentLevel indent_level,
+									 bool with_timestamp) {
 		if (indent_level == IndentLevel::ONE) {
 			if (with_timestamp) {
 				return std::format("[{}] [{}] {}\n", GetTimestamp(), LogLevelToString(log_level), message);
@@ -192,15 +193,17 @@ private:
 			return std::format("[{}] {}\n", LogLevelToString(log_level), message);
 		} else if (indent_level == IndentLevel::TWO) {
 			if (with_timestamp) {
-				return std::format("{}[{}] [{}] {}\n", IndentLevelToString(indent_level), GetTimestamp(), LogLevelToString(log_level), message);
+				return std::format("{}[{}] [{}] {}\n", IndentLevelToString(indent_level), GetTimestamp(),
+								   LogLevelToString(log_level), message);
 			}
 			return std::format("{}[{}] {}\n", IndentLevelToString(indent_level), LogLevelToString(log_level), message);
 		} else {
 			if (with_timestamp) {
-				return std::format("               [{}] [{}] {}\n", GetTimestamp(), LogLevelToString(log_level), IndentLevelToString(indent_level),
-								   message);
+				return std::format("               [{}] [{}] {}\n", GetTimestamp(), LogLevelToString(log_level),
+								   IndentLevelToString(indent_level), message);
 			}
-			return std::format("               [{}] {}\n", LogLevelToString(log_level), IndentLevelToString(indent_level), message);
+			return std::format("               [{}] {}\n", LogLevelToString(log_level), IndentLevelToString(indent_level),
+							   message);
 		}
 	}
 
@@ -269,7 +272,7 @@ private:
 	 *   - `LogLevel::ERROR`
 	 */
 	void OutputToConsole(std::string_view message, LogLevel log_level) {
-		std::ostream& out_stream = log_level == LogLevel::WARNING ? std::cerr : std::cout;
+		std::ostream &out_stream = log_level == LogLevel::WARNING ? std::cerr : std::cout;
 		{
 			std::lock_guard lock(console_mutex_);
 			out_stream << message;

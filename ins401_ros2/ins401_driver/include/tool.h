@@ -18,6 +18,7 @@ namespace Tool {
 		 */
 		std::vector<std::pair<std::string, std::string> > GetNetworkInterfaces();
 
+
 		/**
 		 * Format MAC address to string representation
 		 * @param mac_uint8 MAC address as 6-byte array
@@ -34,11 +35,12 @@ namespace Tool {
 		/**
 		 * Convert uint16 to 2-byte array with specified endianness
 		 * @param uint16 Input 16-bit value
-		 * @param uint8 Output 2-byte array
 		 * @param type Endianness (LSB or MSB)
 		 * @throws std::invalid_argument if invalid ENDIAN_TYPE is specified
+		 * @return Output constexpr 2-byte array
 		 */
-		void ConvertUint16ToUint8(const uint16_t &uint16, std::array<uint8_t, 2> &uint8, ENDIAN_TYPE type);
+		constexpr std::array<uint8_t, 2> ConvertUint16ToUint8(const uint16_t &uint16, ENDIAN_TYPE type);
+
 
 		/**
 		 * Parse MAC address string to byte array
@@ -48,6 +50,18 @@ namespace Tool {
 		 */
 		void ParseMACAddressToUint8(const std::string &mac_str, std::array<uint8_t, 6> &mac_uint8);
 
+
+		/**
+		 * Create an asynchronous raw socket
+		 * @param raw_socket Output parameter, returns the created socket descriptor
+		 * @param interface Network interface name (e.g., "eth0")
+		 * @param target_mac MAC address of the target device, needed for BPF filter
+		 * @param local_mac MAC address of the local interface, needed for BPF filter
+		 * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
+		 * @return true on success, false on failure
+		 */
+		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, const std::array<uint8_t, 6> &target_mac,
+								  const std::array<uint8_t, 6> &local_mac, size_t buffer_size = 4 * 1024 * 1024);
 		/**
 		 * Create an asynchronous raw socket
 		 * @param raw_socket Output parameter, returns the created socket descriptor
@@ -57,16 +71,45 @@ namespace Tool {
 		 */
 		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, size_t buffer_size = 4 * 1024 * 1024);
 
+
+		/**
+		 * Attach a BPF filter for bidirectional communication with a specific device
+		 *
+		 * Accepts packets that are:
+		 * - FROM target_mac TO local_mac (incoming)
+		 * - FROM local_mac TO target_mac (outgoing, for packet capture)
+		 *
+		 * @param raw_socket The raw socket file descriptor
+		 * @param target_mac MAC address of the target device
+		 * @param local_mac MAC address of the local interface
+		 * @return true if filter was successfully attached
+		 */
+		bool SetupMACFilter(int raw_socket, const std::array<uint8_t, 6> &target_mac, const std::array<uint8_t, 6> &local_mac);
+
+
+		/**
+		 * Build an Ethernet frame containing payload data in Aceinna packet format
+		 * @param payload        Pointer to payload data to be transmitted
+		 * @param payload_length Length of payload data in bytes
+		 * @param target_mac     Destination MAC address (device MAC)
+		 * @param local_mac      Source MAC address (local network interface MAC)
+		 *
+		 * @return std::vector<uint8_t> Complete Ethernet frame ready for transmission
+		 */
+		std::vector<uint8_t> BuildPacket(const std::array<uint8_t, 2> &command_start, const std::array<uint8_t, 2> &message_id,
+										 const uint8_t *payload, size_t payload_length, const std::array<uint8_t, 6> &target_mac,
+										 const std::array<uint8_t, 6> &local_mac);
+
+
 		/**
 		 * Send a broadcast Ethernet packet
 		 * @param interface Network interface name
-		 * @param dest_mac_str Destination MAC address string
-		 * @param src_mac_str Source MAC address string
+		 * @param target_mac MAC address of the target device
 		 * @param raw_socket Raw socket descriptor
 		 * @param packet Packet data to send
 		 * @return true on success, false on failure
 		 */
-		bool SendBroadcastPacket(const std::string &interface, const std::string &dest_mac_str, const std::string &src_mac_str, const int &raw_socket,
+		bool SendBroadcastPacket(const std::string &interface, const std::array<uint8_t, 6> &target_mac, const int &raw_socket,
 								 const std::vector<uint8_t> &packet);
 
 
@@ -78,8 +121,6 @@ namespace Tool {
 		 * @return true on success, false on failure
 		 */
 		bool SetupEpollForFd(int sock_fd, int &epfd_out, uint32_t events = EPOLLIN);
-
-
 		class EpollGuard {
 			int epfd_;
 
@@ -99,4 +140,10 @@ namespace Tool {
 
 		uint32_t CalculateRTCM3_CRC24(const void *data, std::size_t nBytes);
 	}  // namespace CRC
+
+
+	namespace Utility {
+		std::vector<std::string> SplitString(const std::string &str, char delimiter);
+	}
+
 }  // namespace Tool

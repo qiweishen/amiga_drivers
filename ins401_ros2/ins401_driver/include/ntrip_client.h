@@ -5,16 +5,13 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <openssl/ssl.h>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
 
-// Forward declarations for OpenSSL
-typedef struct ssl_st SSL;
-typedef struct ssl_ctx_st SSL_CTX;
 
-// ==================== Simplified NTRIP Client ====================
 
 class NTRIPClient {
 public:
@@ -25,7 +22,7 @@ public:
 		std::string mount_point;
 		std::string username;
 		std::string password;
-		bool use_ssl = true;
+		bool is_ssl = true;
 		bool verify_ssl = false;
 		bool auto_reconnect = true;
 		int reconnect_interval = 5;
@@ -56,10 +53,9 @@ public:
 	};
 
 	// Callback for received data
-	using DataCallback = std::function<void(const uint8_t*, size_t)>;
+	using DataCallback = std::function<void(const uint8_t *, size_t)>;
 
-	// Constructor & Destructor
-	explicit NTRIPClient(const Config& config);
+	explicit NTRIPClient(Config config);
 	~NTRIPClient();
 
 	// Main functions
@@ -82,7 +78,7 @@ public:
 	// Statistics
 	size_t GetBytesReceived() const { return bytes_received_; }
 	size_t GetMessagesReceived() const { return messages_received_; }
-	double GetDataRate() const;	 // KB/s
+	double GetDataRate() const;
 
 private:
 	// Network operations
@@ -94,12 +90,12 @@ private:
 	void CloseConnection();
 
 	// Data operations
-	ssize_t SendData(const void* data, size_t size);
-	ssize_t ReceiveData(void* buffer, size_t size);
+	ssize_t SendData(const void *data, size_t size) const;
+	ssize_t ReceiveData(void *buffer, size_t size) const;
 
 	// RTCM parsing
-	std::vector<std::vector<uint8_t>> ParseRTCM(const uint8_t* data, size_t size);
-	bool ValidateRTCMFrame(const uint8_t* frame, size_t size);
+	std::vector<std::vector<uint8_t>> ParseRTCM(const uint8_t *data, size_t size);
+	static bool ValidateRTCMFrame(const uint8_t *frame, size_t size);
 
 	// Thread functions
 	void ReceiveThread();
@@ -109,17 +105,16 @@ private:
 	void HandleReconnect();
 
 	// Utility
-	std::string BuildHTTPRequest(const std::string& path);
-	std::string Base64Encode(const std::string& input);
-	static uint32_t CalculateCRC24(const uint8_t* data, size_t length);
+	std::string BuildHTTPRequest(const std::string &path);
+	static std::string Base64Encode(const std::string &input);
 
 	// Configuration
 	Config config_;
 
 	// Network
 	int socket_fd_ = -1;
-	SSL_CTX* ssl_ctx_ = nullptr;
-	SSL* ssl_ = nullptr;
+	ssl_ctx_st *ssl_ctx_ = nullptr;
+	ssl_st *ssl_ = nullptr;
 
 	// State
 	std::atomic<bool> connected_{ false };
@@ -149,4 +144,19 @@ private:
 	// OpenSSL initialization
 	static std::once_flag ssl_init_flag_;
 	static void InitOpenSSL();
+};
+
+
+class NTRIP_Callback {
+public:
+	explicit NTRIP_Callback(const std::string &interface, const std::string &target_mac_str, const std::string &local_mac_str);
+	~NTRIP_Callback();
+
+	void SendToINS401(const uint8_t *payload, size_t payload_length);
+
+private:
+	int sock_fd_;
+	std::string interface_;
+	std::array<uint8_t, 6> target_mac_{};
+	std::array<uint8_t, 6> local_mac_{};
 };

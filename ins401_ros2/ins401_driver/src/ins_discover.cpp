@@ -15,16 +15,14 @@
 
 
 
-INSDeviceDiscover::INSDeviceDiscover() : socket_fd_(-1), running_(false) {
+INSDeviceDiscover::INSDeviceDiscover() : sock_fd_(-1) {
 	Tool::Ethernet::ParseMACAddressToUint8(BROADCAST_MAC, broadcast_mac_);
-	Tool::Ethernet::ConvertUint16ToUint8(COMMAND_START, command_start_, LSB);
-	Tool::Ethernet::ConvertUint16ToUint8(REQUEST_INFO_COMMAND, request_info_command_, LSB);
 }
 
 
 INSDeviceDiscover::~INSDeviceDiscover() {
-	if (socket_fd_ >= 0) {
-		close(socket_fd_);
+	if (sock_fd_ >= 0) {
+		close(sock_fd_);
 	}
 }
 
@@ -40,51 +38,7 @@ void INSDeviceDiscover::ClearDiscoveredDevices() {
 }
 
 
-// Ethernet Frame:
-// [Destination MAC: FF FF FF FF FF FF]  // 6 bytes
-// [Source MAC: xx xx xx xx xx xx]       // 6 bytes
-// [Length: 0x0A 0x00]                   // 10 bytes (LSB-first)
-// [Payload (Aceinna Packet):]           // 10 bytes + padding
-//   [Header: 55 55]                     // 2 bytes
-//   [Message ID: 01 CC]                 // 2 bytes (PING_TYPE, LSB-first)
-//   [Length: 00 00 00 00]               // 4 bytes (payload length is 0)
-//   [Payload: (empty)]                  // 0 bytes
-//   [Checksum: xx xx]                   // 2 bytes (CRC16)
-// [Padding: 00 00 ... ]                 // 36 bytes (Fill to 46 with zero
-// bytes) [Frame CRC: xx xx xx xx]              // 4 bytes
-std::vector<uint8_t> INSDeviceDiscover::BuildPingPacket(const uint8_t *src_mac) {
-	std::vector<uint8_t> frame;
-	frame.insert(frame.end(), broadcast_mac_.data(), broadcast_mac_.data() + 6);
-	frame.insert(frame.end(), src_mac, src_mac + 6);
-
-	std::vector<uint8_t> aceinna_packet;
-	aceinna_packet.insert(aceinna_packet.end(), command_start_.data(), command_start_.data() + 2);
-	aceinna_packet.insert(aceinna_packet.end(), request_info_command_.data(), request_info_command_.data() + 2);
-
-	std::vector<uint8_t> ping_payload;
-	aceinna_packet.push_back(0x00);
-	aceinna_packet.push_back(0x00);
-	aceinna_packet.push_back(0x00);
-	aceinna_packet.push_back(0x00);
-
-	// CRC16 - MSB first
-	const uint16_t crc16 = Tool::CRC::CalculateINS401_CRC16(&aceinna_packet[2], aceinna_packet.size() - 2);
-	aceinna_packet.push_back(static_cast<uint8_t>((crc16 >> 8) & 0xFF));  // MSB
-	aceinna_packet.push_back(static_cast<uint8_t>(crc16 & 0xFF));		  // LSB
-
-	auto eth_payload_length = static_cast<uint16_t>(aceinna_packet.size());
-	frame.push_back(static_cast<uint8_t>(eth_payload_length & 0xFF));
-	frame.push_back(static_cast<uint8_t>((eth_payload_length >> 8) & 0xFF));
-
-	frame.insert(frame.end(), aceinna_packet.begin(), aceinna_packet.end());
-	while (frame.size() - 14 < 46) {
-		frame.push_back(0x00);
-	}
-	return frame;
-}
-
-
-bool INSDeviceDiscover::ParseResponse(const std::string &interface, const uint8_t *buffer, size_t len) {
+bool INSDeviceDiscover::ParseResponse(const std::string &interface, const std::string &mac, const uint8_t *buffer, size_t len) {
 	if (len < 60) {
 		return false;
 	}
@@ -108,14 +62,14 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const uint8_
 	if (len < payload_offset + 4) {
 		return false;
 	}
-	if (buffer[payload_offset + 2] != request_info_command_[0] || buffer[payload_offset + 3] != request_info_command_[1]) {
+	if (buffer[payload_offset + 2] != REQUEST_INFO_COMMAND_BYTES[0] || buffer[payload_offset + 3] != REQUEST_INFO_COMMAND_BYTES[1]) {
 		return false;
 	}
 	if (len < payload_offset + 8) {
 		return false;
 	}
-	uint32_t aceinna_payload_len =
-			buffer[payload_offset + 4] | (buffer[payload_offset + 5] << 8) | (buffer[payload_offset + 6] << 16) | (buffer[payload_offset + 7] << 24);
+	uint32_t aceinna_payload_len = buffer[payload_offset + 4] | (buffer[payload_offset + 5] << 8) |
+								   (buffer[payload_offset + 6] << 16) | (buffer[payload_offset + 7] << 24);
 	if (len < payload_offset + 10 + aceinna_payload_len) {
 		return false;
 	}
@@ -125,12 +79,14 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const uint8_
 															   6 + aceinna_payload_len	// Message ID(2) + Length(4) + Payload
 	);
 	if (received_crc != calculated_crc) {
-		std::cerr << "CRC mismatch! Received: 0x" << std::hex << received_crc << " Calculated: 0x" << calculated_crc << std::dec << std::endl;
+		std::cerr << "CRC mismatch! Received: 0x" << std::hex << received_crc << " Calculated: 0x" << calculated_crc << std::dec
+				  << std::endl;
 		return false;
 	}
 	DeviceInfo info;
 	info.interface_name = interface;  // Filled in DiscoverDevices()
 	info.mac_address = device_mac;
+	info.localhost_mac_address = mac;
 	if (aceinna_payload_len > 0) {
 		std::string device_data((char *) (buffer + payload_offset + 8), aceinna_payload_len);
 		if (device_data.find(info.product) != std::string::npos) {
@@ -155,9 +111,9 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const uint8_
 }
 
 
-void INSDeviceDiscover::ListenResponses(const std::string &interface, int timeout_ms) {
+void INSDeviceDiscover::ListenResponses(const std::string &interface, const std::string &mac, int timeout_ms) {
 	int epfd = -1;
-	if (!Tool::Ethernet::SetupEpollForFd(socket_fd_, epfd, EPOLLIN)) {
+	if (!Tool::Ethernet::SetupEpollForFd(sock_fd_, epfd, EPOLLIN)) {
 		return;
 	}
 	Tool::Ethernet::EpollGuard epoll_guard(epfd);
@@ -182,7 +138,7 @@ void INSDeviceDiscover::ListenResponses(const std::string &interface, int timeou
 			break;
 		}
 		for (int i = 0; i < nfds; ++i) {
-			if (events[i].data.fd != socket_fd_) {
+			if (events[i].data.fd != sock_fd_) {
 				continue;
 			}
 			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
@@ -192,9 +148,9 @@ void INSDeviceDiscover::ListenResponses(const std::string &interface, int timeou
 			if (events[i].events & EPOLLIN) {
 				ssize_t bytes_read;
 				do {
-					bytes_read = ::recv(socket_fd_, buffer.data(), buffer.size(), MSG_DONTWAIT);
+					bytes_read = ::recv(sock_fd_, buffer.data(), buffer.size(), MSG_DONTWAIT);
 					if (bytes_read > 0) {
-						ParseResponse(interface, buffer.data(), bytes_read);
+						ParseResponse(interface, mac, buffer.data(), bytes_read);
 					}
 				} while (bytes_read > 0 || (bytes_read < 0 && errno == EINTR));
 			}
@@ -214,24 +170,25 @@ void INSDeviceDiscover::DiscoverDevices(int discovery_time_ms) {
 		std::cerr << "No active network interfaces found." << std::endl;
 		return;
 	}
-	for (const auto &[fst, snd]: interfaces) {
-		if (!Tool::Ethernet::CreateAsyncRawSocket(socket_fd_, fst)) {
-			std::cerr << "Failed to initialize socket on " << fst << std::endl;
+	for (const auto &[interface, mac]: interfaces) {
+		std::array<uint8_t, 6> src_mac{};
+		Tool::Ethernet::ParseMACAddressToUint8(mac, src_mac);
+		if (!Tool::Ethernet::CreateAsyncRawSocket(sock_fd_, interface)) {
+			std::cerr << "Failed to initialize socket on " << interface << std::endl;
 			continue;
 		}
 		running_ = true;
-		std::thread listener(&INSDeviceDiscover::ListenResponses, this, fst, discovery_time_ms);
-		std::array<uint8_t, 6> src_mac{};
-		Tool::Ethernet::ParseMACAddressToUint8(snd, src_mac);
-		std::vector<uint8_t> ping_packet = BuildPingPacket(src_mac.data());
-		if (Tool::Ethernet::SendBroadcastPacket(fst, BROADCAST_MAC, snd, socket_fd_, ping_packet)) {
+		std::thread listener(&INSDeviceDiscover::ListenResponses, this, interface, mac, discovery_time_ms);
+		std::vector<uint8_t> ping_packet =
+				Tool::Ethernet::BuildPacket(COMMAND_START_BYTES, REQUEST_INFO_COMMAND_BYTES, nullptr, 0, broadcast_mac_, src_mac);
+		if (Tool::Ethernet::SendBroadcastPacket(interface, broadcast_mac_, sock_fd_, ping_packet)) {
 			listener.join();
 		} else {
 			running_ = false;
 			listener.join();
 		}
-		close(socket_fd_);
-		socket_fd_ = -1;
+		close(sock_fd_);
+		sock_fd_ = -1;
 	}
 	if (discovered_devices.empty()) {
 		std::cout << "\nNo devices found." << std::endl;
