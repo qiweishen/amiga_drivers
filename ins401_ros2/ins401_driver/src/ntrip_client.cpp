@@ -447,49 +447,69 @@ ssize_t NTRIPClient::ReceiveData(void *buffer, size_t size) const {
 }
 
 
+// std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t *data, size_t size) {
+// 	std::vector<std::vector<uint8_t>> messages;
+// 	// Add to buffer
+// 	rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
+// 	size_t offset = 0;
+// 	while (offset < rtcm_buffer_.size()) {
+// 		// Find RTCM3 preamble (0xD3)
+// 		while (offset < rtcm_buffer_.size() && rtcm_buffer_[offset] != RTCM3PREAMB) {
+// 			offset++;
+// 		}
+// 		if (offset >= rtcm_buffer_.size()) {
+// 			break;
+// 		}
+// 		// Need at least 3 bytes for (preamble + 2 length bytes)
+// 		if (offset + 3 > rtcm_buffer_.size()) {
+// 			break;
+// 		}
+// 		// Get message length
+// 		uint16_t length = ((rtcm_buffer_[offset + 1] & 0x03) << 8) | rtcm_buffer_[offset + 2];
+// 		// Validate length (RTCM3 maximum is 1023 bytes)
+// 		if (length > 1023) {
+// 			break;
+// 		}
+// 		// Check for complete frame
+// 		const size_t frame_size = 3 + length + 3;  // header + payload + CRC
+// 		if (offset + frame_size > rtcm_buffer_.size()) {
+// 			break;
+// 		}
+// 		// Validate frame
+// 		if (ValidateRTCMFrame(&rtcm_buffer_[offset], frame_size)) {
+// 			std::vector message(rtcm_buffer_.begin() + offset + 3, rtcm_buffer_.begin() + offset + 3 + length);
+// 			messages.push_back(message);
+// 			messages_received_++;
+// 		}
+// 		offset += frame_size;
+// 	}
+// 	// Remove processed data
+// 	if (offset > 0) {
+// 		rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + offset);
+// 	}
+// 	// Prevent buffer overflow
+// 	if (rtcm_buffer_.size() > 16384) {
+// 		rtcm_buffer_.clear();
+// 	}
+// 	return messages;
+// }
+
+
 std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t *data, size_t size) {
 	std::vector<std::vector<uint8_t>> messages;
-	// Add to buffer
+
+	// 将新数据添加到缓冲区
 	rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
-	size_t offset = 0;
-	while (offset < rtcm_buffer_.size()) {
-		// Find RTCM3 preamble (0xD3)
-		while (offset < rtcm_buffer_.size() && rtcm_buffer_[offset] != RTCM3PREAMB) {
-			offset++;
-		}
-		if (offset >= rtcm_buffer_.size()) {
-			break;
-		}
-		// Need at least 3 bytes for (preamble + 2 length bytes)
-		if (offset + 3 > rtcm_buffer_.size()) {
-			break;
-		}
-		// Get message length
-		uint16_t length = ((rtcm_buffer_[offset + 1] & 0x03) << 8) | rtcm_buffer_[offset + 2];
-		// Validate length (RTCM3 maximum is 1023 bytes)
-		if (length > 1023) {
-			break;
-		}
-		// Check for complete frame
-		const size_t frame_size = 3 + length + 3;  // header + payload + CRC
-		if (offset + frame_size > rtcm_buffer_.size()) {
-			break;
-		}
-		// Validate frame
-		if (ValidateRTCMFrame(&rtcm_buffer_[offset], frame_size)) {
-			std::vector message(rtcm_buffer_.begin() + offset + 3, rtcm_buffer_.begin() + offset + 3 + length);
-			messages.push_back(message);
-			messages_received_++;
-		}
-		offset += frame_size;
-	}
-	// Remove processed data
-	if (offset > 0) {
-		rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + offset);
-	}
-	// Prevent buffer overflow
-	if (rtcm_buffer_.size() > 16384) {
-		rtcm_buffer_.clear();
+
+	// 按1024字节截断并打包
+	while (rtcm_buffer_.size() >= 1024) {
+		// 取出前1024字节作为一个消息
+		std::vector<uint8_t> message(rtcm_buffer_.begin(), rtcm_buffer_.begin() + 1024);
+		messages.push_back(std::move(message));
+		messages_received_++;
+
+		// 从缓冲区移除已处理的1024字节
+		rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + 1024);
 	}
 	return messages;
 }
@@ -539,7 +559,7 @@ void NTRIPClient::ReceiveThread() {
 
 void NTRIPClient::ProcessThread() {
 	while (receiving_) {
-		std::unique_lock<std::mutex> lock(queue_mutex_);
+		std::unique_lock lock(queue_mutex_);
 		queue_cv_.wait(lock, [this] { return !data_queue_.empty() || !receiving_; });
 
 		while (!data_queue_.empty() && receiving_) {
