@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <map>
 #include <string>
 
@@ -9,7 +8,25 @@
 
 
 // LSB, MSB type
-enum ENDIAN_TYPE { LSB, MSB };
+enum class EndianType { LSB, MSB };
+
+
+/**
+ * Convert uint16 to 2-byte array with specified endianness
+ * @param uint16 Input 16-bit value
+ * @param type Endianness (LSB or MSB)
+ * @throws std::invalid_argument if invalid ENDIAN_TYPE is specified
+ * @return Output constexpr 2-byte array
+ */
+constexpr std::array<uint8_t, 2> ConvertUint16ToUint8(const uint16_t &uint16, EndianType type) {
+	if (type == EndianType::LSB) {
+		return { static_cast<uint8_t>(uint16 & 0xFF), static_cast<uint8_t>((uint16 >> 8) & 0xFF) };
+	}
+	if (type == EndianType::MSB) {
+		return { static_cast<uint8_t>((uint16 >> 8) & 0xFF), static_cast<uint8_t>(uint16 & 0xFF) };
+	}
+	throw std::invalid_argument("Invalid ENDIAN_TYPE specified");
+}
 
 
 // Protocol constant value
@@ -38,15 +55,15 @@ const std::string BROADCAST_MAC = "FF:FF:FF:FF:FF:FF";
 static constexpr uint16_t COMMAND_START = 0x5555;
 static constexpr uint16_t REQUEST_INFO_COMMAND = 0xcc01;  // Get the device information
 
-static constexpr auto GNSS_SOLUTION_PACKET_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(GNSS_SOLUTION_PACKET_ID, LSB);
-static constexpr auto INS_Solution_PACKET_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(INS_Solution_PACKET_ID, LSB);
-static constexpr auto RAW_IMU_DATA_PACKET_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(RAW_IMU_DATA_PACKET_ID, LSB);
-static constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, LSB);
-static constexpr auto DIAGNOSTIC_MESSAGE_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(DIAGNOSTIC_MESSAGE_ID, LSB);
-static constexpr auto GNSSCHIP_DIAGNOSTIC_MESSAGE_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(GNSSCHIP_DIAGNOSTIC_MESSAGE_ID, LSB);
-static constexpr auto DM_EXTENT_MESSAGE_ID_BYTES = Tool::Ethernet::ConvertUint16ToUint8(DM_EXTENT_MESSAGE_ID, LSB);
-static constexpr auto COMMAND_START_BYTES = Tool::Ethernet::ConvertUint16ToUint8(COMMAND_START, LSB);
-static constexpr auto REQUEST_INFO_COMMAND_BYTES = Tool::Ethernet::ConvertUint16ToUint8(REQUEST_INFO_COMMAND, LSB);
+static constexpr auto GNSS_SOLUTION_PACKET_ID_BYTES = ConvertUint16ToUint8(GNSS_SOLUTION_PACKET_ID, EndianType::LSB);
+static constexpr auto INS_Solution_PACKET_ID_BYTES = ConvertUint16ToUint8(INS_Solution_PACKET_ID, EndianType::LSB);
+static constexpr auto RAW_IMU_DATA_PACKET_ID_BYTES = ConvertUint16ToUint8(RAW_IMU_DATA_PACKET_ID, EndianType::LSB);
+static constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
+static constexpr auto DIAGNOSTIC_MESSAGE_ID_BYTES = ConvertUint16ToUint8(DIAGNOSTIC_MESSAGE_ID, EndianType::LSB);
+static constexpr auto GNSSCHIP_DIAGNOSTIC_MESSAGE_ID_BYTES = ConvertUint16ToUint8(GNSSCHIP_DIAGNOSTIC_MESSAGE_ID, EndianType::LSB);
+static constexpr auto DM_EXTENT_MESSAGE_ID_BYTES = ConvertUint16ToUint8(DM_EXTENT_MESSAGE_ID, EndianType::LSB);
+static constexpr auto COMMAND_START_BYTES = ConvertUint16ToUint8(COMMAND_START, EndianType::LSB);
+static constexpr auto REQUEST_INFO_COMMAND_BYTES = ConvertUint16ToUint8(REQUEST_INFO_COMMAND, EndianType::LSB);
 
 
 // INS401 device information structure

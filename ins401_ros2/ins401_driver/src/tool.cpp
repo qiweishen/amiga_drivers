@@ -82,23 +82,12 @@ namespace Tool {
 		}
 
 
-		constexpr std::array<uint8_t, 2> ConvertUint16ToUint8(const uint16_t &uint16, ENDIAN_TYPE type) {
-			if (type == LSB) {
-				return { static_cast<uint8_t>(uint16 & 0xFF), static_cast<uint8_t>((uint16 >> 8) & 0xFF) };
-			}
-			if (type == MSB) {
-				return { static_cast<uint8_t>((uint16 >> 8) & 0xFF), static_cast<uint8_t>(uint16 & 0xFF) };
-			}
-			throw std::invalid_argument("Invalid ENDIAN_TYPE specified");
-		}
-
-
 		void ParseMACAddressToUint8(const std::string &mac_str, std::array<uint8_t, 6> &mac_uint8) {
 			if (mac_str.empty()) {
 				throw std::invalid_argument("Empty MAC address string");
 			}
-			int result = std::sscanf(mac_str.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac_uint8[0], &mac_uint8[1],
-									 &mac_uint8[2], &mac_uint8[3], &mac_uint8[4], &mac_uint8[5]);
+			int result = std::sscanf(mac_str.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac_uint8[0], &mac_uint8[1], &mac_uint8[2],
+									 &mac_uint8[3], &mac_uint8[4], &mac_uint8[5]);
 			if (result != 6) {
 				throw std::invalid_argument("Invalid MAC address format: " + mac_str);
 			}
@@ -426,8 +415,8 @@ namespace Tool {
 				return false;
 			}
 			sll.sll_ifindex = ifr.ifr_ifindex;
-			if (const ssize_t sent = sendto(raw_socket, packet.data(), packet.size(), 0,
-											reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
+			if (const ssize_t sent =
+						sendto(raw_socket, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
 				sent < 0) {
 				std::cerr << "Send failed: " << strerror(errno) << std::endl;
 				return false;

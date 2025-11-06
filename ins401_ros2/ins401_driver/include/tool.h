@@ -32,15 +32,6 @@ namespace Tool {
 		 */
 		std::string FormatMacAddress(const uint8_t *mac_ptr);
 
-		/**
-		 * Convert uint16 to 2-byte array with specified endianness
-		 * @param uint16 Input 16-bit value
-		 * @param type Endianness (LSB or MSB)
-		 * @throws std::invalid_argument if invalid ENDIAN_TYPE is specified
-		 * @return Output constexpr 2-byte array
-		 */
-		constexpr std::array<uint8_t, 2> ConvertUint16ToUint8(const uint16_t &uint16, ENDIAN_TYPE type);
-
 
 		/**
 		 * Parse MAC address string to byte array
