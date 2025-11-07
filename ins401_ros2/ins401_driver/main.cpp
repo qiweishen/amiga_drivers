@@ -9,7 +9,8 @@
 #include "ins_discover.h"
 #include "ins_receiver.h"
 #include "ntrip_client.h"
-#include "tool.h"
+
+
 
 static std::atomic<bool> g_terminate{ false };
 
@@ -20,6 +21,7 @@ static void SignalHandler(int) {
 int main() {
 	std::signal(SIGINT, SignalHandler);
 	std::signal(SIGTERM, SignalHandler);
+	std::signal(SIGABRT, SignalHandler);
 
 	try {
 		// 1) 发现设备
