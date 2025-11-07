@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <map>
 #include <netinet/in.h>
-#include <vector>
 
 #include "data_type.h"
 

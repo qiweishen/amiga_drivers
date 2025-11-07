@@ -1,49 +1,95 @@
+#include <atomic>
+#include <csignal>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <thread>
 
+#include "data_type.h"
 #include "ins_discover.h"
 #include "ins_receiver.h"
 #include "ntrip_client.h"
+#include "tool.h"
 
+static std::atomic<bool> g_terminate{ false };
 
+static void SignalHandler(int) {
+	g_terminate.store(true, std::memory_order_release);
+}
 
 int main() {
-	// Find INS401 device
-	INSDeviceDiscover discover;
-	std::map<std::string, DeviceInfo> devices = discover.GetDiscoveredDevices();
-	for (const auto &[mac, device]: devices) {
-		std::cout << "Discovered INS401 device on interface " << device.interface_name << " with MAC " << device.mac_address
-				  << std::endl;
+	std::signal(SIGINT, SignalHandler);
+	std::signal(SIGTERM, SignalHandler);
+
+	try {
+		// 1) 发现设备
+		auto discover = std::make_unique<INSDeviceDiscover>();
+		auto devices = discover->GetDiscoveredDevices();
+		if (devices.empty()) {
+			return 1;
+		}
+		discover->~INSDeviceDiscover();
+		const DeviceInfo device = devices.begin()->second;
+		std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
+
+
+		// 2) 启动接收器线程
+		auto receiver =
+				std::make_unique<INSDeviceReceiver>(device.interface_name, device.mac_address, device.localhost_mac_address, true);
+		std::thread receiver_thread([&receiver]() {
+			try {
+				receiver->Run();
+			} catch (const std::exception &e) {
+				std::cerr << "[Receiver] exception: " << e.what() << std::endl;
+			}
+		});
+
+
+		// 3) 配置 NTRIP
+		NTRIPClient::Config config;
+		config.host = "ntrip.data.gnss.ga.gov.au";
+		config.port = 2101;
+		config.is_ssl = false;
+		config.username = "TPA_Nav";
+		config.password = "vExnar6pajxexexreh@tpa";
+		config.mount_point = "ADDE00AUS0";
+		auto ntrip_client = std::make_unique<NTRIPClient>(config);
+
+
+		// 4) 设置回调，并启动客户端线程
+		auto ntrip_callback =
+				std::make_unique<NTRIP_Callback>(device.interface_name, device.mac_address, device.localhost_mac_address);
+		ntrip_client->SetDataCallback(
+				[cb = ntrip_callback.get()](const uint8_t *payload, size_t len) { cb->SendToINS401(payload, len); });
+		std::thread ntrip_client_thread([&ntrip_client]() {
+			try {
+				ntrip_client->Connect();
+				ntrip_client->StartReceiving();
+			} catch (const std::exception &e) {
+				std::cerr << "[NTRIP Client] exception: " << e.what() << std::endl;
+			}
+		});
+
+
+		// 5) 主循环：等待退出事件（信号、错误、或自定义条件）
+		while (!g_terminate.load(std::memory_order_acquire)) {
+			// 可在此处检查 ntrip_client 状态、心跳、吞吐、错误码等
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		}
+
+
+		// 6) 退出流程：先停接收器，再 join
+		receiver->Stop();
+		if (receiver_thread.joinable()) {
+			receiver_thread.join();
+		}
+		ntrip_client->Disconnect();
+		if (ntrip_client_thread.joinable()) {
+			ntrip_client_thread.join();
+		}
+		return 0;
+	} catch (const std::exception &e) {
+		std::cerr << "[main] exception: " << e.what() << std::endl;
+		return 2;
 	}
-	DeviceInfo device = devices.begin()->second;
-	std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
-
-	// Start receiving INS401 data
-	INSDeviceReceiver receiver(device.interface_name, device.mac_address, device.localhost_mac_address, true);
-	std::thread receiver_thread([&receiver]() { receiver.Run(); });
-
-
-	NTRIPClient::Config config;
-	config.host = "ntrip.data.gnss.ga.gov.au";
-	config.port = 2101;
-	config.is_ssl = false;
-	config.username = "TPA_Nav";
-	config.password = "vExnar6pajxexexreh@tpa";
-	config.mount_point = "ADDE00AUS0";
-
-	// config.host = "www.smartnetaus.com";
-	// config.port = 15101;
-	// config.username = "tpa_field";
-	// config.password = "3915";
-	// config.mountpoint = "MSM_VRS";
-
-	NTRIPClient ntrip_client(config);
-	NTRIP_Callback rtcm_sender(device.interface_name, device.mac_address, device.localhost_mac_address);
-	ntrip_client.SetCallback([&rtcm_sender](const uint8_t *data, size_t size) { return rtcm_sender.SendToINS401(data, size); });
-	std::thread ntrip_thread([&ntrip_client]() {
-		ntrip_client.Connect();
-		ntrip_client.StartReceiving();
-	});
-
-	receiver_thread.join();
-	return 0;
 }
