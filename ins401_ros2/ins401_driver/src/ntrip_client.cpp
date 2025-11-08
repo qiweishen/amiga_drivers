@@ -447,17 +447,6 @@ std::vector<std::vector<uint8_t>> NTRIPClient::ParseRTCM(const uint8_t *data, si
 	std::vector<std::vector<uint8_t>> messages;
 	// Add new data to buffer
 	rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
-	// Check buffer size limit
-	if (rtcm_buffer_.size() > config_.max_buffer_size) {
-		// Keep only the last half of max buffer size
-		size_t keep_size = config_.max_buffer_size / 2;
-		rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.end() - keep_size);
-		// Update statistics
-		std::lock_guard<std::mutex> lock(stats_mutex_);
-		stats_.messages_dropped++;
-		rtcm_sync_lost_count_++;
-		SetLastError("RTCM buffer overflow, discarding old data");
-	}
 	// Parse RTCM3 messages
 	while (rtcm_buffer_.size() >= 1024) {
 		std::vector<uint8_t> msg(rtcm_buffer_.begin(), rtcm_buffer_.begin() + 1024);
@@ -518,37 +507,34 @@ void NTRIPClient::ReceiveThread() {
 
 void NTRIPClient::ProcessThread() {
 	while (receiving_.load(std::memory_order_acquire)) {
-		std::unique_lock<std::mutex> lock(queue_mutex_);
-		// Wait for data or stop signal
-		queue_cv_.wait(lock, [this] { return !data_queue_.empty() || !receiving_.load(std::memory_order_acquire); });
-		// Process batch of data
-		std::vector<std::vector<uint8_t>> batch;
-		const size_t MAX_BATCH_SIZE = 10;
-		while (!data_queue_.empty() && batch.size() < MAX_BATCH_SIZE) {
-			batch.push_back(std::move(data_queue_.front()));
+		std::vector<uint8_t> data;
+		{
+			std::unique_lock<std::mutex> lock(queue_mutex_);
+			// Wait for data or stop signal
+			queue_cv_.wait(lock, [this] { return !data_queue_.empty() || !receiving_.load(std::memory_order_acquire); });
+			if (!receiving_.load(std::memory_order_acquire) && data_queue_.empty())
+				break;
+			data = std::move(data_queue_.front());
 			data_queue_.pop();
 		}
-		lock.unlock();
-		// Process each data chunk
-		for (const auto &data: batch) {
+		auto messages = ParseRTCM(data.data(), data.size());
+
+		std::function<void(const uint8_t *, size_t)> data_cb;
+		std::function<void(const std::vector<uint8_t> &)> msg_cb;
+		{
+			std::lock_guard<std::mutex> lk(callback_mutex_);
+			data_cb = data_callback_;
+			msg_cb = message_callback_;
+		}
+		for (const auto &msg: messages) {
 			if (!receiving_.load(std::memory_order_acquire)) {
 				break;
 			}
-			// Parse RTCM messages
-			auto messages = ParseRTCM(data.data(), data.size());
-			// Invoke callbacks
-			{
-				std::lock_guard<std::mutex> callback_lock(callback_mutex_);
-				for (const auto &msg: messages) {
-					// Raw data callback
-					if (data_callback_) {
-						data_callback_(msg.data(), msg.size());
-					}
-					// Structured message callback
-					if (message_callback_) {
-						message_callback_(msg);
-					}
-				}
+			if (data_cb) {
+				data_cb(msg.data(), msg.size());
+			}
+			if (msg_cb) {
+				msg_cb(msg);
 			}
 		}
 	}
@@ -675,7 +661,7 @@ std::vector<NTRIPClient::MountPoint> NTRIPClient::GetSourceTable() {
 	}
 
 	// Send request for source table (empty path)
-	std::string request = BuildHTTPRequest("/");
+	const std::string request = BuildHTTPRequest("/");
 	if (SendData(request.c_str(), request.size()) <= 0) {
 		CloseConnection();
 		return result;
@@ -753,23 +739,23 @@ NTRIPClient::Statistics NTRIPClient::GetStatistics() const {
 	std::lock_guard<std::mutex> lock(stats_mutex_);
 	Statistics result = stats_;
 	// Calculate current data rate
-	auto now = std::chrono::steady_clock::now();
+	const auto now = std::chrono::steady_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - stats_.last_message_time).count();
 	if (duration > 0 && stats_.bytes_received > 0) {
-		result.current_data_rate = static_cast<double>(stats_.bytes_received) / duration / 1024.0;	// KB/s
+		result.current_data_rate = static_cast<double>(stats_.bytes_received) / static_cast<double>(duration) / 1024.0;	 // KB/s
 	}
 	return result;
 }
 
 
 std::string NTRIPClient::GetSSLError() {
-	unsigned long err = ERR_get_error();
+	const unsigned long err = ERR_get_error();
 	if (err == 0) {
 		return "Unknown SSL error";
 	}
 	char err_buf[256];
 	ERR_error_string_n(err, err_buf, sizeof(err_buf));
-	return std::string(err_buf);
+	return err_buf;
 }
 
 
@@ -803,7 +789,7 @@ void NTRIPClient::SetLastError(const std::string &error) {
 }
 
 
-std::string NTRIPClient::BuildHTTPRequest(const std::string &path) {
+std::string NTRIPClient::BuildHTTPRequest(const std::string &path) const {
 	std::stringstream request;
 	request << "GET " << path << " HTTP/1.1\r\n";
 	request << "Host: " << config_.host << ":" << config_.port << "\r\n";
@@ -813,7 +799,7 @@ std::string NTRIPClient::BuildHTTPRequest(const std::string &path) {
 	request << "Ntrip-Version: Ntrip/2.0\r\n";
 	// Authentication
 	if (!config_.username.empty() && !config_.password.empty()) {
-		std::string credentials = config_.username + ":" + config_.password;
+		const std::string credentials = config_.username + ":" + config_.password;
 		request << "Authorization: Basic " << Base64Encode(credentials) << "\r\n";
 	}
 	// NMEA GGA
@@ -826,15 +812,14 @@ std::string NTRIPClient::BuildHTTPRequest(const std::string &path) {
 
 
 std::string NTRIPClient::Base64Encode(const std::string &input) {
-	BIO *bio, *b64;
 	BUF_MEM *buffer_ptr;
 
-	b64 = BIO_new(BIO_f_base64());
-	bio = BIO_new(BIO_s_mem());
+	BIO *b64 = BIO_new(BIO_f_base64());
+	BIO *bio = BIO_new(BIO_s_mem());
 	bio = BIO_push(b64, bio);
 
 	BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-	BIO_write(bio, input.c_str(), input.length());
+	BIO_write(bio, input.c_str(), static_cast<int>(input.length()));
 	BIO_flush(bio);
 	BIO_get_mem_ptr(bio, &buffer_ptr);
 
@@ -903,24 +888,21 @@ bool NTRIP_Callback::SendToINS401(const uint8_t *payload, size_t payload_length)
 		rtcm_base_packet = Tool::Ethernet::BuildPacket(COMMAND_START_BYTES, RTCM_BASE_DATA_MESSAGE_ID_BYTES, payload, payload_length,
 													   target_mac_, local_mac_);
 	} catch (const std::exception &e) {
-		std::cerr << "[NTRIP_Callback] Packet build error: " << e.what() << std::endl;
+		std::cerr << "[NTRIP Callback] Packet build error: " << e.what() << std::endl;
 		packets_failed_.fetch_add(1, std::memory_order_relaxed);
 		return false;
 	}
 	// Send packet with retry
 	bool sent = false;
-	for (int retry = 0; retry < MAX_SEND_RETRIES; retry++) {
+	for (int retry = 0; retry < MAX_SEND_RETRIES_; retry++) {
 		if (Tool::Ethernet::SendBroadcastPacket(interface_, target_mac_, sock_fd_, rtcm_base_packet)) {
 			sent = true;
 			break;
 		}
-		if (retry < MAX_SEND_RETRIES - 1) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(SEND_RETRY_DELAY_MS));
+		if (retry < MAX_SEND_RETRIES_ - 1) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(SEND_RETRY_DELAY_MS_));
 		}
 	}
-	size_t a = GetPacketsSent();
-	size_t b = GetPacketsFailed();
-	std::cout << "[NTRIP_Callback] Sent: " << a << ", Failed: " << b << "\r";
 	if (sent) {
 		packets_sent_.fetch_add(1, std::memory_order_relaxed);
 		return true;

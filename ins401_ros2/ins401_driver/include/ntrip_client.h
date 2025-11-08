@@ -9,6 +9,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 
@@ -95,15 +96,15 @@ public:
 	// Callback setters
 	void SetDataCallback(DataCallback callback) {
 		std::lock_guard<std::mutex> lock(callback_mutex_);
-		data_callback_ = callback;
+		data_callback_ = std::move(callback);
 	}
 	void SetErrorCallback(ErrorCallback callback) {
 		std::lock_guard<std::mutex> lock(callback_mutex_);
-		error_callback_ = callback;
+		error_callback_ = std::move(callback);
 	}
 	void SetMessageCallback(MessageCallback callback) {
 		std::lock_guard<std::mutex> lock(callback_mutex_);
-		message_callback_ = callback;
+		message_callback_ = std::move(callback);
 	}
 
 	// Get last error message
@@ -144,7 +145,7 @@ private:
 	// Utility
 	static std::string GetSSLError();
 	static std::string GetSSLErrorString(int ssl_error);
-	std::string BuildHTTPRequest(const std::string &path);
+	std::string BuildHTTPRequest(const std::string &path) const;
 	static std::string Base64Encode(const std::string &input);
 
 	// Configuration
@@ -225,6 +226,6 @@ private:
 	std::atomic<size_t> packets_failed_{ 0 };
 
 	// Retry parameters
-	static constexpr int MAX_SEND_RETRIES = 3;
-	static constexpr int SEND_RETRY_DELAY_MS = 100;
+	static constexpr int MAX_SEND_RETRIES_ = 3;
+	static constexpr int SEND_RETRY_DELAY_MS_ = 10;
 };

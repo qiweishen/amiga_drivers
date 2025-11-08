@@ -14,14 +14,20 @@
 
 static std::atomic<bool> g_terminate{ false };
 
-static void SignalHandler(int) {
+
+static void SignalHandler(int sig) {
+	std::cerr << "\n[Signal] Received signal " << sig << ", shutting down...\n";
 	g_terminate.store(true, std::memory_order_release);
 }
 
+
 int main() {
-	std::signal(SIGINT, SignalHandler);
-	std::signal(SIGTERM, SignalHandler);
-	std::signal(SIGABRT, SignalHandler);
+	std::signal(SIGINT, SignalHandler);	  // Ctrl+C
+	std::signal(SIGTERM, SignalHandler);  // kill
+	std::signal(SIGABRT, SignalHandler);  // IDE abort
+	std::signal(SIGTSTP, SignalHandler);  // Ctrl+Z
+	std::signal(SIGHUP, SignalHandler);	  // 终端关闭
+
 
 	try {
 		// 1) 发现设备
@@ -30,7 +36,6 @@ int main() {
 		if (devices.empty()) {
 			return 1;
 		}
-		discover->~INSDeviceDiscover();
 		const DeviceInfo device = devices.begin()->second;
 		std::cout << "Using device on interface " << device.interface_name << " with MAC " << device.mac_address << std::endl;
 
@@ -43,6 +48,7 @@ int main() {
 				receiver->Run();
 			} catch (const std::exception &e) {
 				std::cerr << "[Receiver] exception: " << e.what() << std::endl;
+				g_terminate.store(true);
 			}
 		});
 
@@ -54,7 +60,7 @@ int main() {
 		config.is_ssl = false;
 		config.username = "TPA_Nav";
 		config.password = "vExnar6pajxexexreh@tpa";
-		config.mount_point = "ADDE00AUS0";
+		config.mount_point = "5REG00AUS0";
 		auto ntrip_client = std::make_unique<NTRIPClient>(config);
 
 
@@ -69,6 +75,7 @@ int main() {
 				ntrip_client->StartReceiving();
 			} catch (const std::exception &e) {
 				std::cerr << "[NTRIP Client] exception: " << e.what() << std::endl;
+				g_terminate.store(true);
 			}
 		});
 

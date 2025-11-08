@@ -163,15 +163,6 @@ namespace Tool {
 				}
 			}
 
-			struct fanout_args {
-				uint16_t id;
-				uint16_t type;
-			} fanout = { 0, PACKET_FANOUT_HASH };
-
-			if (setsockopt(raw_socket, SOL_PACKET, PACKET_FANOUT, &fanout, sizeof(fanout)) < 0) {
-				std::cerr << "Warning: Failed to set packet fanout - " << strerror(errno) << std::endl;
-			}
-
 			guard.release();
 			return true;
 		}
@@ -380,10 +371,10 @@ namespace Tool {
 				aceinna_packet.push_back(0x00);
 			}
 
-			// CRC16 - MSB-first - From Message ID to Payload
+			// CRC16 - LSB-first - From Message ID to Payload
 			const uint16_t crc16 = CRC::CalculateINS401_CRC16(&aceinna_packet[2], aceinna_packet.size() - 2);
-			aceinna_packet.push_back(static_cast<uint8_t>((crc16 >> 8) & 0xFF));
 			aceinna_packet.push_back(static_cast<uint8_t>(crc16 & 0xFF));
+			aceinna_packet.push_back(static_cast<uint8_t>((crc16 >> 8) & 0xFF));
 
 			// ETH length field - LSB-first
 			auto eth_payload_length = static_cast<uint16_t>(aceinna_packet.size());
@@ -391,8 +382,11 @@ namespace Tool {
 			frame.push_back(static_cast<uint8_t>((eth_payload_length >> 8) & 0xFF));
 
 			frame.insert(frame.end(), aceinna_packet.begin(), aceinna_packet.end());
-			while (frame.size() - 14 < 46) {
-				frame.push_back(0x00);
+
+			// Padding to reach minimum Ethernet frame size (46 bytes payload)
+			if (aceinna_packet.size() < 46) {
+				size_t padding_size = 46 - aceinna_packet.size();
+				frame.insert(frame.end(), padding_size, 0x00);
 			}
 			return frame;
 		}
@@ -448,17 +442,17 @@ namespace Tool {
 	namespace CRC {
 		uint16_t CalculateINS401_CRC16(const uint8_t *buf, const uint16_t &length) {
 			uint16_t crc = 0x1D0F;
-			for (uint16_t i = 0; i < length; i++) {
-				crc ^= static_cast<uint16_t>(buf[i]) << 8;
+			for (int i = 0; i < length; i++) {
+				crc ^= buf[i] << 8;
 				for (int j = 0; j < 8; j++) {
 					if (crc & 0x8000) {
-						crc = static_cast<uint16_t>(((crc << 1) ^ 0x1021) & 0xFFFF);
+						crc = (crc << 1) ^ 0x1021;
 					} else {
-						crc = static_cast<uint16_t>((crc << 1) & 0xFFFF);
+						crc = crc << 1;
 					}
 				}
 			}
-			return crc;
+			return ((crc << 8) & 0xFF00) | ((crc >> 8) & 0xFF);
 		}
 
 

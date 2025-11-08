@@ -73,8 +73,7 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const std::s
 	if (len < payload_offset + 10 + aceinna_payload_len) {
 		return false;
 	}
-	uint16_t received_crc = (buffer[payload_offset + 8 + aceinna_payload_len] << 8) |	// MSB
-							buffer[payload_offset + 9 + aceinna_payload_len];			// LSB
+	uint16_t received_crc = (buffer[payload_offset + 8 + aceinna_payload_len]) | buffer[payload_offset + 9 + aceinna_payload_len] << 8;
 	uint16_t calculated_crc = Tool::CRC::CalculateINS401_CRC16(&buffer[payload_offset + 2],
 															   6 + aceinna_payload_len	// Message ID(2) + Length(4) + Payload
 	);
