@@ -12,6 +12,16 @@ find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
 
+include(FetchContent)
+
+FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt
+        GIT_TAG 12.1.0
+)
+FetchContent_MakeAvailable(fmt)
+
+
 add_subdirectory(deps)
 
 
@@ -38,4 +48,5 @@ target_link_libraries(${PROJECT_NAME}
         OpenSSL::Crypto
         Threads::Threads
         Boost::boost
+        fmt::fmt
 )

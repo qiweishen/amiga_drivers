@@ -61,14 +61,21 @@ int main() {
 		config.username = "TPA_Nav";
 		config.password = "vExnar6pajxexexreh@tpa";
 		config.mount_point = "5REG00AUS0";
-		auto ntrip_client = std::make_unique<NTRIPClient>(config);
+		// config.host = "smartnetaus.com";
+		// config.port = 15101;
+		// config.is_ssl = false;
+		// config.username = "tpa_field";
+		// config.password = "3915";
+		// config.mount_point = "MSM_VRS";
+		// config.nmea_gga = "";
+		// auto ntrip_client = std::make_unique<NTRIPClient>(config);
 
 
 		// 4) 设置回调，并启动客户端线程
 		auto ntrip_callback =
 				std::make_unique<NTRIP_Callback>(device.interface_name, device.mac_address, device.localhost_mac_address);
 		ntrip_client->SetDataCallback(
-				[cb = ntrip_callback.get()](const uint8_t *payload, size_t len) { cb->SendToINS401(payload, len); });
+				[cb = ntrip_callback.get()](const uint8_t *payload, const size_t len) { cb->SendToINS401(payload, len); });
 		std::thread ntrip_client_thread([&ntrip_client]() {
 			try {
 				ntrip_client->Connect();
