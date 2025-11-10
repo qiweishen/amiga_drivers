@@ -55,19 +55,19 @@ int main() {
 
 		// 3) 配置 NTRIP
 		NTRIPClient::Config config;
-		// config.host = "ntrip.data.gnss.ga.gov.au";
-		// config.port = 2101;
-		// config.is_ssl = false;
-		// config.username = "TPA_Nav";
-		// config.password = "vExnar6pajxexexreh@tpa";
-		// config.mount_point = "5REG00AUS0";
-		config.host = "smartnetaus.com";
-		config.port = 15101;
+		config.host = "ntrip.data.gnss.ga.gov.au";
+		config.port = 2101;
 		config.is_ssl = false;
-		config.username = "tpa_field";
-		config.password = "3915";
-		config.mount_point = "MSM_VRS";
-		config.nmea_gga = "$GNGGA,022457.00,3458.2821333,S,13838.4080166,E,1,23,1.0,167.000,M,-0.430,M,0.0,*51";
+		config.username = "TPA_Nav";
+		config.password = "vExnar6pajxexexreh@tpa";
+		config.mount_point = "ADDE00AUS0";
+		// config.host = "smartnetaus.com";
+		// config.port = 15101;
+		// config.is_ssl = false;
+		// config.username = "tpa_field";
+		// config.password = "3915";
+		// config.mount_point = "MSM_VRS";
+		// config.nmea_gga = "$GNGGA,022457.00,3458.2821333,S,13838.4080166,E,1,23,1.0,167.000,M,-0.430,M,0.0,*51";
 		auto ntrip_client = std::make_unique<NTRIPClient>(config);
 
 

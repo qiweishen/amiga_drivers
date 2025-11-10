@@ -121,7 +121,7 @@ void INSDeviceReceiver::ReceiveLoop() {
 				do {
 					bytes_read = ::recv(sock_fd_, buffer.data(), buffer.size(), MSG_DONTWAIT);
 					if (bytes_read > 0) {
-						VerifyData(buffer.data(), bytes_read);
+						VerifyDataFrame(buffer.data(), bytes_read);
 					}
 				} while (bytes_read > 0 || bytes_read < 0 && errno == EINTR);
 			}
@@ -130,7 +130,7 @@ void INSDeviceReceiver::ReceiveLoop() {
 }
 
 
-void INSDeviceReceiver::VerifyData(const uint8_t *data, const size_t len) {
+void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
 	if (len < ETH_HEADER_LEN) {
 		return;
 	}
@@ -162,6 +162,14 @@ void INSDeviceReceiver::VerifyData(const uint8_t *data, const size_t len) {
 				} else {
 					fmt::print(stderr, "[INS401 Receiver] Invalid raw IMU data length: {}, expected: {}\n", data_length,
 							   RAW_IMU_DATA_LENGTH);
+				}
+				break;
+			case RTCM_ROVER_DATA_MESSAGE_ID:
+				if (data_length > 1 && data_length <= RTCM_ROVER_DATA_LENGTH_MAX) {
+					ProcessRTCMRoverData(packet, data_length);
+				} else {
+					fmt::print(stderr, "[INS401 Receiver] Invalid RTCM rover data length: {}, expected: 1-{}\n", data_length,
+							   RTCM_ROVER_DATA_LENGTH_MAX);
 				}
 				break;
 			default:
@@ -231,7 +239,7 @@ void INSDeviceReceiver::ProcessDiagnosticMessage(const uint8_t *packet) {
 				   calc_crc);
 		return;
 	}
-	// Parse IMU data
+	// Parse Diagnostic message
 	const uint8_t *diagnostic_messages = &packet[ACENINNA_HEADER_LEN];
 	DiagnosticMessage diagnostic_msg{};
 	diagnostic_msg.gps_week = *reinterpret_cast<const uint16_t *>(diagnostic_messages);
@@ -289,6 +297,31 @@ void INSDeviceReceiver::ProcessRawIMUData(const uint8_t *packet) {
 }
 
 
+void INSDeviceReceiver::ProcessRTCMRoverData(const uint8_t *packet, size_t len) {
+	// Check CRC
+	size_t crc_offset = ACENINNA_HEADER_LEN + len;
+	const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;  // LSB-first
+	const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + len);
+	if (recv_crc != calc_crc) {
+		fmt::print(stderr, "[INS401 Receiver] RTCM rover data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc,
+				   calc_crc);
+		return;
+	}
+	// Parse RTCM data
+	const uint8_t *rtcm_data = &packet[ACENINNA_HEADER_LEN];
+	std::vector<uint8_t> rtcm_vector(rtcm_data, rtcm_data + len);
+	{
+		std::lock_guard lock(queue_mutex_);
+		if (rtcm_rover_queue_.size() >= max_rtcm_rover_queue_size_) {
+			rtcm_rover_queue_.pop();
+		}
+		rtcm_rover_queue_.push(rtcm_vector);
+	}
+	cv_.notify_one();
+}
+
+
+
 void INSDeviceReceiver::ProcessNMEAMessage(const uint8_t *packet) {
 	std::string nmea_msg(reinterpret_cast<const char *>(packet));
 	// Find the end of the NMEA message
@@ -328,9 +361,11 @@ void INSDeviceReceiver::ProcessNMEAMessage(const uint8_t *packet) {
 void INSDeviceReceiver::WriterThread() {
 	std::vector<GNSSSolutionData> gnss_batch;
 	std::vector<RawIMUData> imu_batch;
+	std::vector<std::vector<uint8_t>> rtcm_rover_batch;
 	std::vector<std::string> nmea_batch;
 	gnss_batch.reserve(gnss_write_batch_size_);
 	imu_batch.reserve(imu_write_batch_size_);
+	rtcm_rover_batch.reserve(rtcm_rover_write_batch_size_);
 	nmea_batch.reserve(nmea_write_batch_size_);
 
 	auto last_flush = std::chrono::steady_clock::now();
@@ -352,6 +387,12 @@ void INSDeviceReceiver::WriterThread() {
 				imu_batch.emplace_back(imu_queue_.front());
 				imu_queue_.pop();
 			}
+			rtcm_rover_batch.clear();
+			const size_t rtcm_rover_to_take = std::min(rtcm_rover_write_batch_size_, rtcm_rover_queue_.size());
+			for (size_t i = 0; i < rtcm_rover_to_take; ++i) {
+				rtcm_rover_batch.emplace_back(rtcm_rover_queue_.front());
+				rtcm_rover_queue_.pop();
+			}
 			nmea_batch.clear();
 			const size_t nmea_to_take = std::min(nmea_write_batch_size_, nmea_queue_.size());
 			for (size_t i = 0; i < nmea_to_take; ++i) {
@@ -371,6 +412,12 @@ void INSDeviceReceiver::WriterThread() {
 					imu_queue_.pop();
 				}
 			}
+			if (rtcm_rover_queue_.size() > max_rtcm_rover_queue_size_) {
+				const size_t to_remove = rtcm_rover_queue_.size() - max_rtcm_rover_queue_size_ / 2;
+				for (size_t i = 0; i < to_remove; ++i) {
+					rtcm_rover_queue_.pop();
+				}
+			}
 			if (nmea_queue_.size() > max_nmea_queue_size_) {
 				const size_t to_remove = nmea_queue_.size() - max_nmea_queue_size_ / 2;
 				for (size_t i = 0; i < to_remove; ++i) {
@@ -381,6 +428,7 @@ void INSDeviceReceiver::WriterThread() {
 		if (save_to_file_) {
 			WriteGNSSBatch(gnss_batch);
 			WriteIMUBatch(imu_batch);
+			WriteRTCMRoverBatch(rtcm_rover_batch);
 			WriteNMEABatch(nmea_batch);
 			auto now = std::chrono::steady_clock::now();
 			if (now - last_flush >= FLUSH_INTERVAL) {
@@ -390,6 +438,9 @@ void INSDeviceReceiver::WriterThread() {
 				if (imu_file_.is_open()) {
 					imu_file_.flush();
 				}
+				if (rtcm_rover_file_.is_open()) {
+					rtcm_rover_file_.flush();
+				}
 				if (nmea_file_.is_open()) {
 					nmea_file_.flush();
 				}
@@ -398,11 +449,14 @@ void INSDeviceReceiver::WriterThread() {
 		}
 	}
 	if (save_to_file_) {
+		if (gnss_file_.is_open()) {
+			gnss_file_.flush();
+		}
 		if (imu_file_.is_open()) {
 			imu_file_.flush();
 		}
-		if (gnss_file_.is_open()) {
-			gnss_file_.flush();
+		if (rtcm_rover_file_.is_open()) {
+			rtcm_rover_file_.flush();
 		}
 		if (nmea_file_.is_open()) {
 			nmea_file_.flush();
@@ -441,6 +495,16 @@ void INSDeviceReceiver::WriteIMUBatch(const std::vector<RawIMUData> &batch) {
 }
 
 
+void INSDeviceReceiver::WriteRTCMRoverBatch(const std::vector<std::vector<uint8_t>> &batch) {
+	if (!rtcm_rover_file_.is_open() || batch.empty()) {
+		return;
+	}
+	for (const auto &rtcm: batch) {
+		rtcm_rover_file_.write(reinterpret_cast<const char *>(rtcm.data()), static_cast<std::streamsize>(rtcm.size()));
+	}
+}
+
+
 void INSDeviceReceiver::WriteNMEABatch(const std::vector<std::string> &batch) {
 	if (!nmea_file_.is_open() || batch.empty()) {
 		return;
@@ -462,6 +526,7 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 
 		std::string gnss_filename = fmt::format("gnss_data_{}.txt", timestamp);
 		std::string imu_filename = fmt::format("imu_data_{}.txt", timestamp);
+		std::string rtcm_rover_filename = fmt::format("rtcm_rover_data_{}.bin", timestamp);
 		std::string nmea_filename = fmt::format("nmea_message_{}.txt", timestamp);
 
 		gnss_file_buffer_.resize(write_buffer_size_);
@@ -477,6 +542,12 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 		if (imu_file_.is_open()) {
 			imu_file_.rdbuf()->pubsetbuf(imu_file_buffer_.data(), static_cast<std::streamsize>(imu_file_buffer_.size()));
 			fmt::print(imu_file_, "GPS_Week,GPS_MS,Acc_X,Acc_Y,Acc_Z,Gyro_X,Gyro_Y,Gyro_Z\n");
+		}
+		rtcm_rover_file_buffer_.resize(write_buffer_size_);
+		rtcm_rover_file_.open(rtcm_rover_filename, std::ios::out | std::ios::binary);
+		if (rtcm_rover_file_.is_open()) {
+			rtcm_rover_file_.rdbuf()->pubsetbuf(rtcm_rover_file_buffer_.data(),
+												static_cast<std::streamsize>(rtcm_rover_file_buffer_.size()));
 		}
 		nmea_file_buffer_.resize(write_buffer_size_);
 		nmea_file_.open(nmea_filename, std::ios::out);
