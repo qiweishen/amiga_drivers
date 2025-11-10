@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
+#include <fmt/format.h>
 #include <iomanip>
 #include <iostream>
 #include <netdb.h>
@@ -71,6 +72,8 @@ bool NTRIPClient::Connect() {
 	}
 	// Connection successful
 	connected_.store(true, std::memory_order_release);
+	fmt::print("[NTRIP Client] Connected to {}:{} with mount point '{}' successfully\n", config_.host, config_.port,
+			   config_.mount_point);
 	// Reset statistics
 	{
 		std::lock_guard<std::mutex> lock(stats_mutex_);

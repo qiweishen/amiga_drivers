@@ -214,6 +214,8 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
 			gnss_queue_.pop();
 		}
 		gnss_queue_.push(gnss);
+		fmt::print(stdout, "[INS401 Receiver] GNSS Solution: Week {}, Time {} ms, Position Type {}, STD: {:.6f}, {:.6f}, {:.6f}\n",
+				   gnss.gps_week, gnss.gps_millisecs, gnss.position_type, gnss.latitude_std, gnss.longitude_std, gnss.height_std);
 	}
 	cv_.notify_one();
 }

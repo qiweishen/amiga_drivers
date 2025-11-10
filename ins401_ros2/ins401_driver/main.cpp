@@ -68,7 +68,7 @@ int main() {
 		// config.password = "3915";
 		// config.mount_point = "MSM_VRS";
 		// config.nmea_gga = "";
-		// auto ntrip_client = std::make_unique<NTRIPClient>(config);
+		auto ntrip_client = std::make_unique<NTRIPClient>(config);
 
 
 		// 4) 设置回调，并启动客户端线程
