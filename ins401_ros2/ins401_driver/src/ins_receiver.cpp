@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "fmt/xchar.h"
+
 
 
 INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
@@ -361,10 +363,12 @@ void INSDeviceReceiver::ProcessNMEAMessage(const uint8_t *packet) {
 
 void INSDeviceReceiver::WriterThread() {
 	std::vector<GNSSSolutionData> gnss_batch;
+	std::vector<DiagnosticMessage> diagnostic_batch;
 	std::vector<RawIMUData> imu_batch;
 	std::vector<std::vector<uint8_t>> rtcm_rover_batch;
 	std::vector<std::string> nmea_batch;
 	gnss_batch.reserve(gnss_write_batch_size_);
+	diagnostic_batch.reserve(diagnostic_write_batch_size_);
 	imu_batch.reserve(imu_write_batch_size_);
 	rtcm_rover_batch.reserve(rtcm_rover_write_batch_size_);
 	nmea_batch.reserve(nmea_write_batch_size_);
@@ -381,6 +385,12 @@ void INSDeviceReceiver::WriterThread() {
 			for (size_t i = 0; i < gnss_to_take; ++i) {
 				gnss_batch.emplace_back(gnss_queue_.front());
 				gnss_queue_.pop();
+			}
+			diagnostic_batch.clear();
+			const size_t diagnostic_to_take = std::min(diagnostic_write_batch_size_, diagnostic_queue_.size());
+			for (size_t i = 0; i < diagnostic_to_take; ++i) {
+				diagnostic_batch.emplace_back(diagnostic_queue_.front());
+				diagnostic_queue_.pop();
 			}
 			imu_batch.clear();
 			const size_t imu_to_take = std::min(imu_write_batch_size_, imu_queue_.size());
@@ -407,6 +417,12 @@ void INSDeviceReceiver::WriterThread() {
 					gnss_queue_.pop();
 				}
 			}
+			if (diagnostic_queue_.size() > max_diagnostic_queue_size_) {
+				const size_t to_remove = diagnostic_queue_.size() - max_diagnostic_queue_size_ / 2;
+				for (size_t i = 0; i < to_remove; ++i) {
+					diagnostic_queue_.pop();
+				}
+			}
 			if (imu_queue_.size() > max_imu_queue_size_) {
 				const size_t to_remove = imu_queue_.size() - max_imu_queue_size_ / 2;
 				for (size_t i = 0; i < to_remove; ++i) {
@@ -428,6 +444,7 @@ void INSDeviceReceiver::WriterThread() {
 		}
 		if (save_to_file_) {
 			WriteGNSSBatch(gnss_batch);
+			WriteDiagnosticBatch(diagnostic_batch);
 			WriteIMUBatch(imu_batch);
 			WriteRTCMRoverBatch(rtcm_rover_batch);
 			WriteNMEABatch(nmea_batch);
@@ -435,6 +452,9 @@ void INSDeviceReceiver::WriterThread() {
 			if (now - last_flush >= FLUSH_INTERVAL) {
 				if (gnss_file_.is_open()) {
 					gnss_file_.flush();
+				}
+				if (diagnostic_file_.is_open()) {
+					diagnostic_file_.flush();
 				}
 				if (imu_file_.is_open()) {
 					imu_file_.flush();
@@ -452,6 +472,9 @@ void INSDeviceReceiver::WriterThread() {
 	if (save_to_file_) {
 		if (gnss_file_.is_open()) {
 			gnss_file_.flush();
+		}
+		if (diagnostic_file_.is_open()) {
+			diagnostic_file_.flush();
 		}
 		if (imu_file_.is_open()) {
 			imu_file_.flush();
@@ -480,6 +503,21 @@ void INSDeviceReceiver::WriteGNSSBatch(const std::vector<GNSSSolutionData> &batc
 	}
 	gnss_file_.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 }
+
+
+void INSDeviceReceiver::WriteDiagnosticBatch(const std::vector<DiagnosticMessage> &batch) {
+	if (!diagnostic_file_.is_open() || batch.empty()) {
+		return;
+	}
+	fmt::memory_buffer buffer;
+	buffer.reserve(batch.size() * 128);	 // Reserve approximate size
+	for (const auto &diag: batch) {
+		fmt::format_to(std::back_inserter(buffer), "{},{},{},{},{},{},{}\n", diag.gps_week, diag.gps_millisecs,
+					   fmt::join(diag.device_status, ";"), diag.imu_temperature, diag.mcu_temperature, diag.gnss_chip_temperature);
+	}
+	diagnostic_file_.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+}
+
 
 
 void INSDeviceReceiver::WriteIMUBatch(const std::vector<RawIMUData> &batch) {
@@ -531,8 +569,9 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 		}
 
 		std::string gnss_filename = fmt::format("./data/gnss_data_{}.txt", timestamp);
+		std::string diagnostic_filename = fmt::format("./data/diagnostic_data_{}.txt", timestamp);
 		std::string imu_filename = fmt::format("./data/imu_data_{}.txt", timestamp);
-		std::string rtcm_rover_filename = fmt::format("./data/rtcm_rover_data_{}.bin", timestamp);
+		std::string rtcm_rover_filename = fmt::format("./data/rtcm_rover_data_{}.rtcm3", timestamp);
 		std::string nmea_filename = fmt::format("./data/nmea_message_{}.txt", timestamp);
 
 		gnss_file_buffer_.resize(write_buffer_size_);
@@ -542,6 +581,13 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 			fmt::print(gnss_file_,
 					   "GPS_Week,GPS_MS,Position_Type,Latitude,Longitude,Height,Latitude_STD,Longitude_STD,Height_STD,Num_of_SVs,Num_"
 					   "of_SVs_in_Solution,Hdop,Diffage,North_Vel,East_Vel,Up_Vel,North_Vel_STD,East_Vel_STD,Up_Vel_STD\n");
+		}
+		diagnostic_file_buffer_.resize(write_buffer_size_);
+		diagnostic_file_.open(diagnostic_filename, std::ios::out);
+		if (diagnostic_file_.is_open()) {
+			diagnostic_file_.rdbuf()->pubsetbuf(diagnostic_file_buffer_.data(),
+												static_cast<std::streamsize>(diagnostic_file_buffer_.size()));
+			fmt::print(diagnostic_file_, "GPS_Week,GPS_MS,Device_Status,IMU_Temperature,MCU_Temperature,GNSS_Chip_Temperature\n");
 		}
 		imu_file_buffer_.resize(write_buffer_size_);
 		imu_file_.open(imu_filename, std::ios::out);

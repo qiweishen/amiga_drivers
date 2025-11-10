@@ -98,18 +98,21 @@ private:
 	std::condition_variable cv_;
 	std::thread writer_thread_;
 	std::ofstream gnss_file_;
+	std::ofstream diagnostic_file_;
 	std::ofstream imu_file_;
 	std::ofstream rtcm_rover_file_;
 	std::ofstream nmea_file_;
 	bool save_to_file_;
 
 	// Write buffers
-	const size_t gnss_write_batch_size_ = gnss_hz_ * 10;  // 10 seconds of GNSS data at 1Hz
-	const size_t imu_write_batch_size_ = imu_hz_ * 10;	  // 10 seconds of IMU data at 100Hz
-	const size_t rtcm_rover_write_batch_size_ = 64;		  // 64 RTCM messages
-	const size_t nmea_write_batch_size_ = 24;			  // 24 NMEA messages
-	const size_t write_buffer_size_ = 256 * 1024;		  // 256 KB buffer
+	const size_t gnss_write_batch_size_ = gnss_hz_ * 10;			  // 10 seconds of GNSS data at 1Hz
+	const size_t diagnostic_write_batch_size_ = diagnostic_hz_ * 10;  // 10 seconds of diagnostic data at 1Hz
+	const size_t imu_write_batch_size_ = imu_hz_ * 10;				  // 10 seconds of IMU data at 100Hz
+	const size_t rtcm_rover_write_batch_size_ = rtcm_rover_hz_ * 64;  // 10 seconds of RTCM rover messages
+	const size_t nmea_write_batch_size_ = 24;						  // 24 NMEA messages
+	const size_t write_buffer_size_ = 256 * 1024;					  // 256 KB buffer
 	std::vector<char> gnss_file_buffer_;
+	std::vector<char> diagnostic_file_buffer_;
 	std::vector<char> imu_file_buffer_;
 	std::vector<char> rtcm_rover_file_buffer_;
 	std::vector<char> nmea_file_buffer_;
