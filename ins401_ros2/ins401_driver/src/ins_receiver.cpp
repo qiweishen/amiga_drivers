@@ -512,9 +512,8 @@ void INSDeviceReceiver::WriteDiagnosticBatch(const std::vector<DiagnosticMessage
 	fmt::memory_buffer buffer;
 	buffer.reserve(batch.size() * 128);	 // Reserve approximate size
 	for (const auto &diag: batch) {
-		std::string status_str = fmt::format("{}", fmt::join(diag.device_status, ";"));
-		fmt::format_to(std::back_inserter(buffer), "{},{},{},{},{},{},{}\n", diag.gps_week, diag.gps_millisecs,
-					   status_str, diag.imu_temperature, diag.mcu_temperature, diag.gnss_chip_temperature);
+		fmt::format_to(std::back_inserter(buffer), "{},{},{},{},{},{}\n", diag.gps_week, diag.gps_millisecs,
+					   fmt::join(diag.device_status, ";"), diag.imu_temperature, diag.mcu_temperature, diag.gnss_chip_temperature);
 	}
 	diagnostic_file_.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 }
