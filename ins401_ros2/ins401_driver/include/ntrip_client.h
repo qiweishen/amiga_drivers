@@ -27,13 +27,13 @@ public:
 		bool verify_ssl = false;			   // Verify SSL certificate
 		bool auto_reconnect = true;			   // Enable auto-reconnection
 		int reconnect_interval = 5;			   // Reconnection interval in seconds
-		int timeout = 10;					   // Socket timeout in seconds
+		int timeout = 1;					   // Socket timeout in seconds
 		std::string user_agent = "NTRIP/2.0";  // User agent string
 		std::string nmea_gga;				   // NMEA GGA position string
 
 		// Additional safety parameters
-		size_t max_buffer_size = 1 * 1024 * 1024;  // Max RTCM buffer size (1MB)
-		size_t max_queue_size = 100;			   // Max message queue size
+		size_t max_buffer_size = 8 * 1024 * 1024;  // Max RTCM buffer size (8MB)
+		size_t max_queue_size = 1024;			   // Max message queue size
 		int max_reconnect_attempts = 10;		   // Maximum reconnection attempts
 		bool exponential_backoff = true;		   // Use exponential backoff for reconnection
 	};
