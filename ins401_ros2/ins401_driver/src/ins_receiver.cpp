@@ -2,6 +2,7 @@
 
 #include <bitset>
 #include <cstring>
+#include <filesystem>
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -165,7 +166,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
 				}
 				break;
 			case RTCM_ROVER_DATA_MESSAGE_ID:
-				if (data_length > 1 && data_length <= RTCM_ROVER_DATA_LENGTH_MAX) {
+				if (data_length >= 1 && data_length <= RTCM_ROVER_DATA_LENGTH_MAX) {
 					ProcessRTCMRoverData(packet, data_length);
 				} else {
 					fmt::print(stderr, "[INS401 Receiver] Invalid RTCM rover data length: {}, expected: 1-{}\n", data_length,
@@ -524,10 +525,15 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 		auto time_t = std::chrono::system_clock::to_time_t(now);
 		std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", *std::localtime(&time_t));
 
-		std::string gnss_filename = fmt::format("gnss_data_{}.txt", timestamp);
-		std::string imu_filename = fmt::format("imu_data_{}.txt", timestamp);
-		std::string rtcm_rover_filename = fmt::format("rtcm_rover_data_{}.bin", timestamp);
-		std::string nmea_filename = fmt::format("nmea_message_{}.txt", timestamp);
+		std::filesystem::path data_dir = "./data";
+		if (!std::filesystem::exists(data_dir)) {
+			std::filesystem::create_directory(data_dir);
+		}
+
+		std::string gnss_filename = fmt::format("./data/gnss_data_{}.txt", timestamp);
+		std::string imu_filename = fmt::format("./data/imu_data_{}.txt", timestamp);
+		std::string rtcm_rover_filename = fmt::format("./data/rtcm_rover_data_{}.bin", timestamp);
+		std::string nmea_filename = fmt::format("./data/nmea_message_{}.txt", timestamp);
 
 		gnss_file_buffer_.resize(write_buffer_size_);
 		gnss_file_.open(gnss_filename, std::ios::out);
