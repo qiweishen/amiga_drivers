@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15...3.25)
-project(INS401_Driver LANGUAGES CXX)
+project(INS401_Driver LANGUAGES CXX C)
 
 
 set(CMAKE_CXX_STANDARD 17)
@@ -18,11 +18,28 @@ FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt
         GIT_TAG 12.1.0
+        GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(fmt)
 
-
-add_subdirectory(deps)
+FetchContent_Declare(
+        inih
+        GIT_REPOSITORY https://github.com/benhoyt/inih
+        GIT_TAG r62
+        GIT_PROGRESS TRUE
+)
+FetchContent_GetProperties(inih)
+if (NOT inih_POPULATED)
+    FetchContent_MakeAvailable(inih)
+    add_library(inih STATIC
+            ${inih_SOURCE_DIR}/ini.c
+            ${inih_SOURCE_DIR}/cpp/INIReader.cpp
+    )
+    target_include_directories(inih PUBLIC
+            ${inih_SOURCE_DIR}
+            ${inih_SOURCE_DIR}/cpp
+    )
+endif ()
 
 
 include_directories(
@@ -43,10 +60,11 @@ set(SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 
-target_link_libraries(${PROJECT_NAME}
+target_link_libraries(${PROJECT_NAME} PRIVATE
         OpenSSL::SSL
         OpenSSL::Crypto
         Threads::Threads
         Boost::boost
         fmt::fmt
+        inih
 )

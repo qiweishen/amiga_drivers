@@ -6,18 +6,17 @@
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include <fmt/xchar.h>
 #include <net/if.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <vector>
 
-#include <fmt/xchar.h>
-
 
 
 INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
-									 const bool save_to_file) :
-	sock_fd_(-1), interface_name_(iface), running_(true), save_to_file_(save_to_file) {
+									 const bool save_to_file, const std::string &output_folder_path) :
+	sock_fd_(-1), interface_name_(iface), save_to_file_(save_to_file), output_folder_path_(output_folder_path) {
 	Tool::Ethernet::ParseMACAddressToUint8(target_mac, target_mac_);
 	Tool::Ethernet::ParseMACAddressToUint8(local_mac, local_mac_);
 }
@@ -40,9 +39,9 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 
 void INSDeviceReceiver::Run() {
 	if (save_to_file_) {
-		InitializeWritingFiles();
+		running_ = InitializeWritingFiles();
 	}
-	Initialize();
+	running_ = Initialize();
 	ReceiveLoop();
 }
 
@@ -519,7 +518,6 @@ void INSDeviceReceiver::WriteDiagnosticBatch(const std::vector<DiagnosticMessage
 }
 
 
-
 void INSDeviceReceiver::WriteIMUBatch(const std::vector<RawIMUData> &batch) {
 	if (!imu_file_.is_open() || batch.empty()) {
 		return;
@@ -557,22 +555,19 @@ void INSDeviceReceiver::WriteNMEABatch(const std::vector<std::string> &batch) {
 }
 
 
-void INSDeviceReceiver::InitializeWritingFiles() {
+bool INSDeviceReceiver::InitializeWritingFiles() {
 	if (save_to_file_) {
-		auto now = std::chrono::system_clock::now();
-		auto time_t = std::chrono::system_clock::to_time_t(now);
-		std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", *std::localtime(&time_t));
-
-		std::filesystem::path data_dir = "./data";
-		if (!std::filesystem::exists(data_dir)) {
-			std::filesystem::create_directory(data_dir);
+		if (output_folder_path_.empty()) {
+			fmt::print(stderr, "[INS401 Receiver] Error: Output folder path is empty!\n");
+			return false;
 		}
 
-		std::string gnss_filename = fmt::format("./data/gnss_data_{}.txt", timestamp);
-		std::string diagnostic_filename = fmt::format("./data/diagnostic_data_{}.txt", timestamp);
-		std::string imu_filename = fmt::format("./data/imu_data_{}.txt", timestamp);
-		std::string rtcm_rover_filename = fmt::format("./data/rtcm_rover_data_{}.rtcm3", timestamp);
-		std::string nmea_filename = fmt::format("./data/nmea_message_{}.txt", timestamp);
+		std::string timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
+		std::string gnss_filename = fmt::format("{}/gnss_data_{}.txt", output_folder_path_, timestamp);
+		std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.txt", output_folder_path_, timestamp);
+		std::string imu_filename = fmt::format("{}/imu_data_{}.txt", output_folder_path_, timestamp);
+		std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_data_{}.rtcm3", output_folder_path_, timestamp);
+		std::string nmea_filename = fmt::format("{}/nmea_message_{}.txt", output_folder_path_, timestamp);
 
 		gnss_file_buffer_.resize(write_buffer_size_);
 		gnss_file_.open(gnss_filename, std::ios::out);
@@ -609,6 +604,7 @@ void INSDeviceReceiver::InitializeWritingFiles() {
 
 		writer_thread_ = std::thread(&INSDeviceReceiver::WriterThread, this);
 	}
+	return true;
 }
 //
 //

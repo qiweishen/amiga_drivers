@@ -18,18 +18,20 @@ class NTRIPClient {
 public:
 	// Configuration
 	struct Config {
-		std::string host;					   // NTRIP caster hostname
-		int port = 2101;					   // Port number
-		std::string mount_point;			   // Mount point name
-		std::string username;				   // Authentication username
-		std::string password;				   // Authentication password
-		bool is_ssl = false;				   // Use SSL/TLS connection
-		bool verify_ssl = false;			   // Verify SSL certificate
+		std::string host;		  // NTRIP caster hostname
+		int port = 2101;		  // Port number
+		std::string mount_point;  // Mount point name
+		std::string username;	  // Authentication username
+		std::string password;	  // Authentication password
+		bool is_ssl = false;	  // Use SSL/TLS connection
+		bool verify_ssl = false;  // Verify SSL certificate
+		std::string nmea_gga;	  // NMEA GGA position string
+
+		// Connection parameters
 		bool auto_reconnect = true;			   // Enable auto-reconnection
 		int reconnect_interval = 5;			   // Reconnection interval in seconds
 		int timeout = 1;					   // Socket timeout in seconds
 		std::string user_agent = "NTRIP/2.0";  // User agent string
-		std::string nmea_gga;				   // NMEA GGA position string
 
 		// Additional safety parameters
 		size_t max_buffer_size = 8 * 1024 * 1024;  // Max RTCM buffer size (8MB)

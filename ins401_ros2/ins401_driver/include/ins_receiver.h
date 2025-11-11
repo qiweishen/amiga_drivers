@@ -61,7 +61,7 @@ public:
 
 
 	explicit INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
-							   bool save_to_file);
+							   bool save_to_file, const std::string &output_folder_path);
 	~INSDeviceReceiver();
 
 	void Run();
@@ -96,13 +96,17 @@ private:
 	const size_t max_nmea_queue_size_ = 128;							// 128 NMEA messages
 	mutable std::mutex queue_mutex_;
 	std::condition_variable cv_;
+
+	// File saving
+	bool save_to_file_;
+	std::string output_folder_path_;
 	std::thread writer_thread_;
 	std::ofstream gnss_file_;
 	std::ofstream diagnostic_file_;
 	std::ofstream imu_file_;
 	std::ofstream rtcm_rover_file_;
 	std::ofstream nmea_file_;
-	bool save_to_file_;
+
 
 	// Write buffers
 	const size_t gnss_write_batch_size_ = gnss_hz_ * 10;			  // 10 seconds of GNSS data at 1Hz
@@ -119,7 +123,7 @@ private:
 	size_t last_flush_time_ = 0;
 
 	bool Initialize();
-	void InitializeWritingFiles();
+	bool InitializeWritingFiles();
 	void ReceiveLoop();
 	void VerifyDataFrame(const uint8_t *data, size_t len);
 	void ProcessGNSSSolutionData(const uint8_t *packet);
