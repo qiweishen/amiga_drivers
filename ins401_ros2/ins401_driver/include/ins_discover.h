@@ -16,13 +16,12 @@ public:
 	~INSDeviceDiscover();
 
 	std::map<std::string, DeviceInfo> GetDiscoveredDevices();
-	void ClearDiscoveredDevices();
 
 private:
 	int sock_fd_{};
 	const size_t buffer_size_ = { 2 * 1024 };
 	std::array<uint8_t, 6> broadcast_mac_{};
-	std::map<std::string, DeviceInfo> discovered_devices;
+	std::map<std::string, DeviceInfo> discovered_devices_;
 	std::atomic<bool> running_{ false };
 
 	void ListenResponses(const std::string &interface, const std::string &mac, int timeout_ms);

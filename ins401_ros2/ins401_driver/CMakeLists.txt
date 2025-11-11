@@ -18,7 +18,6 @@ FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt
         GIT_TAG 12.1.0
-        GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -26,7 +25,6 @@ FetchContent_Declare(
         inih
         GIT_REPOSITORY https://github.com/benhoyt/inih
         GIT_TAG r62
-        GIT_PROGRESS TRUE
 )
 FetchContent_GetProperties(inih)
 if (NOT inih_POPULATED)

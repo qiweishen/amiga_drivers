@@ -29,12 +29,7 @@ INSDeviceDiscover::~INSDeviceDiscover() {
 
 std::map<std::string, DeviceInfo> INSDeviceDiscover::GetDiscoveredDevices() {
 	DiscoverDevices();
-	return discovered_devices;
-}
-
-
-void INSDeviceDiscover::ClearDiscoveredDevices() {
-	discovered_devices.clear();
+	return discovered_devices_;
 }
 
 
@@ -105,7 +100,7 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const std::s
 			info.gnss_chip_firmware_version = tokens[15] + " " + tokens[16] + " " + tokens[17];
 		}
 	}
-	discovered_devices[device_mac] = info;
+	discovered_devices_[device_mac] = info;
 	return true;
 }
 
@@ -159,9 +154,9 @@ void INSDeviceDiscover::ListenResponses(const std::string &interface, const std:
 
 
 void INSDeviceDiscover::DiscoverDevices(int discovery_time_ms) {
-	if (geteuid() != 0) {
+	if (geteuid() != 0 && (getuid() <= 6000 || getuid() >= 6100)) {
 		std::cerr << "Warning: This program requires root privileges." << std::endl;
-		std::cerr << "         Please run with sudo." << std::endl;
+		std::cerr << "         Please run with sudo or use a privileged user account (UID 6000-6100)." << std::endl;
 		return;
 	}
 	const auto interfaces = Tool::Ethernet::GetNetworkInterfaces();
@@ -189,7 +184,7 @@ void INSDeviceDiscover::DiscoverDevices(int discovery_time_ms) {
 		close(sock_fd_);
 		sock_fd_ = -1;
 	}
-	if (discovered_devices.empty()) {
+	if (discovered_devices_.empty()) {
 		std::cout << "\nNo devices found." << std::endl;
 		std::cout << "\nPossible reasons:" << std::endl;
 		std::cout << "    • No IMU devices on the network" << std::endl;
