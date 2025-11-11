@@ -106,7 +106,8 @@ namespace Tool {
 			if (raw_socket < 0) {
 				std::cerr << "Error: Failed to create raw socket - " << strerror(errno) << std::endl;
 				if (errno == EPERM) {
-					std::cerr << "Note: This program requires root privileges (sudo)" << std::endl;
+					std::cerr << "Note: This program requires root privileges." << std::endl;
+					std::cerr << "      Please run with sudo or use 'Start.bash' to execute program." << std::endl;
 				}
 				return false;
 			}

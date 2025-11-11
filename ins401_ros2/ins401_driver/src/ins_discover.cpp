@@ -154,11 +154,6 @@ void INSDeviceDiscover::ListenResponses(const std::string &interface, const std:
 
 
 void INSDeviceDiscover::DiscoverDevices(int discovery_time_ms) {
-	if (geteuid() != 0 && (getuid() <= 6000 || getuid() >= 6100)) {
-		std::cerr << "Warning: This program requires root privileges." << std::endl;
-		std::cerr << "         Please run with sudo or use a privileged user account (UID 6000-6100)." << std::endl;
-		return;
-	}
 	const auto interfaces = Tool::Ethernet::GetNetworkInterfaces();
 	if (interfaces.empty()) {
 		std::cerr << "No active network interfaces found." << std::endl;
