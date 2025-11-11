@@ -1,5 +1,6 @@
 #include <INIReader.h>
 #include <atomic>
+#include <boost/date_time.hpp>
 #include <csignal>
 #include <filesystem>
 #include <fmt/chrono.h>
@@ -34,7 +35,7 @@ int main() {
 
 	// 0) 建立输出文件夹并读取配置文件
 	auto now = std::chrono::system_clock::now();
-	std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", now);
+	std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
 	std::string output_folder_path = fmt::format("./data/{}", timestamp);
 	std::filesystem::create_directories(output_folder_path);
 
