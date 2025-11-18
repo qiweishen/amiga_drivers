@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <thread>
+#include <spdlog/spdlog.h>
 
 #include "data_type.h"
 #include "ins_discover.h"
