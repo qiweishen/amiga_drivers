@@ -2,7 +2,6 @@
 
 #include <iomanip>
 #include <netinet/in.h>
-#include <sys/epoll.h>
 #include <unistd.h>
 #include <vector>
 
@@ -42,40 +41,40 @@ namespace Tool {
 		void ParseMACAddressToUint8(const std::string &mac_str, std::array<uint8_t, 6> &mac_uint8);
 
 
-		/**
-		 * Create an asynchronous raw socket
-		 * @param raw_socket Output parameter, returns the created socket descriptor
-		 * @param interface Network interface name (e.g., "eth0")
-		 * @param target_mac MAC address of the target device, needed for BPF filter
-		 * @param local_mac MAC address of the local interface, needed for BPF filter
-		 * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
-		 * @return true on success, false on failure
-		 */
-		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, const std::array<uint8_t, 6> &target_mac,
-								  const std::array<uint8_t, 6> &local_mac, size_t buffer_size = 4 * 1024 * 1024);
-		/**
-		 * Create an asynchronous raw socket
-		 * @param raw_socket Output parameter, returns the created socket descriptor
-		 * @param interface Network interface name (e.g., "eth0")
-		 * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
-		 * @return true on success, false on failure
-		 */
-		bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, size_t buffer_size = 4 * 1024 * 1024);
+		// /**
+		//  * Create an asynchronous raw socket
+		//  * @param raw_socket Output parameter, returns the created socket descriptor
+		//  * @param interface Network interface name (e.g., "eth0")
+		//  * @param target_mac MAC address of the target device, needed for BPF filter
+		//  * @param local_mac MAC address of the local interface, needed for BPF filter
+		//  * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
+		//  * @return true on success, false on failure
+		//  */
+		// bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, const std::array<uint8_t, 6> &target_mac,
+		// 						  const std::array<uint8_t, 6> &local_mac, size_t buffer_size = 4 * 1024 * 1024);
+		// /**
+		//  * Create an asynchronous raw socket
+		//  * @param raw_socket Output parameter, returns the created socket descriptor
+		//  * @param interface Network interface name (e.g., "eth0")
+		//  * @param buffer_size Optional receive buffer size (4 * 1024 * 1024 for default)
+		//  * @return true on success, false on failure
+		//  */
+		// bool CreateAsyncRawSocket(int &raw_socket, const std::string &interface, size_t buffer_size = 4 * 1024 * 1024);
 
 
-		/**
-		 * Attach a BPF filter for bidirectional communication with a specific device
-		 *
-		 * Accepts packets that are:
-		 * - FROM target_mac TO local_mac (incoming)
-		 * - FROM local_mac TO target_mac (outgoing, for packet capture)
-		 *
-		 * @param raw_socket The raw socket file descriptor
-		 * @param target_mac MAC address of the target device
-		 * @param local_mac MAC address of the local interface
-		 * @return true if filter was successfully attached
-		 */
-		bool SetupMACFilter(int raw_socket, const std::array<uint8_t, 6> &target_mac, const std::array<uint8_t, 6> &local_mac);
+		// /**
+		//  * Attach a BPF filter for bidirectional communication with a specific device
+		//  *
+		//  * Accepts packets that are:
+		//  * - FROM target_mac TO local_mac (incoming)
+		//  * - FROM local_mac TO target_mac (outgoing, for packet capture)
+		//  *
+		//  * @param raw_socket The raw socket file descriptor
+		//  * @param target_mac MAC address of the target device
+		//  * @param local_mac MAC address of the local interface
+		//  * @return true if filter was successfully attached
+		//  */
+		// bool SetupMACFilter(int raw_socket, const std::array<uint8_t, 6> &target_mac, const std::array<uint8_t, 6> &local_mac);
 
 
 		/**
@@ -92,37 +91,37 @@ namespace Tool {
 										 const std::array<uint8_t, 6> &local_mac);
 
 
-		/**
-		 * Send a broadcast Ethernet packet
-		 * @param interface Network interface name
-		 * @param target_mac MAC address of the target device
-		 * @param raw_socket Raw socket descriptor
-		 * @param packet Packet data to send
-		 * @return true on success, false on failure
-		 */
-		bool SendBroadcastPacket(const std::string &interface, const std::array<uint8_t, 6> &target_mac, const int &raw_socket,
-								 const std::vector<uint8_t> &packet);
+		// /**
+		//  * Send a broadcast Ethernet packet
+		//  * @param interface Network interface name
+		//  * @param target_mac MAC address of the target device
+		//  * @param raw_socket Raw socket descriptor
+		//  * @param packet Packet data to send
+		//  * @return true on success, false on failure
+		//  */
+		// bool SendBroadcastPacket(const std::string &interface, const std::array<uint8_t, 6> &target_mac, const int &raw_socket,
+		// 						 const std::vector<uint8_t> &packet);
 
 
-		/**
-		 * Set up epoll to monitor a socket file descriptor for events
-		 * @param sock_fd    The socket file descriptor to monitor (should already be set to non-blocking)
-		 * @param epfd_out   Output parameter: returns the created epoll instance file descriptor
-		 * @param events     The epoll event mask (e.g., EPOLLIN or EPOLLIN | EPOLLET, default is EPOLLIN)
-		 * @return true on success, false on failure
-		 */
-		bool SetupEpollForFd(int sock_fd, int &epfd_out, uint32_t events = EPOLLIN);
-		class EpollGuard {
-			int epfd_;
-
-		public:
-			explicit EpollGuard(int fd) : epfd_(fd) {}
-			~EpollGuard() {
-				if (epfd_ >= 0)
-					::close(epfd_);
-			}
-			[[nodiscard]] int get() const { return epfd_; }
-		};
+		// /**
+		//  * Set up epoll to monitor a socket file descriptor for events
+		//  * @param sock_fd    The socket file descriptor to monitor (should already be set to non-blocking)
+		//  * @param epfd_out   Output parameter: returns the created epoll instance file descriptor
+		//  * @param events     The epoll event mask (e.g., EPOLLIN or EPOLLIN | EPOLLET, default is EPOLLIN)
+		//  * @return true on success, false on failure
+		//  */
+		// bool SetupEpollForFd(int sock_fd, int &epfd_out, uint32_t events = EPOLLIN);
+		// class EpollGuard {
+		// 	int epfd_;
+		//
+		// public:
+		// 	explicit EpollGuard(int fd) : epfd_(fd) {}
+		// 	~EpollGuard() {
+		// 		if (epfd_ >= 0)
+		// 			::close(epfd_);
+		// 	}
+		// 	[[nodiscard]] int get() const { return epfd_; }
+		// };
 	}  // namespace Ethernet
 
 

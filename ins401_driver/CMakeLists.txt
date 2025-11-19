@@ -61,9 +61,10 @@ include_directories(
 
 set(SOURCES
         src/tool.cpp
+        src/async_socket.cpp
         src/ins_discover.cpp
-        src/ins_receiver.cpp
-        src/ntrip_client.cpp
+        #        src/ins_receiver.cpp
+        #        src/ntrip_client.cpp
         main.cpp
 )
 
@@ -79,4 +80,5 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         fmt::fmt
         inih
         spdlog::spdlog
+        pcap
 )
