@@ -66,25 +66,41 @@ std::map<std::string, DeviceInfo> INSDeviceDiscover::DiscoverDevices(int discove
 }
 
 
+void INSDeviceDiscover::Stop() {
+	running_ = false;
+	work_guard_.reset();
+
+	// Cancel all timers
+	for (auto &timer: timers_) {
+		timer.cancel();
+	}
+
+	// Close all sockets
+	for (auto &socket: sockets_) {
+		if (socket && socket->isRunning()) {
+			socket->Close();
+		}
+	}
+
+	// Stop IO context
+	io_context_.stop();
+}
+
+
 void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const std::string &local_mac, int discovery_time_ms) {
 	try {
 		// Create async socket
-		auto socket = std::make_unique<AsyncRawSocket>(io_context_);
+		AsyncPacketSocket::Config socket_config;
+		socket_config.promiscuous = true;
+		socket_config.interface_name = interface;
+		auto socket = std::make_unique<AsyncPacketSocket>(io_context_, socket_config);
 
 		// Open interface
-		auto ec = socket->Open(interface);
-		if (ec) {
-			spdlog::error("Failed to open socket on {}: {}", interface, ec.message());
+		if (!socket->Open()) {
 			--active_interfaces_;
 			return;
 		}
-
-		// Set BPF filter - only receive packets destined to our MAC or broadcast
-		std::string filter = fmt::format("ether dst {} or ether dst {}", local_mac, BROADCAST_MAC);
-		ec = socket->SetFilter(filter);
-		if (ec) {
-			spdlog::error("Failed to set filter: {}", ec.message());
-		}
+		spdlog::info("Started discovery on interface {} (MAC: {})", interface, local_mac);
 
 		// Convert local MAC address
 		std::array<uint8_t, 6> src_mac{};
@@ -92,10 +108,6 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 
 		// Send discovery packet
 		SendDiscoveryPing(*socket, interface, src_mac);
-
-		// Create receive buffer
-		receive_buffers_.emplace_back(8192);  // 8 KB buffer
-		auto &buffer = receive_buffers_.back();
 
 		// Setup timeout timer
 		timers_.emplace_back(io_context_);
@@ -108,20 +120,20 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 			}
 		});
 
-		// Start async receive
-		std::function<void()> start_receive = [this, socket_ptr = socket.get(), interface, local_mac, &start_receive]() {
-			socket_ptr->AsyncReceive(
-					[this, interface, local_mac, &start_receive](boost::system::error_code ec, const uint8_t *data, size_t length) {
-						if (!ec && running_) {
-							HandleReceive(interface, local_mac, ec, data, length);
-							// Continue receiving
-							start_receive();
-						} else if (ec != boost::asio::error::operation_aborted) {
-							spdlog::error("Receive error on {}: {}", interface, ec.message());
-						}
-					});
+		using ReceiveHandler = AsyncPacketSocket::ReceiveHandler;
+		auto receive_handler = std::make_shared<ReceiveHandler>();
+
+		// Start async receive std::function<void(const uint8_t *, size_t, const boost::system::error_code &)>
+		*receive_handler = [this, interface, local_mac, socket_ptr = socket.get(), receive_handler](
+								   const uint8_t *data, size_t length, const boost::system::error_code &ec) {
+			if (!ec && running_) {
+				HandleReceive(interface, local_mac, data, length, ec);
+				socket_ptr->AsyncReceive(std::move(*receive_handler));
+			} else if (ec != boost::asio::error::operation_aborted) {
+				spdlog::error("Receive error on {}: {}", interface, ec.message());
+			}
 		};
-		start_receive();
+		socket->AsyncReceive(std::move(*receive_handler));
 
 		// Save socket for lifetime management
 		sockets_.push_back(std::move(socket));
@@ -133,7 +145,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 }
 
 
-void INSDeviceDiscover::SendDiscoveryPing(AsyncRawSocket &socket, const std::string &interface,
+void INSDeviceDiscover::SendDiscoveryPing(AsyncPacketSocket &socket, const std::string &interface,
 										  const std::array<uint8_t, 6> &src_mac) const {
 	// Build discovery packet
 	std::vector<uint8_t> ping_packet =
@@ -150,8 +162,8 @@ void INSDeviceDiscover::SendDiscoveryPing(AsyncRawSocket &socket, const std::str
 }
 
 
-void INSDeviceDiscover::HandleReceive(const std::string &interface, const std::string &local_mac, boost::system::error_code ec,
-									  const uint8_t *data, const size_t length) {
+void INSDeviceDiscover::HandleReceive(const std::string &interface, const std::string &local_mac, const uint8_t *data, size_t length,
+									  const boost::system::error_code &ec) {
 	if (ec) {
 		if (ec != boost::asio::error::operation_aborted) {
 			spdlog::error("Receive error: {}", ec.message());
@@ -263,25 +275,4 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const std::s
 	}
 
 	return true;
-}
-
-
-void INSDeviceDiscover::Stop() {
-	running_ = false;
-	work_guard_.reset();
-
-	// Cancel all timers
-	for (auto &timer: timers_) {
-		timer.cancel();
-	}
-
-	// Close all sockets
-	for (auto &socket: sockets_) {
-		if (socket && socket->is_open()) {
-			socket->Close();
-		}
-	}
-
-	// Stop IO context
-	io_context_.stop();
 }

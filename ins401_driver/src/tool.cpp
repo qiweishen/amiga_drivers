@@ -14,14 +14,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
-
-#ifdef __linux__
-	#include <netpacket/packet.h>
-	#include <sys/ioctl.h>
-	#include <unistd.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-	#include <net/if_dl.h>
-#endif
+#include <netpacket/packet.h>
+#include <sys/ioctl.h>
 
 
 
@@ -41,7 +35,7 @@ namespace Tool {
 				if (strcmp(ifa->ifa_name, "lo") == 0 || strcmp(ifa->ifa_name, "lo0") == 0) {
 					continue;
 				}
-#ifdef __linux__
+
 				if (ifa->ifa_addr->sa_family == AF_PACKET) {
 					const auto *s = reinterpret_cast<struct sockaddr_ll *>(ifa->ifa_addr);
 					if (s->sll_halen == 6) {
@@ -66,19 +60,6 @@ namespace Tool {
 						}
 					}
 				}
-#elif defined(__APPLE__)
-				if (ifa->ifa_addr->sa_family == AF_LINK) {
-					const auto *sdl = reinterpret_cast<struct sockaddr_dl *>(ifa->ifa_addr);
-					if (sdl->sdl_alen == 6) {
-						if ((ifa->ifa_flags & IFF_UP) && (ifa->ifa_flags & IFF_RUNNING)) {
-							const auto *mac = reinterpret_cast<const unsigned char *>(LLADDR(sdl));
-							std::string mac_str = fmt::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac[0], mac[1], mac[2],
-															  mac[3], mac[4], mac[5]);
-							interfaces.emplace_back(ifa->ifa_name, mac_str);
-						}
-					}
-				}
-#endif
 			}
 			freeifaddrs(ifaddr);
 			return interfaces;

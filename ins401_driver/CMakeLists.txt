@@ -14,6 +14,10 @@ find_package(Boost REQUIRED)
 
 # ---------------------------------------------------------------------------------------
 
+
+
+# ---------------------------------------------------------------------------------------
+
 include(FetchContent)
 
 # For formatting strings
@@ -80,5 +84,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         fmt::fmt
         inih
         spdlog::spdlog
-        pcap
 )

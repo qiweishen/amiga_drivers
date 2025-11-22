@@ -1,10 +1,13 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/executor_work_guard.hpp>
-#include <iomanip>
 #include <map>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "async_socket.h"
 #include "data_type.h"
@@ -32,7 +35,7 @@ private:
 	// Async components
 	boost::asio::io_context io_context_;
 	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
-	std::vector<std::unique_ptr<AsyncRawSocket>> sockets_;
+	std::vector<std::unique_ptr<AsyncPacketSocket>> sockets_;
 	std::vector<boost::asio::deadline_timer> timers_;
 
 	// Discovery state
@@ -44,19 +47,16 @@ private:
 	// Pre-parsed broadcast MAC
 	std::array<uint8_t, 6> broadcast_mac_{};
 
-	// Receive buffer for each socket
-	std::vector<std::vector<uint8_t>> receive_buffers_;
-
 	// Discovery on single interface
 	void DiscoverOnInterface(const std::string &interface, const std::string &local_mac, int discovery_time_ms);
 
 	// Handle received packet
-	void HandleReceive(const std::string &interface, const std::string &local_mac, boost::system::error_code ec, const uint8_t *data,
-					   size_t length);
+	void HandleReceive(const std::string &interface, const std::string &local_mac, const uint8_t *data, size_t length,
+					   const boost::system::error_code &ec);
 
 	// Parse device response
 	bool ParseResponse(const std::string &interface, const std::string &local_mac, const uint8_t *buffer, size_t len);
 
 	// Send discovery ping
-	void SendDiscoveryPing(AsyncRawSocket &socket, const std::string &interface, const std::array<uint8_t, 6> &src_mac) const;
+	void SendDiscoveryPing(AsyncPacketSocket &socket, const std::string &interface, const std::array<uint8_t, 6> &src_mac) const;
 };

@@ -36,6 +36,7 @@ int main(int argc, char *argv[]) {
 	std::signal(SIGTSTP, SignalHandler);  // Ctrl+Z
 	std::signal(SIGHUP, SignalHandler);	  // Shutdown the terminal
 
+	// ---------------------------------------------------------------------------------------
 
 	// 读取配置文件并建立输出文件夹
 	std::string config_path = argc > 1 ? argv[1] : "../Config.ini";
@@ -72,6 +73,7 @@ int main(int argc, char *argv[]) {
 	const DeviceInfo device = devices.begin()->second;
 	spdlog::info("Using {} on interface {} with MAC {}", device.product, device.interface_name, device.mac_address);
 
+	// ---------------------------------------------------------------------------------------
 
 	// // 2) 启动接收器线程
 	// auto receiver =

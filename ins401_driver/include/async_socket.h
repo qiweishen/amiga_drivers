@@ -1,99 +1,130 @@
 #pragma once
 
+#include <atomic>
 #include <boost/asio.hpp>
-#include <pcap/pcap.h>
+#include <boost/asio/posix/stream_descriptor.hpp>
+#include <cstring>
+#include <fmt/format.h>
 #include <functional>
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
 #include <memory>
 #include <mutex>
+#include <spdlog/spdlog.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <utility>
+#include <vector>
 
 
 
-/**
- * AsyncRawSocket - Pure communication layer for custom Ethernet frames
- * Handles socket setup, raw data reception and transmission only
- * Data parsing should be done by external classes
- */
-class AsyncRawSocket {
+class AsyncPacketSocket : public std::enable_shared_from_this<AsyncPacketSocket> {
 public:
-    using receive_handler = std::function<void(boost::system::error_code, const uint8_t*, size_t)>;
-    using send_handler = std::function<void(boost::system::error_code, size_t)>;
+	using ReceiveHandler = std::function<void(const uint8_t *, size_t, const boost::system::error_code &)>;
+	using SendHandler = std::function<void(const boost::system::error_code &, size_t)>;
 
-	explicit AsyncRawSocket(boost::asio::io_context& io_context);
-    ~AsyncRawSocket();
-
-    /**
-     * Open raw socket on specified network interface
-     * @param interface Network interface name (e.g., "eth0")
-     * @param filter_expr BPF filter expression
-     * @return Error code if failed
-     */
-    boost::system::error_code Open(const std::string& interface, const std::string& filter_expr = "");
-
-    /**
-     * Start async receive operation
-     * Callback will be called with raw Ethernet frame data
-     * Automatically continues receiving after each callback
-     */
-    void AsyncReceive(const receive_handler& handler);
-
-    /**
-     * Send raw Ethernet frame
-     * @param data Pointer to complete Ethernet frame
-     * @param length Frame length in bytes
-     * @return Error code if failed
-     */
-    boost::system::error_code Send(const uint8_t* data, size_t length);
-
-    /**
-     * Async send operation
-     * @param data Pointer to complete Ethernet frame
-     * @param length Frame length in bytes
-     * @param handler Completion handler
-     */
-    void AsyncSend(const uint8_t* data, size_t length, const send_handler& handler);
-
-    /**
-     * Set BPF filter
-     * @param filter_expr BPF filter expression
-     * Example: "ether proto 0x88B5" for custom EtherType
-     * Example: "ether src 00:11:22:33:44:55" for specific MAC
-     */
-    boost::system::error_code SetFilter(const std::string& filter_expr);
-
-    /**
-     * Get PCAP statistics
-     */
-	struct Stats {
-		unsigned int received;     // Packets received
-		unsigned int dropped;      // Packets dropped by kernel
-		unsigned int if_dropped;   // Packets dropped by interface
+	struct Config {
+		std::string interface_name;
+		size_t block_size = 1 << 19;  // 512KB per block
+		size_t frame_size = 2048;	  // 2KB per frame
+		uint32_t block_nr = 64;		  // Number of blocks
+		uint32_t retire_blk_tov = 1;  // 1ms timeout
+		int fanout_group = -1;		  // Fanout group ID (-1 to disable)
+		bool promiscuous = false;	  // Promiscuous mode
+		int protocol = ETH_P_ALL;	  // Protocol filter
 	};
-    [[nodiscard]] Stats GetStats() const;
 
-    /**
-     * Close the socket
-     */
-    void Close();
+	AsyncPacketSocket(boost::asio::io_context &io_context, Config config) :
+		io_context_(io_context), socket_descriptor_(io_context), config_(std::move(config)) {}
+	~AsyncPacketSocket() { Close(); }
 
-    [[nodiscard]] bool is_open() const;
+	bool Open();
+	void Close() noexcept;
+
+	void AsyncReceive(ReceiveHandler &&handler);
+	void AsyncSend(const uint8_t *data, size_t length, SendHandler &&handler);
+
+	bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
+
+	// Get statistics
+	uint64_t GetPacketsReceived() const noexcept { return packets_received_.load(); }
+	uint64_t GetPacketsSent() const noexcept { return packets_sent_.load(); }
+	uint64_t GetPacketsDropped() const noexcept { return packets_dropped_.load(); }
+
+	// Get kernel statistics
+	tpacket_stats_v3 GetKernelStats() const noexcept;
 
 
 private:
-    // Core components
-    boost::asio::io_context& io_context_;
-    pcap_t* pcap_handle_ = nullptr;
-    std::unique_ptr<boost::asio::posix::stream_descriptor> async_fd_;
+	struct RingBuffer {
+		uint8_t *map = nullptr;
+		size_t map_size = 0;
+		tpacket_req3 req{};
+		std::vector<iovec> rd;
+		unsigned int current_block = 0;
 
-    // Configuration
-    std::string interface_;
-    int pcap_fd_ = -1;
+		void reset() noexcept {
+			if (map) {
+				::munmap(map, map_size);
+				map = nullptr;
+			}
+			map_size = 0;
+			rd.clear();
+			current_block = 0;
+			req = tpacket_req3{};
+		}
+	};
 
-    // Thread safety for send operations
-    std::mutex send_mutex_;
+	boost::asio::io_context &io_context_;
+	boost::asio::posix::stream_descriptor socket_descriptor_;
+	Config config_;
+	int raw_fd_{ -1 };
 
-    // Buffer size for high-frequency data
-    static constexpr int KERNEL_BUFFER_SIZE_ = 16 * 1024 * 1024;  // 16MB
-    static constexpr int BATCH_PROCESS_COUNT_ = 32;  // Process up to 32 packets per callback
+	// RX ring buffer
+	RingBuffer rx_ring_;
+	mutable std::mutex rx_mutex_;
 
-    boost::system::error_code LogMsg(const std::string& msg);
+	// TX ring buffer
+	RingBuffer tx_ring_;
+	mutable std::mutex tx_mutex_;
+
+	// Statistics
+	std::atomic<uint64_t> packets_received_{ 0 };
+	std::atomic<uint64_t> packets_sent_{ 0 };
+	std::atomic<uint64_t> packets_dropped_{ 0 };
+
+	// Async operation flags
+	std::atomic<bool> running_{ false };
+
+	bool SetupRXRing();
+
+	bool SetupTXRing();
+
+	bool BindInterface();
+
+	void SetupFanout();
+
+	void SetPromiscuousMode();
+
+	void ProcessRXRing(const ReceiveHandler &handler);
+
+	void SendTXRing(const uint8_t *data, size_t length, const SendHandler &handler);
+
+	void LogMsg(std::string_view msg, spdlog::level::level_enum log_level) const;
+};
+
+
+class SocketGuard {
+	int &fd_;
+	bool released_ = false;
+
+public:
+	explicit SocketGuard(int &fd) : fd_(fd) {}
+	~SocketGuard() {
+		if (!released_ && fd_ >= 0) {
+			::close(fd_);
+			fd_ = -1;
+		}
+	}
+	void release() { released_ = true; }
 };
