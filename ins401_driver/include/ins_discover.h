@@ -35,7 +35,7 @@ private:
 	// Async components
 	boost::asio::io_context io_context_;
 	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
-	std::vector<std::unique_ptr<AsyncPacketSocket>> sockets_;
+	std::vector<std::shared_ptr<AsyncPacketSocket>> sockets_;
 	std::vector<boost::asio::deadline_timer> timers_;
 
 	// Discovery state

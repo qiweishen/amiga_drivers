@@ -1,5 +1,6 @@
 #include "async_socket.h"
 
+#include <>
 
 
 bool AsyncPacketSocket::Open() {
@@ -14,7 +15,6 @@ bool AsyncPacketSocket::Open() {
 	// Set socket options for high performance
 	int val = 1;
 	if (setsockopt(raw_fd_, SOL_PACKET, PACKET_LOSS, &val, sizeof(val)) < 0) {
-		const std::error_code ec(errno, std::generic_category());
 		LogMsg("Failed to set PACKET_LOSS option", spdlog::level::warn);
 	}
 
@@ -85,7 +85,7 @@ void AsyncPacketSocket::Close() noexcept {
 }
 
 
-void AsyncPacketSocket::AsyncReceive(ReceiveHandler &&handler) {
+void AsyncPacketSocket::AsyncReceive(ReceiveHandler handler) {
 	if (!running_.load(std::memory_order_acquire)) {
 		boost::asio::post(io_context_, [handler]() { handler(nullptr, 0, boost::asio::error::operation_aborted); });
 		return;
@@ -93,19 +93,19 @@ void AsyncPacketSocket::AsyncReceive(ReceiveHandler &&handler) {
 
 	auto self = shared_from_this();
 	socket_descriptor_.async_wait(boost::asio::posix::descriptor::wait_read,
-								  [self, handler = std::forward<ReceiveHandler>(handler)](const boost::system::error_code &ec) {
+								  [self, handler = std::move(handler)](const boost::system::error_code &ec) mutable {
 									  if (ec) {
-										  handler(nullptr, 0, ec);
+										  if (handler) {
+											  handler(nullptr, 0, ec);
+										  }
 										  return;
 									  }
-
-									  // Process received packets from ring buffer
 									  self->ProcessRXRing(handler);
 								  });
 }
 
 
-void AsyncPacketSocket::AsyncSend(const uint8_t *data, size_t length, SendHandler &&handler) {
+void AsyncPacketSocket::AsyncSend(const uint8_t *data, size_t length, SendHandler handler) {
 	if (!running_.load(std::memory_order_acquire)) {
 		boost::asio::post(io_context_, [handler]() { handler(boost::asio::error::operation_aborted, 0); });
 		return;
@@ -135,6 +135,7 @@ tpacket_stats_v3 AsyncPacketSocket::GetKernelStats() const noexcept {
 
 bool AsyncPacketSocket::SetupRXRing() {
 	rx_ring_.reset();
+
 	// Setup RX ring
 	rx_ring_.req = tpacket_req3{};
 	rx_ring_.req.tp_block_size = config_.block_size;
@@ -149,31 +150,13 @@ bool AsyncPacketSocket::SetupRXRing() {
 		return false;
 	}
 
-	// Map RX ring buffer
-	rx_ring_.map_size = rx_ring_.req.tp_block_size * rx_ring_.req.tp_block_nr;
-	auto *ptr = static_cast<uint8_t *>(
-			mmap(nullptr, rx_ring_.map_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED | MAP_POPULATE, raw_fd_, 0));
-
-	if (rx_ring_.map == MAP_FAILED) {
-		LogMsg("Failed to map RX ring to memory", spdlog::level::err);
-		rx_ring_.reset();
-		return false;
-	}
-	rx_ring_.map = ptr;
-
-	// Setup iovec for RX blocks
-	rx_ring_.rd.resize(rx_ring_.req.tp_block_nr);
-	for (unsigned i = 0; i < rx_ring_.req.tp_block_nr; ++i) {
-		rx_ring_.rd[i].iov_base = rx_ring_.map + (i * rx_ring_.req.tp_block_size);
-		rx_ring_.rd[i].iov_len = rx_ring_.req.tp_block_size;
-	}
-
 	return true;
 }
 
 
 bool AsyncPacketSocket::SetupTXRing() {
 	tx_ring_.reset();
+
 	// Setup TX ring
 	tx_ring_.req = tpacket_req3{};
 	tx_ring_.req.tp_block_size = config_.block_size;
@@ -183,24 +166,35 @@ bool AsyncPacketSocket::SetupTXRing() {
 
 	if (setsockopt(raw_fd_, SOL_PACKET, PACKET_TX_RING, &tx_ring_.req, sizeof(tx_ring_.req)) < 0) {
 		LogMsg("Failed to setup TX ring", spdlog::level::err);
-		LogMsg(fmt::format("SetupTXRing on fd {} (iface {}), errno={}", raw_fd_, config_.interface_name, errno), spdlog::level::err);
 		return false;
 	}
 
-	// Map TX ring buffer (note the offset for TX ring)
+	// Map RX ring buffer
+	rx_ring_.map_size = rx_ring_.req.tp_block_size * rx_ring_.req.tp_block_nr;
 	tx_ring_.map_size = tx_ring_.req.tp_block_size * tx_ring_.req.tp_block_nr;
-	const size_t rx_ring_size = rx_ring_.req.tp_block_size * rx_ring_.req.tp_block_nr;
-	auto *ptr = static_cast<uint8_t *>(mmap(nullptr, tx_ring_.map_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED | MAP_POPULATE,
-											raw_fd_, static_cast<off_t>(rx_ring_size)));
+	const size_t total_size = rx_ring_.map_size + tx_ring_.map_size;
 
-	if (tx_ring_.map == MAP_FAILED) {
-		LogMsg("Failed to map TX ring to memory", spdlog::level::err);
+	auto *base = static_cast<uint8_t *>(
+			mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED | MAP_POPULATE, raw_fd_, 0));
+
+	if (base == MAP_FAILED) {
+		LogMsg("Failed to map RX+TX rings to memory", spdlog::level::err);
+		rx_ring_.reset();
 		tx_ring_.reset();
 		return false;
 	}
-	tx_ring_.map = ptr;
 
-	// Setup iovec for TX blocks
+	rx_ring_.map = base;
+	tx_ring_.map = base + rx_ring_.map_size;
+
+	// RX blocks
+	rx_ring_.rd.resize(rx_ring_.req.tp_block_nr);
+	for (unsigned i = 0; i < rx_ring_.req.tp_block_nr; ++i) {
+		rx_ring_.rd[i].iov_base = rx_ring_.map + (i * rx_ring_.req.tp_block_size);
+		rx_ring_.rd[i].iov_len = rx_ring_.req.tp_block_size;
+	}
+
+	// TX blocks
 	tx_ring_.rd.resize(tx_ring_.req.tp_block_nr);
 	for (unsigned i = 0; i < tx_ring_.req.tp_block_nr; ++i) {
 		tx_ring_.rd[i].iov_base = tx_ring_.map + (i * tx_ring_.req.tp_block_size);
@@ -211,7 +205,7 @@ bool AsyncPacketSocket::SetupTXRing() {
 }
 
 
-bool AsyncPacketSocket::BindInterface() {
+bool AsyncPacketSocket::BindInterface() const {
 	sockaddr_ll ll{};
 	ll.sll_family = AF_PACKET;
 	ll.sll_protocol = htons(config_.protocol);
@@ -231,7 +225,7 @@ bool AsyncPacketSocket::BindInterface() {
 }
 
 
-void AsyncPacketSocket::SetupFanout() {
+void AsyncPacketSocket::SetupFanout() const {
 	int fanout_arg = (config_.fanout_group | (PACKET_FANOUT_HASH << 16));
 
 	if (setsockopt(raw_fd_, SOL_PACKET, PACKET_FANOUT, &fanout_arg, sizeof(fanout_arg)) < 0) {
@@ -240,7 +234,7 @@ void AsyncPacketSocket::SetupFanout() {
 }
 
 
-void AsyncPacketSocket::SetPromiscuousMode() {
+void AsyncPacketSocket::SetPromiscuousMode() const {
 	packet_mreq mreq{};
 	mreq.mr_ifindex = static_cast<int>(if_nametoindex(config_.interface_name.c_str()));
 	mreq.mr_type = PACKET_MR_PROMISC;
@@ -253,6 +247,11 @@ void AsyncPacketSocket::SetPromiscuousMode() {
 
 void AsyncPacketSocket::ProcessRXRing(const ReceiveHandler &handler) {
 	std::lock_guard<std::mutex> lock(rx_mutex_);
+
+	if (!handler) {
+		LogMsg("ProcessRXRing called with empty handler", spdlog::level::err);
+		return;
+	}
 
 	tpacket_block_desc *pbd;
 	tpacket3_hdr *ppd;

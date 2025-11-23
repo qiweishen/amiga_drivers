@@ -93,7 +93,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 		AsyncPacketSocket::Config socket_config;
 		socket_config.promiscuous = true;
 		socket_config.interface_name = interface;
-		auto socket = std::make_unique<AsyncPacketSocket>(io_context_, socket_config);
+		auto socket = std::make_shared<AsyncPacketSocket>(io_context_, socket_config);
 
 		// Open interface
 		if (!socket->Open()) {
@@ -113,9 +113,9 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 		timers_.emplace_back(io_context_);
 		auto &timer = timers_.back();
 		timer.expires_from_now(boost::posix_time::milliseconds(discovery_time_ms));
-		timer.async_wait([this, socket_ptr = socket.get()](const boost::system::error_code &ec) {
+		timer.async_wait([this, socket](const boost::system::error_code &ec) {
 			if (!ec) {
-				socket_ptr->Close();
+				socket->Close();
 				--active_interfaces_;
 			}
 		});
@@ -124,19 +124,19 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 		auto receive_handler = std::make_shared<ReceiveHandler>();
 
 		// Start async receive std::function<void(const uint8_t *, size_t, const boost::system::error_code &)>
-		*receive_handler = [this, interface, local_mac, socket_ptr = socket.get(), receive_handler](
-								   const uint8_t *data, size_t length, const boost::system::error_code &ec) {
+		*receive_handler = [this, interface, local_mac, socket, receive_handler](const uint8_t *data, size_t length,
+																				 const boost::system::error_code &ec) {
 			if (!ec && running_) {
 				HandleReceive(interface, local_mac, data, length, ec);
-				socket_ptr->AsyncReceive(std::move(*receive_handler));
+				socket->AsyncReceive(*receive_handler);
 			} else if (ec != boost::asio::error::operation_aborted) {
 				spdlog::error("Receive error on {}: {}", interface, ec.message());
 			}
 		};
-		socket->AsyncReceive(std::move(*receive_handler));
+		socket->AsyncReceive(*receive_handler);
 
 		// Save socket for lifetime management
-		sockets_.push_back(std::move(socket));
+		sockets_.push_back(socket);
 
 	} catch (const std::exception &e) {
 		spdlog::error("Exception on interface {}: {}", interface, e.what());
@@ -148,7 +148,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
 void INSDeviceDiscover::SendDiscoveryPing(AsyncPacketSocket &socket, const std::string &interface,
 										  const std::array<uint8_t, 6> &src_mac) const {
 	// Build discovery packet
-	std::vector<uint8_t> ping_packet =
+	const std::vector<uint8_t> ping_packet =
 			Tool::Ethernet::BuildPacket(COMMAND_START_BYTES, REQUEST_INFO_COMMAND_BYTES, nullptr, 0, broadcast_mac_, src_mac);
 
 	// Send asynchronously

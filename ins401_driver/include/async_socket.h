@@ -25,13 +25,13 @@ public:
 
 	struct Config {
 		std::string interface_name;
-		size_t block_size = 1 << 19;  // 512KB per block
-		size_t frame_size = 2048;	  // 2KB per frame
-		uint32_t block_nr = 64;		  // Number of blocks
-		uint32_t retire_blk_tov = 1;  // 1ms timeout
-		int fanout_group = -1;		  // Fanout group ID (-1 to disable)
-		bool promiscuous = false;	  // Promiscuous mode
-		int protocol = ETH_P_ALL;	  // Protocol filter
+		size_t block_size = 1 << 19;   // 512KB per block
+		size_t frame_size = 2048;	   // 2KB per frame
+		uint32_t block_nr = 64;		   // Number of blocks
+		uint32_t retire_blk_tov = 10;  // 1ms timeout
+		int fanout_group = -1;		   // Fanout group ID (-1 to disable)
+		bool promiscuous = false;	   // Promiscuous mode
+		int protocol = ETH_P_ALL;	   // Protocol filter
 	};
 
 	AsyncPacketSocket(boost::asio::io_context &io_context, Config config) :
@@ -41,8 +41,8 @@ public:
 	bool Open();
 	void Close() noexcept;
 
-	void AsyncReceive(ReceiveHandler &&handler);
-	void AsyncSend(const uint8_t *data, size_t length, SendHandler &&handler);
+	void AsyncReceive(ReceiveHandler handler);
+	void AsyncSend(const uint8_t *data, size_t length, SendHandler handler);
 
 	bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
@@ -59,12 +59,13 @@ private:
 	struct RingBuffer {
 		uint8_t *map = nullptr;
 		size_t map_size = 0;
+		bool owns_memory = false;
 		tpacket_req3 req{};
 		std::vector<iovec> rd;
 		unsigned int current_block = 0;
 
 		void reset() noexcept {
-			if (map) {
+			if (map && owns_memory) {
 				::munmap(map, map_size);
 				map = nullptr;
 			}
@@ -100,11 +101,11 @@ private:
 
 	bool SetupTXRing();
 
-	bool BindInterface();
+	bool BindInterface() const;
 
-	void SetupFanout();
+	void SetupFanout() const;
 
-	void SetPromiscuousMode();
+	void SetPromiscuousMode() const;
 
 	void ProcessRXRing(const ReceiveHandler &handler);
 
