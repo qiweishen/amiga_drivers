@@ -13,6 +13,15 @@
 #include <vector>
 
 
+// HTTP response structure
+struct HTTPResponse {
+	int status_code;
+	std::string status_text;
+	std::map<std::string, std::string> headers;
+	std::string body;
+	bool is_chunked;
+};
+
 
 class NTRIPClient {
 public:

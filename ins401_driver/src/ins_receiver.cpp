@@ -3,22 +3,28 @@
 #include <bitset>
 #include <cstring>
 #include <filesystem>
-#include <fmt/chrono.h>
-#include <fmt/format.h>
-#include <fmt/ostream.h>
-#include <fmt/xchar.h>
 #include <net/if.h>
+#include <spdlog/fmt/bundled/ranges.h>
+#include <spdlog/fmt/std.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <vector>
 
+#include "ins401_protocol.h"
+#include "tool.h"
 
 
-INSDeviceReceiver::INSDeviceReceiver(const std::string &iface, const std::string &target_mac, const std::string &local_mac,
-									 const bool save_to_file, const std::string &output_folder_path) :
-	sock_fd_(-1), interface_name_(iface), save_to_file_(save_to_file), output_folder_path_(output_folder_path) {
-	Tool::Ethernet::ParseMACAddressToUint8(target_mac, target_mac_);
-	Tool::Ethernet::ParseMACAddressToUint8(local_mac, local_mac_);
+
+namespace {
+	constexpr std::string_view kModule = "INS Receiver";
+}
+
+
+INSDeviceReceiver::INSDeviceReceiver(std::string iface, const std::string &device_mac, const bool save_to_file,
+									 std::string output_folder_path) :
+	interface_name_(std::move(iface)), save_to_file_(save_to_file), output_folder_path_(std::move(output_folder_path)) {
+	device_mac_ = Ethernet::FormatMACAddress(device_mac);
+	socket_ptr_ = std::make_shared<EthernetSocket>(interface_name_, device_mac_, buffer_size_, true);
 }
 
 
@@ -28,9 +34,6 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 	if (writer_thread_.joinable()) {
 		writer_thread_.join();
 	}
-	if (sock_fd_ >= 0) {
-		close(sock_fd_);
-	}
 	if (imu_file_.is_open()) {
 		imu_file_.close();
 	}
@@ -39,15 +42,14 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 
 void INSDeviceReceiver::Run() {
 	if (save_to_file_) {
-		running_ = InitializeWritingFiles();
+		running_.store(InitializeWritingFiles());
 	}
-	running_ = Initialize();
 	ReceiveLoop();
 }
 
 
 void INSDeviceReceiver::Stop() {
-	running_ = false;
+	running_.store(false);
 }
 
 
@@ -81,62 +83,23 @@ bool INSDeviceReceiver::GetIMUData(std::vector<RawIMUData> &data, size_t max_cou
 }
 
 
-bool INSDeviceReceiver::Initialize() {
-	if (!Tool::Ethernet::CreateAsyncRawSocket(sock_fd_, interface_name_, target_mac_, local_mac_)) {
-		return false;
-	}
-	return true;
-}
-
-
 void INSDeviceReceiver::ReceiveLoop() {
-	int epfd = -1;
-	if (!Tool::Ethernet::SetupEpollForFd(sock_fd_, epfd, EPOLLIN | EPOLLET)) {
-		return;
-	}
-	Tool::Ethernet::EpollGuard epoll_guard(epfd);
-
-	// Estimate max size of single packet
-	std::vector<uint8_t> buffer(buffer_size_);
-	constexpr int MAX_EVENTS = 4;
-	epoll_event events[MAX_EVENTS];
-
 	while (running_.load()) {
-		const int nfds = ::epoll_wait(epfd, events, MAX_EVENTS, 100);
-		if (nfds < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			fmt::print(stderr, "[INS401 Receiver] Error: epoll_wait failed: {}\n", strerror(errno));
-			break;
-		}
-		for (int i = 0; i < nfds; ++i) {
-			if (events[i].data.fd != sock_fd_) {
-				continue;
-			}
-			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-				fmt::print(stderr, "[INS401 Receiver] Socket error on {}\n", interface_name_);
-				continue;
-			}
-			if (events[i].events & EPOLLIN) {
-				ssize_t bytes_read;
-				do {
-					bytes_read = ::recv(sock_fd_, buffer.data(), buffer.size(), MSG_DONTWAIT);
-					if (bytes_read > 0) {
-						VerifyDataFrame(buffer.data(), bytes_read);
-					}
-				} while (bytes_read > 0 || bytes_read < 0 && errno == EINTR);
-			}
+		auto response = socket_ptr_->Receive(100);
+		if (response && !response->empty()) {
+			VerifyDataFrame(response->data(), response->size());
 		}
 	}
 }
 
 
 void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
-	if (len < ETH_HEADER_LEN) {
+	// Basic length check
+	if (len < 60) {
 		return;
 	}
-	const uint8_t *packet = data + ETH_HEADER_LEN;
+
+	const uint8_t *packet = data + kEthernetHeaderSize;
 	// Check Aceinna binary command start
 	if (packet[0] == COMMAND_START_BYTES[0] && packet[1] == COMMAND_START_BYTES[1]) {
 		const uint16_t recv_msg_id = packet[2] | (packet[3] << 8);
@@ -146,32 +109,35 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
 				if (data_length == GNSS_SOLUTION_PACKET_LENGTH) {
 					ProcessGNSSSolutionData(packet);
 				} else {
-					fmt::print(stderr, "[INS401 Receiver] Invalid GNSS solution data length: {}, expected: {}\n", data_length,
-							   GNSS_SOLUTION_PACKET_LENGTH);
+					Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+									 fmt::format("Invalid GNSS solution data length: {}, expected: {}", data_length,
+												 GNSS_SOLUTION_PACKET_LENGTH));
 				}
 				break;
 			case DIAGNOSTIC_MESSAGE_ID:
 				if (data_length == DIAGNOSTIC_MESSAGE_LENGTH) {
 					ProcessDiagnosticMessage(packet);
 				} else {
-					fmt::print(stderr, "[INS401 Receiver] Invalid diagnostic message length: {}, expected: {}\n", data_length,
-							   DIAGNOSTIC_MESSAGE_LENGTH);
+					Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+									 fmt::format("Invalid diagnostic message length: {}, expected: {}", data_length,
+												 DIAGNOSTIC_MESSAGE_LENGTH));
 				}
 				break;
 			case RAW_IMU_DATA_MESSAGE_ID:
 				if (data_length == RAW_IMU_DATA_LENGTH) {
 					ProcessRawIMUData(packet);
 				} else {
-					fmt::print(stderr, "[INS401 Receiver] Invalid raw IMU data length: {}, expected: {}\n", data_length,
-							   RAW_IMU_DATA_LENGTH);
+					Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+									 fmt::format("Invalid raw IMU data length: {}, expected: {}", data_length, RAW_IMU_DATA_LENGTH));
 				}
 				break;
 			case RTCM_ROVER_DATA_MESSAGE_ID:
 				if (data_length >= 1 && data_length <= RTCM_ROVER_DATA_LENGTH_MAX) {
 					ProcessRTCMRoverData(packet, data_length);
 				} else {
-					fmt::print(stderr, "[INS401 Receiver] Invalid RTCM rover data length: {}, expected: 1-{}\n", data_length,
-							   RTCM_ROVER_DATA_LENGTH_MAX);
+					Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+									 fmt::format("Invalid RTCM rover data length: {}, expected: 1-{}", data_length,
+												 RTCM_ROVER_DATA_LENGTH_MAX));
 				}
 				break;
 			default:
@@ -190,10 +156,10 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
 	// Check CRC
 	constexpr size_t crc_offset = ACENINNA_HEADER_LEN + GNSS_SOLUTION_PACKET_LENGTH;
 	const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;  // LSB-first
-	const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + GNSS_SOLUTION_PACKET_LENGTH);
+	const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + GNSS_SOLUTION_PACKET_LENGTH);
 	if (recv_crc != calc_crc) {
-		fmt::print(stderr, "[INS401 Receiver] GNSS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc,
-				   calc_crc);
+		Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+						 fmt::format("GNSS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}", recv_crc, calc_crc));
 		return;
 	}
 	// Parse GNSS solution data
@@ -224,7 +190,7 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
 			gnss_queue_.pop();
 		}
 		gnss_queue_.push(gnss);
-		fmt::print(stdout, "[INS401 Receiver] GNSS Solution: Week {}, Time {} ms, Position Type {}, STD: {:.6f}, {:.6f}, {:.6f}\n",
+		fmt::print(stdout, "[INS Receiver] GNSS Solution: Week {}, Time {} ms, Position Type {}, STD: {:.6f}, {:.6f}, {:.6f}\n",
 				   gnss.gps_week, gnss.gps_millisecs, gnss.position_type, gnss.latitude_std, gnss.longitude_std, gnss.height_std);
 	}
 	cv_.notify_one();
@@ -235,10 +201,11 @@ void INSDeviceReceiver::ProcessDiagnosticMessage(const uint8_t *packet) {
 	// Check CRC
 	constexpr size_t crc_offset = ACENINNA_HEADER_LEN + DIAGNOSTIC_MESSAGE_LENGTH;
 	const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;  // LSB-first
-	const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + DIAGNOSTIC_MESSAGE_LENGTH);
+	const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + DIAGNOSTIC_MESSAGE_LENGTH);
 	if (recv_crc != calc_crc) {
-		fmt::print(stderr, "[INS401 Receiver] Diagnostic message CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc,
-				   calc_crc);
+		Tool::LogMessage(
+				spdlog::level::warn, kModule, __func__,
+				fmt::format("Diagnostic message CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc, calc_crc));
 		return;
 	}
 	// Parse Diagnostic message
@@ -271,10 +238,10 @@ void INSDeviceReceiver::ProcessRawIMUData(const uint8_t *packet) {
 	// Check CRC
 	constexpr size_t crc_offset = ACENINNA_HEADER_LEN + RAW_IMU_DATA_LENGTH;
 	const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;  // LSB-first
-	const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + RAW_IMU_DATA_LENGTH);
+	const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + RAW_IMU_DATA_LENGTH);
 	if (recv_crc != calc_crc) {
-		fmt::print(stderr, "[INS401 Receiver] Raw IMU data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc,
-				   calc_crc);
+		Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+						 fmt::format("Raw IMU data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc, calc_crc));
 		return;
 	}
 	// Parse IMU data
@@ -303,10 +270,10 @@ void INSDeviceReceiver::ProcessRTCMRoverData(const uint8_t *packet, size_t len) 
 	// Check CRC
 	size_t crc_offset = ACENINNA_HEADER_LEN + len;
 	const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;  // LSB-first
-	const uint16_t calc_crc = Tool::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + len);
+	const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + len);
 	if (recv_crc != calc_crc) {
-		fmt::print(stderr, "[INS401 Receiver] RTCM rover data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc,
-				   calc_crc);
+		Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+						 fmt::format("RTCM rover data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}\n", recv_crc, calc_crc));
 		return;
 	}
 	// Parse RTCM data
@@ -340,12 +307,13 @@ void INSDeviceReceiver::ProcessNMEAMessage(const uint8_t *packet) {
 			const std::string checksum_str = nmea_msg.substr(asterisk_pos + 1, 2);
 			const auto recv_checksum = static_cast<uint8_t>(std::stoul(checksum_str, nullptr, 16));
 			if (checksum != recv_checksum) {
-				fmt::print(stderr, "[INS401 Receiver] NMEA message checksum mismatch! Received: 0x{:02x} Calculated: 0x{:02x}\n",
-						   recv_checksum, checksum);
+				Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+								 fmt::format("NMEA message checksum mismatch! Received: 0x{:02x} Calculated: 0x{:02x}\n",
+											 recv_checksum, checksum));
 				return;
 			}
 		} else {
-			fmt::print(stderr, "[INS401 Receiver] NMEA message missing checksum!\n");
+			Tool::LogMessage(spdlog::level::warn, kModule, __func__, fmt::format("NMEA message missing checksum!"));
 			return;
 		}
 		{
@@ -512,7 +480,8 @@ void INSDeviceReceiver::WriteDiagnosticBatch(const std::vector<DiagnosticMessage
 	buffer.reserve(batch.size() * 128);	 // Reserve approximate size
 	for (const auto &diag: batch) {
 		fmt::format_to(std::back_inserter(buffer), "{},{},{},{},{},{}\n", diag.gps_week, diag.gps_millisecs,
-					   fmt::join(diag.device_status, ";"), diag.imu_temperature, diag.mcu_temperature, diag.gnss_chip_temperature);
+					   fmt::format("[{}]", fmt::join(diag.device_status, ",")), diag.imu_temperature, diag.mcu_temperature,
+					   diag.gnss_chip_temperature);
 	}
 	diagnostic_file_.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 }
@@ -558,11 +527,11 @@ void INSDeviceReceiver::WriteNMEABatch(const std::vector<std::string> &batch) {
 bool INSDeviceReceiver::InitializeWritingFiles() {
 	if (save_to_file_) {
 		if (output_folder_path_.empty()) {
-			fmt::print(stderr, "[INS401 Receiver] Error: Output folder path is empty!\n");
+			Tool::LogMessage(spdlog::level::err, kModule, __func__, "Error: Output folder path is empty!");
 			return false;
 		}
 
-		std::string timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
+		std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
 		std::string gnss_filename = fmt::format("{}/gnss_data_{}.txt", output_folder_path_, timestamp);
 		std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.txt", output_folder_path_, timestamp);
 		std::string imu_filename = fmt::format("{}/imu_data_{}.txt", output_folder_path_, timestamp);
@@ -606,12 +575,3 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
 	}
 	return true;
 }
-//
-//
-// void INSDeviceReceiver::WriteIMUBinary(const std::vector<RawIMUData>& batch) {
-// 	if (!imu_binary_file_.is_open() || batch.empty()) return;
-//
-//
-// 	imu_binary_file_.write(reinterpret_cast<const char*>(batch.data()),
-// 						   batch.size() * sizeof(RawIMUData));
-// }

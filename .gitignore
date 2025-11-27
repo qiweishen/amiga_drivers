@@ -1,7 +1,10 @@
 *build/
 *install/
 *log/
+*bin/
 *cmake-build-*/
 *.idea/
 *.vscode/
 *.DS_Store
+
+/docs/doxygen/

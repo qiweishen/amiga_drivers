@@ -3,20 +3,18 @@
 #include <boost/date_time.hpp>
 #include <csignal>
 #include <filesystem>
-#include <fmt/chrono.h>
-#include <fmt/format.h>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <spdlog/fmt/chrono.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <thread>
 
-#include "data_type.h"
+#include "ins401_protocol.h"
 #include "ins_discover.h"
 #include "ins_receiver.h"
 #include "ntrip_client.h"
-#include "spdlog/sinks/basic_file_sink.h"
 
 
 
@@ -75,18 +73,17 @@ int main(int argc, char *argv[]) {
 
 	// ---------------------------------------------------------------------------------------
 
-	// // 2) 启动接收器线程
-	// auto receiver =
-	// 		std::make_unique<INSDeviceReceiver>(device.interface_name, device.mac_address, device.localhost_mac_address,
-	// 											configures.GetBoolean("INS401 Receiver", "save_data", true), output_folder_path);
-	// std::thread receiver_thread([&receiver]() {
-	// 	try {
-	// 		receiver->Run();
-	// 	} catch (const std::exception &e) {
-	// 		std::cerr << "[Receiver] exception: " << e.what() << std::endl;
-	// 		g_terminate.store(true);
-	// 	}
-	// });
+	// 2) 启动接收器线程
+	auto receiver_ptr = std::make_shared<INSDeviceReceiver>(
+			device.interface_name, device.mac_address, configures.GetBoolean("INS401 Receiver", "save_data", true), data_folder_path);
+	std::thread receiver_thread([&receiver_ptr]() {
+		try {
+			receiver_ptr->Run();
+		} catch (const std::exception &e) {
+			std::cerr << "[Receiver] exception: " << e.what() << std::endl;
+			g_terminate.store(true);
+		}
+	});
 	//
 	//
 	// // 3) 配置 NTRIP
@@ -124,11 +121,11 @@ int main(int argc, char *argv[]) {
 	// }
 	//
 	//
-	// // 6) 退出流程：先停接收器，再 join
-	// receiver->Stop();
-	// if (receiver_thread.joinable()) {
-	// 	receiver_thread.join();
-	// }
+	// 6) 退出流程：先停接收器，再 join
+	receiver_ptr->Stop();
+	if (receiver_thread.joinable()) {
+		receiver_thread.join();
+	}
 	// ntrip_client->Disconnect();
 	// if (ntrip_client_thread.joinable()) {
 	// 	ntrip_client_thread.join();

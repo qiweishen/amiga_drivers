@@ -4,12 +4,14 @@
 
 - [ ] Choose a suitable License
 
-- [ ] Create a logging system for debugging
-
 - [ ] Utilize RTKLIB for NTRIP client implementation
+
+- [ ] Implement binary logging for raw data
 
 ___
 
 ### Done ✓
 
 - [x] Create TODO.md
+
+- [x] Create a logging system for debugging

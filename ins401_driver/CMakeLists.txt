@@ -37,7 +37,7 @@ find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
 # FetchContent module
-include(${CMAKE_CURRENT_LIST_DIR}/deps/FetchContent.cmake)
+include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
 
 
 ################################################################################
@@ -45,9 +45,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/deps/FetchContent.cmake)
 # Source files
 set(SOURCES
         src/tool.cpp
-        src/async_socket.cpp
+        src/ethernet_socket.cpp
         src/ins_discover.cpp
-        # src/ins_receiver.cpp
+        src/ins_receiver.cpp
         # src/ntrip_client.cpp
         main.cpp
 )
@@ -66,7 +66,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin
 )
 
 # Include directories
@@ -86,8 +86,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         Boost::boost
 
         # FetchContent libraries
-        tins::tins
-        fmt::fmt
+        #        tins::tins
+        #        fmt::fmt
         inih::inih
         spdlog::spdlog
 )
