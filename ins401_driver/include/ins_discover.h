@@ -2,12 +2,13 @@
  * @file ins_discover.h
  * @brief INS401 device discovery over Ethernet using raw sockets.
  *
- * @author Qiwei
- * @date 2025
- *
  * This module provides functionality to discover INS401 devices on the local
  * network by sending broadcast discovery packets and collecting device
  * information responses.
+ *
+ * @author Qiwei
+ * @date 2025
+ *
  */
 
 #pragma once

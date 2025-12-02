@@ -5,6 +5,9 @@
  * This header defines protocol-specific constants, message identifiers, and
  * utility functions for communicating with Aceinna INS401 devices over Ethernet.
  *
+ * @author Qiwei
+ * @date 2025
+ *
  * @note All multi-byte values in the INS401 protocol use little-endian (LSB first)
  *       byte ordering unless otherwise specified.
  */

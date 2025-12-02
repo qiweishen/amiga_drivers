@@ -86,8 +86,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         Boost::boost
 
         # FetchContent libraries
-        #        tins::tins
-        #        fmt::fmt
         inih::inih
         spdlog::spdlog
 )
@@ -107,8 +105,6 @@ message(STATUS "")
 message(STATUS "  Dependencies:")
 message(STATUS "    OpenSSL:        Found")
 message(STATUS "    Boost:          Found")
-message(STATUS "    libtins:        ${tins_SOURCE_DIR}")
-message(STATUS "    fmt:            ${fmt_SOURCE_DIR}")
 message(STATUS "    inih:           ${inih_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "========================================")

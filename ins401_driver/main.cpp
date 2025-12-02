@@ -11,11 +11,16 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
-#include "ins401_protocol.h"
 #include "ins_discover.h"
 #include "ins_receiver.h"
 #include "ntrip_client.h"
+#include "tool.h"
 
+
+
+namespace {
+	const std::string_view kModule = "Main";
+}
 
 
 static std::atomic<bool> g_terminate{ false };
@@ -69,7 +74,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 	const DeviceInfo device = devices.begin()->second;
-	spdlog::info("Using {} on interface {} with MAC {}", device.product, device.interface_name, device.mac_address);
+	Tool::LogMessage(spdlog::level::info, kModule, __func__,
+					 fmt::format("Using {} on interface {} with MAC {}", device.product, device.interface_name, device.mac_address));
 
 	// ---------------------------------------------------------------------------------------
 
@@ -84,8 +90,8 @@ int main(int argc, char *argv[]) {
 			g_terminate.store(true);
 		}
 	});
-	//
-	//
+
+
 	// // 3) 配置 NTRIP
 	// NTRIPClient::Config config;
 	// config.host = configures.Get("NTRIP Client", "host", "");
@@ -112,15 +118,14 @@ int main(int argc, char *argv[]) {
 	// 		g_terminate.store(true);
 	// 	}
 	// });
-	//
-	//
-	// // 5) 主循环：等待退出事件（信号、错误、或自定义条件）
-	// while (!g_terminate.load(std::memory_order_acquire)) {
-	// 	// 可在此处检查 ntrip_client 状态、心跳、吞吐、错误码等
-	// 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
-	// }
-	//
-	//
+
+	// 5) 主循环：等待退出事件（信号、错误、或自定义条件）
+	while (!g_terminate.load(std::memory_order_acquire)) {
+		// 可在此处检查 ntrip_client 状态、心跳、吞吐、错误码等
+		std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	}
+
+
 	// 6) 退出流程：先停接收器，再 join
 	receiver_ptr->Stop();
 	if (receiver_thread.joinable()) {
