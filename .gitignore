@@ -8,3 +8,4 @@
 *.DS_Store
 
 /docs/doxygen/
+/lms4000_driver/sick_scan_xd
