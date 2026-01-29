@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 project(INS401_Driver
-        DESCRIPTION "INS401 Driver Application"
+        DESCRIPTION "INS401 Driver"
         LANGUAGES CXX C
 )
 
@@ -48,7 +48,7 @@ set(SOURCES
         src/ethernet_socket.cpp
         src/ins_discover.cpp
         src/ins_receiver.cpp
-        # src/ntrip_client.cpp
+        src/ntrip_client.cpp
         main.cpp
 )
 

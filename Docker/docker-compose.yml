@@ -1,0 +1,23 @@
+services:
+    sensor-dev:
+        container_name: sensor-dev
+        build:
+            context: ..
+            dockerfile: Docker/Dockerfile
+
+        # Keep container running for interactive use
+        stdin_open: true
+        tty: true
+
+        # Network and IPC
+        network_mode: host
+        ipc: host
+        privileged: true
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+
+        volumes:
+            - ../workspace:/workspace
+
+        working_dir: /workspace

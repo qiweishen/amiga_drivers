@@ -40,7 +40,6 @@ int main(int argc, char *argv[]) {
 	std::signal(SIGHUP, SignalHandler);	  // Shutdown the terminal
 
 	// ---------------------------------------------------------------------------------------
-
 	// 读取配置文件并建立输出文件夹
 	std::string config_path = argc > 1 ? argv[1] : "../Config.ini";
 	const INIReader configures(config_path);
@@ -78,7 +77,6 @@ int main(int argc, char *argv[]) {
 					 fmt::format("Using {} on interface {} with MAC {}", device.product, device.interface_name, device.mac_address));
 
 	// ---------------------------------------------------------------------------------------
-
 	// 2) 启动接收器线程
 	auto receiver_ptr = std::make_shared<INSDeviceReceiver>(
 			device.interface_name, device.mac_address, configures.GetBoolean("INS401 Receiver", "save_data", true), data_folder_path);
