@@ -32,30 +32,12 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 
 ################################################################################
 # Required System Packages
-# Fix for Ubuntu/Debian multi-arch OpenSSL path (FORCE CACHE version)
-#if(EXISTS "/usr/lib/x86_64-linux-gnu/libssl.so")
-#    message(STATUS "Manually setting OpenSSL paths...")
-#    set(OPENSSL_SSL_LIBRARY "/usr/lib/x86_64-linux-gnu/libssl.so" CACHE FILEPATH "OpenSSL SSL Lib" FORCE)
-#    set(OPENSSL_CRYPTO_LIBRARY "/usr/lib/x86_64-linux-gnu/libcrypto.so" CACHE FILEPATH "OpenSSL Crypto Lib" FORCE)
-#    set(OPENSSL_INCLUDE_DIR "/usr/include" CACHE PATH "OpenSSL Include Dir" FORCE)
-#endif()
 find_package(OpenSSL REQUIRED)
-
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
 # FetchContent module
 include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
-
-
-################################################################################
-# Add RTKLIB lib
-add_library(rtklib STATIC
-        test/RTKLIB/rtkcmn.c
-        test/RTKLIB/stream.c
-)
-target_include_directories(rtklib PUBLIC rtklib)
-target_link_libraries(rtklib pthread m)
 
 
 ################################################################################
