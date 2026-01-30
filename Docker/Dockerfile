@@ -13,9 +13,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     pkg-config \
+	# ----- Version Control -----
+    git \
+    # ----- Debugging & Analysis -----
+    gdb \
+    lldb \
+    valgrind \
+    # ----- Code Formatting -----
+    clang-format \
+	# Utilities
+    wget \
+    curl \
+    ca-certificates \
+    sudo \
+    locales \
     # Core libraries
     libboost-all-dev \
+    openssl \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ============================================================
+# Locale Configuration
+# ============================================================
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
 
 # ============================================================
 # Create Non-root User

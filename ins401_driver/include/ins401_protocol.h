@@ -19,7 +19,6 @@
 #include <string>
 
 
-
 /**
  * @defgroup ProtocolConstants Protocol Constants
  * @brief Core protocol constants for INS401 communication.
@@ -44,7 +43,7 @@ static constexpr std::uint16_t COMMAND_START = 0x5555;
 /// @brief NMEA ASCII message start character ('$').
 static constexpr std::uint8_t NEMA_ASCII_START = '$';
 
-/** @} */  // end of ProtocolConstants
+/** @} */ // end of ProtocolConstants
 
 
 /**
@@ -93,7 +92,7 @@ static constexpr std::uint16_t RTCM_ROVER_DATA_MESSAGE_ID = 0x0A06;
 /// @brief Maximum RTCM rover data payload length in bytes.
 static constexpr std::size_t RTCM_ROVER_DATA_LENGTH_MAX = 1024;
 
-/** @} */  // end of Output Messages
+/** @} */ // end of Output Messages
 
 /**
  * @name Input Messages (0x0Bxx)
@@ -104,7 +103,7 @@ static constexpr std::size_t RTCM_ROVER_DATA_LENGTH_MAX = 1024;
 /// @brief RTCM base station data message identifier.
 static constexpr std::uint16_t RTCM_BASE_DATA_MESSAGE_ID = 0x0B02;
 
-/** @} */  // end of Input Messages
+/** @} */ // end of Input Messages
 
 /**
  * @name Command Messages (0xCCxx)
@@ -115,9 +114,9 @@ static constexpr std::uint16_t RTCM_BASE_DATA_MESSAGE_ID = 0x0B02;
 /// @brief Request device information command identifier.
 static constexpr std::uint16_t REQUEST_INFO_COMMAND = 0xCC01;
 
-/** @} */  // end of Command Messages
+/** @} */ // end of Command Messages
 
-/** @} */  // end of MessageIdentifiers
+/** @} */ // end of MessageIdentifiers
 
 
 /**
@@ -131,8 +130,8 @@ static constexpr std::uint16_t REQUEST_INFO_COMMAND = 0xCC01;
  * @brief Specifies byte ordering for multi-byte value conversion.
  */
 enum class EndianType {
-	LSB,  ///< Little-endian: Least Significant Byte first.
-	MSB	  ///< Big-endian: Most Significant Byte first.
+    LSB, ///< Little-endian: Least Significant Byte first.
+    MSB ///< Big-endian: Most Significant Byte first.
 };
 
 /**
@@ -158,13 +157,18 @@ enum class EndianType {
  * @note This function is constexpr and can be evaluated at compile time.
  */
 [[nodiscard]] constexpr std::array<std::uint8_t, 2> ConvertUint16ToUint8(std::uint16_t value, EndianType type) {
-	return (type == EndianType::LSB) ? std::array<std::uint8_t, 2>{ static_cast<std::uint8_t>(value & 0xFF),
-																	static_cast<std::uint8_t>((value >> 8) & 0xFF) }
-									 : std::array<std::uint8_t, 2>{ static_cast<std::uint8_t>((value >> 8) & 0xFF),
-																	static_cast<std::uint8_t>(value & 0xFF) };
+    return (type == EndianType::LSB)
+               ? std::array<std::uint8_t, 2>{
+                   static_cast<std::uint8_t>(value & 0xFF),
+                   static_cast<std::uint8_t>((value >> 8) & 0xFF)
+               }
+               : std::array<std::uint8_t, 2>{
+                   static_cast<std::uint8_t>((value >> 8) & 0xFF),
+                   static_cast<std::uint8_t>(value & 0xFF)
+               };
 }
 
-/** @} */  // end of EndianUtilities
+/** @} */ // end of EndianUtilities
 
 
 /**
@@ -183,10 +187,12 @@ enum class EndianType {
 static constexpr auto COMMAND_START_BYTES = ConvertUint16ToUint8(COMMAND_START, EndianType::LSB);
 
 /// @brief GNSS solution message ID as byte array.
-static constexpr auto GNSS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(GNSS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
+static constexpr auto GNSS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
+    GNSS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
 
 /// @brief INS solution message ID as byte array.
-static constexpr auto INS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(INS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
+static constexpr auto INS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
+    INS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
 
 /// @brief Diagnostic message ID as byte array.
 static constexpr auto DIAGNOSTIC_MESSAGE_ID_BYTES = ConvertUint16ToUint8(DIAGNOSTIC_MESSAGE_ID, EndianType::LSB);
@@ -195,12 +201,14 @@ static constexpr auto DIAGNOSTIC_MESSAGE_ID_BYTES = ConvertUint16ToUint8(DIAGNOS
 static constexpr auto RAW_IMU_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RAW_IMU_DATA_MESSAGE_ID, EndianType::LSB);
 
 /// @brief RTCM rover data message ID as byte array.
-static constexpr auto RTCM_ROVER_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_ROVER_DATA_MESSAGE_ID, EndianType::LSB);
+static constexpr auto RTCM_ROVER_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
+    RTCM_ROVER_DATA_MESSAGE_ID, EndianType::LSB);
 
 /// @brief RTCM base data message ID as byte array.
-static constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
+static constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES =
+        ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
 
 /// @brief Request info command as byte array.
 static constexpr auto REQUEST_INFO_COMMAND_BYTES = ConvertUint16ToUint8(REQUEST_INFO_COMMAND, EndianType::LSB);
 
-/** @} */  // end of PrecomputedBytes
+/** @} */ // end of PrecomputedBytes

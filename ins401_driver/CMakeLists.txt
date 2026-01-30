@@ -32,12 +32,30 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 
 ################################################################################
 # Required System Packages
+# Fix for Ubuntu/Debian multi-arch OpenSSL path (FORCE CACHE version)
+#if(EXISTS "/usr/lib/x86_64-linux-gnu/libssl.so")
+#    message(STATUS "Manually setting OpenSSL paths...")
+#    set(OPENSSL_SSL_LIBRARY "/usr/lib/x86_64-linux-gnu/libssl.so" CACHE FILEPATH "OpenSSL SSL Lib" FORCE)
+#    set(OPENSSL_CRYPTO_LIBRARY "/usr/lib/x86_64-linux-gnu/libcrypto.so" CACHE FILEPATH "OpenSSL Crypto Lib" FORCE)
+#    set(OPENSSL_INCLUDE_DIR "/usr/include" CACHE PATH "OpenSSL Include Dir" FORCE)
+#endif()
 find_package(OpenSSL REQUIRED)
+
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
 # FetchContent module
 include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
+
+
+################################################################################
+# Add RTKLIB lib
+add_library(rtklib STATIC
+        test/RTKLIB/rtkcmn.c
+        test/RTKLIB/stream.c
+)
+target_include_directories(rtklib PUBLIC rtklib)
+target_link_libraries(rtklib pthread m)
 
 
 ################################################################################
@@ -66,7 +84,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
-        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
 # Include directories
@@ -88,6 +106,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         # FetchContent libraries
         inih::inih
         spdlog::spdlog
+
+        # RTKLIB
+        rtklib
 )
 
 
@@ -103,9 +124,10 @@ message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Install Prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
 message(STATUS "  Dependencies:")
-message(STATUS "    OpenSSL:        Found")
-message(STATUS "    Boost:          Found")
+message(STATUS "    OpenSSL:        ${OpenSSL_SOURCE_DIR}")
+message(STATUS "    Boost:          ${Boost_SOURCE_DIR}")
 message(STATUS "    inih:           ${inih_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
+message(STATUS "    RTKLIB:         ${rtklib_SOURCE_DIR}")
 message(STATUS "========================================")
 message(STATUS "")
