@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
 
     // ---------------------------------------------------------------------------------------
     // Load config and prepare output directory.
-    std::string config_path = argc > 1 ? argv[1] : "../Config.ini";
+    std::string config_path = argc > 1 ? argv[1] : "../../Config.ini";
     const INIReader configures(config_path);
     if (configures.ParseError() < 0) {
         Tool::LogMessage(spdlog::level::err, kModule, __func__,
