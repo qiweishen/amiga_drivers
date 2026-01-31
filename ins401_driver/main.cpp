@@ -30,7 +30,7 @@ static std::atomic<bool> g_terminate{false};
 
 static void SignalHandler(int sig) {
     // Async-safe signal flag for shutdown.
-    Tool::LogMessage(spdlog::level::warn, kModule, __func__,
+    Tool::LogMessage(spdlog::level::err, kModule, __func__,
                      fmt::format("Received signal {}, shutting down...", sig));
     g_terminate.store(true, std::memory_order_release);
 }
@@ -57,7 +57,7 @@ int main(int argc, char *argv[]) {
     auto now = std::chrono::system_clock::now();
     std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
     std::string data_folder_path = fmt::format("{}/{}", output_folder_path, timestamp);
-    std::filesystem::create_directories(output_folder_path);
+    std::filesystem::create_directories(data_folder_path);
     std::filesystem::copy_file(config_path, fmt::format("{}/Config_{}.ini", data_folder_path, timestamp),
                                std::filesystem::copy_options::overwrite_existing);
 
