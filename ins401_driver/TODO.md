@@ -4,9 +4,7 @@
 
 - [ ] Choose a suitable License
 
-- [ ] Utilize RTKLIB for NTRIP client implementation
-
-- [ ] Implement binary logging for raw data
+- [ ] SSL connection is not working, fix it
 
 ___
 

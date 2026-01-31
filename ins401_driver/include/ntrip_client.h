@@ -32,7 +32,7 @@ public:
     // Configuration
     struct Config {
         std::string host; // NTRIP caster hostname
-        int port = 2101; // Port number
+        int port; // Port number
         std::string mount_point; // Mount point name
         std::string username; // Authentication username
         std::string password; // Authentication password
@@ -40,7 +40,7 @@ public:
         bool verify_ssl = false; // Verify SSL certificate
         std::string nmea_gga; // NMEA GGA position string
         bool enable_vrs = false; // Enable periodic GGA for VRS
-        int gga_interval = 60; // GGA send interval in seconds
+        int gga_interval = 5; // GGA send interval in seconds
 
         // Connection parameters
         bool auto_reconnect = true; // Enable auto-reconnection
