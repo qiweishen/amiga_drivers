@@ -167,7 +167,7 @@ int main(int argc, char *argv[]) {
 		output_file = argv[2];
 
 	// 加载库
-	const char *lib_path = "../sick_scan_xd/build/libsick_scan_xd_shared_lib.so";
+	const char *lib_path = "../build/_deps/sick_scan_xd-build/libsick_scan_xd_shared_lib.so";
 	if (SickScanApiLoadLibrary(lib_path) != SICK_SCAN_API_SUCCESS) {
 		std::cerr << "Failed to load library" << std::endl;
 		return 1;
