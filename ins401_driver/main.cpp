@@ -30,7 +30,7 @@ static std::atomic<bool> g_terminate{false};
 
 static void SignalHandler(int sig) {
     // Async-safe signal flag for shutdown.
-    Tool::LogMessage(spdlog::level::err, kModule, __func__,
+    Tool::LogMessage(spdlog::level::warn, kModule, __func__,
                      fmt::format("Received signal {}, shutting down...", sig));
     g_terminate.store(true, std::memory_order_release);
 }
