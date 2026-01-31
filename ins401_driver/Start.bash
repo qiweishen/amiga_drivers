@@ -1,2 +1,2 @@
-sudo setcap cap_net_raw+ep ../bin/INS401_Driver
-../bin/INS401_Driver
+sudo setcap cap_net_raw+ep ./build/bin/INS401_Driver
+./build/bin/INS401_Driver
