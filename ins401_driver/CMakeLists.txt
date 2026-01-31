@@ -88,9 +88,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         # FetchContent libraries
         inih::inih
         spdlog::spdlog
-
-        # RTKLIB
-        rtklib
 )
 
 
@@ -106,10 +103,9 @@ message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Install Prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
 message(STATUS "  Dependencies:")
-message(STATUS "    OpenSSL:        ${OpenSSL_SOURCE_DIR}")
-message(STATUS "    Boost:          ${Boost_SOURCE_DIR}")
+message(STATUS "    OpenSSL:        Found")
+message(STATUS "    Boost:          Found")
 message(STATUS "    inih:           ${inih_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
-message(STATUS "    RTKLIB:         ${rtklib_SOURCE_DIR}")
 message(STATUS "========================================")
 message(STATUS "")
