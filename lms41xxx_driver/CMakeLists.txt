@@ -20,14 +20,16 @@ endif ()
 
 
 ################################################################################
-# FetchContent module
+# External project configuration
+set(SICK_SCAN_XD_ROOT_DIR "${PROJECT_SOURCE_DIR}/3rd_party/FetchContent/sick_scan_xd" CACHE PATH "sick_scan_xd source directory")
 include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
 
 
 ################################################################################
 # Project Configuration
-set(SICK_SCAN_XD_ROOT_DIR "${PROJECT_SOURCE_DIR}/3rd_party/FetchContent/sick_scan_xd")
-set(SOURCES main.cpp ${SICK_SCAN_XD_ROOT_DIR}/test/src/sick_scan_xd_api/sick_scan_xd_api_wrapper.c)
+set(SOURCES main.cpp ${SICK_SCAN_XD_ROOT_DIR}/test/src/sick_scan_xd_api/sick_scan_xd_api_wrapper.c
+        src/tool.cpp)
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_include_directories(${PROJECT_NAME} PUBLIC "${SICK_SCAN_XD_ROOT_DIR}/include") # include folder for sick_scan_api.h
 target_link_libraries(${PROJECT_NAME} PUBLIC dl)  # dynamic library loading
+add_dependencies(${PROJECT_NAME} sick_scan_xd_build)
