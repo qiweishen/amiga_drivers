@@ -14,7 +14,7 @@ namespace {
 InitializationMonitor::InitializationMonitor(const INIReader &configures) {
     LoadConfig(configures);
     window_samples_ = config_.min_stationary_duration_s * config_.imu_freq;
-    Tool::LogMessage(spdlog::level::info, kModule,
+    Tool::LogMessage(spdlog::level::trace, kModule,
                      fmt::format("Initialized: window={}s ({}samples), recompute={}s, "
                                  "stable_count={}, stability_threshold={:.2f}deg, "
                                  "gnss_std_threshold={:.4f}m, gravity={:.5f}m/s^2",

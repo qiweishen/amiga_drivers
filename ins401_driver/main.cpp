@@ -73,7 +73,7 @@ int main(int argc, char *argv[]) {
     }
     const DeviceInfo device = devices.begin()->second;
     Tool::LogMessage(spdlog::level::info, kModule,
-                     fmt::format("Using {} on interface {} with MAC {}", device.product, device.interface_name,
+                     fmt::format("Found {} on interface {} with MAC {}", device.product, device.interface_name,
                                  device.mac_address));
 
 
@@ -102,8 +102,8 @@ int main(int argc, char *argv[]) {
     });
 
 
-    // Configure NTRIP client and set up for a valid GGA.
-    auto ntrip_client_ptr = std::make_unique<NTRIPClient>();
+    // Configure NTRIP client.
+    auto ntrip_client_ptr = std::make_unique<NTRIPClient>(configures);
     receiver_ptr->SetNtripClient(ntrip_client_ptr.get());
 
 

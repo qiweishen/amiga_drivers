@@ -92,7 +92,7 @@ public:
     using DataCallback = std::function<void(const uint8_t *, size_t)>;
     using MessageCallback = std::function<void(const std::vector<uint8_t> &)>;
 
-    explicit NTRIPClient();
+    explicit NTRIPClient(const INIReader &configures);
 
     ~NTRIPClient();
 

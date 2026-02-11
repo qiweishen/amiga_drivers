@@ -28,7 +28,8 @@ namespace {
 std::once_flag NTRIPClient::ssl_init_flag_;
 
 
-NTRIPClient::NTRIPClient() {
+NTRIPClient::NTRIPClient(const INIReader &configures) {
+    LoadConfig(configures);
     // Reserve buffer space
     rtcm_buffer_.reserve(config_.max_buffer_size);
     if (config_.is_ssl) {
