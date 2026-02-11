@@ -17,7 +17,7 @@ FetchContent_MakeAvailable(eigen)
 
 
 #################################################################################
-## GeographicLib - small C++ library for geodesic area
+## GeographicLib - small C++ library for geodesic calculations
 #FetchContent_Declare(
 #        geographiclib
 #        GIT_REPOSITORY https://github.com/geographiclib/geographiclib.git
