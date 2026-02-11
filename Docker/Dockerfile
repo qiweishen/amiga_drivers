@@ -1,4 +1,4 @@
-ARG UBUNTU_TAG=22.04
+ARG UBUNTU_TAG=20.04
 FROM docker.io/ubuntu:${UBUNTU_TAG}
 
 # Prevent interactive prompts during package installation
