@@ -2,6 +2,7 @@
 *install/
 *log/
 *bin/
+*data/
 *cmake-build-*/
 *.idea/
 *.vscode/
