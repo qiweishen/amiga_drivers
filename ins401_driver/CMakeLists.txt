@@ -35,7 +35,6 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
-find_package(Eigen3 REQUIRED)
 
 # FetchContent module
 include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
@@ -52,8 +51,8 @@ set(SOURCES
         src/ntrip_client.cpp
         src/orientation_initializer.cpp
         src/initialization_monitor.cpp
-        main.cpp
         src/stationary_detector.cpp
+        main.cpp
 )
 
 # Header files

@@ -5,6 +5,18 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
+# Eigen - C++ template library for linear algebra
+FetchContent_Declare(
+        eigen
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG 3.4.0
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/eigen
+)
+FetchContent_MakeAvailable(eigen)
+
+
+################################################################################
 # inih - INI file parser
 FetchContent_Declare(
         inih
