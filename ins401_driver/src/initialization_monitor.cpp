@@ -15,7 +15,7 @@ InitializationMonitor::InitializationMonitor(const INIReader &configures) {
     LoadConfig(configures);
     window_samples_ = config_.min_stationary_duration_s * config_.imu_freq;
     Tool::LogMessage(spdlog::level::trace, kModule,
-                     fmt::format("Initialized: window={}s ({}samples), recompute={}s, "
+                     fmt::format("Parameters: window={}s ({}samples), recompute={}s, "
                                  "stable_count={}, stability_threshold={:.2f}deg, "
                                  "gnss_std_threshold={:.4f}m, gravity={:.5f}m/s^2",
                                  config_.min_stationary_duration_s, window_samples_,
@@ -181,12 +181,9 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
 
     const double stationary_duration = current_time - stationary_start_time_;
     Tool::LogMessage(spdlog::level::info, kModule,
-                     fmt::format("Computation #{} at {:.1f}s stationary: roll={:.4f}deg pitch={:.4f}deg "
-                                 "gyro_bias=[{:.6f},{:.6f},{:.6f}] accel_bias=[{:.6f},{:.6f},{:.6f}]",
+                     fmt::format("Computation #{} at {:.1f}s stationary: roll={:.4f}deg pitch={:.4f}deg",
                                  stable_count_ + 1, stationary_duration,
-                                 alignment.roll / kDegToRad, alignment.pitch / kDegToRad,
-                                 bias.gyro_bias.x(), bias.gyro_bias.y(), bias.gyro_bias.z(),
-                                 bias.accel_bias.x(), bias.accel_bias.y(), bias.accel_bias.z()));
+                                 alignment.roll / kDegToRad, alignment.pitch / kDegToRad));
 
     // Check stability
     if (CheckStability(result)) {

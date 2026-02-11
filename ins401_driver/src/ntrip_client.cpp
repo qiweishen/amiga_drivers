@@ -165,6 +165,7 @@ void NTRIPClient::LoadConfig(const INIReader &configures) {
     config_.host = configures.Get("NTRIP Client", "host", "");
     config_.port = static_cast<int>(configures.GetInteger("NTRIP Client", "port", 8080));
     config_.mount_point = configures.Get("NTRIP Client", "mount_point", "");
+    config_.enable_vrs = configures.GetBoolean("NTRIP Client", "enable_vrs", false);
     config_.username = configures.Get("NTRIP Client", "username", "");
     config_.password = configures.Get("NTRIP Client", "password", "");
 }
