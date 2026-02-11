@@ -22,15 +22,15 @@ namespace Tool {
         }
     } // namespace Utility
 
-    void LogMessage(const spdlog::level::level_enum level, const std::string_view module, const std::string_view func,
-                    const std::string_view msg, const std::string_view error) {
+    void LogMessage(const spdlog::level::level_enum level, const std::string_view module, const std::string_view msg,
+                    const std::string_view error) {
         if ((level == spdlog::level::trace || level == spdlog::level::info) && !error.empty()) {
-            spdlog::warn("[{}] {}: Error message provided for trace/info level", module, func);
+            spdlog::warn("[{}] {}: Error message provided for trace/info level", module);
         }
         if (error.empty()) {
-            spdlog::log(level, "[{}] {}: {}", module, func, msg);
+            spdlog::log(level, "[{}] {}: {}", module, msg);
         } else {
-            spdlog::log(level, "[{}] {}: {} - {}", module, func, msg, error);
+            spdlog::log(level, "[{}] {}: {} - {}", module, msg, error);
         }
         if (level == spdlog::level::err || level == spdlog::level::critical) {
             throw std::runtime_error("Error Detected");

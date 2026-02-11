@@ -1,8 +1,3 @@
-/**
- * @file ethernet_socket.cpp
- * @brief Implementation of EthernetSocket class.
- */
-
 #include "ethernet_socket.h"
 
 #include <algorithm>
@@ -111,16 +106,14 @@ void EthernetSocket::CreateSocket() {
         if (errno == EPERM) {
             fmt::print(stderr, "Error: Root privileges required");
         } else {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to create raw socket",
-                             std::strerror(errno));
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to create raw socket", std::strerror(errno));
         }
     }
 
     // Set non-blocking mode
     int flags = fcntl(socket_fd_, F_GETFL, 0);
     if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-        Tool::LogMessage(spdlog::level::warn, kModule, __func__, "Failed to set non-blocking mode",
-                         std::strerror(errno));
+        Tool::LogMessage(spdlog::level::warn, kModule, "Failed to set non-blocking mode", std::strerror(errno));
     }
 
     // Get interface index and local MAC address
@@ -128,16 +121,12 @@ void EthernetSocket::CreateSocket() {
     std::strncpy(ifr.ifr_name, interface_name_.c_str(), IFNAMSIZ - 1);
 
     if (ioctl(socket_fd_, SIOCGIFINDEX, &ifr) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
-                         fmt::format("Failed to get index for interface {}", interface_name_),
-                         std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to get index for interface {}", interface_name_), std::strerror(errno));
     }
     if_index_ = ifr.ifr_ifindex;
 
     if (ioctl(socket_fd_, SIOCGIFHWADDR, &ifr) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
-                         fmt::format("Failed to get MAC for interface {}", interface_name_),
-                         std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to get MAC for interface {}", interface_name_), std::strerror(errno));
     }
     std::memcpy(local_mac_.data(), ifr.ifr_hwaddr.sa_data, kMacAddressSize);
 
@@ -147,9 +136,7 @@ void EthernetSocket::CreateSocket() {
     sll.sll_ifindex = if_index_;
     sll.sll_protocol = htons(ETH_P_ALL);
     if (bind(socket_fd_, reinterpret_cast<sockaddr *>(&sll), sizeof(sll)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
-                         fmt::format("Failed to bind socket to interface {}", interface_name_),
-                         std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to bind socket to interface {}", interface_name_),std::strerror(errno));
     }
 
     // Set receive buffer size
@@ -157,9 +144,7 @@ void EthernetSocket::CreateSocket() {
         int buf_size = static_cast<int>(std::min(recv_buffer_size_,
                                                  static_cast<size_t>(std::numeric_limits<int>::max())));
         if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size)) < 0) {
-            Tool::LogMessage(spdlog::level::warn, kModule, __func__,
-                             fmt::format("Failed to set receive buffer size on interface {}", interface_name_),
-                             std::strerror(errno));
+            Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Failed to set receive buffer size on interface {}", interface_name_), std::strerror(errno));
         }
     }
 }
@@ -168,8 +153,7 @@ void EthernetSocket::CreateSocket() {
 void EthernetSocket::SetupEpoll() {
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to create epoll instance",
-                         std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule, "Failed to create epoll instance", std::strerror(errno));
     }
 
     epoll_event ev{};
@@ -177,7 +161,7 @@ void EthernetSocket::SetupEpoll() {
     ev.data.fd = socket_fd_;
 
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, socket_fd_, &ev) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to add socket to epoll", std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule, "Failed to add socket to epoll", std::strerror(errno));
         close(epoll_fd_);
         epoll_fd_ = -1;
     }
@@ -203,8 +187,7 @@ namespace Ethernet {
         // Retrieve linked list of network interfaces
         ifaddrs *ifaddr = nullptr;
         if (getifaddrs(&ifaddr) == -1) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to get network interfaces",
-                             std::strerror(errno));
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to get network interfaces", std::strerror(errno));
         }
 
         // RAII wrapper to automatically free ifaddrs structure and fd
@@ -212,8 +195,7 @@ namespace Ethernet {
         // Create a socket for ioctl operations (reused for all interfaces)
         const int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to create socket for ioctl",
-                             std::strerror(errno));
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to create socket for ioctl", std::strerror(errno));
         }
         FdGuard fd_guard(fd);
 
@@ -252,9 +234,7 @@ namespace Ethernet {
                         interfaces.emplace_back(ifa->ifa_name, std::move(mac_str));
                     }
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, __func__,
-                                     fmt::format("Failed to get flags for interface {}", ifa->ifa_name),
-                                     std::strerror(errno));
+                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Failed to get flags for interface {}", ifa->ifa_name), std::strerror(errno));
                 }
             }
         }
@@ -334,8 +314,7 @@ namespace Ethernet {
         };
 
         if (setsockopt(socket_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0) {
-            Tool::LogMessage(spdlog::level::warn, kModule, __func__, "Failed to attach BPF filter",
-                             std::strerror(errno));
+            Tool::LogMessage(spdlog::level::warn, kModule, "Failed to attach BPF filter", std::strerror(errno));
         }
 
         return true;
@@ -396,7 +375,7 @@ namespace Ethernet {
 
     std::string ParseMacAddress(const uint8_t *mac_ptr) {
         if (!mac_ptr) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Null MAC address pointer");
+            Tool::LogMessage(spdlog::level::err, kModule, "Null MAC address pointer");
             return "00:00:00:00:00:00";
         }
         return fmt::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac_ptr[0], mac_ptr[1], mac_ptr[2], mac_ptr[3],
@@ -407,7 +386,7 @@ namespace Ethernet {
 
     std::array<uint8_t, 6> FormatMACAddress(const std::string_view mac_str) {
         if (mac_str.empty()) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Empty MAC address string");
+            Tool::LogMessage(spdlog::level::err, kModule, "Empty MAC address string");
         }
         std::string hex_only;
         hex_only.reserve(12);
@@ -415,15 +394,11 @@ namespace Ethernet {
             if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
                 hex_only += c;
             } else if (c != ':' && c != '-' && c != ' ') {
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
-                                 fmt::format("Invalid character '{}' in MAC address: '{}'", c, mac_str));
+                Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Invalid character '{}' in MAC address: '{}'", c, mac_str));
             }
         }
         if (hex_only.length() != 12) {
-            Tool::LogMessage(
-                spdlog::level::err, kModule, __func__,
-                fmt::format("Invalid MAC address length (expected 12 hex digits, got {}): '{}'", hex_only.length(),
-                            mac_str));
+            Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Invalid MAC address length (expected 12 hex digits, got {}): '{}'", hex_only.length(), mac_str));
         }
         std::array<uint8_t, 6> result{};
         for (size_t i = 0; i < 6; ++i) {

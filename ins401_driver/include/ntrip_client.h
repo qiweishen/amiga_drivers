@@ -1,4 +1,5 @@
-#pragma once
+#ifndef NTRIP_CLIENT_H
+#define NTRIP_CLIENT_H
 
 #include <atomic>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <utility>
 #include <vector>
 #include <map>
+#include <INIReader.h>
 
 #include <ethernet_socket.h>
 
@@ -38,9 +40,8 @@ public:
         std::string password; // Authentication password
         bool is_ssl = false; // Use SSL/TLS connection
         bool verify_ssl = false; // Verify SSL certificate
-        std::string nmea_gga; // NMEA GGA position string
         bool enable_vrs = false; // Enable periodic GGA for VRS
-        int gga_interval = 5; // GGA send interval in seconds
+        int gga_interval = 30; // GGA send interval in seconds
 
         // Connection parameters
         bool auto_reconnect = true; // Enable auto-reconnection
@@ -91,7 +92,7 @@ public:
     using DataCallback = std::function<void(const uint8_t *, size_t)>;
     using MessageCallback = std::function<void(const std::vector<uint8_t> &)>;
 
-    explicit NTRIPClient(Config config);
+    explicit NTRIPClient();
 
     ~NTRIPClient();
 
@@ -138,6 +139,9 @@ public:
     Statistics GetStatistics() const;
 
 private:
+    // --- Loading config ---
+    void LoadConfig(const INIReader &configures);
+
     // Network operations
     bool CreateSocket(int family);
 
@@ -145,7 +149,7 @@ private:
 
     bool InitSSL();
 
-    bool SendRequest();
+    bool SendRequest() const;
 
     bool ReceiveResponse();
 
@@ -154,9 +158,9 @@ private:
     void SendGgaIfNeeded();
 
     // Data operations
-    ssize_t SendData(const void *data, size_t size);
+    ssize_t SendData(const void *data, size_t size) const;
 
-    ssize_t ReceiveData(void *buffer, size_t size);
+    ssize_t ReceiveData(void *buffer, size_t size) const;
 
     // RTCM parsing
     std::vector<std::vector<uint8_t> > ParseRTCM(const uint8_t *data, size_t size);
@@ -179,7 +183,7 @@ private:
     static std::string Base64Encode(const std::string &input);
 
     // Configuration
-    Config config_;
+    Config config_{};
 
     // Network
     int socket_fd_ = -1;
@@ -256,7 +260,7 @@ private:
     mutable std::mutex socket_mutex_;
     bool socket_initialized_ = false;
 
-    std::shared_ptr<EthernetSocket> socket_ptr_; ///< Ethernet socket for device communication.
+    std::shared_ptr<EthernetSocket> socket_ptr_;
     std::string interface_;
     std::array<uint8_t, 6> target_mac_{};
     std::array<uint8_t, 6> local_mac_{};
@@ -269,3 +273,6 @@ private:
     static constexpr int MAX_SEND_RETRIES_ = 3;
     static constexpr int SEND_RETRY_DELAY_MS_ = 10;
 };
+
+
+#endif

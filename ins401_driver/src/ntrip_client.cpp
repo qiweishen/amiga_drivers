@@ -28,13 +28,13 @@ namespace {
 std::once_flag NTRIPClient::ssl_init_flag_;
 
 
-NTRIPClient::NTRIPClient(Config config) : config_(std::move(config)) {
+NTRIPClient::NTRIPClient() {
     // Reserve buffer space
     rtcm_buffer_.reserve(config_.max_buffer_size);
-    nmea_gga_ = config_.nmea_gga;
-    last_gga_sent_ = std::chrono::steady_clock::now();
-    // Initialize OpenSSL once
-    std::call_once(ssl_init_flag_, InitOpenSSL);
+    if (config_.is_ssl) {
+        // Initialize OpenSSL once
+        std::call_once(ssl_init_flag_, InitOpenSSL);
+    }
     // Initialize statistics timestamp
     stats_.last_message_time = std::chrono::steady_clock::now();
 }
@@ -78,9 +78,8 @@ bool NTRIPClient::Connect() {
     }
     // Connection successful
     connected_.store(true, std::memory_order_release);
-    Tool::LogMessage(spdlog::level::info, kModule, __func__,
-                     fmt::format("Connected to {}:{} with mount point '{}' successfully",
-                                 config_.host, config_.port, config_.mount_point));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Connected to {}:{} with mount point '{}' successfully",
+                                                               config_.host, config_.port, config_.mount_point));
     // Reset statistics
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -108,7 +107,7 @@ void NTRIPClient::StartReceiving() {
     std::lock_guard<std::mutex> lock(thread_mutex_);
     // Check prerequisites
     if (!connected_.load(std::memory_order_acquire)) {
-        Tool::LogMessage(spdlog::level::warn, kModule, __func__, "Cannot start receiving: not connected");
+        Tool::LogMessage(spdlog::level::warn, kModule, "Cannot start receiving: not connected");
         return;
     }
     if (receiving_.load(std::memory_order_acquire)) {
@@ -161,6 +160,15 @@ void NTRIPClient::StopReceiving() {
 }
 
 
+void NTRIPClient::LoadConfig(const INIReader &configures) {
+    config_.host = configures.Get("NTRIP Client", "host", "");
+    config_.port = static_cast<int>(configures.GetInteger("NTRIP Client", "port", 8080));
+    config_.mount_point = configures.Get("NTRIP Client", "mount_point", "");
+    config_.username = configures.Get("NTRIP Client", "username", "");
+    config_.password = configures.Get("NTRIP Client", "password", "");
+}
+
+
 bool NTRIPClient::CreateSocket(const int family) {
     if (socket_fd_ >= 0) {
         close(socket_fd_);
@@ -168,7 +176,7 @@ bool NTRIPClient::CreateSocket(const int family) {
     }
     socket_fd_ = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (socket_fd_ < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to create socket: " + std::string(strerror(errno)));
         return false;
     }
@@ -179,14 +187,14 @@ bool NTRIPClient::CreateSocket(const int family) {
     // Set socket options
     constexpr int reuse = 1;
     if (setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set SO_REUSEADDR: " + std::string(strerror(errno)));
         return false;
     }
     // TCP_NODELAY for low latency
     constexpr int nodelay = 1;
     if (setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set TCP_NODELAY: " + std::string(strerror(errno)));
         return false;
     }
@@ -195,26 +203,26 @@ bool NTRIPClient::CreateSocket(const int family) {
     tv.tv_sec = config_.timeout;
     tv.tv_usec = 0;
     if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set receive timeout: " + std::string(strerror(errno)));
         return false;
     }
     if (setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set send timeout: " + std::string(strerror(errno)));
         return false;
     }
     // Set keep-alive
     constexpr int keepalive = 1;
     if (setsockopt(socket_fd_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set keep-alive: " + std::string(strerror(errno)));
         return false;
     }
     // Set non-blocking mode
     int flags = fcntl(socket_fd_, F_GETFL, 0);
     if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set non-blocking mode: " + std::string(strerror(errno)));
         return false;
     }
@@ -234,7 +242,7 @@ bool NTRIPClient::ConnectSocket() {
     std::string port_str = std::to_string(config_.port);
     int ret = getaddrinfo(config_.host.c_str(), port_str.c_str(), &hints, &result);
     if (ret != 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to resolve hostname '" + config_.host + "': " + gai_strerror(ret));
         return false;
     }
@@ -285,7 +293,7 @@ bool NTRIPClient::ConnectSocket() {
         socket_fd_ = -1;
     }
     if (!local_connected) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Unable to connect to host '" + config_.host + "' on port " + port_str);
         return false;
     }
@@ -297,7 +305,7 @@ bool NTRIPClient::InitSSL() {
     // Save & temporarily clear O_NONBLOCK
     const int flags = fcntl(socket_fd_, F_GETFL, 0);
     if (flags == -1) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "F_GETFL failed: " + std::string(strerror(errno)));
         return false;
     }
@@ -319,7 +327,7 @@ bool NTRIPClient::InitSSL() {
     // Set to blocking mode for SSL handshake
     if (was_nonblock) {
         if (fcntl(socket_fd_, F_SETFL, flags & ~O_NONBLOCK) == -1) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__,
+            Tool::LogMessage(spdlog::level::err, kModule,
                              "Failed to set blocking mode: " + std::string(strerror(errno)));
             return false;
         }
@@ -329,7 +337,7 @@ bool NTRIPClient::InitSSL() {
     const SSL_METHOD *method = TLS_client_method();
     ssl_ctx_.reset(SSL_CTX_new(method));
     if (!ssl_ctx_) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to create SSL context: " + GetSSLError());
         return false;
     }
@@ -353,7 +361,7 @@ bool NTRIPClient::InitSSL() {
                 }
             }
             if (!loaded) {
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
+                Tool::LogMessage(spdlog::level::err, kModule,
                                  "Failed to load CA trust store from any known location");
                 return false;
             }
@@ -365,7 +373,7 @@ bool NTRIPClient::InitSSL() {
     // Create SSL connection
     ssl_.reset(SSL_new(ssl_ctx_.get()));
     if (!ssl_) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to create SSL connection: " + GetSSLError());
         return false;
     }
@@ -374,13 +382,13 @@ bool NTRIPClient::InitSSL() {
     if (!config_.host.empty()) {
         // Set SNI
         if (SSL_set_tlsext_host_name(ssl_.get(), config_.host.c_str()) != 1) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to set SNI hostname");
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to set SNI hostname");
             return false;
         }
         // Set hostname for certificate verification (only if verifying)
         if (config_.verify_ssl) {
             if (SSL_set1_host(ssl_.get(), config_.host.c_str()) != 1) {
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
+                Tool::LogMessage(spdlog::level::err, kModule,
                                  "Failed to set hostname for verification");
                 return false;
             }
@@ -389,7 +397,7 @@ bool NTRIPClient::InitSSL() {
 
     // Attach socket to SSL
     if (SSL_set_fd(ssl_.get(), socket_fd_) != 1) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          "Failed to set SSL socket: " + GetSSLError());
         return false;
     }
@@ -412,20 +420,20 @@ bool NTRIPClient::InitSSL() {
                 error += " (Verify: " + std::string(X509_verify_cert_error_string(verify_result)) + ")";
             }
         }
-        Tool::LogMessage(spdlog::level::err, kModule, __func__, error);
+        Tool::LogMessage(spdlog::level::err, kModule, error);
         return false;
     }
     return true;
 }
 
 
-bool NTRIPClient::SendRequest() {
+bool NTRIPClient::SendRequest() const {
     std::string request = BuildHTTPRequest("/" + config_.mount_point);
     size_t total_sent = 0;
     while (total_sent < request.size()) {
         ssize_t sent = SendData(request.c_str() + total_sent, request.size() - total_sent);
         if (sent <= 0) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to send request");
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to send request");
             return false;
         }
         total_sent += sent;
@@ -447,7 +455,7 @@ bool NTRIPClient::ReceiveResponse() {
     tv.tv_usec = 0;
     int sel = select(socket_fd_ + 1, &read_fds, nullptr, nullptr, &tv);
     if (sel <= 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kModule,
                          (sel == 0) ? "Timeout waiting for response" : "Select error");
         CloseConnection();
         return false;
@@ -457,7 +465,7 @@ bool NTRIPClient::ReceiveResponse() {
     while (response.find("\r\n\r\n") == std::string::npos) {
         ssize_t received = ReceiveData(buffer, sizeof(buffer) - 1);
         if (received <= 0) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Failed to receive response");
+            Tool::LogMessage(spdlog::level::err, kModule, "Failed to receive response");
             return false;
         }
         buffer[received] = '\0';
@@ -473,12 +481,12 @@ bool NTRIPClient::ReceiveResponse() {
     // Parse status code
     if (header_part.find("200 OK") == std::string::npos && header_part.find("ICY 200 OK") == std::string::npos) {
         if (header_part.find("401") != std::string::npos) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "Authentication failed");
+            Tool::LogMessage(spdlog::level::err, kModule, "Authentication failed");
         } else if (header_part.find("404") != std::string::npos) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__,
+            Tool::LogMessage(spdlog::level::err, kModule,
                              "Mount point not found: " + config_.mount_point);
         } else {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__, "HTTP error response");
+            Tool::LogMessage(spdlog::level::err, kModule, "HTTP error response");
         }
         return false;
     }
@@ -545,7 +553,7 @@ void NTRIPClient::ReceiveThread() {
         } else if (received == 0) {
             // Connection closed by remote
             connected_.store(false, std::memory_order_release);
-            Tool::LogMessage(spdlog::level::warn, kModule, __func__, "Connection closed by remote host");
+            Tool::LogMessage(spdlog::level::warn, kModule, "Connection closed by remote host");
             if (config_.auto_reconnect && receiving_.load(std::memory_order_acquire)) {
                 HandleReconnect();
             }
@@ -554,7 +562,7 @@ void NTRIPClient::ReceiveThread() {
             // Handle errors
             if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ETIMEDOUT) {
                 connected_.store(false, std::memory_order_release);
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
+                Tool::LogMessage(spdlog::level::err, kModule,
                                  "Receive error: " + std::string(strerror(errno)));
                 if (config_.auto_reconnect && receiving_.load(std::memory_order_acquire)) {
                     HandleReconnect();
@@ -623,14 +631,14 @@ void NTRIPClient::HandleReconnect() {
         if (!receiving_.load(std::memory_order_acquire)) {
             break;
         }
-        Tool::LogMessage(spdlog::level::info, kModule, __func__,
+        Tool::LogMessage(spdlog::level::info, kModule,
                          "Reconnection attempt " + std::to_string(attempts) + "/" +
                          std::to_string(config_.max_reconnect_attempts));
         // Close existing connection
         CloseConnection();
         // Attempt reconnection
         if (Connect()) {
-            Tool::LogMessage(spdlog::level::info, kModule, __func__,
+            Tool::LogMessage(spdlog::level::info, kModule,
                              "Reconnected successfully after " + std::to_string(attempts) + " attempts");
             return;
         }
@@ -640,27 +648,27 @@ void NTRIPClient::HandleReconnect() {
         }
     }
     // Reconnection failed
-    Tool::LogMessage(spdlog::level::err, kModule, __func__,
+    Tool::LogMessage(spdlog::level::err, kModule,
                      "Failed to reconnect after " + std::to_string(attempts) + " attempts");
     receiving_.store(false, std::memory_order_release);
 }
 
 
-ssize_t NTRIPClient::SendData(const void *data, size_t size) {
+ssize_t NTRIPClient::SendData(const void *data, size_t size) const {
     ssize_t result;
     if (ssl_) {
         result = SSL_write(ssl_.get(), data, static_cast<int>(size));
         if (result <= 0) {
             int ssl_error = SSL_get_error(ssl_.get(), static_cast<int>(result));
             if (ssl_error != SSL_ERROR_WANT_READ && ssl_error != SSL_ERROR_WANT_WRITE) {
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
+                Tool::LogMessage(spdlog::level::err, kModule,
                                  "SSL write error: " + std::to_string(ssl_error));
             }
         }
     } else {
         result = send(socket_fd_, data, size, MSG_NOSIGNAL);
         if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__,
+            Tool::LogMessage(spdlog::level::err, kModule,
                              "Socket send error: " + std::string(strerror(errno)));
         }
     }
@@ -668,21 +676,21 @@ ssize_t NTRIPClient::SendData(const void *data, size_t size) {
 }
 
 
-ssize_t NTRIPClient::ReceiveData(void *buffer, size_t size) {
+ssize_t NTRIPClient::ReceiveData(void *buffer, size_t size) const {
     ssize_t result;
     if (ssl_) {
         result = SSL_read(ssl_.get(), buffer, static_cast<int>(size));
         if (result <= 0) {
             int ssl_error = SSL_get_error(ssl_.get(), static_cast<int>(result));
             if (ssl_error != SSL_ERROR_WANT_READ && ssl_error != SSL_ERROR_WANT_WRITE) {
-                Tool::LogMessage(spdlog::level::err, kModule, __func__,
+                Tool::LogMessage(spdlog::level::err, kModule,
                                  "SSL read error: " + std::to_string(ssl_error));
             }
         }
     } else {
         result = recv(socket_fd_, buffer, size, 0);
         if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ETIMEDOUT) {
-            Tool::LogMessage(spdlog::level::err, kModule, __func__,
+            Tool::LogMessage(spdlog::level::err, kModule,
                              "Socket recv error: " + std::string(strerror(errno)));
         }
     }
@@ -735,7 +743,7 @@ void NTRIPClient::SendGgaIfNeeded() {
     if (SendData(gga.data(), gga.size()) > 0) {
         last_gga_sent_ = now;
     } else {
-        Tool::LogMessage(spdlog::level::warn, kModule, __func__, "Failed to send GGA for VRS");
+        Tool::LogMessage(spdlog::level::warn, kModule, "Failed to send GGA for VRS");
     }
 }
 
@@ -956,7 +964,7 @@ bool NTRIP_Callback::Initialize() {
         socket_ptr_ = std::make_shared<EthernetSocket>(interface_, target_mac_);
         socket_initialized_ = socket_ptr_->IsValid();
     } catch (const std::exception &e) {
-        Tool::LogMessage(spdlog::level::err, kCallbackModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kCallbackModule,
                          "Failed to initialize socket on " + interface_ + ": " + e.what());
         socket_initialized_ = false;
         socket_ptr_.reset();
@@ -993,7 +1001,7 @@ bool NTRIP_Callback::SendToINS401(const uint8_t *payload, size_t payload_length)
         rtcm_base_packet = Ethernet::BuildAceinnaPacket(target_mac_, local_mac, RTCM_BASE_DATA_MESSAGE_ID_BYTES,
                                                         payload, payload_length);
     } catch (const std::exception &e) {
-        Tool::LogMessage(spdlog::level::err, kCallbackModule, __func__,
+        Tool::LogMessage(spdlog::level::err, kCallbackModule,
                          "Packet build error: " + std::string(e.what()));
         packets_failed_.fetch_add(1, std::memory_order_relaxed);
         return false;
