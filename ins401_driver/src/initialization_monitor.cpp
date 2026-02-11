@@ -93,7 +93,8 @@ void InitializationMonitor::OnGnssData(const GNSSSolutionData &gnss) {
     latest_gnss_ = gnss;
     has_gnss_ = true;
     if (!gravity_ready_) {
-        config_.gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude, latest_gnss_.height);
+        // config_.gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude, latest_gnss_.height);
+        config_.gravity = -9.7968;
         gravity_ready_ = true;
         gnss_cv_.notify_all();
     }

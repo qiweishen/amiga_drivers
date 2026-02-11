@@ -6,9 +6,9 @@
 
 
 namespace Tool {
-    namespace Earth {
-        double ComputeGravity(double latitude, double longitude, double height);
-    }
+    // namespace Earth {
+    //     double ComputeGravity(double latitude, double longitude, double height);
+    // }
     namespace Utility {
         // String splitting without allocations.
         std::vector<std::string_view> SplitString(std::string_view str, char delimiter);
