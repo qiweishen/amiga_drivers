@@ -1,6 +1,6 @@
 #include "orientation_initializer.h"
 
-#include <eigen3/Eigen/Geometry>
+#include <Eigen/Geometry>
 #include <algorithm>
 #include <cmath>
 #include <limits>

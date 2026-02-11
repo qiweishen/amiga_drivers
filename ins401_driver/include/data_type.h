@@ -1,8 +1,8 @@
 #ifndef DATA_TYPE_H
 #define DATA_TYPE_H
 
-#include <cstdint>
-#include <eigen3/Eigen/Core>
+#include <Eigen/Core>
+
 
 // Endianness selection for conversion helpers.
 enum class EndianType {

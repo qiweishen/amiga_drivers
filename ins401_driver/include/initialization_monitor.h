@@ -5,7 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <INIReader.h>
-#include <eigen3/Eigen/Core>
+#include <Eigen/Core>
 
 #include "data_type.h"
 #include "orientation_initializer.h"

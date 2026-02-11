@@ -1,10 +1,9 @@
 #ifndef ORIENTATION_INITIALIZER_H
 #define ORIENTATION_INITIALIZER_H
 
-#include <eigen3/Eigen/Core>
-#include <eigen3/Eigen/Geometry>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <cstddef>
-#include <cstdint>
 #include <vector>
 
 #include "data_type.h"
