@@ -29,7 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     locales \
     # ----- Core libraries----- \
     libboost-all-dev \
-    libeigen3-dev \
     openssl \
     libssl-dev
 
