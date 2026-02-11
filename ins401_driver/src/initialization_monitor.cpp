@@ -17,8 +17,9 @@ InitializationMonitor::InitializationMonitor(const INIReader &configures) {
     if (configured_window_samples <= 0) {
         window_samples_ = 1;
         Tool::LogMessage(spdlog::level::err, kModule,
-                         fmt::format("Invalid stationary window configuration: min_stationary_duration_s={} imu_freq={}.",
-                                     config_.min_stationary_duration_s, config_.imu_freq));
+                         fmt::format(
+                             "Invalid stationary window configuration: min_stationary_duration_s={} imu_freq={}.",
+                             config_.min_stationary_duration_s, config_.imu_freq));
     } else {
         window_samples_ = static_cast<size_t>(configured_window_samples);
     }
@@ -231,6 +232,11 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
                 Tool::LogMessage(spdlog::level::info, kModule,
                                  fmt::format("=== STATIC INITIALIZATION COMPLETE === : GNSS position std: {:.4f} m",
                                              (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
+                Tool::LogMessage(spdlog::level::info, kModule,
+                                 fmt::format(
+                                     "=== STATIC INITIALIZATION COMPLETE === : Start time: {} week {} ms; End time: {} week {} ms",
+                                     computation_buffer_.front().gps_week, computation_buffer_.front().gps_millisecs,
+                                     computation_buffer_.back().gps_week, computation_buffer_.back().gps_millisecs));
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,
                                  "Stability reached but GNSS conditions not met. Waiting for fresh RTK_FIXED and low std.");

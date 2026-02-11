@@ -54,11 +54,13 @@ int main(int argc, char *argv[]) {
     std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
     std::string data_folder_path = fmt::format("{}/{}", output_folder_path, timestamp);
     std::filesystem::create_directories(data_folder_path);
-    std::filesystem::copy_file(config_path, fmt::format("{}/Config_{}.ini", data_folder_path, timestamp), std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(config_path, fmt::format("{}/Config_{}.ini", data_folder_path, timestamp),
+                               std::filesystem::copy_options::overwrite_existing);
 
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     console_sink->set_level(spdlog::level::info);
-    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(fmt::format("{}/log_{}.log", data_folder_path, timestamp), true);
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+        fmt::format("{}/log_{}.log", data_folder_path, timestamp), true);
     file_sink->set_level(spdlog::level::trace);
     std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
     auto logger = std::make_shared<spdlog::logger>("INS401 Driver", sinks.begin(), sinks.end());
@@ -84,7 +86,8 @@ int main(int argc, char *argv[]) {
     // Start receiver thread and capture the first GGA.
     auto receiver_ptr = std::make_shared<INSDeviceReceiver>(
         device.interface_name, device.mac_address, configures.GetBoolean("INS401 Receiver", "save_data", true),
-        data_folder_path, configures.GetBoolean("NTRIP Client", "enable_vrs", false));
+        data_folder_path, configures.GetBoolean("IMU Initial Initialization", "gnss_position_std_threshold", 0.02),
+        configures.GetBoolean("NTRIP Client", "enable_vrs", false));
     // Register IMU and GNSS callbacks for the initialization monitor.
     receiver_ptr->SetImuCallback([monitor = init_monitor](const RawIMUData &imu) {
         monitor->OnImuData(imu);
@@ -102,7 +105,8 @@ int main(int argc, char *argv[]) {
     });
 
     if (!init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(30))) {
-        Tool::LogMessage(spdlog::level::warn, kModule, "Timed out waiting for first GNSS fix for gravity initialization");
+        Tool::LogMessage(spdlog::level::warn, kModule,
+                         "Timed out waiting for first GNSS fix for gravity initialization");
         g_terminate.store(true, std::memory_order_release);
         receiver_ptr->Stop();
         if (receiver_thread.joinable()) {
@@ -134,18 +138,9 @@ int main(int argc, char *argv[]) {
     });
 
 
-    // Main loop: wait for termination signal, monitor initialization status.
-    bool init_logged = false;
+    // Main loop: wait for termination signal
     while (!g_terminate.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        if (!init_logged && init_monitor->IsInitialized()) {
-            init_logged = true;
-            auto result = init_monitor->GetResult();
-            Tool::LogMessage(spdlog::level::info, kModule,
-                             fmt::format("Static initialization complete. Roll={:.4f}deg; Pitch={:.4f}deg",
-                                         result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI));
-        }
     }
 
 

@@ -20,7 +20,7 @@ class NTRIPClient;
 class INSDeviceReceiver {
 public:
     explicit INSDeviceReceiver(std::string iface, const std::string &device_mac, bool save_to_file,
-                               std::string output_folder_path, bool enable_vrs=false);
+                               std::string output_folder_path, double horizontal_std, bool enable_vrs=false);
 
     ~INSDeviceReceiver();
 
@@ -54,8 +54,6 @@ private:
     const std::size_t diagnostic_hz_ = 1;
     const std::size_t imu_hz_ = 100;
     const std::size_t rtcm_rover_hz_ = 10;
-
-    bool entered_rtk_fixed_ = false;
 
     const std::size_t buffer_size_ = 64 * 1024;
 
@@ -137,6 +135,8 @@ private:
     std::vector<char> rtcm_rover_file_buffer_;
     std::vector<char> nmea_file_buffer_;
     std::size_t last_flush_time_ = 0;
+
+    double horizontal_std_;
 
     bool enable_vrs_;
     std::mutex first_gga_mutex_;

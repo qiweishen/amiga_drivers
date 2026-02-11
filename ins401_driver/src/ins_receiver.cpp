@@ -20,9 +20,10 @@ namespace {
 
 
 INSDeviceReceiver::INSDeviceReceiver(std::string iface, const std::string &device_mac, const bool save_to_file,
-                                     std::string output_folder_path,
+                                     std::string output_folder_path, double horizontal_std,
                                      bool enable_vrs) : interface_name_(std::move(iface)), save_to_file_(save_to_file),
                                                         output_folder_path_(std::move(output_folder_path)),
+                                                        horizontal_std_(horizontal_std),
                                                         enable_vrs_(enable_vrs) {
     device_mac_ = Ethernet::FormatMACAddress(device_mac);
     socket_ptr_ = std::make_shared<EthernetSocket>(interface_name_, device_mac_, buffer_size_, true);
@@ -211,20 +212,24 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
         if (gnss_queue_.size() >= max_gnss_queue_size_) {
             gnss_queue_.pop();
         }
+        GNSSSolutionData previous_gnss = gnss_queue_.back();
         gnss_queue_.push(gnss);
 
-        std::uint8_t current_position_type = gnss.position_type;
-        std::uint8_t previous_position_type = gnss_queue_.back().position_type;
-        if (current_position_type != previous_position_type && current_position_type == 4) {
-            entered_rtk_fixed_ = true;
+        if (gnss.position_type != previous_gnss.position_type && gnss.position_type == 4) {
             Tool::LogMessage(spdlog::level::info, kModule, "Entered RTK_FIXED position type");
-        } else if (current_position_type != previous_position_type && previous_position_type == 4) {
-            entered_rtk_fixed_ = false;
+        } else if (gnss.position_type != previous_gnss.position_type && previous_gnss.position_type == 4) {
             Tool::LogMessage(spdlog::level::warn, kModule, "Lost RTK_FIXED position type");
         }
-
-        // Consider std of latitude and longitude is suffcient
-        float current_std = (gnss.latitude_std + gnss.longitude_std) / 2;
+        // Consider std of latitude and longitude is sufficient
+        double previous_std = (previous_gnss.latitude_std + previous_gnss.longitude_std) / 2;
+        double current_std = (gnss.latitude_std + gnss.longitude_std) / 2;
+        if (previous_std > horizontal_std_ && current_std <= horizontal_std_) {
+            Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Converged to {} m STD", horizontal_std_));
+        } else if (previous_std <= horizontal_std_ && current_std > horizontal_std_) {
+            Tool::LogMessage(spdlog::level::info, kModule,
+                             fmt::format("Diverge outside {} m STD, stop scanning waiting for convergence",
+                                         horizontal_std_));
+        }
     }
     cv_.notify_one();
     // Fire GNSS callback outside the queue lock
