@@ -21,7 +21,7 @@
 static std::atomic<bool> g_terminate{false};
 static std::atomic<uint64_t> g_dropped_frames{0};
 
-static constexpr size_t kMaxQueueSize = 200;
+static constexpr size_t kMaxQueueSize = 256;
 static constexpr uint32_t kFileFormatVersion = 1;
 static constexpr std::array<char, 8> kFileMagic = { 'L', 'I', 'D', 'A', 'R', 'P', 'C', 'D' };
 
