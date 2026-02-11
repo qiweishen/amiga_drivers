@@ -197,7 +197,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
 
     const double stationary_duration = current_time - stationary_start_time_;
     Tool::LogMessage(spdlog::level::info, kModule,
-                     fmt::format("Computation #{} at {:.1f}s stationary: roll={:.4f}deg pitch={:.4f}deg",
+                     fmt::format("Computation #{} at {:.1f}s stationary: roll={:.4f} deg pitch={:.4f} deg",
                                  stable_count_ + 1, stationary_duration,
                                  alignment.roll / kDegToRad, alignment.pitch / kDegToRad));
 
@@ -245,7 +245,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     } else {
         if (has_previous_result_) {
             Tool::LogMessage(spdlog::level::warn, kModule,
-                             fmt::format("Result unstable (roll delta={:.4f}deg, pitch delta={:.4f}deg). "
+                             fmt::format("Result unstable (roll delta={:.4f} deg, pitch delta={:.4f} deg). "
                                          "Reset stable count.",
                                          std::abs(result.roll - last_result_.roll) / kDegToRad,
                                          std::abs(result.pitch - last_result_.pitch) / kDegToRad));

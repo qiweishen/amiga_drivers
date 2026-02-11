@@ -86,7 +86,7 @@ int main(int argc, char *argv[]) {
     // Start receiver thread and capture the first GGA.
     auto receiver_ptr = std::make_shared<INSDeviceReceiver>(
         device.interface_name, device.mac_address, configures.GetBoolean("INS401 Receiver", "save_data", true),
-        data_folder_path, configures.GetBoolean("IMU Initial Initialization", "gnss_position_std_threshold", 0.02),
+        data_folder_path, configures.GetReal("IMU Initial Initialization", "gnss_position_std_threshold", 0.02),
         configures.GetBoolean("NTRIP Client", "enable_vrs", false));
     // Register IMU and GNSS callbacks for the initialization monitor.
     receiver_ptr->SetImuCallback([monitor = init_monitor](const RawIMUData &imu) {
