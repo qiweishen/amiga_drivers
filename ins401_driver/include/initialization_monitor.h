@@ -2,6 +2,8 @@
 #define INITIALIZATION_MONITOR_H
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <INIReader.h>
@@ -54,6 +56,9 @@ public:
 
     /// Called from receiver's GNSS callback (1 Hz). Thread-safe.
     void OnGnssData(const GNSSSolutionData &gnss);
+
+    /// Wait until first GNSS arrives and gravity is initialized.
+    bool WaitForFirstGnssAndGravity(std::chrono::milliseconds timeout);
 
     /// Check if static initialization has been declared complete.
     bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }
@@ -112,8 +117,10 @@ private:
     // --- GNSS state ---
     GNSSSolutionData latest_gnss_{};
     bool has_gnss_ = false;
+    bool gravity_ready_ = false;
 
     mutable std::mutex mutex_;
+    std::condition_variable gnss_cv_;
 
     // --- Loading config ---
     void LoadConfig(const INIReader &configures);

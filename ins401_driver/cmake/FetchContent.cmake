@@ -17,10 +17,34 @@ FetchContent_MakeAvailable(eigen)
 
 
 ################################################################################
+# GeographicLib - small C++ library for geodesic area
+FetchContent_Declare(
+        geographiclib
+        GIT_REPOSITORY https://github.com/geographiclib/geographiclib.git
+        GIT_TAG v2.7
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/geographiclib
+)
+FetchContent_MakeAvailable(geographiclib)
+
+
+################################################################################
+# spdlog - Fast C++ logging library
+FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.16.0
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/spdlog
+)
+FetchContent_MakeAvailable(spdlog)
+
+
+################################################################################
 # inih - INI file parser
 FetchContent_Declare(
         inih
-        GIT_REPOSITORY https://github.com/benhoyt/inih
+        GIT_REPOSITORY https://github.com/benhoyt/inih.git
         GIT_TAG r62
         GIT_SHALLOW TRUE
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/inih
@@ -48,15 +72,3 @@ if (NOT inih_POPULATED)
         add_library(inih::inih ALIAS inih)
     endif ()
 endif ()
-
-
-################################################################################
-# spdlog - Fast C++ logging library
-FetchContent_Declare(
-        spdlog
-        GIT_REPOSITORY https://github.com/gabime/spdlog
-        GIT_TAG v1.16.0
-        GIT_SHALLOW TRUE
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/spdlog
-)
-FetchContent_MakeAvailable(spdlog)

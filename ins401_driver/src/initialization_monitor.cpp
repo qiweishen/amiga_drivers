@@ -14,14 +14,6 @@ namespace {
 InitializationMonitor::InitializationMonitor(const INIReader &configures) {
     LoadConfig(configures);
     window_samples_ = config_.min_stationary_duration_s * config_.imu_freq;
-    Tool::LogMessage(spdlog::level::trace, kModule,
-                     fmt::format("Parameters: window={}s ({}samples), recompute={}s, "
-                                 "stable_count={}, stability_threshold={:.2f}deg, "
-                                 "gnss_std_threshold={:.4f}m, gravity={:.5f}m/s^2",
-                                 config_.min_stationary_duration_s, window_samples_,
-                                 config_.recompute_interval_s, config_.required_stable_count,
-                                 config_.stability_threshold_deg,
-                                 config_.gnss_position_std_threshold, config_.gravity));
 }
 
 
@@ -34,6 +26,9 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
     const double current_time = GpsWeekTowToSec(imu.gps_week, imu.gps_millisecs);
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!gravity_ready_) {
+        return;
+    }
 
     // --- Update sliding detection window ---
     detection_window_.push_back(imu);
@@ -97,6 +92,17 @@ void InitializationMonitor::OnGnssData(const GNSSSolutionData &gnss) {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_gnss_ = gnss;
     has_gnss_ = true;
+    if (!gravity_ready_) {
+        config_.gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude, latest_gnss_.height);
+        gravity_ready_ = true;
+        gnss_cv_.notify_all();
+    }
+}
+
+
+bool InitializationMonitor::WaitForFirstGnssAndGravity(const std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return gnss_cv_.wait_for(lock, timeout, [this]() { return gravity_ready_; });
 }
 
 
@@ -123,7 +129,6 @@ void InitializationMonitor::LoadConfig(const INIReader &configures) {
     config_.stability_threshold_deg = configures.GetReal("IMU Initial Initialization", "stability_threshold_deg", 0.1);
     config_.gnss_position_std_threshold = configures.GetReal("IMU Initial Initialization",
                                                              "gnss_position_std_threshold", 0.02);
-    config_.gravity = configures.GetReal("IMU Initial Initialization", "gravity", 9.81);
 }
 
 

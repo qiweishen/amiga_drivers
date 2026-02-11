@@ -101,6 +101,17 @@ int main(int argc, char *argv[]) {
         }
     });
 
+    if (!init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(30))) {
+        Tool::LogMessage(spdlog::level::warn, kModule, "Timed out waiting for first GNSS fix for gravity initialization");
+        g_terminate.store(true, std::memory_order_release);
+        receiver_ptr->Stop();
+        if (receiver_thread.joinable()) {
+            receiver_thread.join();
+        }
+        return 1;
+    }
+    Tool::LogMessage(spdlog::level::info, kModule, "First GNSS received, gravity initialized");
+
 
     // Configure NTRIP client.
     auto ntrip_client_ptr = std::make_unique<NTRIPClient>(configures);

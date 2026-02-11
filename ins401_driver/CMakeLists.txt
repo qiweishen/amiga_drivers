@@ -86,11 +86,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         Threads::Threads
         # Boost
         Boost::boost
-        # Eigen3
-        Eigen3::Eigen
         # FetchContent libraries
-        inih::inih
+        Eigen3::Eigen
+        GeographicLib::GeographicLib
         spdlog::spdlog
+        inih::inih
 )
 
 
@@ -109,7 +109,8 @@ message(STATUS "  Dependencies:")
 message(STATUS "    OpenSSL:        Found")
 message(STATUS "    Boost:          Found")
 message(STATUS "    Eigen3:         ${Eigen3_SOURCE_DIR}")
-message(STATUS "    inih:           ${inih_SOURCE_DIR}")
+message(STATUS "    GeographicLib:  ${GeographicLib_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
+message(STATUS "    inih:           ${inih_SOURCE_DIR}")
 message(STATUS "========================================")
 message(STATUS "")
