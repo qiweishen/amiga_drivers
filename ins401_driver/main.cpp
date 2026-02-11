@@ -143,9 +143,8 @@ int main(int argc, char *argv[]) {
             init_logged = true;
             auto result = init_monitor->GetResult();
             Tool::LogMessage(spdlog::level::info, kModule,
-                             fmt::format("Static initialization complete. Roll={:.4f}deg Pitch={:.4f}deg Yaw={:.4f}deg",
-                                         result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
-                                         result.yaw * 180.0 / M_PI));
+                             fmt::format("Static initialization complete. Roll={:.4f}deg; Pitch={:.4f}deg",
+                                         result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI));
         }
     }
 

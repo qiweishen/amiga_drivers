@@ -14,87 +14,87 @@ enum class EndianType {
 // Parsed GNSS position and velocity solution.
 struct GNSSSolutionData {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
-    std::uint8_t position_type;
-    double latitude;
-    double longitude;
-    double height;
-    float latitude_std;
-    float longitude_std;
-    float height_std;
+    std::uint32_t gps_millisecs; // ms
+    std::uint8_t position_type; // 0: Invalid; 1: SPP; 2: RTD; 3: INS_PROPOGATED; 4: RTK_FIXED; 5: RTK_FLOAT
+    double latitude; // deg
+    double longitude; // deg
+    double height; // m
+    float latitude_std; // m
+    float longitude_std; // m
+    float height_std; // m
     std::uint8_t num_of_SVs;
     std::uint8_t num_of_SVs_in_solution;
     float hdop;
-    float diffage;
-    float north_vel;
-    float east_vel;
-    float up_vel;
-    float north_vel_std;
-    float east_vel_std;
-    float up_vel_std;
+    float diffage; // s
+    float north_vel; // m/s
+    float east_vel; // m/s
+    float up_vel; // m/s
+    float north_vel_std; // m/s
+    float east_vel_std; // m/s
+    float up_vel_std; // m/s
 };
 
 
 // Parsed INS navigation solution.
 struct INSSolutionData {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
-    std::uint8_t ins_status;
-    std::uint8_t ins_position_type;
-    double latitude;
-    double longitude;
-    double height;
-    float north_vel;
-    float east_vel;
-    float up_vel;
-    float longitudinal_vel;
-    float lateral_vel;
-    float roll;
-    float pitch;
-    float heading;
-    float latitude_std;
-    float longitude_std;
-    float height_std;
-    float north_vel_std;
-    float east_vel_std;
-    float up_vel_std;
-    float long_vel_std;
-    float lat_vel_std;
-    float roll_std;
-    float pitch_std;
-    float heading_std;
-    std::uint16_t continent_id;
+    std::uint32_t gps_millisecs; // ms
+    std::uint8_t ins_status; // 0: Invalid; 1: INS_ALIGNING; 2: INS_HIGH_VARIANCE; 3: INS_SOLUTION_GOOD; 4: INS_SOLUTION_FREE; 5: INS_ALIGNMENT_COMPLETE
+    std::uint8_t ins_position_type; // 0: Invalid; 1: SPP/INS; 2: RTD/INS; 3: INS_PROPOGATED; 4: RTK_FIXED/INS; 5: RTK_FLOAT/INS
+    double latitude; // deg
+    double longitude; // deg
+    double height; // m
+    float north_vel; // m/s
+    float east_vel; // m/s
+    float up_vel; // m/s
+    float longitudinal_vel; // m/s
+    float lateral_vel; // m/s
+    float roll; // deg
+    float pitch; // deg
+    float heading; // deg
+    float latitude_std; // m
+    float longitude_std; // m
+    float height_std; // m
+    float north_vel_std; // m/s
+    float east_vel_std; // m/s
+    float up_vel_std; // m/s
+    float long_vel_std; // m/s
+    float lat_vel_std; // m/s
+    float roll_std; // deg
+    float pitch_std; // deg
+    float heading_std; // deg
+    std::uint16_t continent_id; // -2: ID_NONE; -1: ID_ERROR; 0: ID_UNKNOWN; 1: ID_AISA; 2: ID_EUROPE; 3: ID_OCEANIA; 4: ID_AFRICA; 5: ID_NORTHAMERICA; 6: ID_SOUTHAMERICA; 7: ID_ANTARCTICA
 };
 
 
 // Device diagnostic and health status.
 struct DiagnosticMessage {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
-    std::array<int, 32> device_status;
-    float imu_temperature;
-    float mcu_temperature;
-    float gnss_chip_temperature;
+    std::uint32_t gps_millisecs; // ms
+    std::array<int, 32> device_status; // Refer to the Table 7 in manual
+    float imu_temperature; // ℃
+    float mcu_temperature; // ℃
+    float gnss_chip_temperature; // ℃
 };
 
 
 // Raw IMU accelerometer and gyroscope measurements.
 struct RawIMUData {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
-    float acc_x;
-    float acc_y;
-    float acc_z;
-    float gyro_x;
-    float gyro_y;
-    float gyro_z;
+    std::uint32_t gps_millisecs; // ms
+    float acc_x; // m/s^2
+    float acc_y; // m/s^2
+    float acc_z; // m/s^2
+    float gyro_x; // deg/s
+    float gyro_y; // deg/s
+    float gyro_z; // deg/s
 };
 
 
 // IMU data with Eigen vectors for mathematical operations.
 struct ImuData {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
+    std::uint32_t gps_millisecs; // ms
     Eigen::Vector3d accel; // m/s^2
     Eigen::Vector3d gyro; // deg/s
 };
@@ -103,11 +103,11 @@ struct ImuData {
 // GNSS data with Eigen vectors for mathematical operations.
 struct GnssData {
     std::uint16_t gps_week;
-    std::uint32_t gps_millisecs;
-    std::uint8_t position_type;
+    std::uint32_t gps_millisecs; // ms
+    std::uint8_t position_type; // same with the above
     Eigen::Vector3d enu_vel; // east, north, up velocity (m/s)
-    float latitude_std;
-    float longitude_std;
+    float latitude_std; // m
+    float longitude_std; // m
 };
 
 

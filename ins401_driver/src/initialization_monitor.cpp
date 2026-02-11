@@ -42,6 +42,11 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
 
     // Not enough samples yet for detection
     if (detection_window_.size() < window_samples_) {
+        if (detection_window_.size() % 150 == 0) {
+            Tool::LogMessage(spdlog::level::info, kModule,
+                             fmt::format("Collecting data for initialization ({}/{})", detection_window_.size(),
+                                         window_samples_));
+        }
         return;
     }
 
@@ -56,8 +61,7 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
             computation_buffer_.clear();
             computation_buffer_.assign(detection_window_.begin(), detection_window_.end());
 
-            Tool::LogMessage(spdlog::level::info, kModule,
-                             fmt::format("Stationary detected at GPS time {:.3f}s", stationary_start_time_));
+            Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Stationary detected"));
         } else {
             // Still stationary - append to growing computation buffer
             computation_buffer_.push_back(imu);
@@ -160,8 +164,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     std::vector<ImuData> imu_segment(computation_buffer_.begin(), computation_buffer_.end());
 
     // Run StaticInitializer
-    const Eigen::Vector3d gravity_enu(0.0, 0.0, -config_.gravity);
-    StaticInitializer initializer(gravity_enu, imu_segment);
+    StaticInitializer initializer(config_.gravity, imu_segment);
 
     auto alignment = initializer.AlignImuWithGravity();
     auto bias = initializer.ComputeImuBias();
@@ -174,10 +177,6 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     result.accel_bias = bias.accel_bias;
     result.roll = alignment.roll;
     result.pitch = alignment.pitch;
-    result.yaw = alignment.yaw;
-    result.roll_std = alignment.roll_std;
-    result.pitch_std = alignment.pitch_std;
-    result.yaw_std = alignment.yaw_std;
     result.local_gravity = config_.gravity;
 
     // Fill position from latest GNSS if available
@@ -196,6 +195,9 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
         stable_count_++;
         Tool::LogMessage(spdlog::level::info, kModule,
                          fmt::format("Stable computation {}/{}", stable_count_, config_.required_stable_count));
+        Tool::LogMessage(spdlog::level::info, kModule,
+                         fmt::format("GNSS status: position type {}; horizontal STD {}", latest_gnss_.position_type,
+                                     (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
 
         // Check if we have enough stable computations AND GNSS conditions are met
         if (stable_count_ >= config_.required_stable_count) {
@@ -205,24 +207,19 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
                 initialized_.store(true, std::memory_order_release);
 
                 Tool::LogMessage(spdlog::level::info, kModule,
-                                 "=== STATIC INITIALIZATION COMPLETE ===");
+                                 fmt::format(
+                                     "=== STATIC INITIALIZATION COMPLETE === : Roll:  {:.4f} deg; Pitch: {:.4f} deg",
+                                     result.roll / kDegToRad, result.pitch / kDegToRad));
                 Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  Roll:  {:.4f} deg (std: {:.4f} deg)",
-                                             result.roll / kDegToRad, result.roll_std / kDegToRad));
+                                 fmt::format(
+                                     "=== STATIC INITIALIZATION COMPLETE === : Gyro bias:  [{:.6f}, {:.6f}, {:.6f}] deg/s",
+                                     result.gyro_bias.x(), result.gyro_bias.y(), result.gyro_bias.z()));
                 Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  Pitch: {:.4f} deg (std: {:.4f} deg)",
-                                             result.pitch / kDegToRad, result.pitch_std / kDegToRad));
+                                 fmt::format(
+                                     "=== STATIC INITIALIZATION COMPLETE === : Accel bias: [{:.6f}, {:.6f}, {:.6f}] m/s^2",
+                                     result.accel_bias.x(), result.accel_bias.y(), result.accel_bias.z()));
                 Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  Yaw:   {:.4f} deg (std: {:.4f} deg)",
-                                             result.yaw / kDegToRad, result.yaw_std / kDegToRad));
-                Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  Gyro bias:  [{:.6f}, {:.6f}, {:.6f}] deg/s",
-                                             result.gyro_bias.x(), result.gyro_bias.y(), result.gyro_bias.z()));
-                Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  Accel bias: [{:.6f}, {:.6f}, {:.6f}] m/s^2",
-                                             result.accel_bias.x(), result.accel_bias.y(), result.accel_bias.z()));
-                Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("  GNSS position std: {:.4f} m",
+                                 fmt::format("=== STATIC INITIALIZATION COMPLETE === : GNSS position std: {:.4f} m",
                                              (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,

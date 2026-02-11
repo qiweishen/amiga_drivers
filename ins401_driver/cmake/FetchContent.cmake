@@ -13,6 +13,7 @@ FetchContent_Declare(
         GIT_SHALLOW TRUE
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/eigen
 )
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(eigen)
 
 
