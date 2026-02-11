@@ -130,7 +130,7 @@ private:
 
     void ComputeAndCheck(double current_time);
 
-    bool CheckStability(const InitializationResult &new_result);
+    bool CheckStability(const InitializationResult &new_result) const;
 
     bool CheckGnssConditions() const;
 

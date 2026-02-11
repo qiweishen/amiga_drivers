@@ -13,7 +13,15 @@ namespace {
 
 InitializationMonitor::InitializationMonitor(const INIReader &configures) {
     LoadConfig(configures);
-    window_samples_ = config_.min_stationary_duration_s * config_.imu_freq;
+    const int configured_window_samples = config_.min_stationary_duration_s * config_.imu_freq;
+    if (configured_window_samples <= 0) {
+        window_samples_ = 1;
+        Tool::LogMessage(spdlog::level::err, kModule,
+                         fmt::format("Invalid stationary window configuration: min_stationary_duration_s={} imu_freq={}.",
+                                     config_.min_stationary_duration_s, config_.imu_freq));
+    } else {
+        window_samples_ = static_cast<size_t>(configured_window_samples);
+    }
 }
 
 
@@ -42,9 +50,9 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
 
     // Not enough samples yet for detection
     if (detection_window_.size() < window_samples_) {
-        if (detection_window_.size() % 150 == 0) {
+        if (detection_window_.size() % 100 == 0) {
             Tool::LogMessage(spdlog::level::info, kModule,
-                             fmt::format("Collecting data for initialization ({}/{})", detection_window_.size(),
+                             fmt::format("Collecting data for 1# initialization ({}/{})", detection_window_.size(),
                                          window_samples_));
         }
         return;
@@ -83,6 +91,8 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
             Tool::LogMessage(spdlog::level::warn, kModule,
                              fmt::format("Stationarity lost at GPS time {:.3f}s, resetting.", current_time));
             Reset();
+        } else {
+            Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Not stationary for 1# initialization"));
         }
     }
 }
@@ -98,7 +108,7 @@ void InitializationMonitor::OnGnssData(const GNSSSolutionData &gnss) {
     has_gnss_ = true;
     if (!gravity_ready_) {
         // config_.gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude, latest_gnss_.height);
-        config_.gravity = -9.7968;
+        config_.gravity = 9.7968;
         gravity_ready_ = true;
         gnss_cv_.notify_all();
     }
@@ -223,7 +233,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
                                              (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,
-                                 "Stability reached but GNSS conditions not met. Waiting for RTK_FIXED and low std.");
+                                 "Stability reached but GNSS conditions not met. Waiting for fresh RTK_FIXED and low std.");
             }
         }
     } else {
@@ -242,7 +252,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
 }
 
 
-bool InitializationMonitor::CheckStability(const InitializationResult &new_result) {
+bool InitializationMonitor::CheckStability(const InitializationResult &new_result) const {
     if (!has_previous_result_) {
         // First computation - cannot compare yet, treat as stable to start counting
         return true;
@@ -276,6 +286,8 @@ bool InitializationMonitor::CheckGnssConditions() const {
 void InitializationMonitor::Reset() {
     is_stationary_ = false;
     stationary_start_time_ = 0.0;
+    detection_window_.clear();
+    window_stats_ = WindowStats{};
     computation_buffer_.clear();
     last_computation_time_ = 0.0;
     stable_count_ = 0;
