@@ -137,6 +137,14 @@ private:
     std::size_t last_flush_time_ = 0;
 
     double horizontal_std_;
+    static constexpr std::uint8_t GnssTransitionConfirmFrames_ = 3;
+    bool gnss_state_initialized_ = false;
+    bool stable_rtk_fixed_ = false;
+    bool stable_std_converged_ = false;
+    bool pending_rtk_fixed_ = false;
+    bool pending_std_converged_ = false;
+    std::uint8_t pending_rtk_count_ = 0;
+    std::uint8_t pending_std_count_ = 0;
 
     bool enable_vrs_;
     std::mutex first_gga_mutex_;

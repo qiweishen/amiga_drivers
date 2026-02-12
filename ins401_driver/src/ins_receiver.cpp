@@ -212,23 +212,59 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
         if (gnss_queue_.size() >= max_gnss_queue_size_) {
             gnss_queue_.pop();
         }
-        GNSSSolutionData previous_gnss = gnss_queue_.back();
         gnss_queue_.push(gnss);
 
-        if (gnss.position_type != previous_gnss.position_type && gnss.position_type == 4) {
-            Tool::LogMessage(spdlog::level::info, kModule, "Entered RTK_FIXED position type");
-        } else if (gnss.position_type != previous_gnss.position_type && previous_gnss.position_type == 4) {
-            Tool::LogMessage(spdlog::level::warn, kModule, "Lost RTK_FIXED position type");
-        }
-        // Consider std of latitude and longitude is sufficient
-        double previous_std = (previous_gnss.latitude_std + previous_gnss.longitude_std) / 2;
-        double current_std = (gnss.latitude_std + gnss.longitude_std) / 2;
-        if (previous_std > horizontal_std_ && current_std <= horizontal_std_) {
-            Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Converged to {} m STD", horizontal_std_));
-        } else if (previous_std <= horizontal_std_ && current_std > horizontal_std_) {
-            Tool::LogMessage(spdlog::level::info, kModule,
-                             fmt::format("Diverge outside {} m STD, stop scanning waiting for convergence",
-                                         horizontal_std_));
+        const bool current_rtk_fixed = gnss.position_type == 4;
+        const double current_std = (gnss.latitude_std + gnss.longitude_std) / 2.0;
+        const bool current_std_converged = current_std <= horizontal_std_;
+
+        if (!gnss_state_initialized_) {
+            gnss_state_initialized_ = true;
+            stable_rtk_fixed_ = current_rtk_fixed;
+            stable_std_converged_ = current_std_converged;
+            pending_rtk_count_ = 0;
+            pending_std_count_ = 0;
+        } else {
+            if (current_rtk_fixed == stable_rtk_fixed_) {
+                pending_rtk_count_ = 0;
+            } else {
+                if (pending_rtk_count_ == 0 || pending_rtk_fixed_ != current_rtk_fixed) {
+                    pending_rtk_fixed_ = current_rtk_fixed;
+                    pending_rtk_count_ = 1;
+                } else {
+                    ++pending_rtk_count_;
+                }
+                if (pending_rtk_count_ >= GnssTransitionConfirmFrames_) {
+                    stable_rtk_fixed_ = current_rtk_fixed;
+                    pending_rtk_count_ = 0;
+                    const auto level = stable_rtk_fixed_ ? spdlog::level::info : spdlog::level::warn;
+                    Tool::LogMessage(level, kModule,
+                                     stable_rtk_fixed_
+                                         ? "Entered RTK_FIXED position type"
+                                         : "Lost RTK_FIXED position type");
+                }
+            }
+
+            if (current_std_converged == stable_std_converged_) {
+                pending_std_count_ = 0;
+            } else {
+                if (pending_std_count_ == 0 || pending_std_converged_ != current_std_converged) {
+                    pending_std_converged_ = current_std_converged;
+                    pending_std_count_ = 1;
+                } else {
+                    ++pending_std_count_;
+                }
+                if (pending_std_count_ >= GnssTransitionConfirmFrames_) {
+                    stable_std_converged_ = current_std_converged;
+                    pending_std_count_ = 0;
+                    const auto level = stable_std_converged_ ? spdlog::level::info : spdlog::level::warn;
+                    Tool::LogMessage(level, kModule,
+                                     stable_std_converged_
+                                         ? fmt::format("Converged to {:.3f} m STD threshold", horizontal_std_)
+                                         : fmt::format("Horizontal STD diverged above {:.3f} m threshold",
+                                                       horizontal_std_));
+                }
+            }
         }
     }
     cv_.notify_one();
@@ -768,10 +804,10 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
         }
 
         std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
-        std::string gnss_filename = fmt::format("{}/gnss_data_{}.txt", output_folder_path_, timestamp);
-        std::string ins_filename = fmt::format("{}/ins_data_{}.txt", output_folder_path_, timestamp);
-        std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.txt", output_folder_path_, timestamp);
-        std::string imu_filename = fmt::format("{}/imu_data_{}.txt", output_folder_path_, timestamp);
+        std::string gnss_filename = fmt::format("{}/gnss_data_{}.csv", output_folder_path_, timestamp);
+        std::string ins_filename = fmt::format("{}/ins_data_{}.csv", output_folder_path_, timestamp);
+        std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.csv", output_folder_path_, timestamp);
+        std::string imu_filename = fmt::format("{}/imu_data_{}.csv", output_folder_path_, timestamp);
         std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_data_{}.rtcm3", output_folder_path_, timestamp);
         std::string nmea_filename = fmt::format("{}/nmea_message_{}.txt", output_folder_path_, timestamp);
 
