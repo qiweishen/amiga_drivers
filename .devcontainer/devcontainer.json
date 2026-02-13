@@ -8,7 +8,13 @@
     "remoteUser": "dev",
     "updateRemoteUserUID": false,
 
-    "customizations": {
+	"customizations": {
+		"jetbrains": {
+			"backend": "CLion",
+			"plugins": [
+				"com.github.copilot"
+			],
+		},
         "vscode": {
             "extensions": [
                 "ms-vscode.cpptools",
