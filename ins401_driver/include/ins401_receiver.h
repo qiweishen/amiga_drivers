@@ -19,8 +19,8 @@ class NTRIPClient;
 // INS401 receiver with queues and optional file logging.
 class INSDeviceReceiver {
 public:
-    explicit INSDeviceReceiver(std::string iface, const std::string &device_mac, bool save_to_file,
-                               std::string output_folder_path, double horizontal_std, bool enable_vrs=false);
+    explicit INSDeviceReceiver(std::string iface, const std::string &device_mac, std::string output_folder_path,
+                               bool check_rtk, bool enable_vrs, double horizontal_std);
 
     ~INSDeviceReceiver();
 
@@ -41,6 +41,27 @@ public:
     bool GetGNSSData(std::vector<GNSSSolutionData> &data, std::size_t max_count = 10);
 
     bool GetIMUData(std::vector<RawIMUData> &data, std::size_t max_count = 500);
+
+    using NmeaCallback = std::function<void(const std::string &)>;
+    using ImuCallback = std::function<void(const RawIMUData &)>;
+    using GnssCallback = std::function<void(const GNSSSolutionData &)>;
+
+    void SetNmeaCallback(NmeaCallback callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        nmea_callback_ = std::move(callback);
+    }
+
+    void SetImuCallback(ImuCallback callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        imu_callback_ = std::move(callback);
+    }
+
+    void SetGnssCallback(GnssCallback callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        gnss_callback_ = std::move(callback);
+    }
+
+    void SetNtripClient(NTRIPClient *client);
 
 private:
     std::shared_ptr<EthernetSocket> socket_ptr_;
@@ -78,38 +99,11 @@ private:
     mutable std::mutex queue_mutex_;
     std::condition_variable cv_;
 
-public:
-    using NmeaCallback = std::function<void(const std::string &)>;
-    using ImuCallback = std::function<void(const RawIMUData &)>;
-    using GnssCallback = std::function<void(const GNSSSolutionData &)>;
-
-    void SetNmeaCallback(NmeaCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        nmea_callback_ = std::move(callback);
-    }
-
-    void SetImuCallback(ImuCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        imu_callback_ = std::move(callback);
-    }
-
-    void SetGnssCallback(GnssCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        gnss_callback_ = std::move(callback);
-    }
-
-    void SetNtripClient(NTRIPClient *client);
-
-    // std::string WaitForFirstGga(const std::atomic<bool> *terminate_flag = nullptr,
-    //                             std::chrono::milliseconds wait_step = std::chrono::milliseconds(200));
-
-private:
     mutable std::mutex callback_mutex_;
     NmeaCallback nmea_callback_;
     ImuCallback imu_callback_;
     GnssCallback gnss_callback_;
 
-    bool save_to_file_;
     std::string output_folder_path_;
     std::thread writer_thread_;
 
@@ -136,6 +130,7 @@ private:
     std::vector<char> nmea_file_buffer_;
     std::size_t last_flush_time_ = 0;
 
+    bool check_rtk_;
     double horizontal_std_;
     static constexpr std::uint8_t GnssTransitionConfirmFrames_ = 3;
     bool gnss_state_initialized_ = false;
@@ -188,6 +183,8 @@ private:
     void WriteRTCMRoverBatch(const std::vector<std::vector<std::uint8_t> > &batch);
 
     void WriteNMEABatch(const std::vector<std::string> &batch);
+
+    void MonitorGNSSStatus(GNSSSolutionData &gnss);
 };
 
 

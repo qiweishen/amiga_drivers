@@ -12,8 +12,8 @@
 #include <spdlog/spdlog.h>
 
 #include "initialization_monitor.h"
-#include "ins_discover.h"
-#include "ins_receiver.h"
+#include "ins401_discover.h"
+#include "ins401_receiver.h"
 #include "ntrip_client.h"
 #include "tool.h"
 
@@ -40,7 +40,6 @@ int main(int argc, char *argv[]) {
     std::signal(SIGTSTP, SignalHandler); // Ctrl+Z
     std::signal(SIGHUP, SignalHandler); // Shutdown the terminal
 
-    // ---------------------------------------------------------------------------------------
     // Load config and prepare output directory.
     std::string config_path = argc > 1 ? argv[1] : "../../Config.ini";
     const INIReader configures(config_path);
@@ -49,7 +48,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::string output_folder_path = configures.Get("General", "output_directory", "./data");
+    std::string output_folder_path = configures.Get("General", "Output Directory", "./data");
     auto now = std::chrono::system_clock::now();
     std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
     std::string data_folder_path = fmt::format("{}/{}", output_folder_path, timestamp);
@@ -86,10 +85,13 @@ int main(int argc, char *argv[]) {
 
 
     // Start receiver thread and capture the first GGA.
-    auto receiver_ptr = std::make_shared<INSDeviceReceiver>(
-        device.interface_name, device.mac_address, configures.GetBoolean("INS401 Receiver", "save_data", true),
-        data_folder_path, configures.GetReal("IMU Initial Initialization", "gnss_position_std_threshold", 0.02),
-        configures.GetBoolean("NTRIP Client", "enable_vrs", false));
+    auto receiver_ptr = std::make_shared<INSDeviceReceiver>(device.interface_name, device.mac_address, data_folder_path,
+                                                            configures.GetBoolean("NTRIP Client", "Check RTK", false),
+                                                            configures.GetBoolean("NTRIP Client", "Enable VRS", false),
+                                                            configures.GetReal(
+                                                                "Static Initial Initialization",
+                                                                "gnss_position_std_threshold", 0.02)
+    );
     // Register IMU and GNSS callbacks for the initialization monitor.
     receiver_ptr->SetImuCallback([monitor = init_monitor](const RawIMUData &imu) {
         monitor->OnImuData(imu);
@@ -106,9 +108,10 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    if (!init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(30))) {
+    std::pair<bool, double> gravity_initial = init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(5));
+    if (!gravity_initial.first) {
         Tool::LogMessage(spdlog::level::warn, kModule,
-                         "Timed out waiting for first GNSS fix for gravity initialization");
+                         "Timed out waiting for first GNSS data for gravity initialization");
         g_terminate.store(true, std::memory_order_release);
         receiver_ptr->Stop();
         if (receiver_thread.joinable()) {
@@ -116,12 +119,15 @@ int main(int argc, char *argv[]) {
         }
         return 1;
     }
-    Tool::LogMessage(spdlog::level::info, kModule, "First GNSS received, gravity initialized");
+    Tool::LogMessage(spdlog::level::info, kModule,
+                     fmt::format("Gravity for initialization: {:.6f} m/^2", gravity_initial.second));
 
 
     // Configure NTRIP client.
-    auto ntrip_client_ptr = std::make_unique<NTRIPClient>(configures);
-    receiver_ptr->SetNtripClient(ntrip_client_ptr.get());
+    auto ntrip_client_ptr = std::make_unique<NTRIPClient>(configures, data_folder_path);
+    if (configures.GetBoolean("NTRIP Client", "Enable VRS", false)) {
+        receiver_ptr->SetNtripClient(ntrip_client_ptr.get());
+    }
 
 
     // Forward RTCM to device and start the NTRIP client.
@@ -134,8 +140,15 @@ int main(int argc, char *argv[]) {
             ntrip_client_ptr->Connect();
             ntrip_client_ptr->StartReceiving();
         } catch (const std::exception &e) {
-            Tool::LogMessage(spdlog::level::err, kModule, fmt::format("NTRIP client exception: {}", e.what()));
-            g_terminate.store(true);
+            if (ntrip_client_ptr->IsRTKRequired()) {
+                Tool::LogMessage(spdlog::level::err, kModule, fmt::format("NTRIP client exception: {}", e.what()));
+                g_terminate.store(true);
+            } else {
+                Tool::LogMessage(spdlog::level::warn, kModule,
+                                 fmt::format("NTRIP client exception (ignored because RTK not required): {}",
+                                             e.what()));
+                ntrip_client_ptr->Disconnect();
+            }
         }
     });
 

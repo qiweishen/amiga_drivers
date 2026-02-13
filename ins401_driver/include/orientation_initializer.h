@@ -24,7 +24,8 @@ struct InitializationResult {
 
 class StaticInitializer {
 public:
-    explicit StaticInitializer(const double &gravity, const std::vector<ImuData> &static_imu, bool accel_points_with_gravity = true);
+    explicit StaticInitializer(const double &gravity, const std::vector<ImuData> &static_imu,
+                               bool accel_points_with_gravity = true);
 
     ~StaticInitializer() = default;
 

@@ -1,9 +1,11 @@
 #ifndef NTRIP_CLIENT_H
 #define NTRIP_CLIENT_H
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -33,6 +35,7 @@ class NTRIPClient {
 public:
     // Configuration
     struct Config {
+        bool check_rtk;
         std::string host; // NTRIP caster hostname
         int port; // Port number
         std::string mount_point; // Mount point name
@@ -40,7 +43,7 @@ public:
         std::string password; // Authentication password
         bool is_ssl = false; // Use SSL/TLS connection
         bool verify_ssl = false; // Verify SSL certificate
-        bool enable_vrs = false; // Enable periodic GGA for VRS
+        bool use_vrs = false; // Enable periodic GGA for VRS
         int gga_interval = 30; // GGA send interval in seconds
 
         // Connection parameters
@@ -92,7 +95,7 @@ public:
     using DataCallback = std::function<void(const uint8_t *, size_t)>;
     using MessageCallback = std::function<void(const std::vector<uint8_t> &)>;
 
-    explicit NTRIPClient(const INIReader &configures);
+    explicit NTRIPClient(const INIReader &configures, std::string output_folder_path);
 
     ~NTRIPClient();
 
@@ -110,12 +113,13 @@ public:
 
     void StartReceiving();
 
-    void StopReceiving();
-
     bool IsReceiving() const { return receiving_.load(std::memory_order_acquire); }
 
     // Get mount points from caster
     std::vector<MountPoint> GetSourceTable();
+
+    // Check if RTK is required
+    bool IsRTKRequired() const;
 
     // Callback setters
     void SetDataCallback(DataCallback callback) {
@@ -139,7 +143,9 @@ public:
     Statistics GetStatistics() const;
 
 private:
-    // --- Loading config ---
+    void StopReceiving();
+
+    // Loading config
     void LoadConfig(const INIReader &configures);
 
     // Network operations
@@ -155,7 +161,7 @@ private:
 
     void CloseConnection();
 
-    void SendGgaIfNeeded();
+    void SendGGA();
 
     // Data operations
     ssize_t SendData(const void *data, size_t size) const;
@@ -223,6 +229,11 @@ private:
     // RTCM buffer
     std::vector<uint8_t> rtcm_buffer_;
     size_t rtcm_sync_lost_count_ = 0;
+
+    // RTCM base stream recording (for PPK)
+    std::string output_folder_path_;
+    std::ofstream rtcm_base_file_;
+    std::array<char, 256 * 1024> rtcm_base_file_buffer_{};
 
     // OpenSSL initialization
     static std::once_flag ssl_init_flag_;

@@ -121,12 +121,14 @@ void EthernetSocket::CreateSocket() {
     std::strncpy(ifr.ifr_name, interface_name_.c_str(), IFNAMSIZ - 1);
 
     if (ioctl(socket_fd_, SIOCGIFINDEX, &ifr) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to get index for interface {}", interface_name_), std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule,
+                         fmt::format("Failed to get index for interface {}", interface_name_), std::strerror(errno));
     }
     if_index_ = ifr.ifr_ifindex;
 
     if (ioctl(socket_fd_, SIOCGIFHWADDR, &ifr) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to get MAC for interface {}", interface_name_), std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule,
+                         fmt::format("Failed to get MAC for interface {}", interface_name_), std::strerror(errno));
     }
     std::memcpy(local_mac_.data(), ifr.ifr_hwaddr.sa_data, kMacAddressSize);
 
@@ -136,7 +138,8 @@ void EthernetSocket::CreateSocket() {
     sll.sll_ifindex = if_index_;
     sll.sll_protocol = htons(ETH_P_ALL);
     if (bind(socket_fd_, reinterpret_cast<sockaddr *>(&sll), sizeof(sll)) < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to bind socket to interface {}", interface_name_),std::strerror(errno));
+        Tool::LogMessage(spdlog::level::err, kModule,
+                         fmt::format("Failed to bind socket to interface {}", interface_name_), std::strerror(errno));
     }
 
     // Set receive buffer size
@@ -144,7 +147,9 @@ void EthernetSocket::CreateSocket() {
         int buf_size = static_cast<int>(std::min(recv_buffer_size_,
                                                  static_cast<size_t>(std::numeric_limits<int>::max())));
         if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size)) < 0) {
-            Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Failed to set receive buffer size on interface {}", interface_name_), std::strerror(errno));
+            Tool::LogMessage(spdlog::level::warn, kModule,
+                             fmt::format("Failed to set receive buffer size on interface {}", interface_name_),
+                             std::strerror(errno));
         }
     }
 }
@@ -234,7 +239,9 @@ namespace Ethernet {
                         interfaces.emplace_back(ifa->ifa_name, std::move(mac_str));
                     }
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Failed to get flags for interface {}", ifa->ifa_name), std::strerror(errno));
+                    Tool::LogMessage(spdlog::level::warn, kModule,
+                                     fmt::format("Failed to get flags for interface {}", ifa->ifa_name),
+                                     std::strerror(errno));
                 }
             }
         }
@@ -394,11 +401,14 @@ namespace Ethernet {
             if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
                 hex_only += c;
             } else if (c != ':' && c != '-' && c != ' ') {
-                Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Invalid character '{}' in MAC address: '{}'", c, mac_str));
+                Tool::LogMessage(spdlog::level::err, kModule,
+                                 fmt::format("Invalid character '{}' in MAC address: '{}'", c, mac_str));
             }
         }
         if (hex_only.length() != 12) {
-            Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Invalid MAC address length (expected 12 hex digits, got {}): '{}'", hex_only.length(), mac_str));
+            Tool::LogMessage(spdlog::level::err, kModule,
+                             fmt::format("Invalid MAC address length (expected 12 hex digits, got {}): '{}'",
+                                         hex_only.length(), mac_str));
         }
         std::array<uint8_t, 6> result{};
         for (size_t i = 0; i < 6; ++i) {

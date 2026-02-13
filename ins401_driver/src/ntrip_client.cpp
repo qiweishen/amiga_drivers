@@ -13,6 +13,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
+#include <spdlog/fmt/bundled/ranges.h>
+#include <spdlog/fmt/std.h>
 
 #include "ethernet_socket.h"
 #include "ins401_protocol.h"
@@ -28,10 +30,11 @@ namespace {
 std::once_flag NTRIPClient::ssl_init_flag_;
 
 
-NTRIPClient::NTRIPClient(const INIReader &configures) {
+NTRIPClient::NTRIPClient(const INIReader &configures, std::string output_folder_path) : output_folder_path_(std::move(output_folder_path)) {
     LoadConfig(configures);
     // Reserve buffer space
     rtcm_buffer_.reserve(config_.max_buffer_size);
+    // TODO: Enable SSL connection
     if (config_.is_ssl) {
         // Initialize OpenSSL once
         std::call_once(ssl_init_flag_, InitOpenSSL);
@@ -79,8 +82,9 @@ bool NTRIPClient::Connect() {
     }
     // Connection successful
     connected_.store(true, std::memory_order_release);
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Connected to {}:{} with mount point '{}' successfully",
-                                                               config_.host, config_.port, config_.mount_point));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+                         "Connected to NTRIP caster {}:{} with mount point '{}' successfully",
+                         config_.host, config_.port, config_.mount_point));
     // Reset statistics
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -101,6 +105,16 @@ void NTRIPClient::Disconnect() {
     connected_.store(false, std::memory_order_release);
     // Close network connection
     CloseConnection();
+    Tool::LogMessage(spdlog::level::info, kModule,
+                     fmt::format("Disconnected from NTRIP caster {}:{} with mount point '{}'", config_.host,
+                                 config_.port, config_.mount_point));
+    if (stats_.bytes_received > 0) {
+        Tool::LogMessage(spdlog::level::info, kModule,
+                         fmt::format(
+                             "=== NTRIP STATISTICS ===  Total bytes received: {}; Total messages processed: {}; Number of reconnections: {}; RTCM CRC errors: {}",
+                             stats_.bytes_received, stats_.messages_received, stats_.reconnect_count,
+                             stats_.crc_errors));
+    }
 }
 
 
@@ -131,6 +145,14 @@ void NTRIPClient::StartReceiving() {
     rtcm_buffer_.clear();
     rtcm_sync_lost_count_ = 0;
     last_gga_sent_ = std::chrono::steady_clock::now() - std::chrono::seconds(config_.gga_interval);
+    // Open RTCM base recording file
+    std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
+    std::string filename = fmt::format("{}/rtcm_base_data_{}.rtcm3", output_folder_path_, timestamp);
+    rtcm_base_file_.open(filename, std::ios::out | std::ios::binary);
+    if (rtcm_base_file_.is_open()) {
+        rtcm_base_file_.rdbuf()->pubsetbuf(rtcm_base_file_buffer_.data(),
+                                           static_cast<std::streamsize>(rtcm_base_file_buffer_.size()));
+    }
     // Start threads
     receive_thread_ = std::make_unique<std::thread>(&NTRIPClient::ReceiveThread, this);
     process_thread_ = std::make_unique<std::thread>(&NTRIPClient::ProcessThread, this);
@@ -158,16 +180,22 @@ void NTRIPClient::StopReceiving() {
     if (proc_thread && proc_thread->joinable()) {
         proc_thread->join();
     }
+    // Close RTCM base recording file
+    if (rtcm_base_file_.is_open()) {
+        rtcm_base_file_.flush();
+        rtcm_base_file_.close();
+    }
 }
 
 
 void NTRIPClient::LoadConfig(const INIReader &configures) {
-    config_.host = configures.Get("NTRIP Client", "host", "");
-    config_.port = static_cast<int>(configures.GetInteger("NTRIP Client", "port", 8080));
-    config_.mount_point = configures.Get("NTRIP Client", "mount_point", "");
-    config_.enable_vrs = configures.GetBoolean("NTRIP Client", "enable_vrs", false);
-    config_.username = configures.Get("NTRIP Client", "username", "");
-    config_.password = configures.Get("NTRIP Client", "password", "");
+    config_.check_rtk = configures.GetBoolean("NTRIP Client", "Check RTK", false);
+    config_.host = configures.Get("NTRIP Client", "Host", "");
+    config_.port = static_cast<int>(configures.GetInteger("NTRIP Client", "Port", 8080));
+    config_.mount_point = configures.Get("NTRIP Client", "Mount Point", "");
+    config_.use_vrs = configures.GetBoolean("NTRIP Client", "Use VRS", false);
+    config_.username = configures.Get("NTRIP Client", "Username", "");
+    config_.password = configures.Get("NTRIP Client", "Password", "");
 }
 
 
@@ -244,9 +272,16 @@ bool NTRIPClient::ConnectSocket() {
     std::string port_str = std::to_string(config_.port);
     int ret = getaddrinfo(config_.host.c_str(), port_str.c_str(), &hints, &result);
     if (ret != 0) {
-        Tool::LogMessage(spdlog::level::err, kModule,
-                         "Failed to resolve hostname '" + config_.host + "': " + gai_strerror(ret));
-        return false;
+        if (config_.check_rtk) {
+            Tool::LogMessage(spdlog::level::err, kModule,
+                             fmt::format("Failed to resolve hostname '{}': {}", config_.host, gai_strerror(ret)));
+            return false;
+        } else {
+            Tool::LogMessage(spdlog::level::warn, kModule,
+                             fmt::format("Failed to resolve hostname '{}': {}, but not using RTK, error ignored",
+                                         config_.host, gai_strerror(ret)));
+            return false;
+        }
     }
 
     // RAII for addrinfo cleanup
@@ -527,8 +562,8 @@ std::vector<std::vector<uint8_t> > NTRIPClient::ParseRTCM(const uint8_t *data, s
 void NTRIPClient::ReceiveThread() {
     uint8_t buffer[64 * 1024];
     while (receiving_.load(std::memory_order_acquire) && connected_.load(std::memory_order_acquire)) {
-        if (config_.enable_vrs) {
-            SendGgaIfNeeded();
+        if (config_.use_vrs) {
+            SendGGA();
         }
         ssize_t received = ReceiveData(buffer, sizeof(buffer));
         if (received > 0) {
@@ -592,6 +627,11 @@ void NTRIPClient::ProcessThread() {
             data = std::move(data_queue_.front());
             data_queue_.pop();
         }
+        // Record raw RTCM base stream for PPK
+        if (rtcm_base_file_.is_open()) {
+            rtcm_base_file_.write(reinterpret_cast<const char *>(data.data()),
+                                  static_cast<std::streamsize>(data.size()));
+        }
         auto messages = ParseRTCM(data.data(), data.size());
 
         std::function<void(const uint8_t *, size_t)> data_cb;
@@ -650,8 +690,14 @@ void NTRIPClient::HandleReconnect() {
         }
     }
     // Reconnection failed
-    Tool::LogMessage(spdlog::level::err, kModule,
-                     "Failed to reconnect after " + std::to_string(attempts) + " attempts");
+    if (config_.check_rtk) {
+        Tool::LogMessage(spdlog::level::err, kModule,
+                         "Failed to reconnect after " + std::to_string(attempts) + " attempts");
+    } else {
+        Tool::LogMessage(spdlog::level::warn, kModule,
+                         "Failed to reconnect after " + std::to_string(attempts) +
+                         " attempts, but not using RTK, error ignored");
+    }
     receiving_.store(false, std::memory_order_release);
 }
 
@@ -720,7 +766,7 @@ void NTRIPClient::CloseConnection() {
 }
 
 
-void NTRIPClient::SendGgaIfNeeded() {
+void NTRIPClient::SendGGA() {
     const auto now = std::chrono::steady_clock::now();
     const auto interval = std::chrono::seconds(std::max(1, config_.gga_interval));
     if (now - last_gga_sent_ < interval) {
@@ -843,6 +889,11 @@ std::vector<NTRIPClient::MountPoint> NTRIPClient::GetSourceTable() {
     }
     CloseConnection();
     return result;
+}
+
+
+bool NTRIPClient::IsRTKRequired() const {
+    return config_.check_rtk;
 }
 
 

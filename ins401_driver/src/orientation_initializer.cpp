@@ -6,8 +6,10 @@
 #include <limits>
 
 
-StaticInitializer::StaticInitializer(const double &gravity, const std::vector<ImuData> &static_imu, bool accel_points_with_gravity)
-    : origin_gravity_enu_(0.0, 0.0, -std::abs(gravity)), static_imu_(static_imu), accel_points_with_gravity_(accel_points_with_gravity) {
+StaticInitializer::StaticInitializer(const double &gravity, const std::vector<ImuData> &static_imu,
+                                     bool accel_points_with_gravity)
+    : origin_gravity_enu_(0.0, 0.0, -std::abs(gravity)), static_imu_(static_imu),
+      accel_points_with_gravity_(accel_points_with_gravity) {
     UpdateImuMeanStats();
     UpdateAlignmentCache();
 }

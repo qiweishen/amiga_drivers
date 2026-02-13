@@ -36,6 +36,9 @@ find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
+# 3rd_party libraries
+add_subdirectory(3rd_party)
+
 # FetchContent module
 include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
 
@@ -46,8 +49,8 @@ include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
 set(SOURCES
         src/tool.cpp
         src/ethernet_socket.cpp
-        src/ins_discover.cpp
-        src/ins_receiver.cpp
+        src/ins401_discover.cpp
+        src/ins401_receiver.cpp
         src/ntrip_client.cpp
         src/orientation_initializer.cpp
         src/initialization_monitor.cpp
@@ -86,9 +89,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         Threads::Threads
         # Boost
         Boost::boost
+        # 3rd_party
+        Eigen
         # FetchContent libraries
-        Eigen3::Eigen
-#        GeographicLib::GeographicLib
+        GeographicLib::GeographicLib
         spdlog::spdlog
         inih::inih
 )
@@ -109,7 +113,7 @@ message(STATUS "  Dependencies:")
 message(STATUS "    OpenSSL:        Found")
 message(STATUS "    Boost:          Found")
 message(STATUS "    Eigen3:         ${Eigen3_SOURCE_DIR}")
-#message(STATUS "    GeographicLib:  ${GeographicLib_SOURCE_DIR}")
+message(STATUS "    GeographicLib:  ${GeographicLib_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    inih:           ${inih_SOURCE_DIR}")
 message(STATUS "========================================")

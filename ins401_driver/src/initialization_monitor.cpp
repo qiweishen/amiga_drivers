@@ -84,13 +84,18 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
             const double time_since_last = current_time - last_computation_time_;
             if (first_computation || time_since_last >= static_cast<double>(config_.recompute_interval_s)) {
                 ComputeAndCheck(current_time);
+            } else if (!first_computation && std::fmod(time_since_last, 1.0) < 1e-6) {
+                // Log every second while waiting
+                Tool::LogMessage(spdlog::level::info, kModule,
+                                 fmt::format("Stationary for {:.0f} s, waiting {:.0f} s for next computation",
+                                             stationary_duration, config_.recompute_interval_s - time_since_last));
             }
         }
     } else {
         if (is_stationary_) {
             // Lost stationarity
             Tool::LogMessage(spdlog::level::warn, kModule,
-                             fmt::format("Stationarity lost at GPS time {:.3f}s, resetting.", current_time));
+                             fmt::format("Stationarity lost at GPS time {:.3f}s, resetting...", current_time));
             Reset();
         } else {
             Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Not stationary for 1# initialization"));
@@ -108,17 +113,25 @@ void InitializationMonitor::OnGnssData(const GNSSSolutionData &gnss) {
     latest_gnss_ = gnss;
     has_gnss_ = true;
     if (!gravity_ready_) {
-        // config_.gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude, latest_gnss_.height);
-        config_.gravity = 9.7968;
+        config_.local_gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude,
+                                                            latest_gnss_.height);
         gravity_ready_ = true;
         gnss_cv_.notify_all();
     }
 }
 
 
-bool InitializationMonitor::WaitForFirstGnssAndGravity(const std::chrono::milliseconds timeout) {
+std::pair<bool, double> InitializationMonitor::WaitForFirstGnssAndGravity(const std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return gnss_cv_.wait_for(lock, timeout, [this]() { return gravity_ready_; });
+    bool success = gnss_cv_.wait_for(lock, timeout, [this]() { return gravity_ready_; });
+    if (!success && (!config_.check_rtk || !config_.enable_gnss_check)) {
+        // If we are not using RTK or GNSS check, we can still proceed with a default gravity value, but log a warning
+        config_.local_gravity = 9.8; // Typical gravity in South Australia
+        Tool::LogMessage(spdlog::level::warn, kModule,
+                         "RTK check or GNSS check is disabled, proceeding with default gravity value of 9.8 m/s^2, but results may be inaccurate. If it is not on purpose, your configuration");
+        return {true, config_.local_gravity};
+    }
+    return {success, config_.local_gravity};
 }
 
 
@@ -129,21 +142,25 @@ InitializationResult InitializationMonitor::GetResult() const {
 
 
 void InitializationMonitor::LoadConfig(const INIReader &configures) {
+    config_.check_rtk = configures.GetBoolean("NTRIP Client", "Check RTK", false);
+    config_.enable_gnss_check = configures.GetBoolean("Static Initial Initialization", "Enable GNSS Checking", false);
     config_.accel_gravity_threshold = configures.
-            GetReal("IMU Initial Initialization", "accel_gravity_threshold", 0.035);
-    config_.accel_var_threshold = configures.GetReal("IMU Initial Initialization", "accel_var_threshold", 0.008);
-    config_.gyro_var_threshold = configures.GetReal("IMU Initial Initialization", "gyro_var_threshold", 0.125);
-    config_.gyro_mean_threshold_xy = configures.GetReal("IMU Initial Initialization", "gyro_mean_threshold_xy", 0.035);
-    config_.gyro_mean_threshold_z = configures.GetReal("IMU Initial Initialization", "gyro_mean_threshold_z", 0.125);
-    config_.imu_freq = static_cast<int>(configures.GetInteger("IMU Initial Initialization", "imu_freq", 100));
+            GetReal("Static Initial Initialization", "accel_gravity_threshold", 0.035);
+    config_.accel_var_threshold = configures.GetReal("Static Initial Initialization", "accel_var_threshold", 0.008);
+    config_.gyro_var_threshold = configures.GetReal("Static Initial Initialization", "gyro_var_threshold", 0.125);
+    config_.gyro_mean_threshold_xy = configures.GetReal("Static Initial Initialization", "gyro_mean_threshold_xy",
+                                                        0.035);
+    config_.gyro_mean_threshold_z = configures.GetReal("Static Initial Initialization", "gyro_mean_threshold_z", 0.125);
+    config_.imu_freq = static_cast<int>(configures.GetInteger("Static Initial Initialization", "imu_freq", 100));
     config_.min_stationary_duration_s = static_cast<int>(configures.GetInteger(
-        "IMU Initial Initialization", "min_stationary_duration_s", 10));
+        "Static Initial Initialization", "min_stationary_duration_s", 10));
     config_.recompute_interval_s = static_cast<int>(configures.GetInteger(
-        "IMU Initial Initialization", "recompute_interval_s", 5));
+        "Static Initial Initialization", "recompute_interval_s", 5));
     config_.required_stable_count = static_cast<int>(configures.GetInteger(
-        "IMU Initial Initialization", "required_stable_count", 5));
-    config_.stability_threshold_deg = configures.GetReal("IMU Initial Initialization", "stability_threshold_deg", 0.1);
-    config_.gnss_position_std_threshold = configures.GetReal("IMU Initial Initialization",
+        "Static Initial Initialization", "required_stable_count", 5));
+    config_.stability_threshold_deg = configures.GetReal("Static Initial Initialization", "stability_threshold_deg",
+                                                         0.1);
+    config_.gnss_position_std_threshold = configures.GetReal("Static Initial Initialization",
                                                              "gnss_position_std_threshold", 0.02);
 }
 
@@ -163,7 +180,7 @@ bool InitializationMonitor::IsStaticWindow() const {
            (std::abs(gyro_mean.y()) < config_.gyro_mean_threshold_xy) &&
            (std::abs(gyro_mean.z()) < config_.gyro_mean_threshold_z) &&
            (gyro_std < config_.gyro_var_threshold) &&
-           (std::abs(accel_mean.norm() - config_.gravity) < config_.accel_gravity_threshold) &&
+           (std::abs(accel_mean.norm() - config_.local_gravity) < config_.accel_gravity_threshold) &&
            (accel_std < config_.accel_var_threshold);
 }
 
@@ -175,7 +192,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     std::vector<ImuData> imu_segment(computation_buffer_.begin(), computation_buffer_.end());
 
     // Run StaticInitializer
-    StaticInitializer initializer(config_.gravity, imu_segment);
+    StaticInitializer initializer(config_.local_gravity, imu_segment);
 
     auto alignment = initializer.AlignImuWithGravity();
     auto bias = initializer.ComputeImuBias();
@@ -188,7 +205,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     result.accel_bias = bias.accel_bias;
     result.roll = alignment.roll;
     result.pitch = alignment.pitch;
-    result.local_gravity = config_.gravity;
+    result.local_gravity = config_.local_gravity;
 
     // Fill position from latest GNSS if available
     if (has_gnss_) {
@@ -206,13 +223,15 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
         stable_count_++;
         Tool::LogMessage(spdlog::level::info, kModule,
                          fmt::format("Stable computation {}/{}", stable_count_, config_.required_stable_count));
-        Tool::LogMessage(spdlog::level::info, kModule,
-                         fmt::format("GNSS status: position type {}; horizontal STD {}", latest_gnss_.position_type,
-                                     (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
+        if (has_gnss_) {
+            Tool::LogMessage(spdlog::level::info, kModule,
+                             fmt::format("GNSS status: position type {}; horizontal STD {}", latest_gnss_.position_type,
+                                         (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
+        }
 
         // Check if we have enough stable computations AND GNSS conditions are met
         if (stable_count_ >= config_.required_stable_count) {
-            if (CheckGnssConditions()) {
+            if (!config_.enable_gnss_check || CheckGnssConditions()) {
                 // Declaration: static initialization complete!
                 final_result_ = result;
                 initialized_.store(true, std::memory_order_release);
@@ -230,23 +249,28 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
                                      "=== STATIC INITIALIZATION COMPLETE === : Accel bias: [{:.6f}, {:.6f}, {:.6f}] m/s^2",
                                      result.accel_bias.x(), result.accel_bias.y(), result.accel_bias.z()));
                 Tool::LogMessage(spdlog::level::info, kModule,
-                                 fmt::format("=== STATIC INITIALIZATION COMPLETE === : GNSS position std: {:.4f} m",
+                                 fmt::format("=== STATIC INITIALIZATION COMPLETE === : GNSS position std: {:.6f} m",
                                              (latest_gnss_.latitude_std + latest_gnss_.longitude_std) / 2.0f));
                 Tool::LogMessage(spdlog::level::info, kModule,
                                  fmt::format(
                                      "=== STATIC INITIALIZATION COMPLETE === : Start time: {} week {} ms; End time: {} week {} ms",
                                      computation_buffer_.front().gps_week, computation_buffer_.front().gps_millisecs,
                                      computation_buffer_.back().gps_week, computation_buffer_.back().gps_millisecs));
+
+                if (!has_gnss_) {
+                    Tool::LogMessage(spdlog::level::warn, kModule,
+                                     "=== Critical Warning === : Not receiving any GNSS data during the whole static initialization. If it is not on purpose, please check GNSS antenna, connection and configuration");
+                }
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,
-                                 "Stability reached but GNSS conditions not met. Waiting for fresh RTK_FIXED and low std.");
+                                 "Stability reached but GNSS conditions not met. Waiting for fresh RTK_FIXED and low std");
             }
         }
     } else {
         if (has_previous_result_) {
             Tool::LogMessage(spdlog::level::warn, kModule,
-                             fmt::format("Result unstable (roll delta={:.4f} deg, pitch delta={:.4f} deg). "
-                                         "Reset stable count.",
+                             fmt::format("Result unstable (roll delta={:.4f} deg, pitch delta={:.4f} deg), "
+                                         "Reset stable count",
                                          std::abs(result.roll - last_result_.roll) / kDegToRad,
                                          std::abs(result.pitch - last_result_.pitch) / kDegToRad));
         }

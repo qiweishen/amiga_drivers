@@ -5,29 +5,15 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
-# Eigen - C++ template library for linear algebra
+# GeographicLib - small C++ library for geodesic calculations
 FetchContent_Declare(
-        eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG 3.4.0
+        geographiclib
+        GIT_REPOSITORY https://github.com/geographiclib/geographiclib.git
+        GIT_TAG v2.7
         GIT_SHALLOW TRUE
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/eigen
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/geographiclib
 )
-set(BUILD_TESTING OFF)
-set(EIGEN_BUILD_TESTING OFF)
-FetchContent_MakeAvailable(eigen)
-
-
-#################################################################################
-## GeographicLib - small C++ library for geodesic calculations
-#FetchContent_Declare(
-#        geographiclib
-#        GIT_REPOSITORY https://github.com/geographiclib/geographiclib.git
-#        GIT_TAG v2.7
-#        GIT_SHALLOW TRUE
-#        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/geographiclib
-#)
-#FetchContent_MakeAvailable(geographiclib)
+FetchContent_MakeAvailable(geographiclib)
 
 
 ################################################################################

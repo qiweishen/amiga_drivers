@@ -39,8 +39,10 @@ struct GNSSSolutionData {
 struct INSSolutionData {
     std::uint16_t gps_week;
     std::uint32_t gps_millisecs; // ms
-    std::uint8_t ins_status; // 0: Invalid; 1: INS_ALIGNING; 2: INS_HIGH_VARIANCE; 3: INS_SOLUTION_GOOD; 4: INS_SOLUTION_FREE; 5: INS_ALIGNMENT_COMPLETE
-    std::uint8_t ins_position_type; // 0: Invalid; 1: SPP/INS; 2: RTD/INS; 3: INS_PROPOGATED; 4: RTK_FIXED/INS; 5: RTK_FLOAT/INS
+    std::uint8_t ins_status;
+    // 0: Invalid; 1: INS_ALIGNING; 2: INS_HIGH_VARIANCE; 3: INS_SOLUTION_GOOD; 4: INS_SOLUTION_FREE; 5: INS_ALIGNMENT_COMPLETE
+    std::uint8_t ins_position_type;
+    // 0: Invalid; 1: SPP/INS; 2: RTD/INS; 3: INS_PROPOGATED; 4: RTK_FIXED/INS; 5: RTK_FLOAT/INS
     double latitude; // deg
     double longitude; // deg
     double height; // m
@@ -63,7 +65,8 @@ struct INSSolutionData {
     float roll_std; // deg
     float pitch_std; // deg
     float heading_std; // deg
-    std::uint16_t continent_id; // -2: ID_NONE; -1: ID_ERROR; 0: ID_UNKNOWN; 1: ID_AISA; 2: ID_EUROPE; 3: ID_OCEANIA; 4: ID_AFRICA; 5: ID_NORTHAMERICA; 6: ID_SOUTHAMERICA; 7: ID_ANTARCTICA
+    std::uint16_t continent_id;
+    // -2: ID_NONE; -1: ID_ERROR; 0: ID_UNKNOWN; 1: ID_AISA; 2: ID_EUROPE; 3: ID_OCEANIA; 4: ID_AFRICA; 5: ID_NORTHAMERICA; 6: ID_SOUTHAMERICA; 7: ID_ANTARCTICA
 };
 
 

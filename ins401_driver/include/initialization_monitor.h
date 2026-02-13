@@ -26,25 +26,27 @@
 class InitializationMonitor {
 public:
     struct Config {
-        // Stationary detection thresholds
-        double accel_gravity_threshold;
-        double accel_var_threshold;
-        double gyro_var_threshold;
-        double gyro_mean_threshold_xy;
-        double gyro_mean_threshold_z;
-        int imu_freq;
+        // GNSS conditions
+        bool check_rtk;
+        bool enable_gnss_check;
+        double gnss_position_std_threshold; // m
 
-        // Initialization parameters
+        // IMU Stationary detection thresholds
+        int imu_freq;
+        double accel_gravity_threshold;
+        double accel_var_threshold; // m/s^2
+        double gyro_var_threshold; // deg/s
+        double gyro_mean_threshold_xy; // deg/s
+        double gyro_mean_threshold_z; // deg/s
+
+        // IMU initialization parameters
         int min_stationary_duration_s; // Minimum seconds of stationarity before first computation
         int recompute_interval_s; // Recompute interval in seconds
         int required_stable_count; // Consecutive stable computations needed
         double stability_threshold_deg; // Max roll/pitch delta (degrees) for stability
 
-        // GNSS conditions
-        double gnss_position_std_threshold; // meters
-
         // Gravity
-        double gravity; // m/s^2
+        double local_gravity; // m/s^2
     };
 
     explicit InitializationMonitor(const INIReader &configures);
@@ -58,7 +60,7 @@ public:
     void OnGnssData(const GNSSSolutionData &gnss);
 
     /// Wait until first GNSS arrives and gravity is initialized.
-    bool WaitForFirstGnssAndGravity(std::chrono::milliseconds timeout);
+    std::pair<bool, double> WaitForFirstGnssAndGravity(std::chrono::milliseconds timeout);
 
     /// Check if static initialization has been declared complete.
     bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }

@@ -1,4 +1,4 @@
-#include "ins_receiver.h"
+#include "ins401_receiver.h"
 
 #include <bitset>
 #include <cstring>
@@ -19,12 +19,13 @@ namespace {
 }
 
 
-INSDeviceReceiver::INSDeviceReceiver(std::string iface, const std::string &device_mac, const bool save_to_file,
-                                     std::string output_folder_path, double horizontal_std,
-                                     bool enable_vrs) : interface_name_(std::move(iface)), save_to_file_(save_to_file),
-                                                        output_folder_path_(std::move(output_folder_path)),
-                                                        horizontal_std_(horizontal_std),
-                                                        enable_vrs_(enable_vrs) {
+INSDeviceReceiver::INSDeviceReceiver(std::string iface, const std::string &device_mac, std::string output_folder_path,
+                                     bool check_rtk, bool enable_vrs,
+                                     double horizontal_std) : interface_name_(std::move(iface)),
+                                                              output_folder_path_(std::move(output_folder_path)),
+                                                              check_rtk_(check_rtk),
+                                                              enable_vrs_(enable_vrs),
+                                                              horizontal_std_(horizontal_std) {
     device_mac_ = Ethernet::FormatMACAddress(device_mac);
     socket_ptr_ = std::make_shared<EthernetSocket>(interface_name_, device_mac_, buffer_size_, true);
 }
@@ -43,9 +44,7 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 
 
 void INSDeviceReceiver::Run() {
-    if (save_to_file_) {
-        running_.store(InitializeWritingFiles());
-    }
+    running_.store(InitializeWritingFiles());
     ReceiveLoop();
 }
 
@@ -88,19 +87,6 @@ bool INSDeviceReceiver::GetIMUData(std::vector<RawIMUData> &data, size_t max_cou
 void INSDeviceReceiver::SetNtripClient(NTRIPClient *client) {
     ntrip_client_.store(client, std::memory_order_release);
 }
-
-
-// std::string INSDeviceReceiver::WaitForFirstGga(const std::atomic<bool> *terminate_flag,
-//                                                const std::chrono::milliseconds wait_step) {
-//     std::unique_lock<std::mutex> lock(first_gga_mutex_);
-//     while (!first_gga_ready_.load(std::memory_order_acquire)) {
-//         if (terminate_flag && terminate_flag->load(std::memory_order_acquire)) {
-//             break;
-//         }
-//         first_gga_cv_.wait_for(lock, wait_step);
-//     }
-//     return first_gga_from_device_;
-// }
 
 
 void INSDeviceReceiver::ReceiveLoop() {
@@ -213,58 +199,8 @@ void INSDeviceReceiver::ProcessGNSSSolutionData(const uint8_t *packet) {
             gnss_queue_.pop();
         }
         gnss_queue_.push(gnss);
-
-        const bool current_rtk_fixed = gnss.position_type == 4;
-        const double current_std = (gnss.latitude_std + gnss.longitude_std) / 2.0;
-        const bool current_std_converged = current_std <= horizontal_std_;
-
-        if (!gnss_state_initialized_) {
-            gnss_state_initialized_ = true;
-            stable_rtk_fixed_ = current_rtk_fixed;
-            stable_std_converged_ = current_std_converged;
-            pending_rtk_count_ = 0;
-            pending_std_count_ = 0;
-        } else {
-            if (current_rtk_fixed == stable_rtk_fixed_) {
-                pending_rtk_count_ = 0;
-            } else {
-                if (pending_rtk_count_ == 0 || pending_rtk_fixed_ != current_rtk_fixed) {
-                    pending_rtk_fixed_ = current_rtk_fixed;
-                    pending_rtk_count_ = 1;
-                } else {
-                    ++pending_rtk_count_;
-                }
-                if (pending_rtk_count_ >= GnssTransitionConfirmFrames_) {
-                    stable_rtk_fixed_ = current_rtk_fixed;
-                    pending_rtk_count_ = 0;
-                    const auto level = stable_rtk_fixed_ ? spdlog::level::info : spdlog::level::warn;
-                    Tool::LogMessage(level, kModule,
-                                     stable_rtk_fixed_
-                                         ? "Entered RTK_FIXED position type"
-                                         : "Lost RTK_FIXED position type");
-                }
-            }
-
-            if (current_std_converged == stable_std_converged_) {
-                pending_std_count_ = 0;
-            } else {
-                if (pending_std_count_ == 0 || pending_std_converged_ != current_std_converged) {
-                    pending_std_converged_ = current_std_converged;
-                    pending_std_count_ = 1;
-                } else {
-                    ++pending_std_count_;
-                }
-                if (pending_std_count_ >= GnssTransitionConfirmFrames_) {
-                    stable_std_converged_ = current_std_converged;
-                    pending_std_count_ = 0;
-                    const auto level = stable_std_converged_ ? spdlog::level::info : spdlog::level::warn;
-                    Tool::LogMessage(level, kModule,
-                                     stable_std_converged_
-                                         ? fmt::format("Converged to {:.3f} m STD threshold", horizontal_std_)
-                                         : fmt::format("Horizontal STD diverged above {:.3f} m threshold",
-                                                       horizontal_std_));
-                }
-            }
+        if (check_rtk_) {
+            MonitorGNSSStatus(gnss);
         }
     }
     cv_.notify_one();
@@ -603,52 +539,50 @@ void INSDeviceReceiver::WriterThread() {
                 }
             }
         }
-        if (save_to_file_) {
-            WriteGNSSBatch(gnss_batch);
-            WriteDiagnosticBatch(diagnostic_batch);
-            WriteIMUBatch(imu_batch);
-            WriteRTCMRoverBatch(rtcm_rover_batch);
-            WriteNMEABatch(nmea_batch);
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_flush >= FLUSH_INTERVAL) {
-                if (gnss_file_.is_open()) {
-                    gnss_file_.flush();
-                }
-                if (ins_file_.is_open()) {
-                    ins_file_.flush();
-                }
-                if (diagnostic_file_.is_open()) {
-                    diagnostic_file_.flush();
-                }
-                if (imu_file_.is_open()) {
-                    imu_file_.flush();
-                }
-                if (rtcm_rover_file_.is_open()) {
-                    rtcm_rover_file_.flush();
-                }
-                if (nmea_file_.is_open()) {
-                    nmea_file_.flush();
-                }
-                last_flush = now;
+
+        WriteGNSSBatch(gnss_batch);
+        WriteDiagnosticBatch(diagnostic_batch);
+        WriteIMUBatch(imu_batch);
+        WriteRTCMRoverBatch(rtcm_rover_batch);
+        WriteNMEABatch(nmea_batch);
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_flush >= FLUSH_INTERVAL) {
+            if (gnss_file_.is_open()) {
+                gnss_file_.flush();
             }
+            if (ins_file_.is_open()) {
+                ins_file_.flush();
+            }
+            if (diagnostic_file_.is_open()) {
+                diagnostic_file_.flush();
+            }
+            if (imu_file_.is_open()) {
+                imu_file_.flush();
+            }
+            if (rtcm_rover_file_.is_open()) {
+                rtcm_rover_file_.flush();
+            }
+            if (nmea_file_.is_open()) {
+                nmea_file_.flush();
+            }
+            last_flush = now;
         }
     }
-    if (save_to_file_) {
-        if (gnss_file_.is_open()) {
-            gnss_file_.flush();
-        }
-        if (diagnostic_file_.is_open()) {
-            diagnostic_file_.flush();
-        }
-        if (imu_file_.is_open()) {
-            imu_file_.flush();
-        }
-        if (rtcm_rover_file_.is_open()) {
-            rtcm_rover_file_.flush();
-        }
-        if (nmea_file_.is_open()) {
-            nmea_file_.flush();
-        }
+
+    if (gnss_file_.is_open()) {
+        gnss_file_.flush();
+    }
+    if (diagnostic_file_.is_open()) {
+        diagnostic_file_.flush();
+    }
+    if (imu_file_.is_open()) {
+        imu_file_.flush();
+    }
+    if (rtcm_rover_file_.is_open()) {
+        rtcm_rover_file_.flush();
+    }
+    if (nmea_file_.is_open()) {
+        nmea_file_.flush();
     }
 }
 
@@ -797,71 +731,125 @@ void INSDeviceReceiver::WriteNMEABatch(const std::vector<std::string> &batch) {
 
 
 bool INSDeviceReceiver::InitializeWritingFiles() {
-    if (save_to_file_) {
-        if (output_folder_path_.empty()) {
-            Tool::LogMessage(spdlog::level::err, kModule, "Error: Output folder path is empty!");
-            return false;
-        }
-
-        std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
-        std::string gnss_filename = fmt::format("{}/gnss_data_{}.csv", output_folder_path_, timestamp);
-        std::string ins_filename = fmt::format("{}/ins_data_{}.csv", output_folder_path_, timestamp);
-        std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.csv", output_folder_path_, timestamp);
-        std::string imu_filename = fmt::format("{}/imu_data_{}.csv", output_folder_path_, timestamp);
-        std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_data_{}.rtcm3", output_folder_path_, timestamp);
-        std::string nmea_filename = fmt::format("{}/nmea_message_{}.txt", output_folder_path_, timestamp);
-
-        gnss_file_buffer_.resize(write_buffer_size_);
-        gnss_file_.open(gnss_filename, std::ios::out);
-        if (gnss_file_.is_open()) {
-            gnss_file_.rdbuf()->pubsetbuf(gnss_file_buffer_.data(),
-                                          static_cast<std::streamsize>(gnss_file_buffer_.size()));
-            fmt::print(gnss_file_,
-                       "GPS_Week,GPS_MS[ms],Position_Type,Latitude[deg],Longitude[deg],Height[m],Latitude_STD[m],Longitude_STD[m],Height_STD[m],Num_of_SVs,Num_of_SVs_in_Solution,Hdop,Diffage[s],North_Vel[m/s],East_Vel[m/s],Up_Vel[m/s],North_Vel_STD[m/s],East_Vel_STD[m/s],Up_Vel_STD[m/s]\n");
-        }
-
-        ins_file_buffer_.resize(write_buffer_size_);
-        ins_file_.open(ins_filename, std::ios::out);
-        if (ins_file_.is_open()) {
-            ins_file_.rdbuf()->pubsetbuf(ins_file_buffer_.data(),
-                                         static_cast<std::streamsize>(ins_file_buffer_.size()));
-            fmt::print(ins_file_,
-                       "GPS_Week,GPS_MS[ms],INS_Status,INS_Position_Type,Latitude[deg],Longitude[deg],Height[m],North_Vel[m/s],East_Vel[m/s],Up_Vel[m/s],Longitudinal_Vel[m/s],Lateral_Vel[m/s],Roll[deg],Pitch[deg],Heading[deg],Latitude_STD[m],Longitude_STD[m],Height_STD[m],North_Vel_STD[m/s],East_Vel_STD[m/s],Up_Vel_STD[m/s],Longitudinal_Vel_STD[m/s],Lateral_Vel_STD[m/s],Roll_STD[deg],Pitch[STD],Heading_STD[deg],Continent_ID\n");
-        }
-
-        diagnostic_file_buffer_.resize(write_buffer_size_);
-        diagnostic_file_.open(diagnostic_filename, std::ios::out);
-        if (diagnostic_file_.is_open()) {
-            diagnostic_file_.rdbuf()->pubsetbuf(diagnostic_file_buffer_.data(),
-                                                static_cast<std::streamsize>(diagnostic_file_buffer_.size()));
-            fmt::print(diagnostic_file_,
-                       "GPS_Week,GPS_MS[ms],Device_Status,IMU_Temperature[°C],MCU_Temperature[°C],GNSS_Chip_Temperature[°C]\n");
-        }
-
-        imu_file_buffer_.resize(write_buffer_size_);
-        imu_file_.open(imu_filename, std::ios::out);
-        if (imu_file_.is_open()) {
-            imu_file_.rdbuf()->pubsetbuf(imu_file_buffer_.data(),
-                                         static_cast<std::streamsize>(imu_file_buffer_.size()));
-            fmt::print(imu_file_,
-                       "GPS_Week,GPS_MS[ms],Acc_X[m/s^2],Acc_Y[m/s^2],Acc_Z[m/s^2],Gyro_X[deg/s],Gyro_Y[deg/s],Gyro_Z[deg/s]\n");
-        }
-
-        rtcm_rover_file_buffer_.resize(write_buffer_size_);
-        rtcm_rover_file_.open(rtcm_rover_filename, std::ios::out | std::ios::binary);
-        if (rtcm_rover_file_.is_open()) {
-            rtcm_rover_file_.rdbuf()->pubsetbuf(rtcm_rover_file_buffer_.data(),
-                                                static_cast<std::streamsize>(rtcm_rover_file_buffer_.size()));
-        }
-
-        nmea_file_buffer_.resize(write_buffer_size_);
-        nmea_file_.open(nmea_filename, std::ios::out);
-        if (nmea_file_.is_open()) {
-            nmea_file_.rdbuf()->pubsetbuf(nmea_file_buffer_.data(),
-                                          static_cast<std::streamsize>(nmea_file_buffer_.size()));
-        }
-
-        writer_thread_ = std::thread(&INSDeviceReceiver::WriterThread, this);
+    if (output_folder_path_.empty()) {
+        Tool::LogMessage(spdlog::level::err, kModule, "Error: Output folder path is empty!");
+        return false;
     }
+
+    std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
+    std::string gnss_filename = fmt::format("{}/gnss_data_{}.csv", output_folder_path_, timestamp);
+    std::string ins_filename = fmt::format("{}/ins_data_{}.csv", output_folder_path_, timestamp);
+    std::string diagnostic_filename = fmt::format("{}/diagnostic_data_{}.csv", output_folder_path_, timestamp);
+    std::string imu_filename = fmt::format("{}/imu_data_{}.csv", output_folder_path_, timestamp);
+    std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_data_{}.rtcm3", output_folder_path_, timestamp);
+    std::string nmea_filename = fmt::format("{}/nmea_message_{}.txt", output_folder_path_, timestamp);
+
+    gnss_file_buffer_.resize(write_buffer_size_);
+    gnss_file_.open(gnss_filename, std::ios::out);
+    if (gnss_file_.is_open()) {
+        gnss_file_.rdbuf()->pubsetbuf(gnss_file_buffer_.data(),
+                                      static_cast<std::streamsize>(gnss_file_buffer_.size()));
+        fmt::print(gnss_file_,
+                   "GPS_Week,GPS_MS[ms],Position_Type,Latitude[deg],Longitude[deg],Height[m],Latitude_STD[m],Longitude_STD[m],Height_STD[m],Num_of_SVs,Num_of_SVs_in_Solution,Hdop,Diffage[s],North_Vel[m/s],East_Vel[m/s],Up_Vel[m/s],North_Vel_STD[m/s],East_Vel_STD[m/s],Up_Vel_STD[m/s]\n");
+    }
+
+    ins_file_buffer_.resize(write_buffer_size_);
+    ins_file_.open(ins_filename, std::ios::out);
+    if (ins_file_.is_open()) {
+        ins_file_.rdbuf()->pubsetbuf(ins_file_buffer_.data(),
+                                     static_cast<std::streamsize>(ins_file_buffer_.size()));
+        fmt::print(ins_file_,
+                   "GPS_Week,GPS_MS[ms],INS_Status,INS_Position_Type,Latitude[deg],Longitude[deg],Height[m],North_Vel[m/s],East_Vel[m/s],Up_Vel[m/s],Longitudinal_Vel[m/s],Lateral_Vel[m/s],Roll[deg],Pitch[deg],Heading[deg],Latitude_STD[m],Longitude_STD[m],Height_STD[m],North_Vel_STD[m/s],East_Vel_STD[m/s],Up_Vel_STD[m/s],Longitudinal_Vel_STD[m/s],Lateral_Vel_STD[m/s],Roll_STD[deg],Pitch[STD],Heading_STD[deg],Continent_ID\n");
+    }
+
+    diagnostic_file_buffer_.resize(write_buffer_size_);
+    diagnostic_file_.open(diagnostic_filename, std::ios::out);
+    if (diagnostic_file_.is_open()) {
+        diagnostic_file_.rdbuf()->pubsetbuf(diagnostic_file_buffer_.data(),
+                                            static_cast<std::streamsize>(diagnostic_file_buffer_.size()));
+        fmt::print(diagnostic_file_,
+                   "GPS_Week,GPS_MS[ms],Device_Status,IMU_Temperature[°C],MCU_Temperature[°C],GNSS_Chip_Temperature[°C]\n");
+    }
+
+    imu_file_buffer_.resize(write_buffer_size_);
+    imu_file_.open(imu_filename, std::ios::out);
+    if (imu_file_.is_open()) {
+        imu_file_.rdbuf()->pubsetbuf(imu_file_buffer_.data(),
+                                     static_cast<std::streamsize>(imu_file_buffer_.size()));
+        fmt::print(imu_file_,
+                   "GPS_Week,GPS_MS[ms],Acc_X[m/s^2],Acc_Y[m/s^2],Acc_Z[m/s^2],Gyro_X[deg/s],Gyro_Y[deg/s],Gyro_Z[deg/s]\n");
+    }
+
+    rtcm_rover_file_buffer_.resize(write_buffer_size_);
+    rtcm_rover_file_.open(rtcm_rover_filename, std::ios::out | std::ios::binary);
+    if (rtcm_rover_file_.is_open()) {
+        rtcm_rover_file_.rdbuf()->pubsetbuf(rtcm_rover_file_buffer_.data(),
+                                            static_cast<std::streamsize>(rtcm_rover_file_buffer_.size()));
+    }
+
+    nmea_file_buffer_.resize(write_buffer_size_);
+    nmea_file_.open(nmea_filename, std::ios::out);
+    if (nmea_file_.is_open()) {
+        nmea_file_.rdbuf()->pubsetbuf(nmea_file_buffer_.data(),
+                                      static_cast<std::streamsize>(nmea_file_buffer_.size()));
+    }
+
+    writer_thread_ = std::thread(&INSDeviceReceiver::WriterThread, this);
     return true;
+}
+
+
+void INSDeviceReceiver::MonitorGNSSStatus(GNSSSolutionData &gnss) {
+    const bool current_rtk_fixed = gnss.position_type == 4;
+    const double current_std = (gnss.latitude_std + gnss.longitude_std) / 2.0;
+    const bool current_std_converged = current_std <= horizontal_std_;
+
+    if (!gnss_state_initialized_) {
+        gnss_state_initialized_ = true;
+        stable_rtk_fixed_ = current_rtk_fixed;
+        stable_std_converged_ = current_std_converged;
+        pending_rtk_count_ = 0;
+        pending_std_count_ = 0;
+    } else {
+        if (current_rtk_fixed == stable_rtk_fixed_) {
+            pending_rtk_count_ = 0;
+        } else {
+            if (pending_rtk_count_ == 0 || pending_rtk_fixed_ != current_rtk_fixed) {
+                pending_rtk_fixed_ = current_rtk_fixed;
+                pending_rtk_count_ = 1;
+            } else {
+                ++pending_rtk_count_;
+            }
+            if (pending_rtk_count_ >= GnssTransitionConfirmFrames_) {
+                stable_rtk_fixed_ = current_rtk_fixed;
+                pending_rtk_count_ = 0;
+                const auto level = stable_rtk_fixed_ ? spdlog::level::info : spdlog::level::warn;
+                Tool::LogMessage(level, kModule,
+                                 stable_rtk_fixed_
+                                     ? "Entered RTK_FIXED position type"
+                                     : "Lost RTK_FIXED position type");
+            }
+        }
+
+        if (current_std_converged == stable_std_converged_) {
+            pending_std_count_ = 0;
+        } else {
+            if (pending_std_count_ == 0 || pending_std_converged_ != current_std_converged) {
+                pending_std_converged_ = current_std_converged;
+                pending_std_count_ = 1;
+            } else {
+                ++pending_std_count_;
+            }
+            if (pending_std_count_ >= GnssTransitionConfirmFrames_) {
+                stable_std_converged_ = current_std_converged;
+                pending_std_count_ = 0;
+                const auto level = stable_std_converged_ ? spdlog::level::info : spdlog::level::warn;
+                Tool::LogMessage(level, kModule,
+                                 stable_std_converged_
+                                     ? fmt::format("Converged to {:.3f} m STD threshold", horizontal_std_)
+                                     : fmt::format("Horizontal STD diverged above {:.3f} m threshold",
+                                                   horizontal_std_));
+            }
+        }
+    }
 }
