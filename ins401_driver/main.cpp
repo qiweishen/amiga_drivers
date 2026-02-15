@@ -19,7 +19,7 @@
 
 
 namespace {
-    const std::string_view kModule = "Main";
+    constexpr std::string_view kModule = "Main";
 }
 
 

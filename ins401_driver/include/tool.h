@@ -4,11 +4,14 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 
+#include "Eigen/Core"
+
 
 namespace Tool {
     namespace Earth {
-        double ComputeGravity(double latitude, double longitude, double height);
+        double ComputeGravity(const Eigen::Vector3d &blh);
     } // namespace Earth
+
     namespace Utility {
         // String splitting without allocations.
         std::vector<std::string_view> SplitString(std::string_view str, char delimiter);

@@ -5,18 +5,6 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
-# GeographicLib - small C++ library for geodesic calculations
-FetchContent_Declare(
-        geographiclib
-        GIT_REPOSITORY https://github.com/geographiclib/geographiclib.git
-        GIT_TAG v2.7
-        GIT_SHALLOW TRUE
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/FetchContent/geographiclib
-)
-FetchContent_MakeAvailable(geographiclib)
-
-
-################################################################################
 # spdlog - Fast C++ logging library
 FetchContent_Declare(
         spdlog

@@ -113,8 +113,7 @@ void InitializationMonitor::OnGnssData(const GNSSSolutionData &gnss) {
     latest_gnss_ = gnss;
     has_gnss_ = true;
     if (!gravity_ready_) {
-        config_.local_gravity = Tool::Earth::ComputeGravity(latest_gnss_.latitude, latest_gnss_.longitude,
-                                                            latest_gnss_.height);
+        config_.local_gravity = Tool::Earth::ComputeGravity({latest_gnss_.latitude * M_PI / 180.0, latest_gnss_.longitude * M_PI / 180.0, latest_gnss_.height});
         gravity_ready_ = true;
         gnss_cv_.notify_all();
     }
