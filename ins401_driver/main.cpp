@@ -168,5 +168,12 @@ int main(int argc, char *argv[]) {
     if (ntrip_client_thread.joinable()) {
         ntrip_client_thread.join();
     }
+
+    // Post-process binary data files into ASCII CSV
+    receiver_ptr->ProcessBinaryFiles();
+
+    // Log receiver statistics summary
+    receiver_ptr->LogStatistics();
+
     return 0;
 }
