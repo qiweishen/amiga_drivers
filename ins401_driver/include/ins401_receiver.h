@@ -150,11 +150,17 @@ private:
     std::vector<char> rtcm_rover_file_buffer_;
     std::vector<char> nmea_file_buffer_;
 
-    // Binary file paths for post-processing lookup
+    // Binary file paths
     std::string gnss_bin_path_;
     std::string ins_bin_path_;
     std::string imu_bin_path_;
     std::string diagnostic_bin_path_;
+
+    // CSV file paths
+    std::string gnss_csv_path_;
+    std::string ins_csv_path_;
+    std::string imu_csv_path_;
+    std::string diagnostic_csv_path_;
 
     bool check_rtk_;
     double horizontal_std_;

@@ -575,12 +575,20 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
     std::string binary_folder_path = fmt::format("{}/{}", output_folder_path_, "bin");
     std::filesystem::create_directories(binary_folder_path);
 
-    gnss_bin_path_ = fmt::format("{}/gnss_data_{}.bin", binary_folder_path, timestamp);
-    ins_bin_path_ = fmt::format("{}/ins_data_{}.bin", binary_folder_path, timestamp);
-    imu_bin_path_ = fmt::format("{}/imu_data_{}.bin", binary_folder_path, timestamp);
-    diagnostic_bin_path_ = fmt::format("{}/diagnostic_data_{}.bin", binary_folder_path, timestamp);
-    std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_data_{}.rtcm3", output_folder_path_, timestamp);
-    std::string nmea_filename = fmt::format("{}/nmea_message_{}.txt", output_folder_path_, timestamp);
+    gnss_bin_path_ = fmt::format("{}/gnss_{}.bin", binary_folder_path, timestamp);
+    gnss_csv_path_ = fmt::format("{}/gnss_{}.csv", output_folder_path_, timestamp);
+
+    ins_bin_path_ = fmt::format("{}/ins_{}.bin", binary_folder_path, timestamp);
+    ins_csv_path_ = fmt::format("{}/ins_{}.csv", output_folder_path_, timestamp);
+
+    imu_bin_path_ = fmt::format("{}/imu_{}.bin", binary_folder_path, timestamp);
+    imu_csv_path_ = fmt::format("{}/imu_{}.csv", output_folder_path_, timestamp);
+
+    diagnostic_bin_path_ = fmt::format("{}/diagnostic_{}.bin", binary_folder_path, timestamp);
+    diagnostic_csv_path_ = fmt::format("{}/diagnostic_{}.csv", output_folder_path_, timestamp);
+
+    std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_{}.rtcm3", output_folder_path_, timestamp);
+    std::string nmea_filename = fmt::format("{}/nmea_{}.nmea", output_folder_path_, timestamp);
 
     gnss_bin_buffer_.resize(write_buffer_size_);
     gnss_bin_file_.open(gnss_bin_path_, std::ios::out | std::ios::binary);
@@ -652,12 +660,10 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
         return;
     }
 
-    std::string csv_path = output_folder_path_;
-    csv_path.replace(csv_path.rfind(".bin"), 4, ".csv");
-    std::ofstream csv_out(csv_path, std::ios::out);
+    std::ofstream csv_out(gnss_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
         Tool::LogMessage(spdlog::level::warn, kModule,
-                         fmt::format("Cannot create GNSS CSV file: {}", csv_path));
+                         fmt::format("Cannot create GNSS CSV file: {}", gnss_csv_path_));
         return;
     }
 
@@ -707,12 +713,10 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
         return;
     }
 
-    std::string csv_path = output_folder_path_;
-    csv_path.replace(csv_path.rfind(".bin"), 4, ".csv");
-    std::ofstream csv_out(csv_path, std::ios::out);
+    std::ofstream csv_out(ins_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
         Tool::LogMessage(spdlog::level::warn, kModule,
-                         fmt::format("Cannot create INS CSV file: {}", csv_path));
+                         fmt::format("Cannot create INS CSV file: {}", ins_csv_path_));
         return;
     }
 
@@ -768,12 +772,10 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
         return;
     }
 
-    std::string csv_path = output_folder_path_;
-    csv_path.replace(csv_path.rfind(".bin"), 4, ".csv");
-    std::ofstream csv_out(csv_path, std::ios::out);
+    std::ofstream csv_out(imu_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
         Tool::LogMessage(spdlog::level::warn, kModule,
-                         fmt::format("Cannot create IMU CSV file: {}", csv_path));
+                         fmt::format("Cannot create IMU CSV file: {}", imu_csv_path_));
         return;
     }
 
@@ -817,12 +819,10 @@ void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
         return;
     }
 
-    std::string csv_path = output_folder_path_;
-    csv_path.replace(csv_path.rfind(".bin"), 4, ".csv");
-    std::ofstream csv_out(csv_path, std::ios::out);
+    std::ofstream csv_out(diagnostic_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
         Tool::LogMessage(spdlog::level::warn, kModule,
-                         fmt::format("Cannot create diagnostic CSV file: {}", csv_path));
+                         fmt::format("Cannot create diagnostic CSV file: {}", diagnostic_csv_path_));
         return;
     }
 
