@@ -1,15 +1,9 @@
-#include <INIReader.h>
 #include <atomic>
-#include <boost/date_time.hpp>
 #include <chrono>
 #include <csignal>
 #include <filesystem>
-#include <map>
 #include <memory>
-#include <spdlog/fmt/chrono.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
+#include <thread>
 
 #include "initialization_monitor.h"
 #include "ins401_discover.h"
@@ -24,11 +18,11 @@ namespace {
 
 
 static std::atomic<bool> g_terminate{false};
+static std::atomic<int> g_signal_received{0};
 
 
 static void SignalHandler(int sig) {
-    // Async-safe signal flag for shutdown.
-    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Received signal {}, shutting down...", sig));
+    g_signal_received.store(sig, std::memory_order_relaxed);
     g_terminate.store(true, std::memory_order_release);
 }
 
@@ -40,33 +34,15 @@ int main(int argc, char *argv[]) {
     std::signal(SIGTSTP, SignalHandler); // Ctrl+Z
     std::signal(SIGHUP, SignalHandler); // Shutdown the terminal
 
-    // Load config and prepare output directory.
-    std::string config_path = argc > 1 ? argv[1] : "../../Config.ini";
-    const INIReader configures(config_path);
-    if (configures.ParseError() < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Cannot load Config.ini file from {}", config_path));
-        return 1;
-    }
 
-    std::string output_folder_path = configures.Get("General", "Output Directory", "./data");
-    auto now = std::chrono::system_clock::now();
-    std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
-    std::string data_folder_path = fmt::format("{}/{}", output_folder_path, timestamp);
-    std::filesystem::create_directories(data_folder_path);
-    std::filesystem::copy_file(config_path, fmt::format("{}/Config_{}.ini", data_folder_path, timestamp),
+    // Load config and initialize the system.
+    std::string config_path = argc > 1 ? argv[1] : "../../Config.ini";
+    Config config;
+    Tool::LoadConfig(config_path, config);
+    Tool::InitializeSystem(config);
+    std::filesystem::copy_file(config_path, fmt::format("{}/Config_{}.ini", config.data_folder_path, config.timestamp),
                                std::filesystem::copy_options::overwrite_existing);
 
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    console_sink->set_level(spdlog::level::info);
-    console_sink->set_pattern("%^[%H:%M:%S] [%l] %v%$");
-    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-        fmt::format("{}/log_{}.log", data_folder_path, timestamp), true);
-    file_sink->set_level(spdlog::level::trace);
-    file_sink->set_pattern("[%H:%M:%S] [%l] %v");
-    std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
-    auto logger = std::make_shared<spdlog::logger>("INS401 Driver", sinks.begin(), sinks.end());
-    logger->set_level(spdlog::level::trace);
-    spdlog::set_default_logger(logger);
 
     // Discover device on the network.
     auto discover = std::make_unique<INSDeviceDiscover>();
@@ -81,24 +57,21 @@ int main(int argc, char *argv[]) {
 
 
     // Initialize the static initialization monitor
-    auto init_monitor = std::make_shared<InitializationMonitor>(configures);
+    auto init_monitor = std::make_shared<InitializationMonitor>(config);
 
 
-    // Start receiver thread and capture the first GGA.
-    auto receiver_ptr = std::make_shared<INSDeviceReceiver>(device.interface_name, device.mac_address, data_folder_path,
-                                                            configures.GetBoolean("NTRIP Client", "Check RTK", false),
-                                                            configures.GetBoolean("NTRIP Client", "Enable VRS", false),
-                                                            configures.GetReal(
-                                                                "Static Initial Initialization",
-                                                                "gnss_position_std_threshold", 0.02)
-    );
-    // Register IMU and GNSS callbacks for the initialization monitor.
+    // Start receiver thread
+    auto receiver_ptr = std::make_shared<INSDeviceReceiver>(device.interface_name, device.mac_address, config);
+    receiver_ptr->SetInitializationMonitor(init_monitor.get());
+    // Register IMU and/or GNSS callbacks for the initialization monitor
     receiver_ptr->SetImuCallback([monitor = init_monitor](const RawIMUData &imu) {
         monitor->OnImuData(imu);
     });
-    receiver_ptr->SetGnssCallback([monitor = init_monitor](const GNSSSolutionData &gnss) {
-        monitor->OnGnssData(gnss);
-    });
+    if (config.enable_gnss_checking) {
+        receiver_ptr->SetGnssCallback([monitor = init_monitor](const GNSSSolutionData &gnss) {
+            monitor->OnGnssData(gnss);
+        });
+    }
     std::thread receiver_thread([&receiver_ptr]() {
         try {
             receiver_ptr->Run();
@@ -108,30 +81,20 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    std::pair<bool, double> gravity_initial = init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(5));
-    if (!gravity_initial.first) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
-                         "Timed out waiting for first GNSS data for gravity initialization");
-        g_terminate.store(true, std::memory_order_release);
-        receiver_ptr->Stop();
-        if (receiver_thread.joinable()) {
-            receiver_thread.join();
-        }
-        return 1;
-    }
-    Tool::LogMessage(spdlog::level::info, kModule,
-                     fmt::format("Gravity for initialization: {:.6f} m/^2", gravity_initial.second));
+
+    // Wait for the first GNSS solution and gravity estimate to be available from the monitor
+    init_monitor->WaitForFirstGnssAndGravity(std::chrono::seconds(3));
 
 
     // Configure NTRIP client.
-    auto ntrip_client_ptr = std::make_unique<NTRIPClient>(configures, data_folder_path);
-    if (configures.GetBoolean("NTRIP Client", "Enable VRS", false)) {
+    auto ntrip_client_ptr = std::make_unique<NTRIPClient>(config);
+    if (config.use_vrs) {
         receiver_ptr->SetNtripClient(ntrip_client_ptr.get());
     }
 
 
     // Forward RTCM to device and start the NTRIP client.
-    auto ntrip_callback = std::make_unique<NTRIP_Callback>(device.interface_name, device.mac_address,
+    auto ntrip_callback = std::make_unique<NTRIPCallback>(device.interface_name, device.mac_address,
                                                            device.localhost_mac_address);
     ntrip_client_ptr->SetDataCallback(
         [cb = ntrip_callback.get()](const uint8_t *payload, const size_t len) { cb->SendToINS401(payload, len); });
@@ -145,7 +108,7 @@ int main(int argc, char *argv[]) {
                 g_terminate.store(true);
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,
-                                 fmt::format("NTRIP client exception (ignored because RTK not required): {}",
+                                 fmt::format("NTRIP client exception (but ignored because RTK not required): {}",
                                              e.what()));
                 ntrip_client_ptr->Disconnect();
             }
@@ -158,6 +121,9 @@ int main(int argc, char *argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
+    if (int sig = g_signal_received.load(std::memory_order_relaxed); sig != 0) {
+        Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Received signal {}, shutting down...", sig));
+    }
 
     // Shutdown sequence: stop receiver, then join threads.
     receiver_ptr->Stop();

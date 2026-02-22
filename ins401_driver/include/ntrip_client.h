@@ -1,3 +1,6 @@
+/// @file ntrip_client.h
+/// @brief NTRIP v2.0 client for receiving RTK correction data (RTCM3) and forwarding it to INS401.
+
 #ifndef NTRIP_CLIENT_H
 #define NTRIP_CLIENT_H
 
@@ -16,9 +19,9 @@
 #include <utility>
 #include <vector>
 #include <map>
-#include <INIReader.h>
 
-#include <ethernet_socket.h>
+#include "ethernet_socket.h"
+#include "data_type.h"
 
 
 // HTTP response structure
@@ -33,9 +36,8 @@ struct HTTPResponse {
 
 class NTRIPClient {
 public:
-    // Configuration
-    struct Config {
-        bool check_rtk;
+    struct Options {
+        bool enable_rtk;
         std::string host; // NTRIP caster hostname
         int port; // Port number
         std::string mount_point; // Mount point name
@@ -43,7 +45,7 @@ public:
         std::string password; // Authentication password
         bool is_ssl = false; // Use SSL/TLS connection
         bool verify_ssl = false; // Verify SSL certificate
-        bool use_vrs = false; // Enable periodic GGA for VRS
+        bool use_vrs; // Enable periodic GGA for VRS
         int gga_interval = 30; // GGA send interval in seconds
 
         // Connection parameters
@@ -91,11 +93,7 @@ public:
         double current_data_rate = 0.0; // Current data rate in KB/s
     };
 
-    // Callback types
-    using DataCallback = std::function<void(const uint8_t *, size_t)>;
-    using MessageCallback = std::function<void(const std::vector<uint8_t> &)>;
-
-    explicit NTRIPClient(const INIReader &configures, std::string output_folder_path);
+    explicit NTRIPClient(const Config &configures);
 
     ~NTRIPClient();
 
@@ -104,40 +102,39 @@ public:
 
     NTRIPClient &operator=(const NTRIPClient &) = delete;
 
-    // Main functions
+    // Callback types
+    using DataCallback = std::function<void(const uint8_t *, size_t)>;
+    using MessageCallback = std::function<void(const std::vector<uint8_t> &)>;
+
     bool Connect();
 
     void Disconnect();
 
-    bool IsConnected() const { return connected_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsConnected() const { return connected_.load(std::memory_order_acquire); }
 
     void StartReceiving();
 
-    bool IsReceiving() const { return receiving_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsReceiving() const { return receiving_.load(std::memory_order_acquire); }
 
-    // Get mount points from caster
-    std::vector<MountPoint> GetSourceTable();
+    [[nodiscard]] std::vector<MountPoint> GetSourceTable();
 
-    // Check if RTK is required
-    bool IsRTKRequired() const;
+    [[nodiscard]] bool IsRTKRequired() const;
 
     // Callback setters
     void SetDataCallback(DataCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
+        std::scoped_lock lock(callback_mutex_);
         data_callback_ = std::move(callback);
     }
 
     void SetMessageCallback(MessageCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
+        std::scoped_lock lock(callback_mutex_);
         message_callback_ = std::move(callback);
     }
 
     void SetNmeaGga(std::string gga) {
-        std::lock_guard<std::mutex> lock(gga_mutex_);
+        std::scoped_lock lock(gga_mutex_);
         nmea_gga_ = std::move(gga);
     }
-
-    void UpdateGgaFromNmea(std::string nmea);
 
     // Statistics
     Statistics GetStatistics() const;
@@ -146,7 +143,7 @@ private:
     void StopReceiving();
 
     // Loading config
-    void LoadConfig(const INIReader &configures);
+    void LoadConfig(const Config &config);
 
     // Network operations
     bool CreateSocket(int family);
@@ -168,8 +165,9 @@ private:
 
     ssize_t ReceiveData(void *buffer, size_t size) const;
 
-    // RTCM parsing
-    std::vector<std::vector<uint8_t> > ParseRTCM(const uint8_t *data, size_t size);
+    // Split raw RTCM stream into 1024-byte blocks that fit within the Ethernet MTU
+    // for raw socket transmission to the INS401 device.
+    std::vector<std::vector<uint8_t> > ChunkRTCMData(const uint8_t *data, size_t size);
 
     // Thread functions
     void ReceiveThread();
@@ -189,7 +187,7 @@ private:
     static std::string Base64Encode(const std::string &input);
 
     // Configuration
-    Config config_{};
+    Options config_{};
 
     // Network
     int socket_fd_ = -1;
@@ -242,17 +240,16 @@ private:
 };
 
 
-class NTRIP_Callback {
+class NTRIPCallback {
 public:
-    explicit NTRIP_Callback(const std::string &interface, const std::string &target_mac_str,
-                            const std::string &local_mac_str);
+    explicit NTRIPCallback(const std::string &interface, std::string target_mac_str, std::string local_mac_str);
 
-    ~NTRIP_Callback();
+    ~NTRIPCallback();
 
     // Delete copy operations
-    NTRIP_Callback(const NTRIP_Callback &) = delete;
+    NTRIPCallback(const NTRIPCallback &) = delete;
 
-    NTRIP_Callback &operator=(const NTRIP_Callback &) = delete;
+    NTRIPCallback &operator=(const NTRIPCallback &) = delete;
 
     bool IsInitialized() const;
 
@@ -280,9 +277,8 @@ private:
     std::atomic<size_t> packets_sent_{0};
     std::atomic<size_t> packets_failed_{0};
 
-    // Retry parameters
-    static constexpr int MAX_SEND_RETRIES_ = 3;
-    static constexpr int SEND_RETRY_DELAY_MS_ = 10;
+    static constexpr int kMaxSendRetries = 3;
+    static constexpr int kSendRetryDelayMs = 10;
 };
 
 

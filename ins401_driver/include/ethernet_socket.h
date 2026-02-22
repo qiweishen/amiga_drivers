@@ -1,3 +1,6 @@
+/// @file ethernet_socket.h
+/// @brief Raw Ethernet socket abstraction and Aceinna packet-level utilities for INS401 communication.
+
 #ifndef ETHERNET_SOCKET_H
 #define ETHERNET_SOCKET_H
 
@@ -33,7 +36,7 @@ using EthernetFrame = std::vector<std::uint8_t>;
 // Raw Ethernet socket for bidirectional communication.
 class EthernetSocket {
 public:
-    EthernetSocket(std::string_view interface_name, const MacAddress &target_mac, std::size_t recv_buffer_size = 0,
+    EthernetSocket(std::string interface_name, const MacAddress &target_mac, std::size_t recv_buffer_size = 0,
                    bool enable_bpf = false);
 
     ~EthernetSocket();
@@ -42,25 +45,44 @@ public:
 
     EthernetSocket &operator=(const EthernetSocket &) = delete;
 
-    EthernetSocket(EthernetSocket &&other) noexcept = default;
+    EthernetSocket(EthernetSocket &&other) noexcept
+        : interface_name_(std::move(other.interface_name_)),
+          target_mac_(other.target_mac_), local_mac_(other.local_mac_),
+          if_index_(other.if_index_), recv_buffer_size_(other.recv_buffer_size_),
+          enable_bpf_(other.enable_bpf_),
+          socket_fd_(std::exchange(other.socket_fd_, -1)),
+          epoll_fd_(std::exchange(other.epoll_fd_, -1)) {}
 
-    EthernetSocket &operator=(EthernetSocket &&other) noexcept = default;
+    EthernetSocket &operator=(EthernetSocket &&other) noexcept {
+        if (this != &other) {
+            CloseEthernetSocket();
+            interface_name_ = std::move(other.interface_name_);
+            target_mac_ = other.target_mac_;
+            local_mac_ = other.local_mac_;
+            if_index_ = other.if_index_;
+            recv_buffer_size_ = other.recv_buffer_size_;
+            enable_bpf_ = other.enable_bpf_;
+            socket_fd_ = std::exchange(other.socket_fd_, -1);
+            epoll_fd_ = std::exchange(other.epoll_fd_, -1);
+        }
+        return *this;
+    }
 
-    std::ptrdiff_t Send(const std::vector<uint8_t> &frame) const;
+    [[nodiscard]] std::ptrdiff_t Send(const std::vector<uint8_t> &frame) const;
 
-    std::optional<EthernetFrame> Receive(int timeout_ms = -1) const;
+    [[nodiscard]] std::optional<EthernetFrame> Receive(int timeout_ms = -1) const;
 
-    std::vector<EthernetFrame> ReceiveBatch(std::size_t max_frames = 64) const;
+    [[nodiscard]] std::vector<EthernetFrame> ReceiveBatch(std::size_t max_frames = 64) const;
 
-    MacAddress GetLocalMac() const { return local_mac_; }
+    [[nodiscard]] MacAddress GetLocalMac() const { return local_mac_; }
 
-    MacAddress GetTargetMac() const { return target_mac_; }
+    [[nodiscard]] MacAddress GetTargetMac() const { return target_mac_; }
 
-    std::string GetInterface() const { return interface_name_; }
+    [[nodiscard]] std::string GetInterface() const { return interface_name_; }
 
-    int Getfd() const { return socket_fd_; }
+    [[nodiscard]] int GetFd() const { return socket_fd_; }
 
-    bool IsValid() const { return socket_fd_ >= 0; }
+    [[nodiscard]] bool IsValid() const { return socket_fd_ >= 0; }
 
 private:
     void CreateSocket();
@@ -132,30 +154,28 @@ namespace Ethernet {
         int fd_;
     };
 
-    // Active network interfaces (name, mac).
-    std::vector<std::pair<std::string, std::string> > GetNetworkInterfaces();
+    [[nodiscard]] std::vector<std::pair<std::string, std::string> > GetNetworkInterfaces();
 
-    // Attach a bidirectional MAC filter.
     bool SetupBpfFilter(MacAddress target_mac, MacAddress local_mac, int socket_fd);
 
-    // Build a raw Aceinna Ethernet frame.
-    std::vector<uint8_t> BuildAceinnaPacket(MacAddress target_mac, MacAddress local_mac,
-                                            std::array<uint8_t, 2> message_id,
-                                            const uint8_t *payload, size_t payload_length);
+    /// Build a complete Aceinna Ethernet frame with the following wire layout:
+    /// [DstMAC(6) | SrcMAC(6) | EthLen(2) | 0x5555(2) | MsgID(2) | PayloadLen(4) | Payload(N) | CRC16(2) | Pad]
+    [[nodiscard]] std::vector<uint8_t> BuildAceinnaPacket(MacAddress target_mac, MacAddress local_mac,
+                                                          std::array<uint8_t, 2> message_id,
+                                                          const uint8_t *payload, size_t payload_length);
 
-    // MAC address conversions.
-    std::string ParseMacAddress(const std::array<uint8_t, 6> &mac_uint8);
+    [[nodiscard]] std::string ParseMacAddress(const std::array<uint8_t, 6> &mac_uint8);
 
-    std::string ParseMacAddress(const uint8_t *mac_ptr);
+    [[nodiscard]] std::string ParseMacAddress(const uint8_t *mac_ptr);
 
-    std::array<uint8_t, 6> FormatMACAddress(std::string_view mac_str);
+    [[nodiscard]] std::array<uint8_t, 6> FormatMACAddress(std::string mac_str);
 
-
-    // CRC helpers.
     namespace CRC {
-        uint16_t CalculateINS401_CRC16(const uint8_t *buf, const uint16_t &length);
+        /// CRC-16/CCITT (poly 0x1021, init 0x1D0F). Returns byte-swapped per INS401 LSB-first wire format.
+        [[nodiscard]] uint16_t CalculateINS401_CRC16(const uint8_t *buf, const uint16_t &length);
 
-        uint32_t CalculateRTCM3_CRC24(const void *data, std::size_t nBytes);
+        /// CRC-24Q as defined by the RTCM3 standard (poly 0x1864CFB).
+        [[nodiscard]] uint32_t CalculateRTCM3_CRC24(const void *data, std::size_t nBytes);
     } // namespace CRC
 } // namespace Ethernet
 

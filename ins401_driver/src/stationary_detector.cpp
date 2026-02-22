@@ -27,8 +27,8 @@ StationaryDetector::StationaryDetector(const std::vector<RawIMUData> &raw_imu_da
 }
 
 
-StationaryDetector::WindowStats StationaryDetector::InitializeWindowStats() const {
-    WindowStats stats;
+ImuWindowStats StationaryDetector::InitializeWindowStats() const {
+    ImuWindowStats stats;
     for (size_t i = 0; i < window_samples_; ++i) {
         stats.Add(imu_data_[i]);
     }
@@ -36,7 +36,7 @@ StationaryDetector::WindowStats StationaryDetector::InitializeWindowStats() cons
 }
 
 
-bool StationaryDetector::IsStaticWindow(const WindowStats &stats) const {
+bool StationaryDetector::IsStaticWindow(const ImuWindowStats &stats) const {
     const double inv_n = 1.0 / static_cast<double>(window_samples_);
     const Eigen::Vector3d accel_mean = stats.accel_sum * inv_n;
     const Eigen::Vector3d gyro_mean = stats.gyro_sum * inv_n;
@@ -54,7 +54,7 @@ bool StationaryDetector::IsStaticWindow(const WindowStats &stats) const {
 
 
 void StationaryDetector::SlideWindowStats(size_t window_start, size_t window_end, size_t step,
-                                          WindowStats &stats) const {
+                                          ImuWindowStats &stats) const {
     for (size_t i = 0; i < step; ++i) {
         stats.Remove(imu_data_[window_start + i]);
     }
@@ -69,7 +69,8 @@ void StationaryDetector::AppendSegmentIfValid(size_t seg_start_idx, size_t seg_e
         return;
     }
 
-    // Map decision indices back to actual data range covered by the window
+    // Decision indices point to the window *end*; subtract window size to recover
+    // the actual data start covered by the first passing window.
     const size_t adjusted_start = (seg_start_idx + 1 >= window_samples_)
                                       ? (seg_start_idx + 1 - window_samples_)
                                       : 0;
@@ -111,7 +112,7 @@ void StationaryDetector::FindStationaryTimeSegments() {
         return;
     }
 
-    WindowStats stats = InitializeWindowStats();
+    ImuWindowStats stats = InitializeWindowStats();
 
     bool in_segment = false;
     size_t seg_start_idx = 0;

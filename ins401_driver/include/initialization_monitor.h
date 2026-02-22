@@ -6,33 +6,31 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
-#include <INIReader.h>
 #include <Eigen/Core>
 
 #include "data_type.h"
 #include "orientation_initializer.h"
 
 
-/// Monitors incoming IMU and GNSS data to determine when static initialization is complete.
-///
-/// Flow:
-///   1. Accumulate IMU samples in a sliding window (default 10s at 100Hz).
-///   2. When the window passes all stationary thresholds, record stationary start time.
-///   3. After min_stationary_duration_s of continuous stationarity, compute InitializationResult
-///      using all IMU data from stationary start.
-///   4. Recompute every recompute_interval_s with the growing window.
-///   5. After required_stable_count consecutive computations where roll/pitch delta < threshold,
-///      AND GNSS is RTK_FIXED with position std below threshold, declare initialization complete.
+// Monitors incoming IMU and GNSS data to determine when static initialization is complete.
+//
+// Flow:
+//   1. Accumulate IMU samples in a sliding window (default 10s at 100Hz).
+//   2. When the window passes all stationary thresholds, record stationary start time.
+//   3. After min_stationary_duration_s of continuous stationarity, compute InitializationResult
+//      using all IMU data from stationary start.
+//   4. Recompute every recompute_interval_s with the growing window.
+//   5. After required_stable_count consecutive computations where roll/pitch delta < threshold,
+//      AND GNSS is RTK_FIXED with position std below threshold, declare initialization complete.
 class InitializationMonitor {
 public:
-    struct Config {
+    struct Options {
         // GNSS conditions
-        bool check_rtk;
         bool enable_gnss_check;
-        double gnss_position_std_threshold; // m
+        double gnss_horizontal_std_threshold; // m
 
         // IMU Stationary detection thresholds
-        int imu_freq;
+        int imu_freq = 100; // Hz
         double accel_gravity_threshold;
         double accel_var_threshold; // m/s^2
         double gyro_var_threshold; // deg/s
@@ -40,8 +38,8 @@ public:
         double gyro_mean_threshold_z; // deg/s
 
         // IMU initialization parameters
-        int min_stationary_duration_s; // Minimum seconds of stationarity before first computation
-        int recompute_interval_s; // Recompute interval in seconds
+        double min_stationary_duration_s; // Minimum seconds of stationarity before first computation
+        double recompute_interval_s; // Recompute interval in seconds
         int required_stable_count; // Consecutive stable computations needed
         double stability_threshold_deg; // Max roll/pitch delta (degrees) for stability
 
@@ -49,54 +47,31 @@ public:
         double local_gravity; // m/s^2
     };
 
-    explicit InitializationMonitor(const INIReader &configures);
+    explicit InitializationMonitor(const Config &config);
 
     ~InitializationMonitor() = default;
 
-    /// Called from receiver's IMU callback (100 Hz). Thread-safe.
+    // Called from receiver's IMU callback (100 Hz). Thread-safe.
     void OnImuData(const RawIMUData &raw_imu);
 
-    /// Called from receiver's GNSS callback (1 Hz). Thread-safe.
+    // Called from receiver's NMEA callback. Thread-safe.
     void OnGnssData(const GNSSSolutionData &gnss);
 
-    /// Wait until first GNSS arrives and gravity is initialized.
-    std::pair<bool, double> WaitForFirstGnssAndGravity(std::chrono::milliseconds timeout);
+    void WaitForFirstGnssAndGravity(std::chrono::milliseconds timeout);
 
-    /// Check if static initialization has been declared complete.
-    bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }
+    void SetBlhFromGga(const Eigen::Vector3d &blh);
 
-    /// Retrieve the final initialization result. Only valid after IsInitialized() returns true.
-    InitializationResult GetResult() const;
+    [[nodiscard]] bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }
+
+    [[nodiscard]] InitializationResult GetResult() const;
 
 private:
-    Config config_{};
+    Options config_{};
     std::atomic<bool> initialized_{false};
 
-    // --- Sliding window stationary detection (O(1) per sample) ---
-    struct WindowStats {
-        Eigen::Vector3d gyro_sum = Eigen::Vector3d::Zero();
-        Eigen::Vector3d accel_sum = Eigen::Vector3d::Zero();
-        double gyro_sq_sum = 0.0;
-        double accel_sq_sum = 0.0;
-
-        void Add(const ImuData &sample) {
-            gyro_sum += sample.gyro;
-            accel_sum += sample.accel;
-            gyro_sq_sum += sample.gyro.squaredNorm();
-            accel_sq_sum += sample.accel.squaredNorm();
-        }
-
-        void Remove(const ImuData &sample) {
-            gyro_sum -= sample.gyro;
-            accel_sum -= sample.accel;
-            gyro_sq_sum -= sample.gyro.squaredNorm();
-            accel_sq_sum -= sample.accel.squaredNorm();
-        }
-    };
-
-    size_t window_samples_{}; // Number of samples in the detection window
-    std::deque<ImuData> detection_window_; // Sliding window for stationary detection
-    WindowStats window_stats_; // Running statistics for the detection window
+    size_t window_samples_{};
+    std::deque<ImuData> detection_window_;
+    ImuWindowStats window_stats_;
 
     // --- Stationary state ---
     bool is_stationary_ = false;
@@ -117,22 +92,19 @@ private:
     InitializationResult final_result_;
 
     // --- GNSS state ---
-    GNSSSolutionData latest_gnss_{};
-    bool has_gnss_ = false;
+    GNSSSolutionData latest_position_{};
+    bool has_position_ = false;
     bool gravity_ready_ = false;
 
     mutable std::mutex mutex_;
-    std::condition_variable gnss_cv_;
-
-    // --- Loading config ---
-    void LoadConfig(const INIReader &configures);
+    std::condition_variable gravity_cv_;
 
     // --- Internal methods ---
     bool IsStaticWindow() const;
 
     void ComputeAndCheck(double current_time);
 
-    bool CheckStability(const InitializationResult &new_result) const;
+    bool CompareResults(const InitializationResult &new_result) const;
 
     bool CheckGnssConditions() const;
 

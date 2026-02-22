@@ -16,7 +16,7 @@ namespace {
 
 
 INSDeviceDiscover::INSDeviceDiscover() {
-    broadcast_mac_ = Ethernet::FormatMACAddress(BROADCAST_MAC);
+    broadcast_mac_ = Ethernet::FormatMACAddress(std::string{BROADCAST_MAC});
 }
 
 INSDeviceDiscover::~INSDeviceDiscover() = default;
@@ -56,6 +56,7 @@ std::map<std::string, DeviceInfo> INSDeviceDiscover::DiscoverDevices(int discove
         std::cout << "    • Devices are not in discovery mode" << std::endl;
         std::cout << "    • Firewall blocking broadcast packets" << std::endl;
         std::cout << "    • Devices on different network segment" << std::endl;
+        Tool::LogMessage(spdlog::level::err, kModule, "No INS401 devices found");
     }
 
     return discovered_devices_;
@@ -86,7 +87,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
         sockets_.push_back(socket_ptr);
         --active_interfaces_;
     } catch (const std::exception &e) {
-        spdlog::error("Exception on interface {}: {}", interface, e.what());
+        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to discover on interface {}", interface));
         --active_interfaces_;
     }
 }
@@ -100,7 +101,7 @@ void INSDeviceDiscover::SendDiscoveryPing(const std::shared_ptr<EthernetSocket> 
     // Send
     std::ptrdiff_t byte = socket_ptr->Send(ping_packet);
     if (byte < 0) {
-        Tool::LogMessage(spdlog::level::err, kModule,
+        Tool::LogMessage(spdlog::level::warn, kModule,
                          fmt::format("Failed to send discovery ping on interface {}", socket_ptr->GetInterface()));
     } else {
         Tool::LogMessage(spdlog::level::trace, kModule,
@@ -115,7 +116,7 @@ void INSDeviceDiscover::HandleReceive(const std::shared_ptr<EthernetSocket> &soc
                                       const boost::system::error_code &ec) {
     if (ec) {
         if (ec != boost::asio::error::operation_aborted) {
-            Tool::LogMessage(spdlog::level::err, kModule,
+            Tool::LogMessage(spdlog::level::warn, kModule,
                              fmt::format("Receive error on interface {}", socket_ptr->GetInterface()), ec.message());
         }
         return;
@@ -157,19 +158,19 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const MacAdd
     }
 
     // Parse Aceinna payload length (4 bytes)
-    uint32_t aceinna_payload_len = buffer[kEthernetHeaderSize + ACENINNA_PRE_AND_ID] |
-                                   (buffer[kEthernetHeaderSize + ACENINNA_PRE_AND_ID + 1] << 8) |
-                                   (buffer[kEthernetHeaderSize + ACENINNA_PRE_AND_ID + 2] << 16) |
-                                   (buffer[kEthernetHeaderSize + ACENINNA_PRE_AND_ID + 3] << 24);
+    uint32_t aceinna_payload_len = buffer[kEthernetHeaderSize + ACEINNA_PRE_AND_ID] |
+                                   (buffer[kEthernetHeaderSize + ACEINNA_PRE_AND_ID + 1] << 8) |
+                                   (buffer[kEthernetHeaderSize + ACEINNA_PRE_AND_ID + 2] << 16) |
+                                   (buffer[kEthernetHeaderSize + ACEINNA_PRE_AND_ID + 3] << 24);
 
     // CRC validation (2 bytes) - within Aceinna packet
-    uint16_t received_crc = (buffer[kEthernetHeaderSize + ACENINNA_HEADER_LEN + aceinna_payload_len]) |
-                            (buffer[kEthernetHeaderSize + ACENINNA_HEADER_LEN + 1 + aceinna_payload_len] << 8);
+    uint16_t received_crc = (buffer[kEthernetHeaderSize + ACEINNA_HEADER_LEN + aceinna_payload_len]) |
+                            (buffer[kEthernetHeaderSize + ACEINNA_HEADER_LEN + 1 + aceinna_payload_len] << 8);
     uint16_t calculated_crc = Ethernet::CRC::CalculateINS401_CRC16(
         &buffer[kEthernetHeaderSize + 2], 6 + aceinna_payload_len // Message ID(2) + Length(4) + Payload
     );
     if (received_crc != calculated_crc) {
-        Tool::LogMessage(spdlog::level::err, kModule,
+        Tool::LogMessage(spdlog::level::warn, kModule,
                          fmt::format("CRC mismatch! Received: 0x{:X} Calculated: 0x{:X}", received_crc,
                                      calculated_crc));
         return false;
@@ -182,7 +183,7 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const MacAdd
     info.localhost_mac_address = Ethernet::ParseMacAddress(local_mac);
 
     if (aceinna_payload_len > 0) {
-        std::string device_data((char *) (buffer + kEthernetHeaderSize + ACENINNA_HEADER_LEN), aceinna_payload_len);
+        std::string device_data((char *) (buffer + kEthernetHeaderSize + ACEINNA_HEADER_LEN), aceinna_payload_len);
         // Length(4)
         if (device_data.find(info.product) != std::string::npos) {
             std::istringstream iss(device_data);
@@ -207,7 +208,7 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const MacAdd
 
     // Thread-safe save device info
     {
-        std::lock_guard<std::mutex> lock(devices_mutex_);
+        std::scoped_lock lock(devices_mutex_);
         discovered_devices_[device_mac] = info;
     }
 

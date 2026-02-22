@@ -29,7 +29,7 @@ namespace {
 }
 
 
-EthernetSocket::EthernetSocket(const std::string_view interface_name, const MacAddress &target_mac,
+EthernetSocket::EthernetSocket(std::string interface_name, const MacAddress &target_mac,
                                const std::size_t recv_buffer_size,
                                const bool enable_bpf) : interface_name_(interface_name), target_mac_(target_mac),
                                                         recv_buffer_size_(recv_buffer_size), enable_bpf_(enable_bpf) {
@@ -100,23 +100,20 @@ std::vector<EthernetFrame> EthernetSocket::ReceiveBatch(std::size_t max_frames) 
 
 
 void EthernetSocket::CreateSocket() {
-    // Create raw socket
     socket_fd_ = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (socket_fd_ < 0) {
         if (errno == EPERM) {
-            fmt::print(stderr, "Error: Root privileges required");
+            Tool::LogMessage(spdlog::level::err, kModule, "Root privileges required to create raw socket");
         } else {
             Tool::LogMessage(spdlog::level::err, kModule, "Failed to create raw socket", std::strerror(errno));
         }
     }
 
-    // Set non-blocking mode
     int flags = fcntl(socket_fd_, F_GETFL, 0);
     if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
         Tool::LogMessage(spdlog::level::warn, kModule, "Failed to set non-blocking mode", std::strerror(errno));
     }
 
-    // Get interface index and local MAC address
     ifreq ifr{};
     std::strncpy(ifr.ifr_name, interface_name_.c_str(), IFNAMSIZ - 1);
 
@@ -132,7 +129,6 @@ void EthernetSocket::CreateSocket() {
     }
     std::memcpy(local_mac_.data(), ifr.ifr_hwaddr.sa_data, kMacAddressSize);
 
-    // Bind to interface
     sockaddr_ll sll{};
     sll.sll_family = AF_PACKET;
     sll.sll_ifindex = if_index_;
@@ -142,7 +138,6 @@ void EthernetSocket::CreateSocket() {
                          fmt::format("Failed to bind socket to interface {}", interface_name_), std::strerror(errno));
     }
 
-    // Set receive buffer size
     if (recv_buffer_size_ > 0) {
         int buf_size = static_cast<int>(std::min(recv_buffer_size_,
                                                  static_cast<size_t>(std::numeric_limits<int>::max())));
@@ -193,14 +188,14 @@ namespace Ethernet {
         ifaddrs *ifaddr = nullptr;
         if (getifaddrs(&ifaddr) == -1) {
             Tool::LogMessage(spdlog::level::err, kModule, "Failed to get network interfaces", std::strerror(errno));
+            return interfaces;
         }
 
-        // RAII wrapper to automatically free ifaddrs structure and fd
         auto ifaddr_guard = std::unique_ptr<ifaddrs, decltype(&freeifaddrs)>(ifaddr, freeifaddrs);
-        // Create a socket for ioctl operations (reused for all interfaces)
         const int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
             Tool::LogMessage(spdlog::level::err, kModule, "Failed to create socket for ioctl", std::strerror(errno));
+            return interfaces;
         }
         FdGuard fd_guard(fd);
 
@@ -322,12 +317,14 @@ namespace Ethernet {
 
         if (setsockopt(socket_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0) {
             Tool::LogMessage(spdlog::level::warn, kModule, "Failed to attach BPF filter", std::strerror(errno));
+            return false;
         }
 
         return true;
     }
 
 
+    // Wire layout: [DstMAC(6)|SrcMAC(6)|EthLen(2)|0x5555(2)|MsgID(2)|PayloadLen(4)|Payload(N)|CRC16(2)|Pad]
     std::vector<uint8_t> BuildAceinnaPacket(const MacAddress target_mac, const MacAddress local_mac,
                                             const std::array<uint8_t, 2> message_id, const uint8_t *payload,
                                             const size_t payload_length) {
@@ -391,7 +388,7 @@ namespace Ethernet {
     }
 
 
-    std::array<uint8_t, 6> FormatMACAddress(const std::string_view mac_str) {
+    std::array<uint8_t, 6> FormatMACAddress(std::string mac_str) {
         if (mac_str.empty()) {
             Tool::LogMessage(spdlog::level::err, kModule, "Empty MAC address string");
         }
@@ -431,6 +428,7 @@ namespace Ethernet {
                     }
                 }
             }
+            // Byte-swap to match INS401 LSB-first wire format
             return ((crc << 8) & 0xFF00) | ((crc >> 8) & 0xFF);
         }
 

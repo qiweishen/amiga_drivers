@@ -1,10 +1,15 @@
+/// @file tool.h
+/// @brief System initialization, configuration loading, gravity computation, and logging utilities.
+
 #ifndef TOOL_H
 #define TOOL_H
 
 #include <spdlog/spdlog.h>
+#include <string_view>
 #include <vector>
+#include <Eigen/Core>
 
-#include "Eigen/Core"
+#include "data_type.h"
 
 
 namespace Tool {
@@ -13,13 +18,17 @@ namespace Tool {
     } // namespace Earth
 
     namespace Utility {
-        // String splitting without allocations.
-        std::vector<std::string_view> SplitString(std::string_view str, char delimiter);
+        std::vector<std::string> SplitString(std::string_view str, char delimiter);
     } // namespace Utility
 
-    // Log message with optional error details.
-    void LogMessage(spdlog::level::level_enum level, std::string_view module, std::string_view msg,
-                    std::string_view error = "");
+    void InitializeSystem(Config &config);
+
+    void LoadConfig(std::string_view config_path, Config &config);
+
+    /// Log message with optional error details.
+    /// WARNING: levels `err` and `critical` throw std::runtime_error after logging.
+    void LogMessage(spdlog::level::level_enum level, std::string_view module, std::string msg,
+                    std::string error = "");
 } // namespace Tool
 
 

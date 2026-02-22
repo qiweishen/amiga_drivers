@@ -8,8 +8,10 @@
 #include <spdlog/fmt/bundled/ranges.h>
 #include <spdlog/fmt/std.h>
 #include <sys/epoll.h>
+#include <utility>
 #include <vector>
 
+#include "initialization_monitor.h"
 #include "ins401_protocol.h"
 #include "ntrip_client.h"
 #include "tool.h"
@@ -21,15 +23,17 @@ namespace {
 }
 
 
-INSDeviceReceiver::INSDeviceReceiver(std::string iface, const std::string &device_mac, std::string output_folder_path,
-                                     bool check_rtk, bool enable_vrs,
-                                     double horizontal_std) : interface_name_(std::move(iface)),
-                                                              output_folder_path_(std::move(output_folder_path)),
-                                                              check_rtk_(check_rtk),
-                                                              enable_vrs_(enable_vrs),
-                                                              horizontal_std_(horizontal_std) {
-    device_mac_ = Ethernet::FormatMACAddress(device_mac);
+INSDeviceReceiver::INSDeviceReceiver(std::string iface, std::string device_mac, const Config &config) : interface_name_(
+    std::move(iface)) {
+    device_mac_ = Ethernet::FormatMACAddress(std::move(device_mac));
     socket_ptr_ = std::make_shared<EthernetSocket>(interface_name_, device_mac_, buffer_size_, true);
+
+    use_vrs_ = config.use_vrs;
+    check_gnss_ = config.enable_gnss_checking;
+    rtk_horizontal_std_ = config.gnss_horizontal_std_threshold;
+
+    output_folder_path_ = config.data_folder_path;
+    timestamp_ = config.timestamp;
 }
 
 
@@ -41,8 +45,6 @@ INSDeviceReceiver::~INSDeviceReceiver() {
 
 void INSDeviceReceiver::Run() {
     running_.store(InitializeWritingFiles());
-    stats_.start_time = std::chrono::steady_clock::now();
-    stats_.last_packet_time = stats_.start_time;
     ReceiveLoop();
 }
 
@@ -52,33 +54,8 @@ void INSDeviceReceiver::Stop() {
 }
 
 
-bool INSDeviceReceiver::GetGNSSData(std::vector<GNSSSolutionData> &data, size_t max_count) {
-    std::lock_guard lock(queue_mutex_);
-    if (gnss_queue_.empty()) {
-        return false;
-    }
-    size_t count = 0;
-    while (!gnss_queue_.empty() && count < max_count) {
-        data.push_back(gnss_queue_.front());
-        gnss_queue_.pop();
-        count++;
-    }
-    return true;
-}
-
-
-bool INSDeviceReceiver::GetIMUData(std::vector<RawIMUData> &data, size_t max_count) {
-    std::lock_guard lock(queue_mutex_);
-    if (imu_queue_.empty()) {
-        return false;
-    }
-    size_t count = 0;
-    while (!imu_queue_.empty() && count < max_count) {
-        data.push_back(imu_queue_.front());
-        imu_queue_.pop();
-        count++;
-    }
-    return true;
+void INSDeviceReceiver::SetInitializationMonitor(InitializationMonitor *initializer) {
+    initialization_monitor_.store(initializer, std::memory_order_release);
 }
 
 
@@ -89,25 +66,30 @@ void INSDeviceReceiver::SetNtripClient(NTRIPClient *client) {
 
 void INSDeviceReceiver::ReceiveLoop() {
     while (running_.load()) {
-        auto response = socket_ptr_->Receive(100);
-        if (response && !response->empty()) {
-            VerifyDataFrame(response->data(), response->size());
+        auto frames = socket_ptr_->ReceiveBatch(64);
+        if (frames.empty()) {
+            auto response = socket_ptr_->Receive(100);
+            if (response && !response->empty()) {
+                VerifyDataFrame(response->data(), response->size());
+            }
+        } else {
+            for (const auto &frame: frames) {
+                VerifyDataFrame(frame.data(), frame.size());
+            }
         }
     }
 }
 
 
+// Parse an Ethernet frame containing an Aceinna binary packet:
+// [0x5555(2) | MsgID(2) | PayloadLen(4) | Payload(N) | CRC16(2)]
+// or an NMEA ASCII sentence starting with '$'.
 void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
-    // Basic length check
     if (len < 60) {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.total_bytes_received += len;
-        stats_.last_packet_time = std::chrono::steady_clock::now();
-    }
+    stat_total_bytes_received_.fetch_add(len, std::memory_order_relaxed);
 
     // Check Aceinna binary command start
     const uint8_t *packet = data + kEthernetHeaderSize;
@@ -163,171 +145,119 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
             default:
                 break;
         }
-    } else if (packet[0] == NEMA_ASCII_START) {
-        HandleNMEAMessage(packet);
+    } else if (packet[0] == NMEA_ASCII_START) {
+        const std::size_t payload_len = len - kEthernetHeaderSize;
+        HandleNMEAMessage(packet, payload_len);
     } else {
         return;
     }
 }
 
 
-// ---------------------------------------------------------------------------
-// Real-time handlers: CRC check + binary file write (+ optional callback)
-// ---------------------------------------------------------------------------
-
 void INSDeviceReceiver::HandleGNSSSolutionPacket(const uint8_t *packet) {
-    constexpr size_t crc_offset = ACENINNA_HEADER_LEN + GNSS_SOLUTION_PACKET_LENGTH;
-    const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8; // LSB-first
+    constexpr size_t crc_offset = ACEINNA_HEADER_LEN + GNSS_SOLUTION_PACKET_LENGTH;
+    const uint16_t recv_crc = packet[crc_offset] | (packet[crc_offset + 1] << 8); // LSB-first
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + GNSS_SOLUTION_PACKET_LENGTH);
     if (recv_crc != calc_crc) {
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.gnss_crc_errors++;
-        }
+        stat_gnss_crc_errors_.fetch_add(1, std::memory_order_relaxed);
         Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
                              "GNSS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
     }
 
-    const uint8_t *payload = &packet[ACENINNA_HEADER_LEN];
+    stat_gnss_packets_.fetch_add(1, std::memory_order_relaxed);
 
+    const uint8_t *payload = &packet[ACEINNA_HEADER_LEN];
     if (gnss_bin_file_.is_open()) {
         gnss_bin_file_.write(reinterpret_cast<const char *>(payload),
                              static_cast<std::streamsize>(GNSS_SOLUTION_PACKET_LENGTH));
     }
 
-    GNSSSolutionData gnss = ParseGNSSSolutionData(payload);
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        UpdateTimeRange(stats_.gnss_time, gnss.gps_week, gnss.gps_millisecs, stats_.gnss_packets == 0);
-        stats_.gnss_packets++;
-    }
-    {
-        std::lock_guard lock(queue_mutex_);
-        if (gnss_queue_.size() >= max_gnss_queue_size_) {
-            gnss_queue_.pop();
+    // Only parse GNSS packet in real-time under the need of GNSS Checking.
+    if (check_gnss_) {
+        GNSSSolutionData gnss = ParseGNSSSolutionData(payload);
+        GnssCallback gnss_cb;
+        {
+            std::scoped_lock lock(callback_mutex_);
+            gnss_cb = gnss_callback_;
         }
-        gnss_queue_.push(gnss);
-        if (check_rtk_) {
-            MonitorGNSSStatus(gnss);
+        if (gnss_cb) {
+            gnss_cb(gnss);
         }
-    }
-    cv_.notify_one();
-
-    GnssCallback gnss_cb;
-    {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        gnss_cb = gnss_callback_;
-    }
-    if (gnss_cb) {
-        gnss_cb(gnss);
+        MonitorGNSSStatus(gnss);
     }
 }
 
 
 void INSDeviceReceiver::HandleINSSolutionPacket(const uint8_t *packet) {
-    constexpr size_t crc_offset = ACENINNA_HEADER_LEN + INS_SOLUTION_PACKET_LENGTH;
-    const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;
+    constexpr size_t crc_offset = ACEINNA_HEADER_LEN + INS_SOLUTION_PACKET_LENGTH;
+    const uint16_t recv_crc = packet[crc_offset] | (packet[crc_offset + 1] << 8);
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + INS_SOLUTION_PACKET_LENGTH);
     if (recv_crc != calc_crc) {
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.ins_crc_errors++;
-        }
+        stat_ins_crc_errors_.fetch_add(1, std::memory_order_relaxed);
         Tool::LogMessage(spdlog::level::warn, kModule,
                          fmt::format("INS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                                      recv_crc, calc_crc));
         return;
     }
 
-    const uint8_t *payload = &packet[ACENINNA_HEADER_LEN];
+    stat_ins_packets_.fetch_add(1, std::memory_order_relaxed);
 
+    const uint8_t *payload = &packet[ACEINNA_HEADER_LEN];
     if (ins_bin_file_.is_open()) {
         ins_bin_file_.write(reinterpret_cast<const char *>(payload),
                             static_cast<std::streamsize>(INS_SOLUTION_PACKET_LENGTH));
-    }
-
-    const auto ins = ParseINSSolutionData(payload);
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        UpdateTimeRange(stats_.ins_time, ins.gps_week, ins.gps_millisecs, stats_.ins_packets == 0);
-        stats_.ins_packets++;
     }
 }
 
 
 void INSDeviceReceiver::HandleDiagnosticPacket(const uint8_t *packet) {
-    constexpr size_t crc_offset = ACENINNA_HEADER_LEN + DIAGNOSTIC_MESSAGE_LENGTH;
-    const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;
+    constexpr size_t crc_offset = ACEINNA_HEADER_LEN + DIAGNOSTIC_MESSAGE_LENGTH;
+    const uint16_t recv_crc = packet[crc_offset] | (packet[crc_offset + 1] << 8);
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + DIAGNOSTIC_MESSAGE_LENGTH);
     if (recv_crc != calc_crc) {
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.diagnostic_crc_errors++;
-        }
+        stat_diagnostic_crc_errors_.fetch_add(1, std::memory_order_relaxed);
         Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
                              "Diagnostic message CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
     }
 
-    const uint8_t *payload = &packet[ACENINNA_HEADER_LEN];
+    stat_diagnostic_packets_.fetch_add(1, std::memory_order_relaxed);
 
+    const uint8_t *payload = &packet[ACEINNA_HEADER_LEN];
     if (diagnostic_bin_file_.is_open()) {
         diagnostic_bin_file_.write(reinterpret_cast<const char *>(payload),
                                    static_cast<std::streamsize>(DIAGNOSTIC_MESSAGE_LENGTH));
-    }
-
-    const auto diag = ParseDiagnosticMessage(payload);
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        UpdateTimeRange(stats_.diagnostic_time, diag.gps_week, diag.gps_millisecs, stats_.diagnostic_packets == 0);
-        stats_.diagnostic_packets++;
     }
 }
 
 
 void INSDeviceReceiver::HandleRawIMUPacket(const uint8_t *packet) {
-    constexpr size_t crc_offset = ACENINNA_HEADER_LEN + RAW_IMU_DATA_LENGTH;
-    const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;
+    constexpr size_t crc_offset = ACEINNA_HEADER_LEN + RAW_IMU_DATA_LENGTH;
+    const uint16_t recv_crc = packet[crc_offset] | (packet[crc_offset + 1] << 8);
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + RAW_IMU_DATA_LENGTH);
     if (recv_crc != calc_crc) {
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.imu_crc_errors++;
-        }
+        stat_imu_crc_errors_.fetch_add(1, std::memory_order_relaxed);
         Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
                              "Raw IMU data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
     }
 
-    const uint8_t *payload = &packet[ACENINNA_HEADER_LEN];
+    stat_imu_packets_.fetch_add(1, std::memory_order_relaxed);
 
+    const uint8_t *payload = &packet[ACEINNA_HEADER_LEN];
     if (imu_bin_file_.is_open()) {
         imu_bin_file_.write(reinterpret_cast<const char *>(payload),
                             static_cast<std::streamsize>(RAW_IMU_DATA_LENGTH));
     }
 
     RawIMUData imu = ParseRawIMUData(payload);
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        UpdateTimeRange(stats_.imu_time, imu.gps_week, imu.gps_millisecs, stats_.imu_packets == 0);
-        stats_.imu_packets++;
-    }
-    {
-        std::lock_guard lock(queue_mutex_);
-        if (imu_queue_.size() >= max_imu_queue_size_) {
-            imu_queue_.pop();
-        }
-        imu_queue_.push(imu);
-    }
-    cv_.notify_one();
-
     ImuCallback imu_cb;
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
+        std::scoped_lock lock(callback_mutex_);
         imu_cb = imu_callback_;
     }
     if (imu_cb) {
@@ -337,39 +267,34 @@ void INSDeviceReceiver::HandleRawIMUPacket(const uint8_t *packet) {
 
 
 void INSDeviceReceiver::HandleRTCMRoverPacket(const uint8_t *packet, size_t len) {
-    size_t crc_offset = ACENINNA_HEADER_LEN + len;
-    const uint16_t recv_crc = (packet[crc_offset]) | packet[crc_offset + 1] << 8;
+    size_t crc_offset = ACEINNA_HEADER_LEN + len;
+    const uint16_t recv_crc = packet[crc_offset] | (packet[crc_offset + 1] << 8);
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + len);
     if (recv_crc != calc_crc) {
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.rtcm_rover_crc_errors++;
-        }
+        stat_rtcm_rover_crc_errors_.fetch_add(1, std::memory_order_relaxed);
         Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
                              "RTCM rover data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.rtcm_rover_packets++;
-    }
+    stat_rtcm_rover_packets_.fetch_add(1, std::memory_order_relaxed);
 
-    const uint8_t *rtcm_data = &packet[ACENINNA_HEADER_LEN];
+    const uint8_t *rtcm_data = &packet[ACEINNA_HEADER_LEN];
     if (rtcm_rover_file_.is_open()) {
         rtcm_rover_file_.write(reinterpret_cast<const char *>(rtcm_data), static_cast<std::streamsize>(len));
     }
 }
 
 
-void INSDeviceReceiver::HandleNMEAMessage(const uint8_t *packet) {
-    std::string nmea_msg(reinterpret_cast<const char *>(packet));
+void INSDeviceReceiver::HandleNMEAMessage(const uint8_t *packet, std::size_t max_len) {
+    std::string nmea_msg(reinterpret_cast<const char *>(packet), max_len);
     const size_t end_pos = nmea_msg.find("\r\n");
     if (end_pos != std::string::npos) {
         nmea_msg = nmea_msg.substr(0, end_pos + 2);
         const size_t asterisk_pos = nmea_msg.find('*');
         if (asterisk_pos != std::string::npos && asterisk_pos + 2 < nmea_msg.size()) {
+            // NMEA checksum: XOR of all bytes between '$' (exclusive) and '*' (exclusive)
             uint8_t checksum = 0;
             for (size_t i = 1; i < asterisk_pos; ++i) {
                 checksum ^= static_cast<uint8_t>(nmea_msg[i]);
@@ -377,56 +302,35 @@ void INSDeviceReceiver::HandleNMEAMessage(const uint8_t *packet) {
             const std::string checksum_str = nmea_msg.substr(asterisk_pos + 1, 2);
             const auto recv_checksum = static_cast<uint8_t>(std::stoul(checksum_str, nullptr, 16));
             if (checksum != recv_checksum) {
-                {
-                    std::lock_guard<std::mutex> lock(stats_mutex_);
-                    stats_.nmea_checksum_errors++;
-                }
+                stat_nmea_checksum_errors_.fetch_add(1, std::memory_order_relaxed);
                 Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
                                      "NMEA message checksum mismatch! Received: 0x{:02x} Calculated: 0x{:02x}",
                                      recv_checksum, checksum));
                 return;
             }
         } else {
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                stats_.nmea_checksum_errors++;
-            }
+            stat_nmea_checksum_errors_.fetch_add(1, std::memory_order_relaxed);
             Tool::LogMessage(spdlog::level::warn, kModule, "NMEA message missing checksum!");
             return;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.nmea_messages++;
-        }
+        stat_nmea_messages_.fetch_add(1, std::memory_order_relaxed);
 
         if (nmea_file_.is_open()) {
             nmea_file_.write(nmea_msg.data(), static_cast<std::streamsize>(nmea_msg.size()));
         }
 
-        if (enable_vrs_) {
+        if (use_vrs_ || !first_gga_blh_ready_.load(std::memory_order_acquire)) {
             HandleGgaMessage(nmea_msg);
-            NmeaCallback nmea_cb;
-            {
-                std::lock_guard<std::mutex> lock(callback_mutex_);
-                nmea_cb = nmea_callback_;
-            }
-            if (nmea_cb) {
-                nmea_cb(nmea_msg);
-            }
         }
     }
 }
 
 
-// ---------------------------------------------------------------------------
-// Static parse functions: raw payload bytes -> struct
-// ---------------------------------------------------------------------------
-
 GNSSSolutionData INSDeviceReceiver::ParseGNSSSolutionData(const uint8_t *payload) {
     GNSSSolutionData gnss{};
-    gnss.gps_week = *reinterpret_cast<const uint16_t *>(payload);
-    gnss.gps_millisecs = *reinterpret_cast<const uint32_t *>(payload + 2);
+    std::memcpy(&gnss.gps_week, payload, sizeof(uint16_t));
+    std::memcpy(&gnss.gps_millisecs, payload + 2, sizeof(uint32_t));
     gnss.position_type = payload[6];
     std::memcpy(&gnss.latitude, payload + 7, sizeof(double));
     std::memcpy(&gnss.longitude, payload + 15, sizeof(double));
@@ -450,8 +354,8 @@ GNSSSolutionData INSDeviceReceiver::ParseGNSSSolutionData(const uint8_t *payload
 
 INSSolutionData INSDeviceReceiver::ParseINSSolutionData(const uint8_t *payload) {
     INSSolutionData ins{};
-    ins.gps_week = *reinterpret_cast<const uint16_t *>(payload);
-    ins.gps_millisecs = *reinterpret_cast<const uint32_t *>(payload + 2);
+    std::memcpy(&ins.gps_week, payload, sizeof(uint16_t));
+    std::memcpy(&ins.gps_millisecs, payload + 2, sizeof(uint32_t));
     ins.ins_status = payload[6];
     ins.ins_position_type = payload[7];
     std::memcpy(&ins.latitude, payload + 8, sizeof(double));
@@ -476,15 +380,15 @@ INSSolutionData INSDeviceReceiver::ParseINSSolutionData(const uint8_t *payload) 
     std::memcpy(&ins.roll_std, payload + 96, sizeof(float));
     std::memcpy(&ins.pitch_std, payload + 100, sizeof(float));
     std::memcpy(&ins.heading_std, payload + 104, sizeof(float));
-    ins.continent_id = *reinterpret_cast<const uint16_t *>(payload + 108);
+    std::memcpy(&ins.continent_id, payload + 108, sizeof(uint16_t));
     return ins;
 }
 
 
 DiagnosticMessage INSDeviceReceiver::ParseDiagnosticMessage(const uint8_t *payload) {
     DiagnosticMessage diag{};
-    diag.gps_week = *reinterpret_cast<const uint16_t *>(payload);
-    diag.gps_millisecs = *reinterpret_cast<const uint32_t *>(payload + 2);
+    std::memcpy(&diag.gps_week, payload, sizeof(uint16_t));
+    std::memcpy(&diag.gps_millisecs, payload + 2, sizeof(uint32_t));
     uint32_t status_value;
     std::memcpy(&status_value, payload + 6, sizeof(uint32_t));
     const std::bitset<32> bs(status_value);
@@ -500,8 +404,8 @@ DiagnosticMessage INSDeviceReceiver::ParseDiagnosticMessage(const uint8_t *paylo
 
 RawIMUData INSDeviceReceiver::ParseRawIMUData(const uint8_t *payload) {
     RawIMUData imu{};
-    imu.gps_week = *reinterpret_cast<const uint16_t *>(payload);
-    imu.gps_millisecs = *reinterpret_cast<const uint32_t *>(payload + 2);
+    std::memcpy(&imu.gps_week, payload, sizeof(uint16_t));
+    std::memcpy(&imu.gps_millisecs, payload + 2, sizeof(uint32_t));
     std::memcpy(&imu.acc_x, payload + 6, sizeof(float));
     std::memcpy(&imu.acc_y, payload + 10, sizeof(float));
     std::memcpy(&imu.acc_z, payload + 14, sizeof(float));
@@ -512,10 +416,6 @@ RawIMUData INSDeviceReceiver::ParseRawIMUData(const uint8_t *payload) {
 }
 
 
-// ---------------------------------------------------------------------------
-// VRS specific functions
-// ---------------------------------------------------------------------------
-
 bool INSDeviceReceiver::IsGgaSentence(const std::string &nmea) {
     return nmea.rfind("$GPGGA,", 0) == 0 || nmea.rfind("$GNGGA,", 0) == 0;
 }
@@ -525,23 +425,77 @@ void INSDeviceReceiver::HandleGgaMessage(const std::string &nmea) {
     if (!IsGgaSentence(nmea)) {
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(first_gga_mutex_);
-        if (first_gga_from_device_.empty()) {
-            first_gga_from_device_ = nmea;
-            first_gga_ready_.store(true, std::memory_order_release);
+    if (!first_gga_blh_ready_.load(std::memory_order_acquire)) {
+        if (auto blh = ParseGgaCoordinates(nmea)) {
+            first_gga_blh_ = *blh;
+            first_gga_blh_ready_.store(true, std::memory_order_release);
+            if (auto *initializer = initialization_monitor_.load(std::memory_order_acquire)) {
+                initializer->SetBlhFromGga(*blh);
+            }
         }
     }
-    first_gga_cv_.notify_all();
-    if (auto *client = ntrip_client_.load(std::memory_order_acquire)) {
-        client->UpdateGgaFromNmea(nmea);
+    if (use_vrs_) {
+        if (auto *client = ntrip_client_.load(std::memory_order_acquire)) {
+            client->SetNmeaGga(nmea);
+        }
     }
 }
 
 
-// ---------------------------------------------------------------------------
-// File initialization and cleanup
-// ---------------------------------------------------------------------------
+// GGA format: $G?GGA,time,lat,N/S,lon,E/W,qual,nsat,hdop,alt,M,geoid,M,age,stn*cs
+// Latitude is ddmm.mmmm, longitude is dddmm.mmmm.
+// Returns BLH in (radians, radians, meters) for Tool::Earth::ComputeGravity.
+std::optional<Eigen::Vector3d> INSDeviceReceiver::ParseGgaCoordinates(const std::string &gga) {
+    std::string sentence = gga;
+    if (auto pos = sentence.find('*'); pos != std::string::npos) {
+        sentence = sentence.substr(0, pos);
+    }
+
+    auto fields = Tool::Utility::SplitString(sentence, ',');
+    if (fields.size() < 10) {
+        return std::nullopt;
+    }
+
+    // Quality indicator: 0 = no fix
+    if (fields[6].empty()) {
+        return std::nullopt;
+    }
+    try {
+        if (std::stoi(fields[6]) == 0) {
+            return std::nullopt;
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+
+    if (fields[2].empty() || fields[3].empty() || fields[4].empty() || fields[5].empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        // Latitude: ddmm.mmmm -> decimal degrees -> radians
+        double lat_raw = std::stod(fields[2]);
+        double lat_deg = std::floor(lat_raw / 100.0);
+        double latitude = lat_deg + (lat_raw - lat_deg * 100.0) / 60.0;
+        if (fields[3] == "S") latitude = -latitude;
+
+        // Longitude: dddmm.mmmm -> decimal degrees -> radians
+        double lon_raw = std::stod(fields[4]);
+        double lon_deg = std::floor(lon_raw / 100.0);
+        double longitude = lon_deg + (lon_raw - lon_deg * 100.0) / 60.0;
+        if (fields[5] == "W") longitude = -longitude;
+
+        // MSL altitude + geoid separation = ellipsoidal height
+        double altitude = fields[9].empty() ? 0.0 : std::stod(fields[9]);
+        double geoid_sep = (fields.size() > 11 && !fields[11].empty()) ? std::stod(fields[11]) : 0.0;
+
+        return Eigen::Vector3d(latitude * M_PI / 180.0, longitude * M_PI / 180.0, altitude + geoid_sep);
+    } catch (...) {
+        Tool::LogMessage(spdlog::level::warn, kModule, "Failed to parse numeric fields in GGA sentence");
+        return std::nullopt;
+    }
+}
+
 
 void INSDeviceReceiver::CloseAllFiles() {
     if (gnss_bin_file_.is_open()) {
@@ -571,74 +525,57 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
         return false;
     }
 
-    std::string_view timestamp = Tool::Utility::SplitString(output_folder_path_, '/').back();
     std::string binary_folder_path = fmt::format("{}/{}", output_folder_path_, "bin");
     std::filesystem::create_directories(binary_folder_path);
 
-    gnss_bin_path_ = fmt::format("{}/gnss_{}.bin", binary_folder_path, timestamp);
-    gnss_csv_path_ = fmt::format("{}/gnss_{}.csv", output_folder_path_, timestamp);
+    gnss_bin_path_ = fmt::format("{}/gnss_{}.bin", binary_folder_path, timestamp_);
+    gnss_csv_path_ = fmt::format("{}/gnss_{}.csv", output_folder_path_, timestamp_);
 
-    ins_bin_path_ = fmt::format("{}/ins_{}.bin", binary_folder_path, timestamp);
-    ins_csv_path_ = fmt::format("{}/ins_{}.csv", output_folder_path_, timestamp);
+    ins_bin_path_ = fmt::format("{}/ins_{}.bin", binary_folder_path, timestamp_);
+    ins_csv_path_ = fmt::format("{}/ins_{}.csv", output_folder_path_, timestamp_);
 
-    imu_bin_path_ = fmt::format("{}/imu_{}.bin", binary_folder_path, timestamp);
-    imu_csv_path_ = fmt::format("{}/imu_{}.csv", output_folder_path_, timestamp);
+    imu_bin_path_ = fmt::format("{}/imu_{}.bin", binary_folder_path, timestamp_);
+    imu_csv_path_ = fmt::format("{}/imu_{}.csv", output_folder_path_, timestamp_);
 
-    diagnostic_bin_path_ = fmt::format("{}/diagnostic_{}.bin", binary_folder_path, timestamp);
-    diagnostic_csv_path_ = fmt::format("{}/diagnostic_{}.csv", output_folder_path_, timestamp);
+    diagnostic_bin_path_ = fmt::format("{}/diagnostic_{}.bin", binary_folder_path, timestamp_);
+    diagnostic_csv_path_ = fmt::format("{}/diagnostic_{}.csv", output_folder_path_, timestamp_);
 
-    std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_{}.rtcm3", output_folder_path_, timestamp);
-    std::string nmea_filename = fmt::format("{}/nmea_{}.nmea", output_folder_path_, timestamp);
+    std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_{}.rtcm3", output_folder_path_, timestamp_);
+    std::string nmea_filename = fmt::format("{}/nmea_{}.nmea", output_folder_path_, timestamp_);
 
     gnss_bin_buffer_.resize(write_buffer_size_);
+    gnss_bin_file_.rdbuf()->pubsetbuf(gnss_bin_buffer_.data(),
+                                      static_cast<std::streamsize>(gnss_bin_buffer_.size()));
     gnss_bin_file_.open(gnss_bin_path_, std::ios::out | std::ios::binary);
-    if (gnss_bin_file_.is_open()) {
-        gnss_bin_file_.rdbuf()->pubsetbuf(gnss_bin_buffer_.data(),
-                                          static_cast<std::streamsize>(gnss_bin_buffer_.size()));
-    }
 
     ins_bin_buffer_.resize(write_buffer_size_);
+    ins_bin_file_.rdbuf()->pubsetbuf(ins_bin_buffer_.data(),
+                                     static_cast<std::streamsize>(ins_bin_buffer_.size()));
     ins_bin_file_.open(ins_bin_path_, std::ios::out | std::ios::binary);
-    if (ins_bin_file_.is_open()) {
-        ins_bin_file_.rdbuf()->pubsetbuf(ins_bin_buffer_.data(),
-                                         static_cast<std::streamsize>(ins_bin_buffer_.size()));
-    }
 
     imu_bin_buffer_.resize(write_buffer_size_);
+    imu_bin_file_.rdbuf()->pubsetbuf(imu_bin_buffer_.data(),
+                                     static_cast<std::streamsize>(imu_bin_buffer_.size()));
     imu_bin_file_.open(imu_bin_path_, std::ios::out | std::ios::binary);
-    if (imu_bin_file_.is_open()) {
-        imu_bin_file_.rdbuf()->pubsetbuf(imu_bin_buffer_.data(),
-                                         static_cast<std::streamsize>(imu_bin_buffer_.size()));
-    }
 
     diagnostic_bin_buffer_.resize(write_buffer_size_);
+    diagnostic_bin_file_.rdbuf()->pubsetbuf(diagnostic_bin_buffer_.data(),
+                                            static_cast<std::streamsize>(diagnostic_bin_buffer_.size()));
     diagnostic_bin_file_.open(diagnostic_bin_path_, std::ios::out | std::ios::binary);
-    if (diagnostic_bin_file_.is_open()) {
-        diagnostic_bin_file_.rdbuf()->pubsetbuf(diagnostic_bin_buffer_.data(),
-                                                static_cast<std::streamsize>(diagnostic_bin_buffer_.size()));
-    }
 
     rtcm_rover_file_buffer_.resize(write_buffer_size_);
+    rtcm_rover_file_.rdbuf()->pubsetbuf(rtcm_rover_file_buffer_.data(),
+                                        static_cast<std::streamsize>(rtcm_rover_file_buffer_.size()));
     rtcm_rover_file_.open(rtcm_rover_filename, std::ios::out | std::ios::binary);
-    if (rtcm_rover_file_.is_open()) {
-        rtcm_rover_file_.rdbuf()->pubsetbuf(rtcm_rover_file_buffer_.data(),
-                                            static_cast<std::streamsize>(rtcm_rover_file_buffer_.size()));
-    }
 
     nmea_file_buffer_.resize(write_buffer_size_);
+    nmea_file_.rdbuf()->pubsetbuf(nmea_file_buffer_.data(),
+                                  static_cast<std::streamsize>(nmea_file_buffer_.size()));
     nmea_file_.open(nmea_filename, std::ios::out);
-    if (nmea_file_.is_open()) {
-        nmea_file_.rdbuf()->pubsetbuf(nmea_file_buffer_.data(),
-                                      static_cast<std::streamsize>(nmea_file_buffer_.size()));
-    }
 
     return true;
 }
 
-
-// ---------------------------------------------------------------------------
-// Post-processing: read binary files -> parse -> write ASCII CSV
-// ---------------------------------------------------------------------------
 
 void INSDeviceReceiver::ProcessBinaryFiles() {
     CloseAllFiles();
@@ -652,6 +589,7 @@ void INSDeviceReceiver::ProcessBinaryFiles() {
 }
 
 
+// Read fixed-size binary records written during collection and convert to CSV.
 void INSDeviceReceiver::ProcessGNSSBinaryFile() {
     std::ifstream bin_in(gnss_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
@@ -705,6 +643,7 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
 }
 
 
+// Read fixed-size binary records written during collection and convert to CSV.
 void INSDeviceReceiver::ProcessINSBinaryFile() {
     std::ifstream bin_in(ins_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
@@ -764,6 +703,7 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
 }
 
 
+// Read fixed-size binary records written during collection and convert to CSV.
 void INSDeviceReceiver::ProcessIMUBinaryFile() {
     std::ifstream bin_in(imu_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
@@ -811,6 +751,7 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
 }
 
 
+// Read fixed-size binary records written during collection and convert to CSV.
 void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
     std::ifstream bin_in(diagnostic_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
@@ -857,84 +798,58 @@ void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
 }
 
 
-// ---------------------------------------------------------------------------
-// Statistics
-// ---------------------------------------------------------------------------
-
-void INSDeviceReceiver::UpdateTimeRange(GpsTimeRange &range, const std::uint16_t week,
-                                        const std::uint32_t ms, const bool first) {
-    if (first) {
-        range.first_week = week;
-        range.first_ms = ms;
-    }
-    range.last_week = week;
-    range.last_ms = ms;
-}
-
-
 INSDeviceReceiver::Statistics INSDeviceReceiver::GetStatistics() const {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
+    Statistics s;
+    s.gnss_packets = stat_gnss_packets_.load(std::memory_order_relaxed);
+    s.ins_packets = stat_ins_packets_.load(std::memory_order_relaxed);
+    s.imu_packets = stat_imu_packets_.load(std::memory_order_relaxed);
+    s.diagnostic_packets = stat_diagnostic_packets_.load(std::memory_order_relaxed);
+    s.rtcm_rover_packets = stat_rtcm_rover_packets_.load(std::memory_order_relaxed);
+    s.nmea_messages = stat_nmea_messages_.load(std::memory_order_relaxed);
+    s.gnss_crc_errors = stat_gnss_crc_errors_.load(std::memory_order_relaxed);
+    s.ins_crc_errors = stat_ins_crc_errors_.load(std::memory_order_relaxed);
+    s.imu_crc_errors = stat_imu_crc_errors_.load(std::memory_order_relaxed);
+    s.diagnostic_crc_errors = stat_diagnostic_crc_errors_.load(std::memory_order_relaxed);
+    s.rtcm_rover_crc_errors = stat_rtcm_rover_crc_errors_.load(std::memory_order_relaxed);
+    s.nmea_checksum_errors = stat_nmea_checksum_errors_.load(std::memory_order_relaxed);
+    s.total_bytes_received = stat_total_bytes_received_.load(std::memory_order_relaxed);
+    return s;
 }
 
 
 void INSDeviceReceiver::LogStatistics() const {
-    const Statistics s = GetStatistics();
-    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        s.last_packet_time - s.start_time).count();
-    const double duration_sec = static_cast<double>(duration) / 1000.0;
-
-    // expected_count = time_span / interval + 1 (first + last inclusive)
-    auto compute_expected = [](const GpsTimeRange &t, std::uint32_t hz) -> std::size_t {
-        const double span_sec = GpsWeekTowToSec(t.last_week, t.last_ms)
-                              - GpsWeekTowToSec(t.first_week, t.first_ms);
-        if (span_sec <= 0.0) {
-            return 1;
-        }
-        return static_cast<std::size_t>(std::round(span_sec * static_cast<double>(hz))) + 1;
-    };
-
-    auto loss_line = [&](const char *label, std::size_t received, std::size_t crc_errors,
-                         const GpsTimeRange &t, std::uint32_t hz) {
-        if (received < 2) {
-            Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                                 "  {}: received={}, CRC errors={}", label, received, crc_errors));
-            return;
-        }
-        const std::size_t expected = compute_expected(t, hz);
-        const std::size_t lost = expected > received ? expected - received : 0;
-        const double pct = expected > 0
-                               ? static_cast<double>(lost) / static_cast<double>(expected) * 100.0
-                               : 0.0;
-        Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                             "  {}: received={}, expected={}, lost={} ({:.2f}%), CRC errors={}",
-                             label, received, expected, lost, pct, crc_errors));
-    };
+    const Statistics statistic_result = GetStatistics();
 
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS RECEIVER STATISTICS ===  Duration: {:.1f}s | Total bytes: {}",
-                         duration_sec, s.total_bytes_received));
-    loss_line("IMU ", s.imu_packets, s.imu_crc_errors, s.imu_time, 100);
-    loss_line("INS ", s.ins_packets, s.ins_crc_errors, s.ins_time, 100);
-    loss_line("GNSS", s.gnss_packets, s.gnss_crc_errors, s.gnss_time, 1);
-    loss_line("Diag", s.diagnostic_packets, s.diagnostic_crc_errors, s.diagnostic_time, 1);
+                         "=== INS401 RECEIVER STATISTICS ===  Total bytes received: {}",
+                         statistic_result.total_bytes_received));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "  RTCM Rover: received={}, CRC errors={}",
-                         s.rtcm_rover_packets, s.rtcm_rover_crc_errors));
+                         "=== INS401 RECEIVER STATISTICS ===  Received GNSS packet: {}; Number of GNSS packet CRC errors {}",
+                         statistic_result.gnss_packets, statistic_result.gnss_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "  NMEA: received={}, checksum errors={}",
-                         s.nmea_messages, s.nmea_checksum_errors));
+                         "=== INS401 RECEIVER STATISTICS ===  Received INS packet: {}; Number of INS packet CRC errors {}",
+                         statistic_result.ins_packets, statistic_result.ins_crc_errors));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+                         "=== INS401 RECEIVER STATISTICS ===  Received IMU packet: {}; Number of IMU packet CRC errors {}",
+                         statistic_result.imu_packets, statistic_result.imu_crc_errors));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+                         "=== INS401 RECEIVER STATISTICS ===  Received Diag packet: {}; Number of Diag packet CRC errors {}",
+                         statistic_result.diagnostic_packets, statistic_result.diagnostic_crc_errors));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+                         "=== INS401 RECEIVER STATISTICS ===  Received RTCM Rover packet: {}; Number of RTCM Rover packet CRC errors {}",
+                         statistic_result.rtcm_rover_packets, statistic_result.rtcm_rover_crc_errors));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+                         "=== INS401 RECEIVER STATISTICS ===  Received NMEA Rover packet: {}; Number of NMEA Rover packet CRC errors {}",
+                         statistic_result.nmea_messages, statistic_result.nmea_checksum_errors));
 }
 
 
-// ---------------------------------------------------------------------------
-// GNSS RTK monitoring
-// ---------------------------------------------------------------------------
-
+// Hysteresis-based GNSS state machine: require GnssTransitionConfirmFrames_ consecutive
+// frames of a new state before accepting the transition, to avoid flapping on noisy signals.
 void INSDeviceReceiver::MonitorGNSSStatus(GNSSSolutionData &gnss) {
     const bool current_rtk_fixed = gnss.position_type == 4;
     const double current_std = (gnss.latitude_std + gnss.longitude_std) / 2.0;
-    const bool current_std_converged = current_std <= horizontal_std_;
+    const bool current_std_converged = current_std <= rtk_horizontal_std_;
 
     if (!gnss_state_initialized_) {
         gnss_state_initialized_ = true;
@@ -978,9 +893,9 @@ void INSDeviceReceiver::MonitorGNSSStatus(GNSSSolutionData &gnss) {
                 const auto level = stable_std_converged_ ? spdlog::level::info : spdlog::level::warn;
                 Tool::LogMessage(level, kModule,
                                  stable_std_converged_
-                                     ? fmt::format("Converged to {:.3f} m STD threshold", horizontal_std_)
+                                     ? fmt::format("Converged to {:.3f} m STD threshold", rtk_horizontal_std_)
                                      : fmt::format("Horizontal STD diverged above {:.3f} m threshold",
-                                                   horizontal_std_));
+                                                   rtk_horizontal_std_));
             }
         }
     }

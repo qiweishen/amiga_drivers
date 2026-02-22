@@ -47,7 +47,7 @@ Eigen::Vector3d GetRandomGeodeticPosition() {
 
 
 int main(int argc, char *argv[]) {
-    constexpr int kNumTrials = 100;
+    constexpr int kNumTrials = 101;
 
     double max_error = std::numeric_limits<double>::lowest();
     double min_error = std::numeric_limits<double>::max();

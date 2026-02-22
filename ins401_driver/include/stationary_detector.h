@@ -1,3 +1,7 @@
+/// @file stationary_detector.h
+/// @brief Offline (post-processing) stationary segment detection on recorded IMU data.
+///        For real-time stationary detection during data collection, see InitializationMonitor.
+
 #ifndef STATIONARY_DETECTOR_H
 #define STATIONARY_DETECTOR_H
 
@@ -52,36 +56,11 @@ private:
     std::vector<std::pair<double, double> > stationary_time_segments_;
     std::vector<std::vector<ImuData> > stationary_imu_segments_;
 
-    // --- Internal helpers ---
-    struct WindowStats {
-        Eigen::Vector3d gyro_sum = Eigen::Vector3d::Zero();
-        Eigen::Vector3d accel_sum = Eigen::Vector3d::Zero();
-        double gyro_sq_sum = 0.0;
-        double accel_sq_sum = 0.0;
+    ImuWindowStats InitializeWindowStats() const;
 
-        void Add(const ImuData &sample) {
-            gyro_sum += sample.gyro;
-            accel_sum += sample.accel;
-            gyro_sq_sum += sample.gyro.squaredNorm();
-            accel_sq_sum += sample.accel.squaredNorm();
-        }
+    bool IsStaticWindow(const ImuWindowStats &stats) const;
 
-        void Remove(const ImuData &sample) {
-            gyro_sum -= sample.gyro;
-            accel_sum -= sample.accel;
-            gyro_sq_sum -= sample.gyro.squaredNorm();
-            accel_sq_sum -= sample.accel.squaredNorm();
-        }
-    };
-
-    // Initialize window statistics over the first window_samples_ samples.
-    WindowStats InitializeWindowStats() const;
-
-    // Check if the current window is stationary based on gyro/accel statistics.
-    bool IsStaticWindow(const WindowStats &stats) const;
-
-    // Slide the window forward by `step` samples.
-    void SlideWindowStats(size_t window_start, size_t window_end, size_t step, WindowStats &stats) const;
+    void SlideWindowStats(size_t window_start, size_t window_end, size_t step, ImuWindowStats &stats) const;
 
     // Append a validated stationary segment, merging overlapping segments.
     void AppendSegmentIfValid(size_t seg_start_idx, size_t seg_end_idx);

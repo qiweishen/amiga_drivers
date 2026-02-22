@@ -40,8 +40,10 @@ public:
         Eigen::Vector3d accel_bias = Eigen::Vector3d::Zero();
     };
 
+    /// Compute IMU biases: gyro bias = mean gyro; accel bias = measured mean - expected gravity in body frame.
     ImuBiasResult ComputeImuBias() const;
 
+    /// Compute rotation from IMU body frame to ENU via gravity alignment (roll/pitch only; yaw is unobservable).
     ImuAlignmentResult AlignImuWithGravity() const;
 
 private:
