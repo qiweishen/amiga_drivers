@@ -585,7 +585,6 @@ void INSDeviceReceiver::ProcessBinaryFiles() {
     ProcessINSBinaryFile();
     ProcessIMUBinaryFile();
     ProcessDiagnosticBinaryFile();
-    Tool::LogMessage(spdlog::level::info, kModule, "Binary data processing complete.");
 }
 
 
@@ -639,7 +638,7 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("GNSS: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    GNSS: {} records processed", count));
 }
 
 
@@ -699,7 +698,7 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("INS: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    INS: {} records processed", count));
 }
 
 
@@ -747,7 +746,7 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("IMU: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    IMU: {} records processed", count));
 }
 
 
@@ -794,7 +793,7 @@ void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Diagnostic: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    Diagnostic: {} records processed", count));
 }
 
 

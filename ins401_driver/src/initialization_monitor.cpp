@@ -253,7 +253,9 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
 
                 if (!has_position_) {
                     Tool::LogMessage(spdlog::level::warn, kModule,
-                                     "=== Critical Warning === : Not receiving any GNSS data during the whole static initialization. If it is not on purpose, please check GNSS antenna, connection and configuration");
+                                     "=== Critical Warning === : Not receiving any GNSS data during the whole static initialization");
+                    Tool::LogMessage(spdlog::level::warn, kModule,
+                 "=== Critical Warning === : If it is not on purpose, please check GNSS antenna, connection and configuration");
                 }
             } else {
                 Tool::LogMessage(spdlog::level::warn, kModule,

@@ -82,6 +82,7 @@ bool NTRIPClient::Connect() {
     }
     // Connection successful
     connected_.store(true, std::memory_order_release);
+    disconnected_.store(false, std::memory_order_release);
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
                          "Connected to NTRIP caster {}:{} with mount point '{}' successfully",
                          config_.host, config_.port, config_.mount_point));
@@ -99,6 +100,9 @@ bool NTRIPClient::Connect() {
 
 
 void NTRIPClient::Disconnect() {
+    if (disconnected_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     // Stop receiving threads first
     StopReceiving();
     // Mark as disconnected

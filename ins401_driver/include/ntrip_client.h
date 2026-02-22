@@ -196,6 +196,7 @@ private:
 
     // State
     std::atomic<bool> connected_{false};
+    std::atomic<bool> disconnected_{false};
     std::atomic<bool> receiving_{false};
 
     // Thread management
