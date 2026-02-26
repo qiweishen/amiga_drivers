@@ -9,6 +9,7 @@
 #include "ins401_discover.h"
 #include "ins401_receiver.h"
 #include "ntrip_client.h"
+#include "terminal_spinner.h"
 #include "tool.h"
 
 
@@ -116,10 +117,13 @@ int main(int argc, char *argv[]) {
     });
 
 
-    // Main loop: wait for termination signal
+    // Main loop: wait for termination signal with terminal activity spinner
+    TerminalSpinner spinner("../../spinner_frames.conf");
     while (!g_terminate.load(std::memory_order_acquire)) {
+        spinner.Tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+    spinner.Clear();
 
     if (int sig = g_signal_received.load(std::memory_order_relaxed); sig != 0) {
         Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Received signal {}, shutting down...", sig));

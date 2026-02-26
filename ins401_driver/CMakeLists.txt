@@ -61,6 +61,7 @@ set(LIB_SOURCES
         src/orientation_initializer.cpp
         src/initialization_monitor.cpp
         src/stationary_detector.cpp
+        src/terminal_spinner.cpp
 )
 
 # Header files
