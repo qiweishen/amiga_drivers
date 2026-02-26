@@ -580,7 +580,7 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
 void INSDeviceReceiver::ProcessBinaryFiles() {
     CloseAllFiles();
 
-    Tool::LogMessage(spdlog::level::info, kModule, "Processing binary data files...");
+    Tool::LogMessage(spdlog::level::info, kModule, "Parsing binary data files...");
     ProcessGNSSBinaryFile();
     ProcessINSBinaryFile();
     ProcessIMUBinaryFile();
@@ -638,7 +638,7 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    GNSS: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - GNSS: {} records processed", count));
 }
 
 
@@ -698,7 +698,7 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    INS: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - INS: {} records processed", count));
 }
 
 
@@ -746,7 +746,7 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    IMU: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - IMU: {} records processed", count));
 }
 
 
@@ -793,7 +793,7 @@ void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    Diagnostic: {} records processed", count));
+    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - Diagnostic: {} records processed", count));
 }
 
 
@@ -820,25 +820,25 @@ void INSDeviceReceiver::LogStatistics() const {
     const Statistics statistic_result = GetStatistics();
 
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Total bytes received: {}",
+                         "=== INS401 RECEIVER STATISTICS === : Total bytes received: {}",
                          statistic_result.total_bytes_received));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received GNSS packet: {}; Number of GNSS packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received GNSS packet: {}; Number of GNSS packet CRC errors {}",
                          statistic_result.gnss_packets, statistic_result.gnss_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received INS packet: {}; Number of INS packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received INS packet: {}; Number of INS packet CRC errors {}",
                          statistic_result.ins_packets, statistic_result.ins_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received IMU packet: {}; Number of IMU packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received IMU packet: {}; Number of IMU packet CRC errors {}",
                          statistic_result.imu_packets, statistic_result.imu_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received Diag packet: {}; Number of Diag packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received Diag packet: {}; Number of Diag packet CRC errors {}",
                          statistic_result.diagnostic_packets, statistic_result.diagnostic_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received RTCM Rover packet: {}; Number of RTCM Rover packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received RTCM Rover packet: {}; Number of RTCM Rover packet CRC errors {}",
                          statistic_result.rtcm_rover_packets, statistic_result.rtcm_rover_crc_errors));
     Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
-                         "=== INS401 RECEIVER STATISTICS ===  Received NMEA Rover packet: {}; Number of NMEA Rover packet CRC errors {}",
+                         "=== INS401 RECEIVER STATISTICS === : Received NMEA Rover packet: {}; Number of NMEA Rover packet CRC errors {}",
                          statistic_result.nmea_messages, statistic_result.nmea_checksum_errors));
 }
 

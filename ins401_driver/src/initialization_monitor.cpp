@@ -128,11 +128,11 @@ void InitializationMonitor::WaitForFirstGnssAndGravity(const std::chrono::millis
     std::unique_lock<std::mutex> lock(mutex_);
     bool success = gravity_cv_.wait_for(lock, timeout, [this]() { return gravity_ready_; });
     if (!success) {
-        // If we are not using RTK or GNSS check, we can still proceed with a default gravity value, but log a warning
+        // If we are not enable RTK or GNSS check, we can still proceed with a default gravity value, but log a warning
         config_.local_gravity = 9.8; // Typical gravity in South Australia
         gravity_ready_ = true;
-        Tool::LogMessage(spdlog::level::warn, kModule,
-                         "RTK check or GNSS check is disabled, proceeding with default gravity value of 9.8 m/s^2, but results may be coarse. If it is not on purpose, your configuration");
+        Tool::LogMessage(spdlog::level::info, kModule,
+                         "No GGA sentence received, proceeding with default gravity value of 9.8 m/s^2");
     } else {
         Tool::LogMessage(spdlog::level::info, kModule,
                          fmt::format("Gravity computed from GGA coordinates: {:.6f} m/s^2", config_.local_gravity));
@@ -232,11 +232,11 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
 
                 Tool::LogMessage(spdlog::level::info, kModule,
                                  fmt::format(
-                                     "=== STATIC INITIALIZATION COMPLETE === : Roll:  {:.4f} deg; Pitch: {:.4f} deg",
+                                     "=== STATIC INITIALIZATION COMPLETE === : Roll: {:.4f} deg; Pitch: {:.4f} deg",
                                      result.roll / kDegToRad, result.pitch / kDegToRad));
                 Tool::LogMessage(spdlog::level::info, kModule,
                                  fmt::format(
-                                     "=== STATIC INITIALIZATION COMPLETE === : Gyro bias:  [{:.6f}, {:.6f}, {:.6f}] deg/s",
+                                     "=== STATIC INITIALIZATION COMPLETE === : Gyro bias: [{:.6f}, {:.6f}, {:.6f}] deg/s",
                                      result.gyro_bias.x(), result.gyro_bias.y(), result.gyro_bias.z()));
                 Tool::LogMessage(spdlog::level::info, kModule,
                                  fmt::format(

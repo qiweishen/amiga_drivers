@@ -193,7 +193,7 @@ void writerThread(const std::string &output_path) {
     // Drain remaining frames
     while (g_queue.pop(frame, std::chrono::milliseconds(0))) {
         ofs.write(reinterpret_cast<const char *>(&frame.timestamp_ns), sizeof(frame.timestamp_ns));
-        uint32_t num_points = static_cast<uint32_t>(frame.points.size());
+        auto num_points = static_cast<uint32_t>(frame.points.size());
         ofs.write(reinterpret_cast<const char *>(&num_points), sizeof(num_points));
         ofs.write(reinterpret_cast<const char *>(frame.points.data()), frame.points.size() * sizeof(PointXYZI));
         frames_written++;
