@@ -117,7 +117,10 @@ int main(int argc, char *argv[]) {
     });
 
 
-    // Main loop: wait for termination signal with terminal activity spinner
+    // Main loop: wait for static initialization, then show activity spinner
+    while (!g_terminate.load(std::memory_order_acquire) && !init_monitor->IsInitialized()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
     TerminalSpinner spinner("./spinner_frames.conf");
     while (!g_terminate.load(std::memory_order_acquire)) {
         spinner.Tick();
