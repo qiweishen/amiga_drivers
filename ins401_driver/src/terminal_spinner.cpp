@@ -66,7 +66,7 @@ void TerminalSpinner::Tick() {
 }
 
 
-void TerminalSpinner::Clear() {
+void TerminalSpinner::Clear() const {
     // Overwrite the spinner line with spaces, then return cursor to column 0.
     // +1 for the leading '\r' character itself occupying the write.
     std::string blank(max_line_length_ + 1, ' ');

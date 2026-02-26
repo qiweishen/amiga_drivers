@@ -31,7 +31,7 @@ public:
 
     /// Clear the spinner line from terminal (restore clean state).
     /// Call before shutdown or before printing final log messages.
-    void Clear();
+    void Clear() const;
 
 private:
     /// Pre-formatted frame strings ready for direct fwrite to stdout.

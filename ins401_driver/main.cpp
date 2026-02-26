@@ -118,10 +118,10 @@ int main(int argc, char *argv[]) {
 
 
     // Main loop: wait for termination signal with terminal activity spinner
-    TerminalSpinner spinner("../../spinner_frames.conf");
+    TerminalSpinner spinner("./spinner_frames.conf");
     while (!g_terminate.load(std::memory_order_acquire)) {
         spinner.Tick();
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     }
     spinner.Clear();
 
