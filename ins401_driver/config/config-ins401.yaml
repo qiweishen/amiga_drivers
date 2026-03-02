@@ -1,0 +1,66 @@
+# =============================================================================
+# INS401 Driver Configuration
+# =============================================================================
+
+
+# --- NTRIP Client Configuration ---
+# NTRIP (Networked Transport of RTCM via Internet Protocol) client settings
+# Used to receive real-time RTK corrections from a CORS/VRS network
+NTRIP Client:
+    # Enable/disable RTK corrections for centimeter-level GNSS positioning
+    Enable RTK: true
+    # NTRIP caster hostname (SmartNet Australia CORS network)
+    Host: www.smartnetaus.com
+    # NTRIP caster port number
+    Port: 15101
+    # Mount point for the desired correction stream
+    # MSM_VRS: Multi-Signal Messages Virtual Reference Station
+    Mount Point: MSM_VRS
+    # Use Virtual Reference Station mode, which generates a virtual base station
+    # near the rover's approximate position for improved RTK performance
+    Use VRS: true
+    # Authentication credentials for the NTRIP caster
+    Username: tpa_field
+    Password: "3915"
+
+
+# --- Static Initialization Settings ---
+# Parameters for the initial stationary alignment phase
+# The system must detect a stable, stationary period to:
+#   1. Estimate initial attitude (roll/pitch from gravity, heading from GNSS if available)
+#   2. Characterize IMU biases before motion begins
+Static Initialization:
+    # Whether to require valid GNSS fix before initialization can proceed
+    Enable GNSS Checking: false
+    # Maximum allowable horizontal standard deviation (m) from GNSS to accept a fix
+    GNSS Horizontal STD: 0.03
+
+    # --- Accelerometer Stationarity Thresholds ---
+    # Gravity magnitude deviation threshold (m/s²) from nominal 9.81 m/s²
+    # Rejects periods where the accelerometer norm deviates too far from gravity
+    Accel Gravity Threshold: 0.035
+    # Maximum allowable variance of accelerometer readings (m²/s⁴)
+    # Ensures the platform is not vibrating or moving during initialization
+    Accel Variance Threshold: 0.008
+
+    # --- Gyroscope Stationarity Thresholds ---
+    # Maximum allowable variance of gyroscope readings (rad²/s²)
+    # Detects any rotational motion during the stationary phase
+    Gyro Variance Threshold: 0.125
+    # Maximum allowable mean angular rate (rad/s) for x and y axes
+    # Tighter threshold on horizontal axes for accurate gravity-based leveling
+    Gyro Mean Threshold_xy: 0.035
+    # Maximum allowable mean angular rate (rad/s) for the z axis
+    # More relaxed threshold since heading is not derived from gravity
+    Gyro Mean Threshold_z: 0.125
+
+    # --- Timing and Convergence ---
+    # Minimum duration (s) of continuous stationary data required for initialization
+    Minimal Stationary Duration: 10
+    # Interval (s) at which the stationarity check is re-evaluated
+    Recompute Interval: 5
+    # Number of consecutive stable evaluations required to confirm stationarity
+    Required Stable Count: 5
+    # Maximum attitude change (deg) between consecutive estimates to be considered stable
+    # Used to verify that the initial attitude estimate has converged
+    Stability Initialization Threshold deg: 0.1

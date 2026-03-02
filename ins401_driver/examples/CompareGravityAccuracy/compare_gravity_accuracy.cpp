@@ -6,7 +6,7 @@
 #include <GeographicLib/LocalCartesian.hpp>
 
 #include "Eigen/Core"
-#include "tool.h"
+#include "ins401_tool.h"
 
 
 double ComputeReferenceGravity(Eigen::Vector3d &llh) {
@@ -62,7 +62,7 @@ int main(int argc, char *argv[]) {
         Eigen::Vector3d pos_blh(pos_llh(0) * M_PI / 180.0, pos_llh(1) * M_PI / 180.0, pos_llh(2));
         double reference = ComputeReferenceGravity(pos_llh);
 
-        double computed = Tool::Earth::ComputeGravity(pos_blh);
+        double computed = InsTool::Earth::ComputeGravity(pos_blh);
         double error = std::abs(computed - reference);
 
         sum_error += error;

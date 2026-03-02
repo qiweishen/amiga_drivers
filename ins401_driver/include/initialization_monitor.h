@@ -8,7 +8,7 @@
 #include <mutex>
 #include <Eigen/Core>
 
-#include "data_type.h"
+#include "ins401_data_type.h"
 #include "orientation_initializer.h"
 
 
@@ -47,7 +47,7 @@ public:
         double local_gravity; // m/s^2
     };
 
-    explicit InitializationMonitor(const Config &config);
+    explicit InitializationMonitor(const INSConfig &config);
 
     ~InitializationMonitor() = default;
 

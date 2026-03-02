@@ -22,7 +22,7 @@ add_executable(CompareGravityAccuracy compare_gravity_accuracy.cpp)
 target_link_libraries(CompareGravityAccuracy PRIVATE ins401_lib GeographicLib)
 
 target_compile_definitions(CompareGravityAccuracy PRIVATE
-        PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+        PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 
 set_target_properties(CompareGravityAccuracy PROPERTIES

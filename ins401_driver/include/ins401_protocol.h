@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <string_view>
 
-#include "data_type.h"
+#include "ins401_data_type.h"
 
 
 // Aceinna packet framing: header = [0x5555(2) | MsgID(2) | PayloadLen(4)], trailer = [CRC16(2)].

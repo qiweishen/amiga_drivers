@@ -1,33 +1,7 @@
-cmake_minimum_required(VERSION 3.12)
-project(INS401_Driver
-        DESCRIPTION "INS401 Driver"
-        LANGUAGES CXX C
-)
-
-
 ################################################################################
-# Project Standards and Policies
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Set default build type if not specified
-if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
-    message(STATUS "Setting build type to '${CMAKE_BUILD_TYPE}' as none was specified.")
-endif ()
-
-# CMake policies
-if (POLICY CMP0167)
-    cmake_policy(SET CMP0167 OLD)
-    set(CMAKE_POLICY_DEFAULT_CMP0167 OLD)
-endif ()
-if (POLICY CMP0169)
-    cmake_policy(SET CMP0169 OLD)
-    set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
-endif ()
-set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirectory options
+# INS401 Driver
+# This is a subdirectory of the top-level AmigaDrivers project.
+# Shared dependencies (spdlog, yaml-cpp, Eigen) are provided by the parent.
 
 # Build options
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -38,22 +12,15 @@ endif()
 
 
 ################################################################################
-# Required System Packages
+# Required System Packages (Threads provided by top-level)
 find_package(OpenSSL REQUIRED)
-find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
-
-# 3rd_party libraries
-add_subdirectory(3rd_party)
-
-# FetchContent module
-include(${PROJECT_SOURCE_DIR}/cmake/FetchContent.cmake)
 
 
 ################################################################################
 # Driver Library (shared code for main executable and examples)
 set(LIB_SOURCES
-        src/tool.cpp
+        src/ins401_tool.cpp
         src/ethernet_socket.cpp
         src/ins401_discover.cpp
         src/ins401_receiver.cpp
@@ -62,12 +29,13 @@ set(LIB_SOURCES
         src/initialization_monitor.cpp
         src/stationary_detector.cpp
         src/terminal_spinner.cpp
+        src/ins401_driver_app.cpp
 )
 
 # Header files
 file(GLOB_RECURSE HEADERS
-        ${PROJECT_SOURCE_DIR}/include/*.h
-        ${PROJECT_SOURCE_DIR}/include/*.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
 )
 
 # Create static library
@@ -80,7 +48,7 @@ set_target_properties(ins401_lib PROPERTIES
 )
 
 target_include_directories(ins401_lib PUBLIC
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -91,23 +59,22 @@ target_link_libraries(ins401_lib PUBLIC
         Threads::Threads
         # Boost
         Boost::boost
-        # 3rd_party
+        # Shared 3rd_party (provided by top-level CMakeLists.txt)
         Eigen
-        # FetchContent libraries
-        spdlog::spdlog
-        inih::inih
+        # Shared common library provides spdlog, yaml-cpp, Threads
+        amiga_common
 )
 
 
 ################################################################################
 # Main Executable
-add_executable(${PROJECT_NAME} main.cpp)
+add_executable(INS401_Driver src/main.cpp)
 
-set_target_properties(${PROJECT_NAME} PROPERTIES
+set_target_properties(INS401_Driver PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ins401_lib)
+target_link_libraries(INS401_Driver PRIVATE ins401_lib)
 
 
 ################################################################################
@@ -120,20 +87,10 @@ endif ()
 ################################################################################
 # Status Messages
 message(STATUS "")
-message(STATUS "========================================")
-message(STATUS "   ${PROJECT_NAME} Configuration Summary")
-message(STATUS "========================================")
-message(STATUS "  Version:          ${PROJECT_VERSION}")
+message(STATUS "----------------------------------------")
+message(STATUS "   INS401_Driver Configuration")
+message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
-message(STATUS "  Install Prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  Build Examples:   ${INS401_BUILD_EXAMPLES}")
-message(STATUS "")
-message(STATUS "  Dependencies:")
-message(STATUS "    OpenSSL:        Found")
-message(STATUS "    Boost:          Found")
-message(STATUS "    Eigen3:         ${Eigen3_SOURCE_DIR}")
-message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
-message(STATUS "    inih:           ${inih_SOURCE_DIR}")
-message(STATUS "========================================")
+message(STATUS "----------------------------------------")
 message(STATUS "")

@@ -21,7 +21,7 @@
 #include <map>
 
 #include "ethernet_socket.h"
-#include "data_type.h"
+#include "ins401_data_type.h"
 
 
 // HTTP response structure
@@ -93,7 +93,7 @@ public:
         double current_data_rate = 0.0; // Current data rate in KB/s
     };
 
-    explicit NTRIPClient(const Config &configures);
+    explicit NTRIPClient(const INSConfig &configures);
 
     ~NTRIPClient();
 
@@ -143,7 +143,7 @@ private:
     void StopReceiving();
 
     // Loading config
-    void LoadConfig(const Config &config);
+    void LoadConfig(const INSConfig &config);
 
     // Network operations
     bool CreateSocket(int family);

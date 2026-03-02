@@ -1,0 +1,17 @@
+# =============================================================================
+# LMS4XXX Driver Configuration
+# =============================================================================
+
+# --- SICK Launch File ---
+Sick Launch:
+    # Launch file for LMS4XXX
+    SICK Launch file: ../../lms4xxx_driver/config/config-lms4xxx.yaml
+    # Some overwrite parameter
+    hostname: [10.75.96.101, 10.75.96.102]
+    tick_to_timestamp_mode: 2
+
+
+# --- Time Synchronization ---
+Time Synchronization:
+    # The IP address of the NTP server to synchronize the system clock with
+    NTP Server: 10.75.96.100

@@ -6,8 +6,10 @@
 #include <sstream>
 #include <thread>
 
+#include "utility.h"
+
 #include "ins401_protocol.h"
-#include "tool.h"
+#include "ins401_tool.h"
 
 
 namespace {
@@ -28,7 +30,7 @@ std::map<std::string, DeviceInfo> INSDeviceDiscover::DiscoverDevices(int discove
     // Get all network interfaces
     const auto interfaces = Ethernet::GetNetworkInterfaces();
     if (interfaces.empty()) {
-        Tool::LogMessage(spdlog::level::info, kModule, "No active network interfaces found");
+        Common::Log::log_message(spdlog::level::info, kModule, "No active network interfaces found");
         return discovered_devices_;
     }
 
@@ -56,7 +58,7 @@ std::map<std::string, DeviceInfo> INSDeviceDiscover::DiscoverDevices(int discove
         std::cout << "    • Devices are not in discovery mode" << std::endl;
         std::cout << "    • Firewall blocking broadcast packets" << std::endl;
         std::cout << "    • Devices on different network segment" << std::endl;
-        Tool::LogMessage(spdlog::level::err, kModule, "No INS401 devices found");
+        Common::Log::log_and_throw(kModule, "No INS401 devices found");
     }
 
     return discovered_devices_;
@@ -68,7 +70,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
     try {
         // Create socket
         auto socket_ptr = std::make_shared<EthernetSocket>(interface, broadcast_mac_);
-        Tool::LogMessage(spdlog::level::trace, kModule,
+        Common::Log::log_message(spdlog::level::trace, kModule,
                          fmt::format("Started discovery on interface {} (MAC: {})", interface, local_mac_str));
 
         // Send discovery packet
@@ -87,7 +89,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
         sockets_.push_back(socket_ptr);
         --active_interfaces_;
     } catch (const std::exception &e) {
-        Tool::LogMessage(spdlog::level::err, kModule, fmt::format("Failed to discover on interface {}", interface));
+        Common::Log::log_and_throw(kModule, fmt::format("Failed to discover on interface {}", interface));
         --active_interfaces_;
     }
 }
@@ -101,10 +103,10 @@ void INSDeviceDiscover::SendDiscoveryPing(const std::shared_ptr<EthernetSocket> 
     // Send
     std::ptrdiff_t byte = socket_ptr->Send(ping_packet);
     if (byte < 0) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Failed to send discovery ping on interface {}", socket_ptr->GetInterface()));
     } else {
-        Tool::LogMessage(spdlog::level::trace, kModule,
+        Common::Log::log_message(spdlog::level::trace, kModule,
                          fmt::format("Sent discovery ping ({} bytes) on interface {}", byte,
                                      socket_ptr->GetInterface()));
     }
@@ -116,7 +118,7 @@ void INSDeviceDiscover::HandleReceive(const std::shared_ptr<EthernetSocket> &soc
                                       const boost::system::error_code &ec) {
     if (ec) {
         if (ec != boost::asio::error::operation_aborted) {
-            Tool::LogMessage(spdlog::level::warn, kModule,
+            Common::Log::log_message(spdlog::level::warn, kModule,
                              fmt::format("Receive error on interface {}", socket_ptr->GetInterface()), ec.message());
         }
         return;
@@ -124,7 +126,7 @@ void INSDeviceDiscover::HandleReceive(const std::shared_ptr<EthernetSocket> &soc
 
     // Parse response
     if (ParseResponse(socket_ptr->GetInterface(), socket_ptr->GetLocalMac(), data, length)) {
-        Tool::LogMessage(spdlog::level::trace, kModule,
+        Common::Log::log_message(spdlog::level::trace, kModule,
                          fmt::format("Device discovered on {}", socket_ptr->GetInterface()));
     }
 }
@@ -170,7 +172,7 @@ bool INSDeviceDiscover::ParseResponse(const std::string &interface, const MacAdd
         &buffer[kEthernetHeaderSize + 2], 6 + aceinna_payload_len // Message ID(2) + Length(4) + Payload
     );
     if (received_crc != calculated_crc) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("CRC mismatch! Received: 0x{:X} Calculated: 0x{:X}", received_crc,
                                      calculated_crc));
         return false;

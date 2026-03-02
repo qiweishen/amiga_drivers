@@ -1,5 +1,8 @@
 #include "stationary_detector.h"
 
+#include "utility.h"
+#include <spdlog/spdlog.h>
+
 
 namespace {
     constexpr std::string_view kModule = "Stationary Detector";
@@ -101,12 +104,12 @@ void StationaryDetector::FindStationaryTimeSegments() {
     stationary_time_segments_.clear();
 
     if (imu_data_.empty()) {
-        Tool::LogMessage(spdlog::level::err, kModule,
+        Common::Log::log_and_throw(kModule,
                          "IMU data is empty.");
         return;
     }
     if (imu_data_.size() < window_samples_) {
-        Tool::LogMessage(spdlog::level::err, kModule,
+        Common::Log::log_and_throw(kModule,
                          fmt::format("Not enough IMU samples ({}) for window size ({}).",
                                      imu_data_.size(), window_samples_));
         return;

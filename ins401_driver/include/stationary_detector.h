@@ -9,8 +9,8 @@
 #include <vector>
 #include <Eigen/Core>
 
-#include "data_type.h"
-#include "tool.h"
+#include "ins401_data_type.h"
+#include "ins401_tool.h"
 
 
 class StationaryDetector {

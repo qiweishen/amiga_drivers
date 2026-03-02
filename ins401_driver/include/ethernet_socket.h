@@ -51,7 +51,8 @@ public:
           if_index_(other.if_index_), recv_buffer_size_(other.recv_buffer_size_),
           enable_bpf_(other.enable_bpf_),
           socket_fd_(std::exchange(other.socket_fd_, -1)),
-          epoll_fd_(std::exchange(other.epoll_fd_, -1)) {}
+          epoll_fd_(std::exchange(other.epoll_fd_, -1)) {
+    }
 
     EthernetSocket &operator=(EthernetSocket &&other) noexcept {
         if (this != &other) {

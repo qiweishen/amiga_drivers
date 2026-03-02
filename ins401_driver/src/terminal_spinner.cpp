@@ -11,20 +11,20 @@
 
 
 namespace {
-    /// Label displayed alongside every spinner frame.
-    constexpr std::string_view kLabel = "System running...";
+    // Label displayed alongside every spinner frame.
+    constexpr std::string_view kLabel = "Data collecting...";
 
-    /// Minimum line width used for trailing-space padding so that shorter frames
-    /// fully overwrite remnants of longer previous frames.
+    // Minimum line width used for trailing-space padding so that shorter frames
+    // fully overwrite remnants of longer previous frames.
     constexpr std::size_t kMinPadWidth = 4;
 
-    /// Count the number of UTF-8 code points in a string.
-    /// Each code point typically occupies one display column (correct for ASCII,
-    /// Latin, Braille, and most symbols). CJK full-width characters would need
-    /// a more involved width table, but the spinner frames do not use them.
+    // Count the number of UTF-8 code points in a string.
+    // Each code point typically occupies one display column (correct for ASCII,
+    // Latin, Braille, and most symbols). CJK full-width characters would need
+    // a more involved width table, but the spinner frames do not use them.
     std::size_t Utf8CodePointCount(std::string_view s) {
         std::size_t count = 0;
-        for (unsigned char c : s) {
+        for (unsigned char c: s) {
             // Count only leading bytes: 0xxxxxxx or 11xxxxxx.
             // Continuation bytes (10xxxxxx) are skipped.
             if ((c & 0xC0) != 0x80) {
@@ -35,10 +35,6 @@ namespace {
     }
 }
 
-
-// -----------------------------------------------------------------------------
-// Construction / Destruction
-// -----------------------------------------------------------------------------
 
 TerminalSpinner::TerminalSpinner(std::string_view frames_file_path) {
     std::vector<std::string> raw_frames = LoadFramesFromFile(frames_file_path);
@@ -53,10 +49,6 @@ TerminalSpinner::~TerminalSpinner() {
     Clear();
 }
 
-
-// -----------------------------------------------------------------------------
-// Public interface
-// -----------------------------------------------------------------------------
 
 void TerminalSpinner::Tick() {
     const std::string &line = frames_[current_frame_];
@@ -77,10 +69,6 @@ void TerminalSpinner::Clear() const {
     std::fflush(stdout);
 }
 
-
-// -----------------------------------------------------------------------------
-// Private helpers
-// -----------------------------------------------------------------------------
 
 std::vector<std::string> TerminalSpinner::LoadFramesFromFile(std::string_view path) {
     std::string path_str{path};
@@ -103,7 +91,7 @@ std::vector<std::string> TerminalSpinner::LoadFramesFromFile(std::string_view pa
             continue;
         }
         frames.push_back(std::move(line));
-        line = {};  // moved-from string -- reinitialize for next iteration
+        line = {}; // moved-from string -- reinitialize for next iteration
     }
     return frames;
 }
@@ -118,7 +106,7 @@ void TerminalSpinner::BuildFormattedLines(const std::vector<std::string> &raw_fr
     // Determine the widest raw frame in display columns (code points, not bytes)
     // so we can pad all lines to a uniform visual width.
     std::size_t max_frame_display_width = 0;
-    for (const auto &f : raw_frames) {
+    for (const auto &f: raw_frames) {
         max_frame_display_width = std::max(max_frame_display_width, Utf8CodePointCount(f));
     }
 
@@ -129,7 +117,7 @@ void TerminalSpinner::BuildFormattedLines(const std::vector<std::string> &raw_fr
     frames_.clear();
     frames_.reserve(raw_frames.size());
 
-    for (const auto &raw : raw_frames) {
+    for (const auto &raw: raw_frames) {
         std::string formatted;
         // Reserve generously: 1 ('\r') + raw bytes + padding + label + extras.
         formatted.reserve(1 + raw.size() + max_frame_display_width + 2 + kLabel.size() + kMinPadWidth + 4);

@@ -11,10 +11,12 @@
 #include <utility>
 #include <vector>
 
+#include "utility.h"
+
 #include "initialization_monitor.h"
 #include "ins401_protocol.h"
 #include "ntrip_client.h"
-#include "tool.h"
+#include "ins401_tool.h"
 
 
 namespace {
@@ -23,7 +25,7 @@ namespace {
 }
 
 
-INSDeviceReceiver::INSDeviceReceiver(std::string iface, std::string device_mac, const Config &config) : interface_name_(
+INSDeviceReceiver::INSDeviceReceiver(std::string iface, std::string device_mac, const INSConfig &config) : interface_name_(
     std::move(iface)) {
     device_mac_ = Ethernet::FormatMACAddress(std::move(device_mac));
     socket_ptr_ = std::make_shared<EthernetSocket>(interface_name_, device_mac_, buffer_size_, true);
@@ -65,18 +67,24 @@ void INSDeviceReceiver::SetNtripClient(NTRIPClient *client) {
 
 
 void INSDeviceReceiver::ReceiveLoop() {
-    while (running_.load()) {
-        auto frames = socket_ptr_->ReceiveBatch(64);
-        if (frames.empty()) {
-            auto response = socket_ptr_->Receive(100);
-            if (response && !response->empty()) {
-                VerifyDataFrame(response->data(), response->size());
-            }
-        } else {
-            for (const auto &frame: frames) {
-                VerifyDataFrame(frame.data(), frame.size());
+    try {
+        while (running_.load()) {
+            auto frames = socket_ptr_->ReceiveBatch(64);
+            if (frames.empty()) {
+                auto response = socket_ptr_->Receive(100);
+                if (response && !response->empty()) {
+                    VerifyDataFrame(response->data(), response->size());
+                }
+            } else {
+                for (const auto &frame: frames) {
+                    VerifyDataFrame(frame.data(), frame.size());
+                }
             }
         }
+    } catch (const std::exception &e) {
+        // Use spdlog::error() directly — Common::Log::log_message(err) would re-throw.
+        spdlog::error("[INS Receiver] ReceiveLoop exception: {}", e.what());
+        running_.store(false);
     }
 }
 
@@ -101,7 +109,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
                 if (data_length == GNSS_SOLUTION_PACKET_LENGTH) {
                     HandleGNSSSolutionPacket(packet);
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                    Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                          "Invalid GNSS solution data length: {}, expected: {}", data_length,
                                          GNSS_SOLUTION_PACKET_LENGTH));
                 }
@@ -110,7 +118,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
                 if (data_length == INS_SOLUTION_PACKET_LENGTH) {
                     HandleINSSolutionPacket(packet);
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                    Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                          "Invalid INS solution data length: {}, expected: {}", data_length,
                                          INS_SOLUTION_PACKET_LENGTH));
                 }
@@ -119,7 +127,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
                 if (data_length == DIAGNOSTIC_MESSAGE_LENGTH) {
                     HandleDiagnosticPacket(packet);
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                    Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                          "Invalid diagnostic message length: {}, expected: {}", data_length,
                                          DIAGNOSTIC_MESSAGE_LENGTH));
                 }
@@ -128,7 +136,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
                 if (data_length == RAW_IMU_DATA_LENGTH) {
                     HandleRawIMUPacket(packet);
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                    Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                          "Invalid raw IMU data length: {}, expected: {}", data_length,
                                          RAW_IMU_DATA_LENGTH));
                 }
@@ -137,7 +145,7 @@ void INSDeviceReceiver::VerifyDataFrame(const uint8_t *data, const size_t len) {
                 if (data_length >= 1 && data_length <= RTCM_ROVER_DATA_LENGTH_MAX) {
                     HandleRTCMRoverPacket(packet, data_length);
                 } else {
-                    Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                    Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                          "Invalid RTCM rover data length: {}, expected: 1-{}", data_length,
                                          RTCM_ROVER_DATA_LENGTH_MAX));
                 }
@@ -160,7 +168,7 @@ void INSDeviceReceiver::HandleGNSSSolutionPacket(const uint8_t *packet) {
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + GNSS_SOLUTION_PACKET_LENGTH);
     if (recv_crc != calc_crc) {
         stat_gnss_crc_errors_.fetch_add(1, std::memory_order_relaxed);
-        Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+        Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                              "GNSS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
@@ -196,7 +204,7 @@ void INSDeviceReceiver::HandleINSSolutionPacket(const uint8_t *packet) {
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + INS_SOLUTION_PACKET_LENGTH);
     if (recv_crc != calc_crc) {
         stat_ins_crc_errors_.fetch_add(1, std::memory_order_relaxed);
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("INS solution data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                                      recv_crc, calc_crc));
         return;
@@ -218,7 +226,7 @@ void INSDeviceReceiver::HandleDiagnosticPacket(const uint8_t *packet) {
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + DIAGNOSTIC_MESSAGE_LENGTH);
     if (recv_crc != calc_crc) {
         stat_diagnostic_crc_errors_.fetch_add(1, std::memory_order_relaxed);
-        Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+        Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                              "Diagnostic message CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
@@ -240,7 +248,7 @@ void INSDeviceReceiver::HandleRawIMUPacket(const uint8_t *packet) {
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + RAW_IMU_DATA_LENGTH);
     if (recv_crc != calc_crc) {
         stat_imu_crc_errors_.fetch_add(1, std::memory_order_relaxed);
-        Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+        Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                              "Raw IMU data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
@@ -272,7 +280,7 @@ void INSDeviceReceiver::HandleRTCMRoverPacket(const uint8_t *packet, size_t len)
     const uint16_t calc_crc = Ethernet::CRC::CalculateINS401_CRC16(&packet[2], 2 + 4 + len);
     if (recv_crc != calc_crc) {
         stat_rtcm_rover_crc_errors_.fetch_add(1, std::memory_order_relaxed);
-        Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+        Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                              "RTCM rover data CRC mismatch! Received: 0x{:04x} Calculated: 0x{:04x}",
                              recv_crc, calc_crc));
         return;
@@ -303,14 +311,14 @@ void INSDeviceReceiver::HandleNMEAMessage(const uint8_t *packet, std::size_t max
             const auto recv_checksum = static_cast<uint8_t>(std::stoul(checksum_str, nullptr, 16));
             if (checksum != recv_checksum) {
                 stat_nmea_checksum_errors_.fetch_add(1, std::memory_order_relaxed);
-                Tool::LogMessage(spdlog::level::warn, kModule, fmt::format(
+                Common::Log::log_message(spdlog::level::warn, kModule, fmt::format(
                                      "NMEA message checksum mismatch! Received: 0x{:02x} Calculated: 0x{:02x}",
                                      recv_checksum, checksum));
                 return;
             }
         } else {
             stat_nmea_checksum_errors_.fetch_add(1, std::memory_order_relaxed);
-            Tool::LogMessage(spdlog::level::warn, kModule, "NMEA message missing checksum!");
+            Common::Log::log_message(spdlog::level::warn, kModule, "NMEA message missing checksum!");
             return;
         }
 
@@ -451,7 +459,7 @@ std::optional<Eigen::Vector3d> INSDeviceReceiver::ParseGgaCoordinates(const std:
         sentence = sentence.substr(0, pos);
     }
 
-    auto fields = Tool::Utility::SplitString(sentence, ',');
+    auto fields = InsTool::Utility::SplitString(sentence, ',');
     if (fields.size() < 10) {
         return std::nullopt;
     }
@@ -491,7 +499,7 @@ std::optional<Eigen::Vector3d> INSDeviceReceiver::ParseGgaCoordinates(const std:
 
         return Eigen::Vector3d(latitude * M_PI / 180.0, longitude * M_PI / 180.0, altitude + geoid_sep);
     } catch (...) {
-        Tool::LogMessage(spdlog::level::warn, kModule, "Failed to parse numeric fields in GGA sentence");
+        Common::Log::log_message(spdlog::level::warn, kModule, "Failed to parse numeric fields in GGA sentence");
         return std::nullopt;
     }
 }
@@ -521,7 +529,7 @@ void INSDeviceReceiver::CloseAllFiles() {
 
 bool INSDeviceReceiver::InitializeWritingFiles() {
     if (output_folder_path_.empty()) {
-        Tool::LogMessage(spdlog::level::err, kModule, "Error: Output folder path is empty!");
+        Common::Log::log_and_throw(kModule, "Error: Output folder path is empty!");
         return false;
     }
 
@@ -580,7 +588,7 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
 void INSDeviceReceiver::ProcessBinaryFiles() {
     CloseAllFiles();
 
-    Tool::LogMessage(spdlog::level::info, kModule, "Parsing binary data files...");
+    Common::Log::log_message(spdlog::level::info, kModule, "Parsing binary data files...");
     ProcessGNSSBinaryFile();
     ProcessINSBinaryFile();
     ProcessIMUBinaryFile();
@@ -592,14 +600,14 @@ void INSDeviceReceiver::ProcessBinaryFiles() {
 void INSDeviceReceiver::ProcessGNSSBinaryFile() {
     std::ifstream bin_in(gnss_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot open GNSS binary file: {}", gnss_bin_path_));
         return;
     }
 
     std::ofstream csv_out(gnss_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot create GNSS CSV file: {}", gnss_csv_path_));
         return;
     }
@@ -638,7 +646,7 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - GNSS: {} records processed", count));
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format("    - GNSS: {} records processed", count));
 }
 
 
@@ -646,14 +654,14 @@ void INSDeviceReceiver::ProcessGNSSBinaryFile() {
 void INSDeviceReceiver::ProcessINSBinaryFile() {
     std::ifstream bin_in(ins_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot open INS binary file: {}", ins_bin_path_));
         return;
     }
 
     std::ofstream csv_out(ins_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot create INS CSV file: {}", ins_csv_path_));
         return;
     }
@@ -698,7 +706,7 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - INS: {} records processed", count));
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format("    - INS: {} records processed", count));
 }
 
 
@@ -706,14 +714,14 @@ void INSDeviceReceiver::ProcessINSBinaryFile() {
 void INSDeviceReceiver::ProcessIMUBinaryFile() {
     std::ifstream bin_in(imu_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot open IMU binary file: {}", imu_bin_path_));
         return;
     }
 
     std::ofstream csv_out(imu_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot create IMU CSV file: {}", imu_csv_path_));
         return;
     }
@@ -746,7 +754,7 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - IMU: {} records processed", count));
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format("    - IMU: {} records processed", count));
 }
 
 
@@ -754,14 +762,14 @@ void INSDeviceReceiver::ProcessIMUBinaryFile() {
 void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
     std::ifstream bin_in(diagnostic_bin_path_, std::ios::in | std::ios::binary);
     if (!bin_in.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot open diagnostic binary file: {}", diagnostic_bin_path_));
         return;
     }
 
     std::ofstream csv_out(diagnostic_csv_path_, std::ios::out);
     if (!csv_out.is_open()) {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Cannot create diagnostic CSV file: {}", diagnostic_csv_path_));
         return;
     }
@@ -793,7 +801,7 @@ void INSDeviceReceiver::ProcessDiagnosticBinaryFile() {
         csv_out.write(fmt_buf.data(), static_cast<std::streamsize>(fmt_buf.size()));
     }
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format("    - Diagnostic: {} records processed", count));
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format("    - Diagnostic: {} records processed", count));
 }
 
 
@@ -819,25 +827,25 @@ INSDeviceReceiver::Statistics INSDeviceReceiver::GetStatistics() const {
 void INSDeviceReceiver::LogStatistics() const {
     const Statistics statistic_result = GetStatistics();
 
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Total bytes received: {}",
                          statistic_result.total_bytes_received));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received GNSS packet: {}; Number of GNSS packet CRC errors {}",
                          statistic_result.gnss_packets, statistic_result.gnss_crc_errors));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received INS packet: {}; Number of INS packet CRC errors {}",
                          statistic_result.ins_packets, statistic_result.ins_crc_errors));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received IMU packet: {}; Number of IMU packet CRC errors {}",
                          statistic_result.imu_packets, statistic_result.imu_crc_errors));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received Diag packet: {}; Number of Diag packet CRC errors {}",
                          statistic_result.diagnostic_packets, statistic_result.diagnostic_crc_errors));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received RTCM Rover packet: {}; Number of RTCM Rover packet CRC errors {}",
                          statistic_result.rtcm_rover_packets, statistic_result.rtcm_rover_crc_errors));
-    Tool::LogMessage(spdlog::level::info, kModule, fmt::format(
+    Common::Log::log_message(spdlog::level::info, kModule, fmt::format(
                          "=== INS401 RECEIVER STATISTICS === : Received NMEA Rover packet: {}; Number of NMEA Rover packet CRC errors {}",
                          statistic_result.nmea_messages, statistic_result.nmea_checksum_errors));
 }
@@ -870,7 +878,7 @@ void INSDeviceReceiver::MonitorGNSSStatus(GNSSSolutionData &gnss) {
                 stable_rtk_fixed_ = current_rtk_fixed;
                 pending_rtk_count_ = 0;
                 const auto level = stable_rtk_fixed_ ? spdlog::level::info : spdlog::level::warn;
-                Tool::LogMessage(level, kModule,
+                Common::Log::log_message(level, kModule,
                                  stable_rtk_fixed_
                                      ? "Entered RTK_FIXED position type"
                                      : "Lost RTK_FIXED position type");
@@ -890,7 +898,7 @@ void INSDeviceReceiver::MonitorGNSSStatus(GNSSSolutionData &gnss) {
                 stable_std_converged_ = current_std_converged;
                 pending_std_count_ = 0;
                 const auto level = stable_std_converged_ ? spdlog::level::info : spdlog::level::warn;
-                Tool::LogMessage(level, kModule,
+                Common::Log::log_message(level, kModule,
                                  stable_std_converged_
                                      ? fmt::format("Converged to {:.3f} m STD threshold", rtk_horizontal_std_)
                                      : fmt::format("Horizontal STD diverged above {:.3f} m threshold",

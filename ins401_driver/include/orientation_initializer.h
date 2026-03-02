@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "data_type.h"
+#include "ins401_data_type.h"
 
 
 struct InitializationResult {

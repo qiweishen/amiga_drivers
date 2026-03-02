@@ -2,7 +2,10 @@
 
 #include <cmath>
 
-#include "tool.h"
+#include "utility.h"
+#include <spdlog/spdlog.h>
+
+#include "ins401_tool.h"
 
 
 namespace {
@@ -11,7 +14,7 @@ namespace {
 }
 
 
-InitializationMonitor::InitializationMonitor(const Config &config) {
+InitializationMonitor::InitializationMonitor(const INSConfig &config) {
     config_.enable_gnss_check = config.enable_gnss_checking;
     config_.gnss_horizontal_std_threshold = config.gnss_horizontal_std_threshold;
     config_.accel_gravity_threshold = config.accel_gravity_threshold;
@@ -26,7 +29,7 @@ InitializationMonitor::InitializationMonitor(const Config &config) {
 
     const int configured_window_samples = static_cast<int>(config_.min_stationary_duration_s * config_.imu_freq);
     if (configured_window_samples <= 0) {
-        Tool::LogMessage(spdlog::level::err, kModule,
+        Common::Log::log_and_throw(kModule,
                          fmt::format(
                              "Invalid stationary window configuration: min_stationary_duration_s={} imu_freq={}.",
                              config_.min_stationary_duration_s, config_.imu_freq));
@@ -62,7 +65,7 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
     // Not enough samples yet for detection
     if (detection_window_.size() < window_samples_) {
         if (detection_window_.size() % 100 == 0) {
-            Tool::LogMessage(spdlog::level::info, kModule,
+            Common::Log::log_message(spdlog::level::info, kModule,
                              fmt::format("Collecting data for 1# initialization ({}/{})", detection_window_.size(),
                                          window_samples_));
         }
@@ -80,7 +83,7 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
             computation_buffer_.clear();
             computation_buffer_.assign(detection_window_.begin(), detection_window_.end());
 
-            Tool::LogMessage(spdlog::level::info, kModule, fmt::format("Stationary status detected"));
+            Common::Log::log_message(spdlog::level::info, kModule, fmt::format("Stationary status detected"));
         } else {
             // Still stationary - append to growing computation buffer
             computation_buffer_.push_back(imu);
@@ -95,7 +98,7 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
                 ComputeAndCheck(current_time);
             } else if (std::fmod(time_since_last, 1.0) < 1e-6) {
                 // Log every second while waiting
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format("Stationary for {:.0f} s, waiting {:.0f} s for next computation",
                                              stationary_duration, config_.recompute_interval_s - time_since_last));
             }
@@ -103,11 +106,11 @@ void InitializationMonitor::OnImuData(const RawIMUData &raw_imu) {
     } else {
         if (is_stationary_) {
             // Lost stationarity
-            Tool::LogMessage(spdlog::level::warn, kModule,
+            Common::Log::log_message(spdlog::level::warn, kModule,
                              fmt::format("Stationarity lost at GPS time {:.3f}s, resetting...", current_time));
             Reset();
         } else {
-            Tool::LogMessage(spdlog::level::warn, kModule, fmt::format("Not stationary for 1# initialization"));
+            Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Not stationary for 1# initialization"));
         }
     }
 }
@@ -131,17 +134,17 @@ void InitializationMonitor::WaitForFirstGnssAndGravity(const std::chrono::millis
         // If we are not enable RTK or GNSS check, we can still proceed with a default gravity value, but log a warning
         config_.local_gravity = 9.8; // Typical gravity in South Australia
         gravity_ready_ = true;
-        Tool::LogMessage(spdlog::level::info, kModule,
+        Common::Log::log_message(spdlog::level::info, kModule,
                          "No GGA sentence received, proceeding with default gravity value of 9.8 m/s^2");
     } else {
-        Tool::LogMessage(spdlog::level::info, kModule,
+        Common::Log::log_message(spdlog::level::info, kModule,
                          fmt::format("Gravity computed from GGA coordinates: {:.6f} m/s^2", config_.local_gravity));
     }
 }
 
 
 void InitializationMonitor::SetBlhFromGga(const Eigen::Vector3d &blh) {
-    double gravity = Tool::Earth::ComputeGravity(blh);
+    double gravity = InsTool::Earth::ComputeGravity(blh);
     std::scoped_lock lock(mutex_);
     config_.local_gravity = gravity;
     gravity_ready_ = true;
@@ -205,7 +208,7 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     }
 
     const double stationary_duration = current_time - stationary_start_time_;
-    Tool::LogMessage(spdlog::level::info, kModule,
+    Common::Log::log_message(spdlog::level::info, kModule,
                      fmt::format("Computation #{} at {:.1f}s stationary: roll={:.4f} deg pitch={:.4f} deg",
                                  stable_count_ + 1, stationary_duration,
                                  alignment.roll / kDegToRad, alignment.pitch / kDegToRad));
@@ -213,11 +216,11 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
     // Check stability
     if (CompareResults(result)) {
         stable_count_++;
-        Tool::LogMessage(spdlog::level::info, kModule,
+        Common::Log::log_message(spdlog::level::info, kModule,
                          fmt::format("Static initialization computation {}/{}", stable_count_,
                                      config_.required_stable_count));
         if (has_position_) {
-            Tool::LogMessage(spdlog::level::info, kModule,
+            Common::Log::log_message(spdlog::level::info, kModule,
                              fmt::format("GNSS status: position type {}; horizontal STD {}",
                                          latest_position_.position_type,
                                          (latest_position_.latitude_std + latest_position_.longitude_std) / 2.0f));
@@ -230,40 +233,40 @@ void InitializationMonitor::ComputeAndCheck(double current_time) {
                 final_result_ = result;
                 initialized_.store(true, std::memory_order_release);
 
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format(
                                      "=== STATIC INITIALIZATION COMPLETE === : Roll: {:.4f} deg; Pitch: {:.4f} deg",
                                      result.roll / kDegToRad, result.pitch / kDegToRad));
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format(
                                      "=== STATIC INITIALIZATION COMPLETE === : Gyro bias: [{:.6f}, {:.6f}, {:.6f}] deg/s",
                                      result.gyro_bias.x(), result.gyro_bias.y(), result.gyro_bias.z()));
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format(
                                      "=== STATIC INITIALIZATION COMPLETE === : Accel bias: [{:.6f}, {:.6f}, {:.6f}] m/s^2",
                                      result.accel_bias.x(), result.accel_bias.y(), result.accel_bias.z()));
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format("=== STATIC INITIALIZATION COMPLETE === : GNSS position std: {:.6f} m",
                                              (latest_position_.latitude_std + latest_position_.longitude_std) / 2.0f));
-                Tool::LogMessage(spdlog::level::info, kModule,
+                Common::Log::log_message(spdlog::level::info, kModule,
                                  fmt::format(
                                      "=== STATIC INITIALIZATION COMPLETE === : Start time: {} week {} ms; End time: {} week {} ms",
                                      computation_buffer_.front().gps_week, computation_buffer_.front().gps_millisecs,
                                      computation_buffer_.back().gps_week, computation_buffer_.back().gps_millisecs));
 
                 if (!has_position_) {
-                    Tool::LogMessage(spdlog::level::warn, kModule,
+                    Common::Log::log_message(spdlog::level::warn, kModule,
                                      "=== Critical Warning === : Not receiving any GNSS data during the whole static initialization");
-                    Tool::LogMessage(spdlog::level::warn, kModule,
-                 "=== Critical Warning === : If it is not on purpose, please check GNSS antenna, connection and configuration");
+                    Common::Log::log_message(spdlog::level::warn, kModule,
+                                     "=== Critical Warning === : If it is not on purpose, please check GNSS antenna, connection and configuration");
                 }
             } else {
-                Tool::LogMessage(spdlog::level::warn, kModule,
+                Common::Log::log_message(spdlog::level::warn, kModule,
                                  "Stability reached but GNSS conditions not met. Waiting for fresh RTK_FIXED and low std");
             }
         }
     } else {
-        Tool::LogMessage(spdlog::level::warn, kModule,
+        Common::Log::log_message(spdlog::level::warn, kModule,
                          fmt::format("Result unstable (roll delta={:.4f} deg, pitch delta={:.4f} deg), "
                                      "Reset stable count",
                                      std::abs(result.roll - last_result_.roll) / kDegToRad,

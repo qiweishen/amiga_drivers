@@ -8,7 +8,7 @@
 #include <optional>
 #include <vector>
 
-#include "data_type.h"
+#include "ins401_data_type.h"
 #include "ethernet_socket.h"
 
 
@@ -19,7 +19,7 @@ class NTRIPClient;
 // INS401 receiver: writes raw binary during collection, converts to ASCII after stop.
 class INSDeviceReceiver {
 public:
-    explicit INSDeviceReceiver(std::string iface, std::string device_mac, const Config &config);
+    explicit INSDeviceReceiver(std::string iface, std::string device_mac, const INSConfig &config);
 
     ~INSDeviceReceiver();
 
