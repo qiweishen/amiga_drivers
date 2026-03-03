@@ -21,7 +21,7 @@ namespace {
 
 
 LidarDriverApp::LidarDriverApp(const Common::Config &config) {
-    // Store config paths from the main config. Actual loading deferred to init().
+    // Store config paths from the main config. Actual loading deferred to init()
     config_path_ = config.lidar_config_path;
     launch_file_override_ = config.lidar_launch_path;
     data_folder_path_ = config.data_folder_path;
@@ -39,7 +39,7 @@ LidarDriverApp::~LidarDriverApp() {
 
 
 bool LidarDriverApp::init() {
-    // Load config from YAML if not preloaded (unified main path).
+    // Load config from YAML if not preloaded (unified main path)
     if (!config_preloaded_) {
         if (config_path_.empty()) {
             std::filesystem::path exe_dir = Common::GetExecutableDir();
@@ -54,7 +54,7 @@ bool LidarDriverApp::init() {
             return false;
         }
 
-        // Override fields from unified config.
+        // Override fields from unified config
         if (!launch_file_override_.empty()) {
             config_.launch_file = launch_file_override_;
         }
@@ -62,12 +62,12 @@ bool LidarDriverApp::init() {
         config_.timestamp = timestamp_;
     }
 
-    // Compute output file path if not explicitly set.
+    // Compute output file path if not explicitly set
     if (config_.output_file.empty() && !config_.data_folder_path.empty()) {
         config_.output_file = fmt::format("{}/pointcloud.bin", config_.data_folder_path);
     }
 
-    // Suppress SICK console output in unified mode (logging goes through shared logger).
+    // Suppress SICK console output in unified mode (logging goes through shared logger)
     if (!config_preloaded_) {
         config_.quiet = true;
     }

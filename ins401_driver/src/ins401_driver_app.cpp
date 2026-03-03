@@ -19,7 +19,7 @@ namespace {
 
 
 InsDriverApp::InsDriverApp(const Common::Config &config) {
-    // Store config path from the main config. The actual loading is deferred to init().
+    // Store config path from the main config. The actual loading is deferred to init()
     config_path_ = config.ins_config_path;
     config_.data_folder_path = config.data_folder_path;
     config_.timestamp = config.timestamp;
@@ -32,26 +32,24 @@ InsDriverApp::~InsDriverApp() {
 
 
 bool InsDriverApp::init() {
-    // Resolve default config path relative to executable if none was provided.
+    // Resolve default config path relative to executable if none was provided
     if (config_path_.empty()) {
         std::filesystem::path exe_dir = Common::GetExecutableDir(); // exe_dir + "../../" -> project root
         config_path_ = (exe_dir / "../../ins401_driver/config/config-ins401.yaml").string();
     }
 
-    // Load config and initialize the system.
+    // Load config and initialize the system
     try {
         InsTool::LoadConfig(config_path_, config_);
         std::filesystem::copy_file(
             config_path_,
-            fmt::format("{}/Config_{}.yaml", config_.data_folder_path, config_.timestamp),
+            fmt::format("{}/config/config-ins401_{}.yaml", config_.data_folder_path, config_.timestamp),
             std::filesystem::copy_options::overwrite_existing);
     } catch (const std::exception &e) {
-        // Use spdlog::error() directly — log_message(err) would re-throw.
-        spdlog::error("[InsDriverApp] Config/init failed: {}", e.what());
-        return false;
+        Common::Log::log_and_throw(kModule, "Config/init failed: {}", e.what());
     }
 
-    // Discover device on the network.
+    // Discover device on the network
     auto discover = std::make_unique<INSDeviceDiscover>();
     auto devices = discover->DiscoverDevices();
     if (devices.empty()) {

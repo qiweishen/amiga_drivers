@@ -13,7 +13,7 @@
 
 
 namespace {
-    constexpr std::string_view kModule = "INS Discover";
+    constexpr std::string_view kModule = "INSDiscover";
 }
 
 
@@ -69,7 +69,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
                                             const int discovery_time_ms) {
     try {
         // Create socket
-        auto socket_ptr = std::make_shared<EthernetSocket>(interface, broadcast_mac_);
+        const auto socket_ptr = std::make_shared<EthernetSocket>(interface, broadcast_mac_);
         Common::Log::log_message(spdlog::level::trace, kModule,
                          fmt::format("Started discovery on interface {} (MAC: {})", interface, local_mac_str));
 
@@ -80,7 +80,7 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(discovery_time_ms);
 
         while (running_.load() && std::chrono::steady_clock::now() < deadline) {
-            auto response = socket_ptr->Receive(100);
+            const auto response = socket_ptr->Receive(100);
             if (response && !response->empty()) {
                 HandleReceive(socket_ptr, response->data(), response->size(), {});
             }
@@ -90,14 +90,13 @@ void INSDeviceDiscover::DiscoverOnInterface(const std::string &interface, const 
         --active_interfaces_;
     } catch (const std::exception &e) {
         Common::Log::log_and_throw(kModule, fmt::format("Failed to discover on interface {}", interface));
-        --active_interfaces_;
     }
 }
 
 
 void INSDeviceDiscover::SendDiscoveryPing(const std::shared_ptr<EthernetSocket> &socket_ptr) const {
     // Build discovery packet
-    std::vector<uint8_t> ping_packet =
+    const std::vector<uint8_t> ping_packet =
             Ethernet::BuildAceinnaPacket(broadcast_mac_, socket_ptr->GetLocalMac(), REQUEST_INFO_COMMAND_BYTES, nullptr,
                                          0);
     // Send

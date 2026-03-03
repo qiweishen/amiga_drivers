@@ -1,7 +1,6 @@
 *build/
 *install/
-*log/
-*bin/
+*FetchContent/
 *data/
 *cmake-build-*/
 *.idea/

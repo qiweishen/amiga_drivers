@@ -1,6 +1,7 @@
 ################################################################################
 # FetchContent Dependencies (Shared)
 include(FetchContent)
+set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/3rd_party")
 set(FETCHCONTENT_QUIET FALSE)
 
 
@@ -31,9 +32,6 @@ FetchContent_MakeAvailable(yaml-cpp)
 # LMS41xxx Driver - Local External Dependencies
 include(ExternalProject)
 include(ProcessorCount)
-set(FETCHCONTENT_QUIET FALSE)
-
-
 ################################################################################
 # sick_scan_xd - Driver and tools for SICK LiDAR and RADAR devices
 set(SICK_SCAN_XD_ROOT_DIR "${CMAKE_SOURCE_DIR}/3rd_party/FetchContent/sick_scan_xd" CACHE PATH "sick_scan_xd source directory")

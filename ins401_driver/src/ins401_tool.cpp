@@ -15,8 +15,8 @@ namespace InsTool {
         // BLH: Breite (Latitude, radians), Länge (Longitude, radians), Höhe (Height, meters).
         // Returned gravity is **POSITIVE** in m/s^2.
         double ComputeGravity(const Eigen::Vector3d &blh) {
-            // Check for valid latitude and longitude ranges.
-            // Although longitude can be any value since it doesn't affect gravity, we still check it.
+            // Check for valid latitude and longitude ranges
+            // Although longitude can be any value since it doesn't affect gravity, we still check it
             if (blh[0] < -M_PI / 2 || blh[0] > M_PI / 2 || blh[1] < -M_PI || blh[1] > M_PI) {
                 Common::Log::log_and_throw(kModule,
                                            "Latitude / Longitude must be in radians and within valid ranges");
@@ -56,7 +56,7 @@ namespace InsTool {
 
 
     void LoadConfig(std::string_view config_path, INSConfig &config) {
-        // Delegate YAML I/O to the common ConfigLoader (throws on error).
+        // Delegate YAML I/O to the common ConfigLoader (throws on error)
         Common::ConfigLoader loader(config_path);
         const auto &root = loader.root();
 

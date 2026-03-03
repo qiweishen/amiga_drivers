@@ -72,14 +72,13 @@ namespace Common {
 
         void sick_msg(int32_t log_level, const char *message) {
             // ROS log levels: 1=Info, 2=Warn, 3=Error, 4=Fatal
-            // Info and below → file only; Warn and above → console + file (default logger).
+            // Warn and below → file only; Error and above → console + file (default logger).
             switch (log_level) {
-                case 2:
-                    spdlog::warn("[SICK]: {}", message);
-                    break;
                 case 3:
-                case 4:
                     spdlog::error("[SICK]: {}", message);
+                    break;
+                case 4:
+                    spdlog::critical("[SICK]: {}", message);
                     break;
                 default:
                     if (auto sick_logger = spdlog::get("sick")) {

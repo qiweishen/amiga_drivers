@@ -51,9 +51,11 @@ namespace {
         config.timestamp = fmt::format("{:%Y%m%d_%H%M%S}", std::chrono::time_point_cast<std::chrono::seconds>(now));
         config.data_folder_path = fmt::format("{}/{}", config.output_directory, config.timestamp);
         std::filesystem::create_directories(config.data_folder_path);
+        std::filesystem::create_directories(fmt::format("{}/{}", config.data_folder_path, "bin"));
+        std::filesystem::create_directories(fmt::format("{}/{}", config.data_folder_path, "config"));
         // Init logging system
         if (config.enable_logging) {
-            const std::string log_file = fmt::format("{}/log_drivers_{}.log", config.data_folder_path, config.timestamp);
+            const std::string log_file = fmt::format("{}/log_{}.log", config.data_folder_path, config.timestamp);
             Common::Logger::init({log_file, false}, "AmigaDrivers");
         }
     }
@@ -120,13 +122,10 @@ int main(int argc, char *argv[]) {
             if (!ins_app->init()) {
                 Common::Log::log_message(spdlog::level::warn, kModule, "INS401 driver initialization failed");
                 ins_app.reset();
-                run_ins = false;
             }
         } catch (const std::exception &e) {
-            // Use spdlog::error() directly — log_message(err) would re-throw.
-            spdlog::error("[Main] INS401 init exception: {}", e.what());
-            ins_app.reset();
-            run_ins = false;
+            // Program will be terminated
+            Common::Log::log_and_throw(kModule, "INS401 init exception: ", e.what());
         }
     }
     if (lidar_app) {
@@ -134,19 +133,16 @@ int main(int argc, char *argv[]) {
             if (!lidar_app->init()) {
                 Common::Log::log_message(spdlog::level::warn, kModule, "LMS4xxx driver initialization failed");
                 lidar_app.reset();
-                run_lidar = false;
             }
         } catch (const std::exception &e) {
-            // Use spdlog::error() directly — log_message(err) would re-throw.
-            spdlog::error("[Main] LMS4xxx init exception: {}", e.what());
-            lidar_app.reset();
-            run_lidar = false;
+            // Program will be terminated
+            Common::Log::log_and_throw(kModule, "LMS4xxx init exception: ", e.what());
         }
     }
 
     if (!ins_app && !lidar_app) {
-        Common::Log::log_message(spdlog::level::warn, kModule, "No drivers initialized, exiting");
-        return 1;
+        // Program will be terminated
+        Common::Log::log_and_throw(kModule, "No drivers initialized, exiting");
     }
 
 
@@ -158,8 +154,8 @@ int main(int argc, char *argv[]) {
             try {
                 ins_app->run();
             } catch (const std::exception &e) {
-                spdlog::error("[Main] INS401 run() exception: {}", e.what());
-                ins_app->terminate_flag().store(true, std::memory_order_release);
+                // Program will be terminated
+                Common::Log::log_and_throw(kModule,"INS401 run() exception: {}", e.what());
             }
         });
     }
@@ -168,8 +164,8 @@ int main(int argc, char *argv[]) {
             try {
                 lidar_app->run();
             } catch (const std::exception &e) {
-                spdlog::error("[Main] LMS4xxx run() exception: {}", e.what());
-                lidar_app->terminate_flag().store(true, std::memory_order_release);
+                // Program will be terminated
+                Common::Log::log_and_throw(kModule, "LMS4xxx run() exception: {}", e.what());
             }
         });
     }

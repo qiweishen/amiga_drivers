@@ -41,8 +41,7 @@ find_package(Threads REQUIRED)
 # Shared vendored libraries (Eigen)
 add_subdirectory(3rd_party)
 
-# Shared FetchContent libraries (spdlog, yaml-cpp)
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/3rd_party/FetchContent" CACHE PATH "" FORCE)
+# Shared FetchContent libraries (spdlog, yaml-cpp and sick_scan_xd)
 include(${CMAKE_SOURCE_DIR}/cmake/FetchContent.cmake)
 
 
@@ -81,7 +80,6 @@ message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
 message(STATUS "")
 message(STATUS "  Shared Dependencies:")
-message(STATUS "    Eigen3:         ${CMAKE_SOURCE_DIR}/3rd_party/eigen")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")
 message(STATUS "========================================")
