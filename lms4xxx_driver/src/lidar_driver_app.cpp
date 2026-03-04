@@ -42,8 +42,8 @@ bool LidarDriverApp::init() {
     // Load config from YAML if not preloaded (unified main path)
     if (!config_preloaded_) {
         if (config_path_.empty()) {
-            std::filesystem::path exe_dir = Common::GetExecutableDir();
-            config_path_ = (exe_dir / "../../lms4xxx_driver/config/config-lms4xxx.yaml").string();
+        	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
+        	config_path_ = (exe_dir / "../../lms4xxx_driver/config/config-lms4xxx.yaml").string();
         }
 
         try {

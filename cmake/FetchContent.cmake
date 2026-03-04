@@ -45,7 +45,7 @@ if (NOT EXISTS "${SICK_SCAN_XD_ROOT_DIR}/CMakeLists.txt")
             GIT_SHALLOW TRUE
             SOURCE_DIR ${SICK_SCAN_XD_ROOT_DIR}
     )
-    FetchContent_MakeAvailable(sick_scan_xd)
+    FetchContent_Populate(sick_scan_xd)
 endif ()
 
 ProcessorCount(SICK_SCAN_XD_BUILD_JOBS)

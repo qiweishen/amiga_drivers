@@ -72,7 +72,9 @@ int main(int argc, char *argv[]) {
 
 
     // Read main config and initialize system (e.g. create timestamped data folder)
-    std::string main_config_path = argc > 1 ? argv[1] : "../../config/config-main.yaml";
+	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
+	std::string main_config_path_ = (exe_dir / "../../config/config-main.yaml");
+    std::string main_config_path = argc > 1 ? argv[1] : main_config_path_;
     Common::Config main_config;
     LoadConfig(main_config_path, main_config);
     InitializeSystem(main_config);
