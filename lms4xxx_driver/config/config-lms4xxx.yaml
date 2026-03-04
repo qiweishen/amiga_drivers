@@ -6,8 +6,11 @@
 Sick Launch:
     # Launch file for LMS4XXX
     SICK Launch file: ../../lms4xxx_driver/config/config-lms4xxx.yaml
-    # Some overwrite parameter
-    hostname: [10.75.96.101, 10.75.96.102]
+    # Some override parameter in launch file
+    Front Left Laser:
+        hostname: 10.75.96.101
+    Front Right Laser:
+        hostname: 10.75.96.103
     tick_to_timestamp_mode: 2
 
 

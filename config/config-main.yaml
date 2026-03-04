@@ -7,7 +7,7 @@ General:
     # Root directory for all output files (logs, GNSS, IMU, LiDAR, etc.)
     Output Directory: ../data
     # Run mode for the driver
-    Run Mode: 0 # 0: Run both INS401 and LMS4XXX, 1: Run only INS401, 2: Run only LMS4XXX
+    Run Mode: 2 # 0: Run both INS401 and LMS4XXX, 1: Run only INS401, 2: Run only LMS4XXX
     # Path to the configuration files for each driver
     INS401 Driver Config Path: ../../ins401_driver/config/config-ins401.yaml
     LMS4XXX Driver Config Path: ../../lms4xxx_driver/config/config-lms4xxx.yaml

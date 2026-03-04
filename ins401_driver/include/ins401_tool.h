@@ -4,24 +4,24 @@
 #ifndef INS401_TOOL_H
 #define INS401_TOOL_H
 
+#include <Eigen/Core>
 #include <string_view>
 #include <vector>
-#include <Eigen/Core>
 
 #include "ins401_data_type.h"
 
 
 namespace InsTool {
-    namespace Earth {
-        double ComputeGravity(const Eigen::Vector3d &blh);
-    } // namespace Earth
+	namespace Earth {
+		double ComputeGravity(const Eigen::Vector3d &blh);
+	}  // namespace Earth
 
-    namespace Utility {
-        std::vector<std::string> SplitString(std::string_view str, char delimiter);
-    } // namespace Utility
+	namespace Utility {
+		std::vector<std::string> SplitString(std::string_view str, char delimiter);
+	}  // namespace Utility
 
-    void LoadConfig(std::string_view config_path, INSConfig &config);
-} // namespace Tool
+	void LoadConfig(std::string_view config_path, INSConfig &config);
+}  // namespace InsTool
 
 
 #endif

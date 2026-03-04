@@ -5,8 +5,7 @@
 
 
 BufferedBinaryWriter::BufferedBinaryWriter(const BufferedWriterConfig &config)
-    : config_(config)
-      , writer_(Common::BinaryWriterConfig{config.output_path, config.buffer_size}) {
+    : config_(config) , writer_(Common::BinaryWriterConfig{config.output_path, config.buffer_size}) {
 }
 
 

@@ -32,17 +32,6 @@ add_dependencies(lms4xxx_lib sick_scan_xd_build)
 
 
 ################################################################################
-# Main Executable
-add_executable(LMS4xxx_Driver src/main.cpp)
-
-target_link_libraries(LMS4xxx_Driver PRIVATE lms4xxx_lib)
-
-set_target_properties(LMS4xxx_Driver PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-
-################################################################################
 # Status Messages
 message(STATUS "")
 message(STATUS "----------------------------------------")

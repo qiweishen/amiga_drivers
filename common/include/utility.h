@@ -3,7 +3,6 @@
 
 
 #include <filesystem>
-#include <unistd.h>
 #include <string>
 #include <string_view>
 #include <yaml-cpp/yaml.h>
@@ -13,10 +12,10 @@
 namespace Common {
     class ConfigLoader {
     public:
-        // Load and parse a YAML file. Throws std::runtime_error on I/O or parse failure.
+        // Load and parse a YAML file, throws std::runtime_error on I/O or parse failure
         explicit ConfigLoader(std::string_view path);
 
-        // Access the parsed YAML root node.
+        // Access the parsed YAML root node
         [[nodiscard]] const YAML::Node &root() const { return root_; }
         [[nodiscard]] YAML::Node &root() { return root_; }
 
@@ -33,32 +32,36 @@ namespace Common {
 
     namespace Logger {
         struct Config {
-            std::string log_file; // Empty = no file logging.
-            bool quiet = false; // Suppress below-warn messages from the console.
+            std::string log_file; // Empty = no file logging
+            bool quiet = false; // Suppress below-warn messages from the console
         };
 
-        // Initialize the logging system. Call once at startup before any log calls.
-        // Sets up a dual-sink logger: stderr (INFO+ or WARN+ if quiet) and optional file (TRACE+).
+        // Initialize the logging system. Call once at startup before any log calls
+        // Sets up a dual-sink logger: stderr (INFO+ or WARN+ if quiet) and optional file (TRACE+)
         void init(const Config &config, const std::string &logger_name = "AmigaDriver");
     } // namespace Logger
 
 
     namespace Log {
-        // Log at the given spdlog level. Pure logging — never throws.
+        // Log at the given spdlog level
         void log_message(spdlog::level::level_enum level, std::string_view module,
                          std::string_view msg, std::string_view error_detail = "");
 
-        // Log at error level and throw std::runtime_error.
-        // Use for unrecoverable errors where exception-based unwinding is needed.
+        // Log at error level and throw std::runtime_error
+        // Use for unrecoverable errors where exception-based unwinding is needed
         [[noreturn]] void log_and_throw(std::string_view module, std::string_view msg,
                                         std::string_view error_detail = "");
 
-        // Forward SICK library log messages (ROS levels: 1=Info, 2=Warn, 3/4=Error).
+        // Forward SICK library log messages (ROS levels: 1=Info, 2=Warn, 3/4=Error)
         void sick_msg(int32_t log_level, const char *message);
+
+        // Pre-log callback: invoked before each console log write
+        using PreLogCallback = void(*)();
+        void set_pre_log_callback(PreLogCallback cb);
     } // namespace Log
 
 
-    // Resolve the directory containing the running executable (used for relative config paths).
+    // Resolve the directory containing the running executable (used for relative config paths)
     std::filesystem::path GetExecutableDir();
 }
 

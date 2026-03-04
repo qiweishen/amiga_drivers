@@ -1,8 +1,8 @@
 /// @file lidar_driver_app.h
-/// @brief Top-level application class managing the SICK LMS 4xxx driver lifecycle.
+/// @brief Top-level application class managing the SICK LMS 4xxx driver lifecycle
 ///
 /// Encapsulates config loading, LidarReceiver management, and graceful shutdown
-/// with optional post-processing (binary→CSV). Matches InsDriverApp lifecycle pattern.
+/// with optional post-processing (binary→CSV). Matches InsDriverApp lifecycle pattern
 
 #ifndef DRIVER_APP_H
 #define DRIVER_APP_H
@@ -20,10 +20,10 @@ class LidarReceiver;
 
 class LidarDriverApp {
 public:
-    // Unified main path: stores config paths, loads LiDARConfig in init().
+    // Unified main path: stores config paths, loads LiDARConfig in init()
     explicit LidarDriverApp(const Common::Config &config);
 
-    // Standalone main path: config already fully populated.
+    // Standalone main path: config already fully populated
     explicit LidarDriverApp(LiDARConfig config);
 
     ~LidarDriverApp();
@@ -38,7 +38,7 @@ public:
 
     void shutdown();
 
-    // Called from signal handlers (async-signal-safe: only atomic store).
+    // Called from signal handlers (async-signal-safe: only atomic store)
     void request_shutdown();
 
     std::atomic<bool> &terminate_flag();

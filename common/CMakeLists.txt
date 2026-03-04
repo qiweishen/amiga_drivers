@@ -1,8 +1,9 @@
 ################################################################################
 # common - Shared infrastructure library for all Amiga drivers
-# Provides: logging, config loading, binary I/O, thread-safe queue, signal handling.
+# Provides: logging, config loading, binary I/O, thread-safe queue, signal handling
 
 add_library(amiga_common STATIC
+        src/activity_spinner.cpp
         src/binary_writer.cpp
         src/signal_handler.cpp
         src/utility.cpp

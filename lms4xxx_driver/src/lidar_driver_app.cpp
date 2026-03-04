@@ -1,8 +1,8 @@
 /// @file lidar_driver_app.cpp
-/// @brief LidarDriverApp lifecycle implementation.
+/// @brief LidarDriverApp lifecycle implementation
 ///
-/// Unified and standalone main paths both flow through init/run/shutdown.
-/// The receiver (LidarReceiver) owns the SICK API, queue, writer, and statistics.
+/// Unified and standalone main paths both flow through init/run/shutdown
+/// The receiver (LidarReceiver) owns the SICK API, queue, writer, and statistics
 
 #include "lidar_driver_app.h"
 
@@ -64,7 +64,7 @@ bool LidarDriverApp::init() {
 
     // Compute output file path if not explicitly set
     if (config_.output_file.empty() && !config_.data_folder_path.empty()) {
-        config_.output_file = fmt::format("{}/pointcloud.bin", config_.data_folder_path);
+        config_.output_file = fmt::format("{}/pointcloud_{}_{}.bin", config_.data_folder_path, config_.lidar_position, config_.timestamp);
     }
 
     // Suppress SICK console output in unified mode (logging goes through shared logger)
@@ -72,7 +72,7 @@ bool LidarDriverApp::init() {
         config_.quiet = true;
     }
 
-    // Create and initialize the receiver.
+    // Create and initialize the receiver
     receiver_ = std::make_unique<LidarReceiver>(config_);
     if (!receiver_->Init()) {
         return false;
@@ -81,7 +81,8 @@ bool LidarDriverApp::init() {
         return false;
     }
 
-    Common::Log::log_message(spdlog::level::info, kModule, "LiDAR driver initialized");
+    Common::Log::log_message(spdlog::level::info, kModule,
+                             fmt::format("LiDAR [{}] initialized", config_.lidar_position));
     return true;
 }
 
@@ -96,16 +97,16 @@ void LidarDriverApp::run() {
 void LidarDriverApp::shutdown() {
     if (shutdown_called_.exchange(true)) return;
 
-    // 1. Signal termination.
+    // 1. Signal termination
     terminate_.store(true, std::memory_order_release);
 
-    // 2. Stop receiver (deregisters callbacks, drains queue, closes writer, releases API).
+    // 2. Stop receiver (deregisters callbacks, drains queue, closes writer, releases API)
     if (receiver_) {
         receiver_->Stop();
         receiver_->LogStatistics();
     }
 
-    // 3. Optional post-processing: binary→CSV conversion (matching INS401 pattern).
+    // 3. Optional post-processing: binary→CSV conversion (matching INS401 pattern)
     if (config_.convert_to_csv && receiver_ && !config_.output_file.empty()) {
         std::string csv_path = BinaryToCsvConverter::default_csv_path(config_.output_file);
         Common::Log::log_message(spdlog::level::info, kModule,
@@ -132,7 +133,8 @@ void LidarDriverApp::shutdown() {
     }
 
     receiver_.reset();
-    Common::Log::log_message(spdlog::level::info, kModule, "Shutdown complete");
+    Common::Log::log_message(spdlog::level::info, kModule,
+                             fmt::format("LiDAR [{}] shutdown complete", config_.lidar_position));
 }
 
 

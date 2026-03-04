@@ -5,9 +5,9 @@
 #ifndef STATIONARY_DETECTOR_H
 #define STATIONARY_DETECTOR_H
 
+#include <Eigen/Core>
 #include <utility>
 #include <vector>
-#include <Eigen/Core>
 
 #include "ins401_data_type.h"
 #include "ins401_tool.h"
@@ -15,61 +15,56 @@
 
 class StationaryDetector {
 public:
-    struct Config {
-        double accel_gravity_threshold;
-        double accel_var_threshold;
-        double gyro_var_threshold;
-        double gyro_mean_threshold_xy;
-        double gyro_mean_threshold_z;
-        int imu_freq;
-        int min_duration_s;
-    };
+	struct Config {
+		double accel_gravity_threshold;
+		double accel_var_threshold;
+		double gyro_var_threshold;
+		double gyro_mean_threshold_xy;
+		double gyro_mean_threshold_z;
+		int imu_freq;
+		int min_duration_s;
+	};
 
-    explicit StationaryDetector(const std::vector<RawIMUData> &raw_imu_data, double local_gravity,
-                                const Config &cfg = Config{});
+	explicit StationaryDetector(const std::vector<RawIMUData> &raw_imu_data, double local_gravity, const Config &cfg = Config{});
 
-    ~StationaryDetector() = default;
+	~StationaryDetector() = default;
 
-    std::vector<std::pair<double, double> > GetStationaryTimeSegments() {
-        return stationary_time_segments_;
-    }
+	std::vector<std::pair<double, double> > GetStationaryTimeSegments() { return stationary_time_segments_; }
 
-    std::vector<std::vector<ImuData> > &GetStationaryImuSegments() {
-        return stationary_imu_segments_;
-    }
+	std::vector<std::vector<ImuData> > &GetStationaryImuSegments() { return stationary_imu_segments_; }
 
 private:
-    // --- Configuration ---
-    double accel_gravity_threshold_;
-    double accel_var_threshold_;
-    double gyro_var_threshold_;
-    double gyro_mean_threshold_xy_;
-    double gyro_mean_threshold_z_;
-    int imu_freq_;
-    int min_duration_s_;
-    size_t window_samples_;
-    size_t step_samples_ = 1;
+	// --- Configuration ---
+	double accel_gravity_threshold_;
+	double accel_var_threshold_;
+	double gyro_var_threshold_;
+	double gyro_mean_threshold_xy_;
+	double gyro_mean_threshold_z_;
+	int imu_freq_;
+	int min_duration_s_;
+	size_t window_samples_;
+	size_t step_samples_ = 1;
 
-    // --- Data ---
-    std::vector<ImuData> imu_data_;
-    double local_gravity_;
-    std::vector<std::pair<double, double> > stationary_time_segments_;
-    std::vector<std::vector<ImuData> > stationary_imu_segments_;
+	// --- Data ---
+	std::vector<ImuData> imu_data_;
+	double local_gravity_;
+	std::vector<std::pair<double, double> > stationary_time_segments_;
+	std::vector<std::vector<ImuData> > stationary_imu_segments_;
 
-    ImuWindowStats InitializeWindowStats() const;
+	ImuWindowStats InitializeWindowStats() const;
 
-    bool IsStaticWindow(const ImuWindowStats &stats) const;
+	bool IsStaticWindow(const ImuWindowStats &stats) const;
 
-    void SlideWindowStats(size_t window_start, size_t window_end, size_t step, ImuWindowStats &stats) const;
+	void SlideWindowStats(size_t window_start, size_t window_end, size_t step, ImuWindowStats &stats) const;
 
-    // Append a validated stationary segment, merging overlapping segments.
-    void AppendSegmentIfValid(size_t seg_start_idx, size_t seg_end_idx);
+	// Append a validated stationary segment, merging overlapping segments.
+	void AppendSegmentIfValid(size_t seg_start_idx, size_t seg_end_idx);
 
-    // Main detection loop: slide a fixed-size window across IMU data.
-    void FindStationaryTimeSegments();
+	// Main detection loop: slide a fixed-size window across IMU data.
+	void FindStationaryTimeSegments();
 
-    // Build IMU data segments from detected time ranges using binary search.
-    void FindStationaryImuSegments();
+	// Build IMU data segments from detected time ranges using binary search.
+	void FindStationaryImuSegments();
 };
 
-#endif // STATIONARY_DETECTOR_H
+#endif	// STATIONARY_DETECTOR_H

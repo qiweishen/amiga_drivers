@@ -1,30 +1,32 @@
-/// @file src/main.cpp
-/// @brief Unified entry point for running INS401 and LMS41xxx drivers concurrently.
+
+/// @brief Unified entry point for running INS401 and LMS4xxx drivers concurrently
 ///
-/// Installs a single signal handler with a shared terminate flag, then propagates
-/// it to both driver apps. Each driver runs in its own thread; shutdown is orderly.
+/// Supports multiple LiDAR instances from a single YAML config. Each driver
+/// runs in its own thread; shutdown is orderly via shared terminate flags
 
 #include <atomic>
-#include <cstring>
 #include <iostream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/chrono.h>
 
 #include "utility.h"
+#include "activity_spinner.h"
 #include "data_type.h"
 #include "signal_handler.h"
 #include "ins401_driver_app.h"
 #include "lidar_driver_app.h"
+#include "lidar_tool.h"
 
 
 namespace {
     constexpr std::string_view kModule = "Main";
 
     void LoadConfig(std::string_view config_path, Common::Config &config) {
-        // Delegate YAML I/O to the common ConfigLoader (throws on error).
+        // Delegate YAML I/O to the common ConfigLoader (throws on error)
         Common::ConfigLoader loader(config_path);
         const auto &root = loader.root();
 
@@ -107,13 +109,23 @@ int main(int argc, char *argv[]) {
 
     // Create driver apps
     std::unique_ptr<InsDriverApp> ins_app;
-    std::unique_ptr<LidarDriverApp> lidar_app;
+    std::vector<std::unique_ptr<LidarDriverApp>> lidar_apps;
 
     if (run_ins) {
         ins_app = std::make_unique<InsDriverApp>(main_config);
     }
     if (run_lidar) {
-        lidar_app = std::make_unique<LidarDriverApp>(main_config);
+        auto lidar_configs = LidarTool::LoadConfigs(main_config.lidar_config_path);
+        for (auto& cfg : lidar_configs) {
+            if (!main_config.lidar_launch_path.empty()) {
+                cfg.launch_file = main_config.lidar_launch_path;
+            }
+            cfg.data_folder_path = main_config.data_folder_path;
+            cfg.timestamp = main_config.timestamp;
+            lidar_apps.push_back(std::make_unique<LidarDriverApp>(std::move(cfg)));
+        }
+        Common::Log::log_message(spdlog::level::info, kModule,
+                                 fmt::format("Created {} LiDAR instance(s)", lidar_apps.size()));
     }
 
     // Initialize drivers
@@ -128,27 +140,28 @@ int main(int argc, char *argv[]) {
             Common::Log::log_and_throw(kModule, "INS401 init exception: ", e.what());
         }
     }
-    if (lidar_app) {
+    for (auto it = lidar_apps.begin(); it != lidar_apps.end(); ) {
         try {
-            if (!lidar_app->init()) {
+            if (!(*it)->init()) {
                 Common::Log::log_message(spdlog::level::warn, kModule, "LMS4xxx driver initialization failed");
-                lidar_app.reset();
+                it = lidar_apps.erase(it);
+            } else {
+                ++it;
             }
         } catch (const std::exception &e) {
-            // Program will be terminated
             Common::Log::log_and_throw(kModule, "LMS4xxx init exception: ", e.what());
         }
     }
 
-    if (!ins_app && !lidar_app) {
+    if (!ins_app && lidar_apps.empty()) {
         // Program will be terminated
         Common::Log::log_and_throw(kModule, "No drivers initialized, exiting");
     }
 
 
-    // Run both drivers concurrently
+    // Run all drivers concurrently
     std::thread ins_thread;
-    std::thread lidar_thread;
+    std::vector<std::thread> lidar_threads;
     if (ins_app) {
         ins_thread = std::thread([&ins_app]() {
             try {
@@ -159,37 +172,47 @@ int main(int argc, char *argv[]) {
             }
         });
     }
-    if (lidar_app) {
-        lidar_thread = std::thread([&lidar_app]() {
+    for (auto& app : lidar_apps) {
+        lidar_threads.emplace_back([&app]() {
             try {
-                lidar_app->run();
+                app->run();
             } catch (const std::exception &e) {
-                // Program will be terminated
                 Common::Log::log_and_throw(kModule, "LMS4xxx run() exception: {}", e.what());
             }
         });
     }
 
 
-    // Monitor shared terminate flag and propagate to drivers
+    // Activity spinner: shows animation during idle periods (1.5s no console output)
+    Common::ActivitySpinner spinner("../../resource/spinner_frames.conf");
+    spinner.Attach();
+
     while (!g_terminate.load(std::memory_order_acquire)) {
-        // Also check if either driver self-terminated (e.g. receiver exception).
         if (ins_app && ins_app->terminate_flag().load(std::memory_order_acquire)) {
             break;
         }
-        if (lidar_app && lidar_app->terminate_flag().load(std::memory_order_acquire)) {
-            break;
+        bool any_lidar_terminated = false;
+        for (auto& app : lidar_apps) {
+            if (app->terminate_flag().load(std::memory_order_acquire)) {
+                any_lidar_terminated = true;
+                break;
+            }
         }
+        if (any_lidar_terminated) break;
+        spinner.Tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    spinner.Detach();
+    spinner.Clear();
 
-    // Propagate termination to both drivers.
+
+    // Propagate termination to all drivers
     if (ins_app) {
         ins_app->terminate_flag().store(true, std::memory_order_release);
     }
-    if (lidar_app) {
-        lidar_app->terminate_flag().store(true, std::memory_order_release);
+    for (auto& app : lidar_apps) {
+        app->terminate_flag().store(true, std::memory_order_release);
     }
 
     if (int sig = g_signal_received.load(std::memory_order_relaxed); sig != 0) {
@@ -202,25 +225,27 @@ int main(int argc, char *argv[]) {
     if (ins_thread.joinable()) {
         ins_thread.join();
     }
-    if (lidar_thread.joinable()) {
-        lidar_thread.join();
+    for (auto& t : lidar_threads) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
 
 
-    // Shutdown both drivers
+    // Shutdown all drivers
     Common::Log::log_message(spdlog::level::info, kModule, "Shutting down drivers...");
 
     if (ins_app) {
         ins_app->shutdown();
     }
-    if (lidar_app) {
-        lidar_app->shutdown();
+    for (auto& app : lidar_apps) {
+        app->shutdown();
     }
 
 
     // Note: LiDAR post-recording CSV conversion (if enabled) is handled
     // inside LidarDriverApp::shutdown(), matching the INS401 pattern where
-    // ProcessBinaryFiles() runs during the receiver shutdown sequence.
+    // ProcessBinaryFiles() runs during the receiver shutdown sequence
 
     Common::Log::log_message(spdlog::level::info, kModule, "All drivers shut down");
     return 0;

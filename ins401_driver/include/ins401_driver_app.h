@@ -14,8 +14,8 @@
 #include <string>
 #include <thread>
 
-#include "ins401_data_type.h"
 #include "data_type.h"
+#include "ins401_data_type.h"
 
 
 // Forward declarations to avoid pulling heavy headers into every translation unit.
@@ -30,52 +30,52 @@ struct DeviceInfo;
 
 class InsDriverApp {
 public:
-    // @param config_path Path to the INS401 YAML configuration file.
-    explicit InsDriverApp(const Common::Config &config);
+	// @param config_path Path to the INS401 YAML configuration file.
+	explicit InsDriverApp(const Common::Config &config);
 
-    ~InsDriverApp();
+	~InsDriverApp();
 
-    InsDriverApp(const InsDriverApp &) = delete;
-    InsDriverApp &operator=(const InsDriverApp &) = delete;
+	InsDriverApp(const InsDriverApp &) = delete;
+	InsDriverApp &operator=(const InsDriverApp &) = delete;
 
-    // Discover the device, set up receiver/NTRIP threads, and prepare for run().
-    // @return true on success, false on fatal error (no device found, config failure, etc.)
-    bool init();
+	// Discover the device, set up receiver/NTRIP threads, and prepare for run().
+	// @return true on success, false on fatal error (no device found, config failure, etc.)
+	bool init();
 
-    // Main loop: blocks until terminate_flag is set. Polls initialization and shows spinner.
-    void run();
+	// Main loop: blocks until terminate_flag is set. Polls initialization and shows spinner.
+	void run();
 
-    // Graceful shutdown: stops receiver, disconnects NTRIP, joins threads,
-    // post-processes binary files, and logs statistics.
-    void shutdown();
+	// Graceful shutdown: stops receiver, disconnects NTRIP, joins threads,
+	// post-processes binary files, and logs statistics.
+	void shutdown();
 
-    // Called from signal handlers (async-signal-safe: only atomic store).
-    void request_shutdown();
+	// Called from signal handlers (async-signal-safe: only atomic store).
+	void request_shutdown();
 
-    // Shared terminate flag. Can be wired to a signal handler or set externally.
-    std::atomic<bool> &terminate_flag();
+	// Shared terminate flag. Can be wired to a signal handler or set externally.
+	std::atomic<bool> &terminate_flag();
 
 private:
-    std::atomic<bool> terminate_{false};
+	std::atomic<bool> terminate_{ false };
 
-    std::string config_path_;
-    INSConfig config_{};
+	std::string config_path_;
+	INSConfig config_{};
 
-    // Device discovered on the network.
-    std::unique_ptr<DeviceInfo> device_;
+	// Device discovered on the network.
+	std::unique_ptr<DeviceInfo> device_;
 
-    // Core components.
-    std::shared_ptr<InitializationMonitor> init_monitor_;
-    std::shared_ptr<INSDeviceReceiver> receiver_;
-    std::unique_ptr<NTRIPClient> ntrip_client_;
-    std::unique_ptr<NTRIPCallback> ntrip_callback_;
+	// Core components.
+	std::shared_ptr<InitializationMonitor> init_monitor_;
+	std::shared_ptr<INSDeviceReceiver> receiver_;
+	std::unique_ptr<NTRIPClient> ntrip_client_;
+	std::unique_ptr<NTRIPCallback> ntrip_callback_;
 
-    // Internal threads.
-    std::thread receiver_thread_;
-    std::thread ntrip_thread_;
+	// Internal threads.
+	std::thread receiver_thread_;
+	std::thread ntrip_thread_;
 
-    std::atomic<bool> shutdown_called_{false};
+	std::atomic<bool> shutdown_called_{ false };
 };
 
 
-#endif // INS_DRIVER_APP_H
+#endif	// INS_DRIVER_APP_H

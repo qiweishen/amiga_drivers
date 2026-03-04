@@ -52,36 +52,27 @@ inline constexpr std::uint16_t REQUEST_INFO_COMMAND = 0xCC01;
 
 
 [[nodiscard]] constexpr std::array<std::uint8_t, 2> ConvertUint16ToUint8(std::uint16_t value, EndianType type) {
-    return (type == EndianType::LSB)
-               ? std::array<std::uint8_t, 2>{
-                   static_cast<std::uint8_t>(value & 0xFF),
-                   static_cast<std::uint8_t>((value >> 8) & 0xFF)
-               }
-               : std::array<std::uint8_t, 2>{
-                   static_cast<std::uint8_t>((value >> 8) & 0xFF),
-                   static_cast<std::uint8_t>(value & 0xFF)
-               };
+	return (type == EndianType::LSB) ? std::array<std::uint8_t, 2>{ static_cast<std::uint8_t>(value & 0xFF),
+																	static_cast<std::uint8_t>((value >> 8) & 0xFF) }
+									 : std::array<std::uint8_t, 2>{ static_cast<std::uint8_t>((value >> 8) & 0xFF),
+																	static_cast<std::uint8_t>(value & 0xFF) };
 }
 
 
 // Precomputed byte arrays (LSB first).
 inline constexpr auto COMMAND_START_BYTES = ConvertUint16ToUint8(COMMAND_START, EndianType::LSB);
 
-inline constexpr auto GNSS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
-    GNSS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
+inline constexpr auto GNSS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(GNSS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
 
-inline constexpr auto INS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
-    INS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
+inline constexpr auto INS_SOLUTION_PACKET_MESSAGE_ID_BYTES = ConvertUint16ToUint8(INS_SOLUTION_PACKET_MESSAGE_ID, EndianType::LSB);
 
 inline constexpr auto DIAGNOSTIC_MESSAGE_ID_BYTES = ConvertUint16ToUint8(DIAGNOSTIC_MESSAGE_ID, EndianType::LSB);
 
 inline constexpr auto RAW_IMU_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RAW_IMU_DATA_MESSAGE_ID, EndianType::LSB);
 
-inline constexpr auto RTCM_ROVER_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(
-    RTCM_ROVER_DATA_MESSAGE_ID, EndianType::LSB);
+inline constexpr auto RTCM_ROVER_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_ROVER_DATA_MESSAGE_ID, EndianType::LSB);
 
-inline constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES =
-        ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
+inline constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
 
 inline constexpr auto REQUEST_INFO_COMMAND_BYTES = ConvertUint16ToUint8(REQUEST_INFO_COMMAND, EndianType::LSB);
 

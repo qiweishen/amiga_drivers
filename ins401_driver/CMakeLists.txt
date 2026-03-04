@@ -28,7 +28,6 @@ set(LIB_SOURCES
         src/orientation_initializer.cpp
         src/initialization_monitor.cpp
         src/stationary_detector.cpp
-        src/terminal_spinner.cpp
         src/ins401_driver_app.cpp
 )
 
@@ -59,22 +58,11 @@ target_link_libraries(ins401_lib PUBLIC
         Threads::Threads
         # Boost
         Boost::boost
-        # Shared 3rd_party (provided by top-level CMakeLists.txt)
-        Eigen
+        # Eigen
+        Eigen3::Eigen
         # Shared common library provides spdlog, yaml-cpp, Threads
         amiga_common
 )
-
-
-################################################################################
-# Main Executable
-add_executable(INS401_Driver src/main.cpp)
-
-set_target_properties(INS401_Driver PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-target_link_libraries(INS401_Driver PRIVATE ins401_lib)
 
 
 ################################################################################

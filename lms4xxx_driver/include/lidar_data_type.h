@@ -1,6 +1,7 @@
 #ifndef LIDAR_DATA_TYPE_H
 #define LIDAR_DATA_TYPE_H
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -8,7 +9,9 @@
 struct LiDARConfig {
     // SICK scanner configuration
     std::string launch_file;
-    std::vector<std::string> lidar_ip;
+	std::string lidar_position;
+    std::string lidar_ip;
+    std::map<std::string, std::string> launch_overrides;  // YAML key-value overrides for SICK CLI
     // NTP time synchronization: if non-empty, configures the scanner to use
     // this IP as NTP server. The SICK library sends SOPAS commands:
     //   sWN TSCTCInterface 0       (Ethernet)
@@ -16,7 +19,7 @@ struct LiDARConfig {
     //   sWN TSCTCupdatetime 5      (sync every 5 seconds)
     //   sWN TSCRole 1              (activate NTP client)
     std::string ntp_server_ip;
-    bool quiet = true; // Suppress SICK console output.
+    bool quiet = true; // Suppress SICK console output
 
     // Output paths (set by the standalone or unified main)
     std::string output_file; // Binary output file path

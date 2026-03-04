@@ -33,14 +33,10 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 ################################################################################
 # Shared System Packages
 find_package(Threads REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 
 ################################################################################
-# Shared 3rd Party Libraries
-
-# Shared vendored libraries (Eigen)
-add_subdirectory(3rd_party)
-
 # Shared FetchContent libraries (spdlog, yaml-cpp and sick_scan_xd)
 include(${CMAKE_SOURCE_DIR}/cmake/FetchContent.cmake)
 
