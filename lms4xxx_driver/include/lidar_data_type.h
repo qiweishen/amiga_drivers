@@ -26,7 +26,7 @@ struct LiDARConfig {
     std::string data_folder_path;
     std::string timestamp;
     std::string log_file; // Log file path (standalone mode only)
-    bool convert_to_csv = false; // Convert binary to CSV after recording
+    bool convert_to_csv = true; // Convert binary to CSV after recording
 
     // Queue and writer tuning
     size_t max_queue_size = 256;

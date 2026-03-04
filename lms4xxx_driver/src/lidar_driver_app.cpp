@@ -49,9 +49,11 @@ bool LidarDriverApp::init() {
         try {
             LidarTool::LoadConfig(config_path_, config_);
         } catch (const std::exception &e) {
-            Common::Log::log_message(spdlog::level::warn, kModule,
-                                     fmt::format("Config load failed: {}", e.what()));
-            return false;
+        	std::filesystem::copy_file(config_path_,
+									   fmt::format("{}/config/config-lms4xxx_{}.yaml", config_.data_folder_path, config_.timestamp),
+									   std::filesystem::copy_options::overwrite_existing);
+        } catch (const std::exception &e) {
+        	Common::Log::log_and_throw(kModule, "Config/init failed: {}", e.what());
         }
 
         // Override fields from unified config
@@ -64,7 +66,7 @@ bool LidarDriverApp::init() {
 
     // Compute output file path if not explicitly set
     if (config_.output_file.empty() && !config_.data_folder_path.empty()) {
-        config_.output_file = fmt::format("{}/pointcloud_{}_{}.bin", config_.data_folder_path, config_.lidar_position, config_.timestamp);
+        config_.output_file = fmt::format("{}/bin/pointcloud_{}_{}.bin", config_.data_folder_path, config_.lidar_position, config_.timestamp);
     }
 
     // Suppress SICK console output in unified mode (logging goes through shared logger)

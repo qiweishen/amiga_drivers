@@ -8,9 +8,9 @@ Sick Launch:
     SICK Launch file: ../../lms4xxx_driver/config/config-lms4xxx.yaml
     # Some override parameter in launch file
     Front Left Laser:
-        hostname: 10.75.96.101
+        hostname: 10.95.76.101
     Front Right Laser:
-        hostname: 10.75.96.103
+        hostname: 10.95.76.103
     tick_to_timestamp_mode: 2
 
 
