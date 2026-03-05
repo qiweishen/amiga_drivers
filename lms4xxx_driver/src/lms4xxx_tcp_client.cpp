@@ -173,6 +173,16 @@ namespace LMS4xxx {
 	}
 
 
+	void TcpClient::ShutdownReceive() {
+		if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
+			return;
+		}
+		boost::system::error_code ec;
+		impl_->socket.shutdown(tcp::socket::shutdown_receive, ec);
+		// Best-effort: ignore error (socket may already be closing)
+	}
+
+
 	void TcpClient::Disconnect() {
 		if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
 			return;

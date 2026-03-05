@@ -36,6 +36,11 @@ namespace LMS4xxx {
 		// Connect to the sensor. Configures SO_RCVBUF and TCP keepalive.
 		[[nodiscard]] std::error_code Connect(int timeout_ms);
 
+		// Shut down the receive side of the socket to unblock any pending ReadSome()
+		// call in the receive thread. The send side remains open.
+		// Safe to call from a different thread than the one calling ReadSome().
+		void ShutdownReceive();
+
 		// Close the connection. Safe to call multiple times.
 		void Disconnect();
 

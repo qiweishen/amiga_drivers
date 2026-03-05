@@ -645,23 +645,31 @@ namespace LMS4xxx {
 		impl_->parse_running.store(false, std::memory_order_release);
 		impl_->scanning.store(false, std::memory_order_release);
 
-		// Join threads.
-		if (impl_->receive_thread.joinable()) {
-			impl_->receive_thread.join();
-		}
-		if (impl_->parse_thread.joinable()) {
-			impl_->parse_thread.join();
-		}
-
-		// Send stop stream command (best-effort, connection may already be lost).
-		// Note: we don't read the response because residual sSN frames may still
-		// be buffered in the TCP stack, making clean response matching unreliable.
+		// Send stop stream command BEFORE shutting down receive.
+		// Full-duplex guarantees concurrent Write + ReadSome is safe.
 		if (impl_->tcp_client && impl_->tcp_client->IsConnected()) {
 			auto frame = CommandBuilder::BuildStopStream();
 			auto ec = impl_->tcp_client->Write(frame);
 			if (ec) {
 				Common::Log::log_message(spdlog::level::warn, kModule, "Failed to send stop stream command (non-fatal)", ec.message());
 			}
+		}
+
+		// Unblock the receive thread: Boost.Asio uses epoll_wait() internally for
+		// synchronous read_some(), so SO_RCVTIMEO has no effect. Calling
+		// shutdown(SHUT_RD) triggers POLLHUP which wakes epoll_wait() immediately,
+		// causing read_some() to return EOF. The receive loop will then see
+		// receive_running==false and exit cleanly.
+		if (impl_->tcp_client) {
+			impl_->tcp_client->ShutdownReceive();
+		}
+
+		// Join threads.
+		if (impl_->receive_thread.joinable()) {
+			impl_->receive_thread.join();
+		}
+		if (impl_->parse_thread.joinable()) {
+			impl_->parse_thread.join();
 		}
 
 		impl_->set_state(ConnectionState::kConnected);
