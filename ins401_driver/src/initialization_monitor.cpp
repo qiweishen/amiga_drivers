@@ -8,7 +8,7 @@
 
 
 namespace {
-	constexpr std::string_view kModule = "IInitializationMonitor";
+	constexpr std::string_view kModule = "InitializationMonitor";
 	constexpr double kDegToRad = M_PI / 180.0;
 }  // namespace
 

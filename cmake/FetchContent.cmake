@@ -28,16 +28,3 @@ FetchContent_Declare(
         SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/FetchContent/yaml-cpp
 )
 FetchContent_MakeAvailable(yaml-cpp)
-
-
-################################################################################
-# nlohmann/json - JSON for Modern C++
-FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.12.0
-        GIT_SHALLOW TRUE
-        SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/FetchContent/nlohmann_json
-)
-set(JSON_BuildTests OFF CACHE INTERNAL "")
-FetchContent_MakeAvailable(nlohmann_json)

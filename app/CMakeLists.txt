@@ -1,6 +1,5 @@
 ################################################################################
 # DataConverter - standalone binary-to-CSV post-processing tool
-################################################################################
 
 add_executable(DataConverter
         src/main.cpp
@@ -19,3 +18,15 @@ target_link_libraries(DataConverter PRIVATE
 set_target_properties(DataConverter PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
+
+
+################################################################################
+# Status Messages
+message(STATUS "")
+message(STATUS "========================================")
+message(STATUS "   DataConverter Configuration")
+message(STATUS "========================================")
+message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Output Dir:       ${CMAKE_BINARY_DIR}/bin")
+message(STATUS "========================================")
+message(STATUS "")

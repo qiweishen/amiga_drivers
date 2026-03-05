@@ -57,8 +57,6 @@ target_link_libraries(lms4xxx_lib PUBLIC
         Threads::Threads
         # Boost (Asio for TCP networking)
         Boost::boost
-        # JSON configuration
-        nlohmann_json::nlohmann_json
         # Shared common library provides spdlog, yaml-cpp, RingBuffer
         amiga_common
 )
@@ -79,6 +77,5 @@ message(STATUS "   LMS4xxx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Build Examples:   ${LMS4XXX_BUILD_EXAMPLES}")
-message(STATUS "  nlohmann/json:    ${nlohmann_json_SOURCE_DIR}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

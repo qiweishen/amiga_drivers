@@ -3,9 +3,9 @@
 
 # Per-instance sensor configuration
 Instances:
-#    Front Left Laser:
-#        Hostname: "10.95.76.101"
-#        Port: 2111
+    Front Left Laser:
+        Hostname: "10.95.76.101"
+        Port: 2111
     Front Right Laser:
         Hostname: "10.95.76.103"
         Port: 2111
@@ -28,8 +28,8 @@ Network:
     Ring Buffer Frames: 1024        # SPSC ring buffer capacity (frames)
     Receive Thread Priority: 99     # SCHED_FIFO priority (1-99)
     Receive Thread CPU: -1          # CPU affinity (-1 = no pinning)
-    Connect Timeout Ms: 5000
-    Response Timeout Ms: 2000
+    Connect Timeout Ms: 500
+    Response Timeout Ms: 200
     TCP Keepalive: true
     Keepalive Idle S: 10
     Keepalive Interval S: 5

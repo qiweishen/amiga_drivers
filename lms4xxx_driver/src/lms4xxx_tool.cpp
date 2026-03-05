@@ -4,9 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <nlohmann/json.hpp>
 
-#include "lms4xxx_error.h"
 #include "utility.h"
 
 
