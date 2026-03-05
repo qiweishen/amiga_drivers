@@ -28,7 +28,7 @@ namespace LMS4xxx {
 		std::uint32_t magic = 0x4C4D5334;	///< "LMS4"
 		std::uint16_t version = 1;
 		std::uint16_t channel_mask = 0;
-		std::uint16_t max_points = static_cast<std::uint16_t>(kMaxPointsPerScan);
+		std::uint16_t max_points = kMaxPointsPerScan;
 		std::int32_t start_angle = 0;	 ///< 1/10000 deg (from config)
 		std::int32_t stop_angle = 0;	 ///< 1/10000 deg (from config)
 		std::uint16_t angle_step = 0;	 ///< 1/10000 deg (from config)

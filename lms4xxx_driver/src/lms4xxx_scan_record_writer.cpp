@@ -345,7 +345,7 @@ namespace LMS4xxx {
 	void ScanRecordWriter::LogStatistics() const {
 		const auto stats = GetStatistics();
 		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx SCAN RECORDING STATISTICS === : Total frames written: {}, dropped: {}, total bytes: {:.2f} MB, files created: {}",
+								 fmt::format("=== LMS4xxx RECORDING STATISTICS === : Total frames written: {}, dropped: {}, total bytes: {:.2f} MB, files created: {}",
 											 stats.frames_written, stats.frames_dropped,
 											 static_cast<double>(stats.bytes_written) / (1024.0 * 1024.0),
 											 stats.files_created));
