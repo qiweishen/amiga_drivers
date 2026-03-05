@@ -126,20 +126,20 @@ struct RawIMUData {
 // IMU data with Eigen vectors for mathematical operations.
 struct ImuData {
 	std::uint16_t gps_week{};
-	std::uint32_t gps_millisecs{};  // ms
-	Eigen::Vector3d accel;		  // m/s^2
-	Eigen::Vector3d gyro;		  // deg/s
+	std::uint32_t gps_millisecs{};	// ms
+	Eigen::Vector3d accel;			// m/s^2
+	Eigen::Vector3d gyro;			// deg/s
 };
 
 
 // GNSS data with Eigen vectors for mathematical operations.
 struct GnssData {
 	std::uint16_t gps_week{};
-	std::uint32_t gps_millisecs{};  // ms
-	std::uint8_t position_type{};	  // same with the above
-	Eigen::Vector3d enu_vel;	  // east, north, up velocity (m/s)
-	float latitude_std{};			  // m
-	float longitude_std{};		  // m
+	std::uint32_t gps_millisecs{};	// ms
+	std::uint8_t position_type{};	// same with the above
+	Eigen::Vector3d enu_vel;		// east, north, up velocity (m/s)
+	float latitude_std{};			// m
+	float longitude_std{};			// m
 };
 
 

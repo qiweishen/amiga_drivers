@@ -15,7 +15,7 @@
 
 namespace {
 	// Label displayed alongside every spinner frame
-	constexpr std::string_view kLabel = "Data collecting...";
+	constexpr std::string_view kLabel = "System Runing o_0";
 
 	// Minimum trailing-space padding so shorter frames overwrite remnants of longer ones
 	constexpr std::size_t kMinPadWidth = 4;

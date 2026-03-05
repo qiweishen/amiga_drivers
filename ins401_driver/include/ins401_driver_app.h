@@ -40,7 +40,7 @@ public:
 
 	// Discover the device, set up receiver/NTRIP threads, and prepare for run().
 	// @return true on success, false on fatal error (no device found, config failure, etc.)
-	bool init();
+	bool Init();
 
 	// Main loop: blocks until terminate_flag is set. Polls initialization and shows spinner.
 	void run();

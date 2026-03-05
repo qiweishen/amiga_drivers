@@ -1,20 +1,48 @@
-# =============================================================================
-# LMS4XXX Driver Configuration
-# =============================================================================
+# LMS4xxx Driver Configuration
+# Used by the unified main.cpp via LidarTool::LoadConfigs()
 
-# --- SICK Launch File ---
-Sick Launch:
-    # Launch file for LMS4XXX
-    SICK Launch file: ../../lms4xxx_driver/config/config-lms4xxx.yaml
-    # Some override parameter in launch file
-    Front Left Laser:
-        hostname: 10.95.76.101
+# Per-instance sensor configuration
+Instances:
+#    Front Left Laser:
+#        Hostname: "10.95.76.101"
+#        Port: 2111
     Front Right Laser:
-        hostname: 10.95.76.103
-    tick_to_timestamp_mode: 2
+        Hostname: "10.95.76.103"
+        Port: 2111
 
+# Scan parameters (shared across instances)
+Scan Config:
+    Start Angle Deg: 55.0
+    Stop Angle Deg: 125.0
+    Angular Resolution Deg: 0.0833
+    Enable Distance: true
+    Enable RSSI: true
+    Enable Reflectance: false
+    Enable Angle Correction: true
+    Enable Quality: true
+    Output Rate: 1
 
-# --- Time Synchronization ---
+# Network tuning
+Network:
+    Receive Buffer Bytes: 4194304   # SO_RCVBUF size (4 MB)
+    Ring Buffer Frames: 1024        # SPSC ring buffer capacity (frames)
+    Receive Thread Priority: 99     # SCHED_FIFO priority (1-99)
+    Receive Thread CPU: -1          # CPU affinity (-1 = no pinning)
+    Connect Timeout Ms: 5000
+    Response Timeout Ms: 2000
+    TCP Keepalive: true
+    Keepalive Idle S: 10
+    Keepalive Interval S: 5
+    Keepalive Count: 3
+
+# Time Synchronization
 Time Synchronization:
-    # The IP address of the NTP server to synchronize the system clock with
-    NTP Server: 10.75.96.100
+    Enable NTP: false
+    NTP Server: "10.95.76.100"
+    Sync Time: 1
+
+# Scan data recording
+Recording:
+    Queue Capacity: 512          # SPSC queue frames (parse thread → write thread)
+    Write Buffer Size: 262144    # ofstream pubsetbuf size (256 KB)
+    Max File Bytes: 1073741824   # 1 GB per file (0 = no splitting)

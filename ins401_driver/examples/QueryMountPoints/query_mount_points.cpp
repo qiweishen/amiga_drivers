@@ -1,6 +1,6 @@
 #include <INIReader.h>
 
-#include "ntrip_client.h"
+#include "ins401_ntrip_client.h"
 
 
 int main(int argc, char *argv[]) {

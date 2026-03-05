@@ -69,8 +69,8 @@ namespace Common {
         }
 
 
-        [[noreturn]] void log_and_throw(std::string_view module, std::string_view msg,
-                                        std::string_view error_detail) {
+        void log_and_throw(std::string_view module, std::string_view msg,
+                                        std::string_view error_detail, bool throw_error) {
             // Log directly via spdlog — do NOT call log_message() here, because
             // log_message(err) delegates to log_and_throw(), causing infinite recursion
             if (auto cb = g_pre_log_cb.load(std::memory_order_acquire)) { cb(); }
@@ -79,7 +79,9 @@ namespace Common {
             } else {
                 spdlog::error("[{}]: {} - {}", module, msg, error_detail);
             }
-            throw std::runtime_error(std::string(msg));
+        	if (throw_error) {
+        		throw std::runtime_error(std::string(msg));
+        	}
         }
 
 

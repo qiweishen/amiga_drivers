@@ -24,7 +24,7 @@ class ActivitySpinner {
 public:
 	// Construct spinner with frame file and idle threshold in seconds
 	// If file cannot be read or is empty, falls back to a built-in default set
-	explicit ActivitySpinner(std::string_view frames_file_path, double idle_threshold_s = 1.5);
+	explicit ActivitySpinner(std::string_view frames_file_path, double idle_threshold_s = 1.25);
 
 	~ActivitySpinner();
 

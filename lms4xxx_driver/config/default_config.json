@@ -1,0 +1,43 @@
+{
+    "device": {
+        "ip": "192.168.0.1",
+        "port": 2111
+    },
+    "scan": {
+        "start_angle_deg": 55.0,
+        "stop_angle_deg": 125.0,
+        "angular_resolution_deg": 0.0833,
+        "channels": {
+            "distance": true,
+            "rssi": false,
+            "reflectance": false,
+            "angle_correction": false,
+            "quality": false
+        },
+        "output_rate": 1
+    },
+    "ntp": {
+        "enable": false,
+        "role": 1,
+        "server_ip": "192.168.0.100",
+        "update_interval_s": 1
+    },
+    "network": {
+        "recv_buffer_bytes": 4194304,
+        "ring_buffer_frames": 1024,
+        "receive_thread_priority": 99,
+        "receive_thread_cpu": -1,
+        "connect_timeout_ms": 5000,
+        "response_timeout_ms": 2000,
+        "tcp_keepalive": true,
+        "keepalive_idle_s": 10,
+        "keepalive_interval_s": 5,
+        "keepalive_count": 3
+    },
+    "recording": {
+        "enable": true,
+        "queue_capacity": 512,
+        "write_buffer_size": 262144,
+        "max_file_bytes": 1073741824
+    }
+}

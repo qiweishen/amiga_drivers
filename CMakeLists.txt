@@ -53,6 +53,11 @@ add_subdirectory(lms4xxx_driver)
 
 
 ################################################################################
+# DataConverter (standalone binary-to-CSV post-processing tool)
+add_subdirectory(app)
+
+
+################################################################################
 # Unified Executable (runs both drivers concurrently)
 add_executable(AmigaDrivers main.cpp)
 

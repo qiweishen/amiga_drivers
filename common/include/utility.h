@@ -3,67 +3,66 @@
 
 
 #include <filesystem>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <string_view>
 #include <yaml-cpp/yaml.h>
-#include <spdlog/spdlog.h>
 
 
 namespace Common {
-    class ConfigLoader {
-    public:
-        // Load and parse a YAML file, throws std::runtime_error on I/O or parse failure
-        explicit ConfigLoader(std::string_view path);
+	class ConfigLoader {
+	public:
+		// Load and parse a YAML file, throws std::runtime_error on I/O or parse failure
+		explicit ConfigLoader(std::string_view path);
 
-        // Access the parsed YAML root node
-        [[nodiscard]] const YAML::Node &root() const { return root_; }
-        [[nodiscard]] YAML::Node &root() { return root_; }
+		// Access the parsed YAML root node
+		[[nodiscard]] const YAML::Node &root() const { return root_; }
+		[[nodiscard]] YAML::Node &root() { return root_; }
 
-        // Convenience accessor: root()[section][key].as<T>(default_val)
-        template<typename T>
-        T get(std::string_view section, std::string_view key, const T &default_val) const {
-            return root_[std::string{section}][std::string{key}].template as<T>(default_val);
-        }
+		// Convenience accessor: root()[section][key].as<T>(default_val)
+		template<typename T>
+		T get(std::string_view section, std::string_view key, const T &default_val) const {
+			return root_[std::string{ section }][std::string{ key }].template as<T>(default_val);
+		}
 
-    private:
-        YAML::Node root_;
-    };
-
-
-    namespace Logger {
-        struct Config {
-            std::string log_file; // Empty = no file logging
-            bool quiet = false; // Suppress below-warn messages from the console
-        };
-
-        // Initialize the logging system. Call once at startup before any log calls
-        // Sets up a dual-sink logger: stderr (INFO+ or WARN+ if quiet) and optional file (TRACE+)
-        void init(const Config &config, const std::string &logger_name = "AmigaDriver");
-    } // namespace Logger
+	private:
+		YAML::Node root_;
+	};
 
 
-    namespace Log {
-        // Log at the given spdlog level
-        void log_message(spdlog::level::level_enum level, std::string_view module,
-                         std::string_view msg, std::string_view error_detail = "");
+	namespace Logger {
+		struct Config {
+			std::string log_file;  // Empty = no file logging
+			bool quiet = false;	   // Suppress below-warn messages from the console
+		};
 
-        // Log at error level and throw std::runtime_error
-        // Use for unrecoverable errors where exception-based unwinding is needed
-        [[noreturn]] void log_and_throw(std::string_view module, std::string_view msg,
-                                        std::string_view error_detail = "");
-
-        // Forward SICK library log messages (ROS levels: 1=Info, 2=Warn, 3/4=Error)
-        void sick_msg(int32_t log_level, const char *message);
-
-        // Pre-log callback: invoked before each console log write
-        using PreLogCallback = void(*)();
-        void set_pre_log_callback(PreLogCallback cb);
-    } // namespace Log
+		// Initialize the logging system. Call once at startup before any log calls
+		// Sets up a dual-sink logger: stderr (INFO+ or WARN+ if quiet) and optional file (TRACE+)
+		void init(const Config &config, const std::string &logger_name = "AmigaDriver");
+	}  // namespace Logger
 
 
-    // Resolve the directory containing the running executable (used for relative config paths)
-    std::filesystem::path GetExecutableDir();
-}
+	namespace Log {
+		// Log at the given spdlog level
+		void log_message(spdlog::level::level_enum level, std::string_view module, std::string_view msg,
+						 std::string_view error_detail = "");
+
+		// Log at error level and throw std::runtime_error
+		// Use for unrecoverable errors where exception-based unwinding is needed
+		void log_and_throw(std::string_view module, std::string_view msg, std::string_view error_detail = "", bool throw_error = true);
+
+		// Forward SICK library log messages (ROS levels: 1=Info, 2=Warn, 3/4=Error)
+		void sick_msg(int32_t log_level, const char *message);
+
+		// Pre-log callback: invoked before each console log write
+		using PreLogCallback = void (*)();
+		void set_pre_log_callback(PreLogCallback cb);
+	}  // namespace Log
 
 
-#endif //COMMON_UTILITY_H
+	// Resolve the directory containing the running executable (used for relative config paths)
+	std::filesystem::path GetExecutableDir();
+}  // namespace Common
+
+
+#endif	// COMMON_UTILITY_H

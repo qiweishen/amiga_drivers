@@ -12,7 +12,7 @@
 
 
 namespace {
-	constexpr std::string_view kModule = "INSDiscover";
+	constexpr std::string_view kModule = "INS401Discover";
 }
 
 

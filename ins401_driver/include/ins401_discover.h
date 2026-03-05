@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "ethernet_socket.h"
+#include "ins401_ethernet_socket.h"
 
 
 // Information reported by a discovered device.

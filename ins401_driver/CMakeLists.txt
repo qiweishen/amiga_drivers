@@ -21,10 +21,10 @@ find_package(Boost REQUIRED)
 # Driver Library (shared code for main executable and examples)
 set(LIB_SOURCES
         src/ins401_tool.cpp
-        src/ethernet_socket.cpp
+        src/ins401_ethernet_socket.cpp
         src/ins401_discover.cpp
         src/ins401_receiver.cpp
-        src/ntrip_client.cpp
+        src/ins401_ntrip_client.cpp
         src/orientation_initializer.cpp
         src/initialization_monitor.cpp
         src/stationary_detector.cpp

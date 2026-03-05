@@ -11,7 +11,6 @@ General:
     # Path to the configuration files for each driver
     INS401 Driver Config Path: ./ins401_driver/config/config-ins401.yaml
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
-    LMS4XXX Driver Launch Path: ./lms4xxx_driver/config/sick_lms_4xxx.launch
 
 # --- Logging System ---
 Logging System:

@@ -1,34 +1,74 @@
 ################################################################################
 # LMS4xxx Driver
+# Direct TCP/CoLa B protocol driver for SICK LMS4xxx 2D LiDAR sensors.
 # This is a subdirectory of the top-level AmigaDrivers project.
+# Shared dependencies (spdlog, yaml-cpp) are provided by amiga_common.
+
+# Build options
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    option(LMS4XXX_BUILD_EXAMPLES "Build example programs" ON)
+else()
+    option(LMS4XXX_BUILD_EXAMPLES "Build example programs" OFF)
+endif()
 
 
 ################################################################################
-# Driver Library (shared code for main executable and unified executable)
+# Required System Packages (Threads provided by top-level)
+find_package(Threads REQUIRED)
+find_package(Boost REQUIRED)
+
+
+################################################################################
+# Driver Library
 set(LIB_SOURCES
-        src/buffered_writer.cpp
-        src/csv_converter.cpp
-        src/lidar_driver_app.cpp
-        src/lidar_receiver.cpp
-        src/lidar_tool.cpp
-        src/point_cloud_callback.cpp
-        ${SICK_SCAN_XD_ROOT_DIR}/test/src/sick_scan_xd_api/sick_scan_xd_api_wrapper.c
+        src/lms4xxx_driver.cpp
+        src/lms4xxx_driver_app.cpp
+        src/lms4xxx_scan_record_writer.cpp
+        src/lms4xxx_tool.cpp
+        src/lms4xxx_tcp_client.cpp
+        src/lms4xxx_frame_receiver.cpp
+        src/lms4xxx_cola_b.cpp
+        src/lms4xxx_command_builder.cpp
+        src/lms4xxx_scan_data_parser.cpp
 )
 
-add_library(lms4xxx_lib STATIC ${LIB_SOURCES})
+# Header files
+file(GLOB_RECURSE HEADERS
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
+)
+
+# Create static library
+add_library(lms4xxx_lib STATIC ${LIB_SOURCES} ${HEADERS})
+
+set_target_properties(lms4xxx_lib PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+)
 
 target_include_directories(lms4xxx_lib PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${SICK_SCAN_XD_ROOT_DIR}/include
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(lms4xxx_lib PUBLIC
-        dl
-        # Shared common library provides spdlog, yaml-cpp, Threads
+        # System libraries
+        Threads::Threads
+        # Boost (Asio for TCP networking)
+        Boost::boost
+        # JSON configuration
+        nlohmann_json::nlohmann_json
+        # Shared common library provides spdlog, yaml-cpp, RingBuffer
         amiga_common
 )
 
-add_dependencies(lms4xxx_lib sick_scan_xd_build)
+
+################################################################################
+# Examples
+if (LMS4XXX_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif ()
 
 
 ################################################################################
@@ -38,6 +78,7 @@ message(STATUS "----------------------------------------")
 message(STATUS "   LMS4xxx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  sick_scan_xd:     ${SICK_SCAN_XD_ROOT_DIR}")
+message(STATUS "  Build Examples:   ${LMS4XXX_BUILD_EXAMPLES}")
+message(STATUS "  nlohmann/json:    ${nlohmann_json_SOURCE_DIR}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

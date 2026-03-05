@@ -8,15 +8,15 @@
 #include <optional>
 #include <vector>
 
-#include "ethernet_socket.h"
 #include "ins401_data_type.h"
+#include "ins401_ethernet_socket.h"
 
 
 class InitializationMonitor;
 class NTRIPClient;
 
 
-// INS401 receiver: writes raw binary during collection, converts to ASCII after stop.
+// INS401 receiver: writes raw binary during collection.
 class INSDeviceReceiver {
 public:
 	explicit INSDeviceReceiver(std::string iface, std::string device_mac, const INSConfig &config);
@@ -59,9 +59,6 @@ public:
 	// Parse a GGA NMEA sentence into BLH coordinates (lat_rad, lon_rad, ellipsoidal_height_m)
 	// suitable for Tool::Earth::ComputeGravity. Returns std::nullopt on parse failure or no fix.
 	[[nodiscard]] static std::optional<Eigen::Vector3d> ParseGgaCoordinates(const std::string &gga);
-
-	/// Convert raw binary log files (written during collection) into human-readable ASCII CSV files.
-	void ProcessBinaryFiles();
 
 	// Statistics
 	struct GpsTimeRange {
@@ -134,12 +131,6 @@ private:
 	std::string imu_bin_path_;
 	std::string diagnostic_bin_path_;
 
-	// CSV file paths
-	std::string gnss_csv_path_;
-	std::string ins_csv_path_;
-	std::string imu_csv_path_;
-	std::string diagnostic_csv_path_;
-
 	bool check_gnss_;
 	double rtk_horizontal_std_;
 	// Hysteresis state machine for GNSS status monitoring:
@@ -207,15 +198,6 @@ private:
 	static RawIMUData ParseRawIMUData(const std::uint8_t *payload);
 
 	// static
-
-	// Post-processing: read binary file, write ASCII CSV
-	void ProcessGNSSBinaryFile();
-
-	void ProcessINSBinaryFile();
-
-	void ProcessIMUBinaryFile();
-
-	void ProcessDiagnosticBinaryFile();
 
 	static bool IsGgaSentence(const std::string &nmea);
 

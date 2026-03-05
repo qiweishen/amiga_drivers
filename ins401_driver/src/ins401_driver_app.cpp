@@ -6,20 +6,21 @@
 
 #include "initialization_monitor.h"
 #include "ins401_discover.h"
+#include "ins401_ntrip_client.h"
 #include "ins401_receiver.h"
 #include "ins401_tool.h"
-#include "ntrip_client.h"
 #include "utility.h"
 
 
 namespace {
-	constexpr std::string_view kModule = "InsDriverApp";
+	constexpr std::string_view kModule = "INS401App";
 }
 
 
 InsDriverApp::InsDriverApp(const Common::Config &config) {
 	// Store config path from the main config. The actual loading is deferred to init()
-	config_path_ = config.ins_config_path;
+	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
+	config_path_ = exe_dir / "../../" / config.ins_config_path;
 	config_.data_folder_path = config.data_folder_path;
 	config_.timestamp = config.timestamp;
 }
@@ -30,16 +31,10 @@ InsDriverApp::~InsDriverApp() {
 }
 
 
-bool InsDriverApp::init() {
-	// Resolve default config path relative to executable if none was provided
-	if (config_path_.empty()) {
-		std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
-		config_path_ = (exe_dir / "../../ins401_driver/config/config-ins401.yaml").string();
-	}
-
+bool InsDriverApp::Init() {
 	// Load config and initialize the system
 	try {
-		InsTool::LoadConfig(config_path_, config_);
+		INS401Tool::LoadConfig(config_path_, config_);
 		std::filesystem::copy_file(config_path_,
 								   fmt::format("{}/config/config-ins401_{}.yaml", config_.data_folder_path, config_.timestamp),
 								   std::filesystem::copy_options::overwrite_existing);
@@ -94,8 +89,8 @@ bool InsDriverApp::init() {
 
 	// Forward RTCM to device only when RTK is required
 	if (config_.enable_rtk) {
-		ntrip_callback_ = std::make_unique<NTRIPCallback>(
-				device_->interface_name, device_->mac_address, device_->localhost_mac_address);
+		ntrip_callback_ =
+				std::make_unique<NTRIPCallback>(device_->interface_name, device_->mac_address, device_->localhost_mac_address);
 		ntrip_client_->SetDataCallback(
 				[cb = ntrip_callback_.get()](const uint8_t *payload, const size_t len) { cb->SendToINS401(payload, len); });
 	}
@@ -108,8 +103,7 @@ bool InsDriverApp::init() {
 					terminate_.store(true, std::memory_order_release);
 					return;
 				}
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 "NTRIP connection failed (RTK not required, ignored)");
+				Common::Log::log_message(spdlog::level::warn, kModule, "NTRIP connection failed (RTK not required, ignored)");
 				return;
 			}
 			ntrip_client_->StartReceiving();
@@ -164,13 +158,11 @@ void InsDriverApp::shutdown() {
 		ntrip_thread_.join();
 	}
 
-	// Post-process binary data files into ASCII CSV
 	if (receiver_) {
-		receiver_->ProcessBinaryFiles();
 		receiver_->LogStatistics();
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule, "INS401 driver shutdown complete");
+	Common::Log::log_message(spdlog::level::info, kModule, "INS401 driver shutdown completely");
 }
 
 
