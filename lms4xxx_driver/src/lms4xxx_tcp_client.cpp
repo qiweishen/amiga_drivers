@@ -84,6 +84,19 @@ namespace LMS4xxx {
 						spdlog::level::trace, kModule,
 						fmt::format("TCP keepalive enabled (idle={}s, interval={}s, count={})", idle, interval, count));
 			}
+
+			// Set receive timeout so ReadSome() wakes up periodically.
+			// This allows the receive thread to check its stop flag on shutdown,
+			// preventing indefinite blocking when the device pauses streaming (e.g. NTP sync).
+			{
+				struct timeval tv{};
+				tv.tv_sec = 0;
+				tv.tv_usec = 100000;  // 100 ms
+				if (setsockopt(native_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+					Common::Log::log_message(spdlog::level::warn, kModule,
+											 fmt::format("Failed to set SO_RCVTIMEO: {}", std::strerror(errno)));
+				}
+			}
 		}
 	};
 
@@ -185,23 +198,35 @@ namespace LMS4xxx {
 			return 0;
 		}
 
-		boost::system::error_code bec;
-		std::size_t bytes_read = asio::read(impl_->socket, asio::buffer(buf, len), bec);
+		// Manual loop instead of asio::read() to handle SO_RCVTIMEO timeouts.
+		// asio::read() treats EAGAIN/would_block as a fatal error and aborts,
+		// so we loop with read_some() and retry on timeout.
+		std::size_t total = 0;
+		while (total < len) {
+			boost::system::error_code bec;
+			std::size_t n = impl_->socket.read_some(
+				asio::buffer(buf + total, len - total), bec);
+			total += n;
 
-		if (bec) {
-			if (bec == asio::error::eof || bec == asio::error::connection_reset) {
-				impl_->connected.store(false, std::memory_order_release);
-				ec = make_error_code(ErrorCode::kConnectionLost);
-				Common::Log::log_message(spdlog::level::warn, kModule, "Connection lost during read", bec.message());
-			} else {
-				ec = make_error_code(ErrorCode::kConnectionFailed);
-				Common::Log::log_message(spdlog::level::warn, kModule, "Read error", bec.message());
+			if (bec) {
+				if (bec == asio::error::try_again ||
+					bec == asio::error::would_block) {
+					continue;  // SO_RCVTIMEO expired, retry
+				}
+				if (bec == asio::error::eof || bec == asio::error::connection_reset) {
+					impl_->connected.store(false, std::memory_order_release);
+					ec = make_error_code(ErrorCode::kConnectionLost);
+					Common::Log::log_message(spdlog::level::warn, kModule, "Connection lost during read", bec.message());
+				} else {
+					ec = make_error_code(ErrorCode::kConnectionFailed);
+					Common::Log::log_message(spdlog::level::warn, kModule, "Read error", bec.message());
+				}
+				return 0;
 			}
-			return 0;
 		}
 
 		ec = {};
-		return bytes_read;
+		return total;
 	}
 
 
@@ -215,6 +240,13 @@ namespace LMS4xxx {
 		std::size_t bytes_read = impl_->socket.read_some(asio::buffer(buf, max_len), bec);
 
 		if (bec) {
+			// SO_RCVTIMEO timeout: treat as "no data yet, not an error".
+			// The receive loop will re-check its stop flag and retry.
+			if (bec == boost::asio::error::try_again ||
+				bec == boost::asio::error::would_block) {
+				ec = {};
+				return 0;
+			}
 			if (bec == asio::error::eof || bec == asio::error::connection_reset) {
 				impl_->connected.store(false, std::memory_order_release);
 				ec = make_error_code(ErrorCode::kConnectionLost);

@@ -54,7 +54,7 @@ namespace LMS4xxx {
 
 
 	// NTP time synchronization configuration.
-	struct NtpConfig {
+	struct NTPConfig {
 		bool enable = false;
 		TscRole role = TscRole::kClient;
 		std::string server_ip = "192.168.0.100";
@@ -88,7 +88,7 @@ namespace LMS4xxx {
 	struct DriverConfig {
 		DeviceConfig device;
 		ScanConfig scan;
-		NtpConfig ntp;
+		NTPConfig ntp;
 		NetworkConfig network;
 
 		// Validate configuration parameters.

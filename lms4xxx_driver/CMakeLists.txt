@@ -63,13 +63,6 @@ target_link_libraries(lms4xxx_lib PUBLIC
 
 
 ################################################################################
-# Examples
-if (LMS4XXX_BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif ()
-
-
-################################################################################
 # Status Messages
 message(STATUS "")
 message(STATUS "----------------------------------------")

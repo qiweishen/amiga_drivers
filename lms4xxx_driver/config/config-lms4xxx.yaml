@@ -6,9 +6,9 @@ Instances:
     Front Left Laser:
         Hostname: "10.95.76.101"
         Port: 2111
-    Front Right Laser:
-        Hostname: "10.95.76.103"
-        Port: 2111
+#    Front Right Laser:
+#        Hostname: "10.95.76.103"
+#        Port: 2111
 
 # Scan parameters (shared across instances)
 Scan Config:

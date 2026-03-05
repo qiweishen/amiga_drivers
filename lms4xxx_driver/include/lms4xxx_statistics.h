@@ -27,6 +27,10 @@ namespace LMS4xxx {
 		std::atomic<std::uint32_t> last_telegram_counter{ 0 };
 		std::atomic<std::uint32_t> last_scan_counter{ 0 };
 
+		// Host wall-clock time (microseconds, CLOCK_REALTIME) when NTP was
+		// successfully configured. Zero if NTP is disabled or not yet configured.
+		std::atomic<std::uint64_t> ntp_configured_at_us{ 0 };
+
 		// Plain-old-data snapshot for logging and reporting.
 		struct Snapshot {
 			std::uint64_t bytes_received;
@@ -40,6 +44,7 @@ namespace LMS4xxx {
 			std::uint64_t last_frame_time_us;
 			std::uint32_t last_telegram_counter;
 			std::uint32_t last_scan_counter;
+			std::uint64_t ntp_configured_at_us;
 
 			// Percentage of frames successfully delivered to user callback.
 			[[nodiscard]] double DeliveryRate() const {
@@ -61,6 +66,7 @@ namespace LMS4xxx {
 				parse_errors.load(std::memory_order_relaxed),		counter_gaps.load(std::memory_order_relaxed),
 				last_frame_time_us.load(std::memory_order_relaxed), last_telegram_counter.load(std::memory_order_relaxed),
 				last_scan_counter.load(std::memory_order_relaxed),
+				ntp_configured_at_us.load(std::memory_order_relaxed),
 			};
 		}
 
@@ -77,6 +83,7 @@ namespace LMS4xxx {
 			last_frame_time_us.store(0, std::memory_order_relaxed);
 			last_telegram_counter.store(0, std::memory_order_relaxed);
 			last_scan_counter.store(0, std::memory_order_relaxed);
+			ntp_configured_at_us.store(0, std::memory_order_relaxed);
 		}
 
 		DriverStatistics() = default;

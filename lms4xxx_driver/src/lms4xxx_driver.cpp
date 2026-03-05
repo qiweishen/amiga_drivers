@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <initializer_list>
 #include <mutex>
 #include <pthread.h>
@@ -210,7 +211,7 @@ namespace LMS4xxx {
 											 fmt::format("Failed to set CPU affinity to core {}: {}",
 														 config.network.receive_thread_cpu, std::strerror(ret)));
 				} else {
-					Common::Log::log_message(spdlog::level::info, kModule,
+					Common::Log::log_message(spdlog::level::trace, kModule,
 											 fmt::format("Receive thread pinned to CPU {}", config.network.receive_thread_cpu));
 				}
 			}
@@ -519,6 +520,16 @@ namespace LMS4xxx {
 									 fmt::format("NTP configured: role={}, server={}, interval={}s, timezone=UTC",
 												 static_cast<int>(impl_->config.ntp.role), impl_->config.ntp.server_ip,
 												 impl_->config.ntp.update_interval_s));
+
+			// Record the host wall-clock time of successful NTP configuration.
+			{
+				struct timespec ts{};
+				if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+					const auto us = static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000ULL
+								  + static_cast<std::uint64_t>(ts.tv_nsec) / 1'000ULL;
+					impl_->stats.ntp_configured_at_us.store(us, std::memory_order_relaxed);
+				}
+			}
 		}
 
 		// 6. Activate configuration (sMN Run)
@@ -672,7 +683,7 @@ namespace LMS4xxx {
 		impl_->ring_buffer.reset();
 
 		impl_->set_state(ConnectionState::kDisconnected);
-		Common::Log::log_message(spdlog::level::info, kModule, "Disconnected");
+		Common::Log::log_message(spdlog::level::trace, kModule, "Disconnected");
 	}
 
 
@@ -718,11 +729,23 @@ namespace LMS4xxx {
 	void LMS4xxxDriver::LogStatistics() const {
 		const auto s = impl_->stats.GetSnapshot();
 		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx SCAN RECEIVING STATISTICS === : bytes={}, frames_recv={}, parsed={}, dropped={}, "
-											 "crc_err={}, framing_err={}, parse_err={}, counter_gaps={}, "
-											 "delivery={:.1f}%",
-											 s.bytes_received, s.frames_received, s.frames_parsed, s.frames_dropped, s.crc_errors,
-											 s.framing_errors, s.parse_errors, s.counter_gaps, s.DeliveryRate()));
+								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : bytes={}, frames_recv={}, delivery={:.1f}%",
+											 s.bytes_received, s.frames_received, s.DeliveryRate()));
+		Common::Log::log_message(spdlog::level::info, kModule,
+								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : parsed={}, dropped={}, , counter_gaps={}",
+											 s.frames_parsed, s.frames_dropped, s.counter_gaps));
+		Common::Log::log_message(spdlog::level::info, kModule,
+								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : crc_err={}, framing_err={}, parse_err={}",
+											 s.crc_errors, s.framing_errors, s.parse_errors));
+		if (s.ntp_configured_at_us != 0) {
+			const auto sec = static_cast<std::time_t>(s.ntp_configured_at_us / 1'000'000ULL);
+			char buf[32]{};
+			struct tm tm_info{};
+			gmtime_r(&sec, &tm_info);
+			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_info);
+			Common::Log::log_message(spdlog::level::info, kModule,
+									 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : NTP configured at host time: {}", buf));
+		}
 	}
 
 
@@ -734,12 +757,14 @@ namespace LMS4xxx {
 		auto frame = CommandBuilder::BuildPollScan();
 		CoLaBMessage response;
 		auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		ec = impl_->validate_response(response, CommandType::kReadAnswer, "LMDscandata");
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		return ScanDataParser::Parse(response.payload.data(), response.payload.size(), out);
 	}
@@ -750,17 +775,19 @@ namespace LMS4xxx {
 		auto frame = CommandBuilder::BuildStartMeasurement();
 		CoLaBMessage response;
 		auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		ec = impl_->validate_response(response, CommandType::kMethodAnswer, "LMCstartmeas");
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
 		}
-		Common::Log::log_message(spdlog::level::info, kModule, "Measurement started");
+		Common::Log::log_message(spdlog::level::trace, kModule, "Measurement started");
 		return {};
 	}
 
@@ -769,17 +796,19 @@ namespace LMS4xxx {
 		auto frame = CommandBuilder::BuildStopMeasurement();
 		CoLaBMessage response;
 		auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		ec = impl_->validate_response(response, CommandType::kMethodAnswer, "LMCstopmeas");
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
 		}
-		Common::Log::log_message(spdlog::level::info, kModule, "Measurement stopped");
+		Common::Log::log_message(spdlog::level::trace, kModule, "Measurement stopped");
 		return {};
 	}
 
@@ -788,12 +817,14 @@ namespace LMS4xxx {
 		auto frame = CommandBuilder::BuildStandby();
 		CoLaBMessage response;
 		auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		ec = impl_->validate_response(response, CommandType::kMethodAnswer, "LMCstandby");
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
@@ -807,8 +838,9 @@ namespace LMS4xxx {
 		auto frame = CommandBuilder::BuildReboot();
 		CoLaBMessage response;
 		auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
-		if (ec)
+		if (ec) {
 			return ec;
+		}
 
 		Common::Log::log_message(spdlog::level::info, kModule, "Reboot command sent");
 		return {};
