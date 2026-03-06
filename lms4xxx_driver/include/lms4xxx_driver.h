@@ -14,7 +14,7 @@
 namespace LMS4xxx {
 
 	// Forward declarations (implementation details).
-	class TcpClient;
+	class TCPClient;
 	class FrameReceiver;
 	class CoLaBCodec;
 	class CommandBuilder;

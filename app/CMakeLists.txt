@@ -9,6 +9,7 @@ add_executable(DataConverter
 
 target_include_directories(DataConverter PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lms4xxx_driver/include
 )
 
 target_link_libraries(DataConverter PRIVATE

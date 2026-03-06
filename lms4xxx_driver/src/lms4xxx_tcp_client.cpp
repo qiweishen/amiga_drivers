@@ -22,7 +22,7 @@ namespace LMS4xxx {
 	using tcp = asio::ip::tcp;
 
 
-	struct TcpClient::Impl {
+	struct TCPClient::Impl {
 		DeviceConfig device_config;
 		NetworkConfig network_config;
 
@@ -101,22 +101,22 @@ namespace LMS4xxx {
 	};
 
 
-	TcpClient::TcpClient(const DeviceConfig &device_config, const NetworkConfig &network_config) :
+	TCPClient::TCPClient(const DeviceConfig &device_config, const NetworkConfig &network_config) :
 		impl_(std::make_unique<Impl>(device_config, network_config)) {}
 
 
-	TcpClient::~TcpClient() {
+	TCPClient::~TCPClient() {
 		if (impl_ && impl_->connected.load(std::memory_order_acquire)) {
 			Disconnect();
 		}
 	}
 
 
-	TcpClient::TcpClient(TcpClient &&) noexcept = default;
-	TcpClient &TcpClient::operator=(TcpClient &&) noexcept = default;
+	TCPClient::TCPClient(TCPClient &&) noexcept = default;
+	TCPClient &TCPClient::operator=(TCPClient &&) noexcept = default;
 
 
-	std::error_code TcpClient::Connect(int timeout_ms) {
+	std::error_code TCPClient::Connect(int timeout_ms) {
 		if (impl_->connected.load(std::memory_order_acquire)) {
 			return make_error_code(ErrorCode::kAlreadyConnected);
 		}
@@ -173,7 +173,7 @@ namespace LMS4xxx {
 	}
 
 
-	void TcpClient::ShutdownReceive() {
+	void TCPClient::ShutdownReceive() {
 		if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
 			return;
 		}
@@ -183,7 +183,7 @@ namespace LMS4xxx {
 	}
 
 
-	void TcpClient::Disconnect() {
+	void TCPClient::Disconnect() {
 		if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
 			return;
 		}
@@ -197,12 +197,12 @@ namespace LMS4xxx {
 	}
 
 
-	bool TcpClient::IsConnected() const {
+	bool TCPClient::IsConnected() const {
 		return impl_ && impl_->connected.load(std::memory_order_acquire);
 	}
 
 
-	std::size_t TcpClient::Read(std::uint8_t *buf, std::size_t len, std::error_code &ec) {
+	std::size_t TCPClient::Read(std::uint8_t *buf, std::size_t len, std::error_code &ec, int timeout_ms) {
 		if (!impl_->connected.load(std::memory_order_acquire)) {
 			ec = make_error_code(ErrorCode::kNotConnected);
 			return 0;
@@ -211,6 +211,9 @@ namespace LMS4xxx {
 		// Manual loop instead of asio::read() to handle SO_RCVTIMEO timeouts.
 		// asio::read() treats EAGAIN/would_block as a fatal error and aborts,
 		// so we loop with read_some() and retry on timeout.
+		const bool has_deadline = timeout_ms > 0;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
 		std::size_t total = 0;
 		while (total < len) {
 			boost::system::error_code bec;
@@ -221,7 +224,15 @@ namespace LMS4xxx {
 			if (bec) {
 				if (bec == asio::error::try_again ||
 					bec == asio::error::would_block) {
-					continue;  // SO_RCVTIMEO expired, retry
+					// SO_RCVTIMEO expired — check deadline before retrying.
+					if (has_deadline && std::chrono::steady_clock::now() >= deadline) {
+						ec = make_error_code(ErrorCode::kResponseTimeout);
+						Common::Log::log_message(spdlog::level::warn, kModule,
+												 fmt::format("Read deadline exceeded ({}ms, got {}/{} bytes)",
+															 timeout_ms, total, len));
+						return 0;
+					}
+					continue;
 				}
 				if (bec == asio::error::eof || bec == asio::error::connection_reset) {
 					impl_->connected.store(false, std::memory_order_release);
@@ -240,7 +251,7 @@ namespace LMS4xxx {
 	}
 
 
-	std::size_t TcpClient::ReadSome(std::uint8_t *buf, std::size_t max_len, std::error_code &ec) {
+	std::size_t TCPClient::ReadSome(std::uint8_t *buf, std::size_t max_len, std::error_code &ec) {
 		if (!impl_->connected.load(std::memory_order_acquire)) {
 			ec = make_error_code(ErrorCode::kNotConnected);
 			return 0;
@@ -273,7 +284,7 @@ namespace LMS4xxx {
 	}
 
 
-	std::error_code TcpClient::Write(const std::uint8_t *data, std::size_t len) {
+	std::error_code TCPClient::Write(const std::uint8_t *data, std::size_t len) {
 		if (!impl_->connected.load(std::memory_order_acquire)) {
 			return make_error_code(ErrorCode::kNotConnected);
 		}
@@ -295,12 +306,12 @@ namespace LMS4xxx {
 	}
 
 
-	std::error_code TcpClient::Write(const std::vector<std::uint8_t> &data) {
+	std::error_code TCPClient::Write(const std::vector<std::uint8_t> &data) {
 		return Write(data.data(), data.size());
 	}
 
 
-	std::string TcpClient::RemoteEndpointStr() const {
+	std::string TCPClient::RemoteEndpointStr() const {
 		if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
 			return "not connected";
 		}

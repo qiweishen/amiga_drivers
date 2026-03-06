@@ -12,29 +12,30 @@ namespace LMS4xxx {
 	enum class ErrorCode : int {
 		kSuccess = 0,
 
-		// --- Connection errors ---
+		// Connection errors
 		kConnectionFailed = 100,   ///< TCP connection could not be established
 		kConnectionTimeout = 101,  ///< Connection attempt timed out
 		kConnectionLost = 102,	   ///< Unexpected disconnection during operation
 
-		// --- Protocol errors ---
+		// Protocol errors
 		kCrcError = 200,			///< Frame CRC8 checksum mismatch
 		kProtocolError = 201,		///< Invalid CoLa B response format
 		kUnexpectedResponse = 202,	///< Response does not match expected command
 		kFrameTooShort = 203,		///< Received frame shorter than minimum length
 		kFrameTooLong = 204,		///< Frame exceeds maximum expected length
+		kResponseTimeout = 205,		///< Timed out waiting for device response
 
-		// --- Device errors ---
+		// Device errors
 		kDeviceError = 300,		 ///< Device reports error status
 		kAccessDenied = 301,	 ///< Insufficient access level (login required)
 		kCommandRejected = 302,	 ///< Device rejected the command
 
-		// --- Configuration errors ---
+		// Configuration errors
 		kInvalidConfig = 400,		///< Invalid configuration parameter
 		kConfigFileNotFound = 401,	///< Configuration file does not exist
 		kConfigParseError = 402,	///< JSON/YAML parse failure
 
-		// --- Runtime errors ---
+		// Runtime errors
 		kBufferOverflow = 500,	  ///< Ring buffer full, frame dropped
 		kNotConnected = 501,	  ///< Operation requires an active connection
 		kAlreadyConnected = 502,  ///< Connect called on active connection
@@ -69,6 +70,8 @@ namespace LMS4xxx {
 					return "frame too short";
 				case ErrorCode::kFrameTooLong:
 					return "frame exceeds max length";
+				case ErrorCode::kResponseTimeout:
+					return "response timeout";
 				case ErrorCode::kDeviceError:
 					return "device reports error status";
 				case ErrorCode::kAccessDenied:

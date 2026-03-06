@@ -411,22 +411,27 @@ namespace LMS4xxx {
 	}
 
 	ChannelContent16 ScanDataParser::IdentifyChannel16(const std::string &name) {
-		if (name == "DIST1")
+		if (name == "DIST1") {
 			return ChannelContent16::kDist1;
-		if (name == "RSSI1")
+		}
+		if (name == "RSSI1") {
 			return ChannelContent16::kRssi1;
-		if (name == "REFL1")
+		}
+		if (name == "REFL1") {
 			return ChannelContent16::kRefl1;
-		if (name == "ANGL1")
+		}
+		if (name == "ANGL1") {
 			return ChannelContent16::kAngl1;
+		}
 
 		Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Unknown 16-bit channel name: '{}'", name));
 		return ChannelContent16::kUnknown;
 	}
 
 	ChannelContent8 ScanDataParser::IdentifyChannel8(const std::string &name) {
-		if (name == "QLTY1")
+		if (name == "QLTY1") {
 			return ChannelContent8::kQlty1;
+		}
 
 		Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Unknown 8-bit channel name: '{}'", name));
 		return ChannelContent8::kUnknown;

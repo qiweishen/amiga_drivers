@@ -26,7 +26,7 @@ namespace LMS4xxx {
 #pragma pack(push, 1)
 	struct ScanFileHeader {
 		std::uint32_t magic = 0x4C4D5334;	///< "LMS4"
-		std::uint16_t version = 1;
+		std::uint16_t version = 2;
 		std::uint16_t channel_mask = 0;
 		std::uint16_t max_points = kMaxPointsPerScan;
 		std::int32_t start_angle = 0;	 ///< 1/10000 deg (from config)
@@ -41,29 +41,101 @@ namespace LMS4xxx {
 	static_assert(sizeof(ScanFileHeader) == 64, "ScanFileHeader must be 64 bytes");
 
 
-	// Per-frame record header (16 bytes, precedes channel data in each record).
+	// Per-frame record header for v1 format (16 bytes).
+#pragma pack(push, 1)
+	struct ScanRecordHeaderV1 {
+		std::uint32_t time_since_startup_us = 0;
+		std::uint16_t telegram_counter = 0;
+		std::uint16_t scan_counter = 0;
+		std::uint16_t num_points = 0;
+		std::int32_t start_angle = 0;
+		std::uint16_t angle_step = 0;
+	};
+#pragma pack(pop)
+
+	static_assert(sizeof(ScanRecordHeaderV1) == 16, "ScanRecordHeaderV1 must be 16 bytes");
+
+
+	// Per-frame record header for v2 format (96 bytes).
+	// Contains all ScanData metadata fields.
 #pragma pack(push, 1)
 	struct ScanRecordHeader {
+		// --- Core (same layout as v1 first 16 bytes) ---
 		std::uint32_t time_since_startup_us = 0;
 		std::uint16_t telegram_counter = 0;
 		std::uint16_t scan_counter = 0;
 		std::uint16_t num_points = 0;
 		std::int32_t start_angle = 0;	///< 1/10000 deg (actual for this frame)
 		std::uint16_t angle_step = 0;	///< 1/10000 deg (actual for this frame)
+		// = 16 bytes
+
+		// --- Timing ---
+		std::uint32_t transmission_time_us = 0;
+		std::uint32_t scan_frequency = 0;		  ///< 1/100 Hz
+		std::uint32_t measurement_frequency = 0;  ///< Inverse of time between 2 measurement shots (100 Hz units)
+		// = 28
+
+		// --- Device info ---
+		std::uint16_t device_version = 0;
+		std::uint16_t device_number = 0;
+		std::uint32_t serial_number = 0;
+		std::uint8_t device_status_1 = 0;
+		std::uint8_t device_status_2 = 0;
+		// = 38
+
+		// --- Digital I/O ---
+		std::uint8_t digital_input_1 = 0;
+		std::uint8_t digital_input_2 = 0;
+		std::uint8_t digital_output_1 = 0;
+		std::uint8_t digital_output_2 = 0;
+		// = 42
+
+		// --- Encoder ---
+		std::uint8_t has_encoder = 0;
+		std::uint8_t pad1 = 0;
+		std::uint32_t encoder_position = 0;
+		std::uint16_t encoder_speed = 0;
+		// = 50
+
+		// --- Timestamp ---
+		std::uint8_t has_timestamp = 0;
+		std::uint8_t pad2 = 0;
+		std::uint16_t ts_year = 0;
+		std::uint8_t ts_month = 0;
+		std::uint8_t ts_day = 0;
+		std::uint8_t ts_hour = 0;
+		std::uint8_t ts_minute = 0;
+		std::uint8_t ts_second = 0;
+		std::uint8_t pad3 = 0;
+		std::uint32_t ts_microsecond = 0;
+		// = 64
+
+		// --- Device name ---
+		std::uint8_t has_device_name = 0;
+		char device_name[16] = {};
+		std::uint8_t pad4 = 0;
+		// = 82
+
+		// --- Position ---
+		float y_rotation = 0.0f;
+		// = 86
+
+		std::uint8_t reserved[10] = {};
+		// = 96
 	};
 #pragma pack(pop)
 
-	static_assert(sizeof(ScanRecordHeader) == 16, "ScanRecordHeader must be 16 bytes");
+	static_assert(sizeof(ScanRecordHeader) == 96, "ScanRecordHeader must be 96 bytes");
 
 
-	// Maximum serialized record size (all channels enabled):
-	// header(16) + dist(841*2) + rssi(841*2) + refl(841*2) + angl(841*2) + qlty(841*1)
+	// Maximum serialized record size (all channels enabled, v2 header):
+	// header(96) + dist(841*2) + rssi(841*2) + refl(841*2) + angl(841*2) + qlty(841*1)
 	inline constexpr std::size_t kMaxRecordBytes = sizeof(ScanRecordHeader) + kMaxPointsPerScan * 9;
 
 
 	// Asynchronous binary scan data writer.
 	//
-	// Architecture: parse thread → OnScan() → SPSC queue → write thread → ofstream
+	// Architecture: parse thread -> OnScan() -> SPSC queue -> write thread -> ofstream
 	//
 	// The parse thread only does memcpy + queue push (sub-microsecond).
 	// All file I/O is isolated in the write thread, ensuring the parse thread

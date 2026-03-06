@@ -5,9 +5,9 @@
 
 # Build options
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    option(INS401_BUILD_EXAMPLES "Build example programs" ON)
+    option(INS401_BUILD_TESTS "Build test programs" ON)
 else()
-    option(INS401_BUILD_EXAMPLES "Build example programs" OFF)
+    option(INS401_BUILD_TESTS "Build test programs" OFF)
 endif()
 
 
@@ -18,7 +18,7 @@ find_package(Boost REQUIRED)
 
 
 ################################################################################
-# Driver Library (shared code for main executable and examples)
+# Driver Library (shared code for main executable and tests)
 set(LIB_SOURCES
         src/ins401_tool.cpp
         src/ins401_ethernet_socket.cpp
@@ -66,9 +66,9 @@ target_link_libraries(ins401_lib PUBLIC
 
 
 ################################################################################
-# Examples
-if (INS401_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+# Tests
+if (INS401_BUILD_TESTS)
+    add_subdirectory(tests)
 endif ()
 
 
@@ -79,6 +79,6 @@ message(STATUS "----------------------------------------")
 message(STATUS "   INS401_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Build Examples:   ${INS401_BUILD_EXAMPLES}")
+message(STATUS "  Build Tests:      ${INS401_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

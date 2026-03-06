@@ -9,11 +9,11 @@
 
 namespace LMS4xxx {
 
-	// Forward declarations.
+	// Forward declarations
 	struct ScanData;
 
 
-	// Connection state enumeration.
+	// Connection state enumeration
 	enum class ConnectionState : std::uint8_t {
 		kDisconnected = 0,
 		kConnecting = 1,
@@ -24,7 +24,7 @@ namespace LMS4xxx {
 	};
 
 
-	// Convert ConnectionState to human-readable string.
+	// Convert ConnectionState to human-readable string
 	[[nodiscard]] inline const char *ToString(ConnectionState state) {
 		switch (state) {
 			case ConnectionState::kDisconnected:
@@ -45,15 +45,15 @@ namespace LMS4xxx {
 	}
 
 
-	// Callback invoked for each complete scan frame. Must not block or throw.
+	// Callback invoked for each complete scan frame. Must not block or throw
 	using ScanDataCallback = std::function<void(const ScanData &scan_data)>;
 
-	// Callback invoked when the connection state changes.
+	// Callback invoked when the connection state changes
 	using ConnectionStateCallback = std::function<void(ConnectionState new_state)>;
 
-	// Callback invoked when an error occurs. Must be thread-safe.
+	// Callback invoked when an error occurs. Must be thread-safe
 	using ErrorCallback = std::function<void(std::error_code ec, const std::string &detail)>;
 
-}  // namespace LMS4xxx
+} // namespace LMS4xxx
 
 #endif	// LMS4XXX_CALLBACKS_H

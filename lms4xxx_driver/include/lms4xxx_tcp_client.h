@@ -22,16 +22,16 @@ namespace LMS4xxx {
 	//   - Write() may be called from the control thread (command sending).
 	//   - Concurrent read + write is safe (Boost.Asio full-duplex).
 	//   - Concurrent read + read or write + write is NOT safe.
-	class TcpClient {
+	class TCPClient {
 	public:
-		explicit TcpClient(const DeviceConfig &device_config, const NetworkConfig &network_config);
-		~TcpClient();
+		explicit TCPClient(const DeviceConfig &device_config, const NetworkConfig &network_config);
+		~TCPClient();
 
 		// Non-copyable, movable.
-		TcpClient(const TcpClient &) = delete;
-		TcpClient &operator=(const TcpClient &) = delete;
-		TcpClient(TcpClient &&) noexcept;
-		TcpClient &operator=(TcpClient &&) noexcept;
+		TCPClient(const TCPClient &) = delete;
+		TCPClient &operator=(const TCPClient &) = delete;
+		TCPClient(TCPClient &&) noexcept;
+		TCPClient &operator=(TCPClient &&) noexcept;
 
 		// Connect to the sensor. Configures SO_RCVBUF and TCP keepalive.
 		[[nodiscard]] std::error_code Connect(int timeout_ms);
@@ -48,7 +48,9 @@ namespace LMS4xxx {
 		[[nodiscard]] bool IsConnected() const;
 
 		// Synchronous blocking read. Reads exactly `len` bytes into `buf`.
-		[[nodiscard]] std::size_t Read(std::uint8_t *buf, std::size_t len, std::error_code &ec);
+		// If `timeout_ms` > 0, returns ErrorCode::kResponseTimeout when the
+		// deadline is exceeded.  Pass 0 for no deadline (retries indefinitely).
+		[[nodiscard]] std::size_t Read(std::uint8_t *buf, std::size_t len, std::error_code &ec, int timeout_ms = 0);
 
 		// Synchronous non-blocking read. Returns whatever data is available.
 		[[nodiscard]] std::size_t ReadSome(std::uint8_t *buf, std::size_t max_len, std::error_code &ec);

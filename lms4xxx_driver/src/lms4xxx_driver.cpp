@@ -39,7 +39,7 @@ namespace LMS4xxx {
 		DriverConfig config;
 
 		// --- Components ---
-		std::unique_ptr<TcpClient> tcp_client;
+		std::unique_ptr<TCPClient> tcp_client;
 		std::unique_ptr<FrameReceiver> frame_receiver;
 		std::unique_ptr<FrameRingBuffer> ring_buffer;
 
@@ -121,7 +121,7 @@ namespace LMS4xxx {
 			// 1. Read STX (4 bytes)
 			std::uint8_t header[8];
 			std::error_code read_ec;
-			auto bytes = tcp_client->Read(header, 8, read_ec);
+			auto bytes = tcp_client->Read(header, 8, read_ec, timeout_ms);
 			if (read_ec)
 				return read_ec;
 			if (bytes < 8)
@@ -145,7 +145,7 @@ namespace LMS4xxx {
 
 			// 3. Read Data + Checksum
 			std::vector<std::uint8_t> data_and_cs(data_len + 1);
-			bytes = tcp_client->Read(data_and_cs.data(), data_and_cs.size(), read_ec);
+			bytes = tcp_client->Read(data_and_cs.data(), data_and_cs.size(), read_ec, timeout_ms);
 			if (read_ec) {
 				return read_ec;
 			}
@@ -346,7 +346,7 @@ namespace LMS4xxx {
 		impl_->set_state(ConnectionState::kConnecting);
 
 		// Create TCP client
-		impl_->tcp_client = std::make_unique<TcpClient>(impl_->config.device, impl_->config.network);
+		impl_->tcp_client = std::make_unique<TCPClient>(impl_->config.device, impl_->config.network);
 
 		// Connect with timeout.
 		ec = impl_->tcp_client->Connect(impl_->config.network.connect_timeout_ms);
@@ -357,7 +357,8 @@ namespace LMS4xxx {
 		}
 
 		impl_->set_state(ConnectionState::kConnected);
-		Common::Log::log_message(spdlog::level::trace, kModule, fmt::format("Connected to {}", impl_->tcp_client->RemoteEndpointStr()));
+		Common::Log::log_message(spdlog::level::trace, kModule,
+								 fmt::format("Connected to {}", impl_->tcp_client->RemoteEndpointStr()));
 		return {};
 	}
 
@@ -370,7 +371,8 @@ namespace LMS4xxx {
 		impl_->set_state(ConnectionState::kConfiguring);
 		const int timeout = impl_->config.network.response_timeout_ms;
 
-		// 1. Login as Authorized Client
+		// Following the workflow documented on Page 69 of the Operating Instructions
+		// 1. Log in as Authorized Client
 		{
 			auto frame = CommandBuilder::BuildLogin();
 			CoLaBMessage response;
@@ -394,7 +396,8 @@ namespace LMS4xxx {
 			Common::Log::log_message(spdlog::level::trace, kModule, "Logged in as Authorized Client");
 		}
 
-		// 2. Configure scan data content
+
+		// 2. Configure scandata content
 		{
 			auto frame = CommandBuilder::BuildScanDataConfig(impl_->config.scan);
 			CoLaBMessage response;
@@ -410,7 +413,8 @@ namespace LMS4xxx {
 			Common::Log::log_message(spdlog::level::trace, kModule, "Scan data configuration set");
 		}
 
-		// 3. Configure output range
+
+		// 3. Configure scandata output
 		{
 			auto frame = CommandBuilder::BuildOutputRange(impl_->config.scan);
 			CoLaBMessage response;
@@ -429,7 +433,9 @@ namespace LMS4xxx {
 								impl_->config.scan.stop_angle_deg, impl_->config.scan.angular_resolution_deg));
 		}
 
-		// 4. Disable all filters (hardcoded)
+
+		// 4. Parameter settings before store parameters
+		// 4.1. Always disable all filters (hardcoded)
 		{
 			auto cmds = {
 				CommandBuilder::BuildMeanFilter(false, 2),
@@ -449,20 +455,35 @@ namespace LMS4xxx {
 			Common::Log::log_message(spdlog::level::trace, kModule, "All filters disabled");
 		}
 
-		// 5. Configure NTP (if enabled)
+
+		// 4.2. Configure NTP (if enabled)
 		if (impl_->config.ntp.enable) {
-			// TSCRole
-			{
-				auto frame = CommandBuilder::BuildSetTimeSyncRole(static_cast<std::uint8_t>(impl_->config.ntp.role));
+			// Send an NTP sWN command, validate the sWA response.
+			// Returns true on success, false on transport error or device rejection (sFA).
+			auto ntp_write = [&](const std::vector<std::uint8_t> &frame, std::string_view cmd_name, const char *desc) -> bool {
 				CoLaBMessage response;
 				auto ec = impl_->send_and_receive(frame, response, timeout);
 				if (ec) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Set TSCRole failed", ec.message());
+					Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("{} failed: {}", desc, ec.message()));
+					return false;
 				}
-			}
+				ec = impl_->validate_response(response, CommandType::kWriteAnswer, cmd_name);
+				if (ec) {
+					Common::Log::log_message(
+							spdlog::level::warn, kModule,
+							fmt::format("{} rejected (response: {} {})", desc, response.command_type, response.command_name));
+					return false;
+				}
+				return true;
+			};
+
+			bool ntp_ok = true;
+
+			// TSCRole
+			ntp_ok = ntp_write(CommandBuilder::BuildSetTimeSyncRole(static_cast<std::uint8_t>(impl_->config.ntp.role)), "TSCRole", "Set TSCRole");
 
 			// TSCTCSrvAddr — parse server_ip string to 4 bytes
-			{
+			if (ntp_ok) {
 				std::array<std::uint8_t, 4> ip_bytes{};
 				std::string_view sv = impl_->config.ntp.server_ip;
 				bool ip_ok = true;
@@ -484,55 +505,96 @@ namespace LMS4xxx {
 					}
 				}
 				if (ip_ok) {
-					auto frame = CommandBuilder::BuildSetNtpServer(ip_bytes);
-					CoLaBMessage response;
-					auto ec = impl_->send_and_receive(frame, response, timeout);
-					if (ec) {
-						Common::Log::log_message(spdlog::level::warn, kModule, "Set NTP server failed", ec.message());
-					}
+					ntp_ok = ntp_write(CommandBuilder::BuildSetNtpServer(ip_bytes), "TSCTCSrvAddr", "Set NTP server");
 				} else {
 					Common::Log::log_message(spdlog::level::warn, kModule,
 											 fmt::format("Invalid NTP server IP: {}", impl_->config.ntp.server_ip));
+					ntp_ok = false;
 				}
 			}
 
 			// TSCTCupdatetime
-			{
-				auto frame = CommandBuilder::BuildSetNtpUpdateTime(impl_->config.ntp.update_interval_s);
-				CoLaBMessage response;
-				auto ec = impl_->send_and_receive(frame, response, timeout);
-				if (ec) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Set NTP update time failed", ec.message());
-				}
+			if (ntp_ok) {
+				ntp_ok = ntp_write(CommandBuilder::BuildSetNtpUpdateTime(impl_->config.ntp.update_interval_s), "TSCTCupdatetime",
+								   "Set NTP update time");
 			}
 
 			// TSCTCtimezone — hardcoded UTC (0)
-			{
-				auto frame = CommandBuilder::BuildSetNtpTimezone(0);
-				CoLaBMessage response;
-				auto ec = impl_->send_and_receive(frame, response, timeout);
-				if (ec) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Set NTP timezone failed", ec.message());
-				}
+			if (ntp_ok) {
+				ntp_ok = ntp_write(CommandBuilder::BuildSetNtpTimezone(0), "TSCTCtimezone", "Set NTP timezone");
 			}
 
-			Common::Log::log_message(spdlog::level::info, kModule,
-									 fmt::format("NTP configured: role={}, server={}, interval={}s, timezone=UTC",
-												 static_cast<int>(impl_->config.ntp.role), impl_->config.ntp.server_ip,
-												 impl_->config.ntp.update_interval_s));
+			if (ntp_ok) {
+				Common::Log::log_message(spdlog::level::info, kModule,
+										 fmt::format("NTP configured: role={}, server={}, interval={}s, timezone=UTC",
+													 static_cast<int>(impl_->config.ntp.role), impl_->config.ntp.server_ip,
+													 impl_->config.ntp.update_interval_s));
 
-			// Record the host wall-clock time of successful NTP configuration.
-			{
+				// Record the host wall-clock time of successful NTP configuration.
 				struct timespec ts{};
 				if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-					const auto us = static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000ULL
-								  + static_cast<std::uint64_t>(ts.tv_nsec) / 1'000ULL;
+					const auto us = static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000ULL + static_cast<std::uint64_t>(ts.tv_nsec) / 1'000ULL;
 					impl_->stats.ntp_configured_at_us.store(us, std::memory_order_relaxed);
+				}
+			} else {
+				Common::Log::log_message(spdlog::level::warn, kModule, "NTP configuration failed, continuing without NTP");
+				impl_->config.ntp.enable = false;
+			}
+		} else {
+			// NTP disabled: set TSCRole=Off. mEEwriteall below will persist it.
+			CoLaBMessage response;
+			auto ec = impl_->send_and_receive(CommandBuilder::BuildSetTimeSyncRole(static_cast<std::uint8_t>(TscRole::kOff)), response, timeout);
+			if (ec) {
+				Common::Log::log_message(spdlog::level::warn, kModule,
+										 fmt::format("Failed to disable TSCRole (non-fatal): {}", ec.message()));
+			}
+			Common::Log::log_message(spdlog::level::info, kModule, "NTP disabled (Timestamp role=Off)");
+		}
+
+
+		// 5. Store parameters
+		{
+			auto frame = CommandBuilder::BuildSaveParams();
+			CoLaBMessage response;
+			auto ec = impl_->send_and_receive(frame, response, timeout);
+			if (ec) {
+				Common::Log::log_message(spdlog::level::warn, kModule,
+										 fmt::format("mEEwriteall failed: {} (params activated but not persisted)", ec.message()));
+			} else {
+				ec = impl_->validate_response(response, CommandType::kMethodAnswer, "mEEwriteall");
+				if (ec) {
+					Common::Log::log_message(
+							spdlog::level::warn, kModule,
+							fmt::format("mEEwriteall unexpected response: {} {}", response.command_type, response.command_name));
+				} else {
+					Common::Log::log_message(spdlog::level::trace, kModule, "Parameters saved (mEEwriteall)");
 				}
 			}
 		}
 
-		// 6. Activate configuration (sMN Run)
+
+		// 6. Start measurement
+		{
+			auto frame = CommandBuilder::BuildStartMeasurement();
+			CoLaBMessage response;
+			auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
+			if (ec) {
+				Common::Log::log_and_throw(kModule, "Start measurement command failed", ec.message(), false);
+				return ec;
+			}
+			auto validate_ec = impl_->validate_response(response, CommandType::kMethodAnswer, "LMCstartmeas");
+			if (validate_ec) {
+				return validate_ec;
+			}
+
+			if (response.payload.empty() || response.payload[0] != 0x00) {
+				Common::Log::log_and_throw(kModule, "Start measurement rejected", "", false);
+				return make_error_code(ErrorCode::kCommandRejected);
+			}
+		}
+
+
+		// 7. Activate configuration and log out (sMN Run)
 		{
 			auto frame = CommandBuilder::BuildRun();
 			CoLaBMessage response;
@@ -596,7 +658,7 @@ namespace LMS4xxx {
 					}
 				});
 
-		// Send start stream command.
+		// Send start stream command
 		{
 			auto frame = CommandBuilder::BuildStartStream();
 			CoLaBMessage response;
@@ -606,8 +668,9 @@ namespace LMS4xxx {
 				return ec;
 			}
 			auto validate_ec = impl_->validate_response(response, CommandType::kEventAnswer, "LMDscandata");
-			if (validate_ec)
+			if (validate_ec) {
 				return validate_ec;
+			}
 
 			if (response.payload.empty() || response.payload[0] != 0x01) {
 				Common::Log::log_and_throw(kModule, "Start stream rejected", "", false);
@@ -652,6 +715,11 @@ namespace LMS4xxx {
 			auto ec = impl_->tcp_client->Write(frame);
 			if (ec) {
 				Common::Log::log_message(spdlog::level::warn, kModule, "Failed to send stop stream command (non-fatal)", ec.message());
+			}
+			frame = CommandBuilder::BuildStandby();
+			ec = impl_->tcp_client->Write(frame);
+			if (ec) {
+				Common::Log::log_message(spdlog::level::warn, kModule, "Failed to send standby command (non-fatal)", ec.message());
 			}
 		}
 
@@ -740,7 +808,7 @@ namespace LMS4xxx {
 								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : bytes={}, frames_recv={}, delivery={:.1f}%",
 											 s.bytes_received, s.frames_received, s.DeliveryRate()));
 		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : parsed={}, dropped={}, , counter_gaps={}",
+								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : parsed={}, dropped={}, counter_gaps={}",
 											 s.frames_parsed, s.frames_dropped, s.counter_gaps));
 		Common::Log::log_message(spdlog::level::info, kModule,
 								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : crc_err={}, framing_err={}, parse_err={}",

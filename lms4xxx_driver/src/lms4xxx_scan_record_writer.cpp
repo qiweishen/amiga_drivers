@@ -1,5 +1,6 @@
 #include "lms4xxx_scan_record_writer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -71,8 +72,10 @@ namespace LMS4xxx {
 		void Serialize(const ScanData &scan, WriteRecord &record) const {
 			std::uint8_t *ptr = record.data;
 
-			// Record header
+			// Record header (v2: 96 bytes with all metadata)
 			ScanRecordHeader header{};
+
+			// Core fields
 			header.time_since_startup_us = scan.time_since_startup_us;
 			header.telegram_counter = scan.telegram_counter;
 			header.scan_counter = scan.scan_counter;
@@ -83,6 +86,53 @@ namespace LMS4xxx {
 				header.start_angle = dist_ch->start_angle;
 				header.angle_step = dist_ch->angle_step;
 			}
+
+			// Timing
+			header.transmission_time_us = scan.transmission_time_us;
+			header.scan_frequency = scan.scan_frequency;
+			header.measurement_frequency = scan.measurement_frequency;
+
+			// Device info
+			header.device_version = scan.device_info.version_number;
+			header.device_number = scan.device_info.device_number;
+			header.serial_number = scan.device_info.serial_number;
+			header.device_status_1 = static_cast<std::uint8_t>(scan.device_info.device_status_1);
+			header.device_status_2 = static_cast<std::uint8_t>(scan.device_info.device_status_2);
+
+			// Digital I/O
+			header.digital_input_1 = scan.digital_input_1;
+			header.digital_input_2 = scan.digital_input_2;
+			header.digital_output_1 = scan.digital_output_1;
+			header.digital_output_2 = scan.digital_output_2;
+
+			// Encoder
+			header.has_encoder = scan.has_encoder ? 1 : 0;
+			if (scan.has_encoder) {
+				header.encoder_position = scan.encoder.position;
+				header.encoder_speed = scan.encoder.speed;
+			}
+
+			// Timestamp
+			header.has_timestamp = scan.has_timestamp ? 1 : 0;
+			if (scan.has_timestamp) {
+				header.ts_year = scan.timestamp.year;
+				header.ts_month = scan.timestamp.month;
+				header.ts_day = scan.timestamp.day;
+				header.ts_hour = scan.timestamp.hour;
+				header.ts_minute = scan.timestamp.minute;
+				header.ts_second = scan.timestamp.second;
+				header.ts_microsecond = scan.timestamp.microsecond;
+			}
+
+			// Device name
+			header.has_device_name = scan.has_device_name ? 1 : 0;
+			if (scan.has_device_name) {
+				const auto copy_len = std::min(scan.device_name.size(), sizeof(header.device_name) - 1);
+				std::memcpy(header.device_name, scan.device_name.data(), copy_len);
+			}
+
+			// Position
+			header.y_rotation = scan.y_rotation;
 
 			std::memcpy(ptr, &header, sizeof(header));
 			ptr += sizeof(header);
