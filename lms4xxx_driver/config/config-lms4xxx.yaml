@@ -3,9 +3,9 @@
 
 # Per-instance sensor configuration
 Instances:
-#    Front Left Laser:
-#        Hostname: "10.95.76.101"
-#        Port: 2111
+    Front Left Laser:
+        Hostname: "10.95.76.101"
+        Port: 2111
     Front Right Laser:
         Hostname: "10.95.76.103"
         Port: 2111
@@ -38,7 +38,7 @@ Network:
 # Time Synchronization
 Time Synchronization:
     Enable NTP: true
-    NTP Server: "10.95.76.10"
+    NTP Server: "10.95.76.100"
     Sync Time: 1
 
 # Scan data recording

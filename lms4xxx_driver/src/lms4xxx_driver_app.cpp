@@ -12,7 +12,7 @@ namespace {
 	constexpr std::string_view kModule = "LMS4xxxApp";
 
 	// Statistics logging interval during scanning
-	constexpr auto kStatsInterval = std::chrono::seconds(2);
+	constexpr auto kStatsInterval = std::chrono::seconds(30);
 
 	// Main loop polling interval
 	constexpr auto kPollInterval = std::chrono::milliseconds(200);
