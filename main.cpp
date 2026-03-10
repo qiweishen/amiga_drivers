@@ -116,6 +116,10 @@ int main(int argc, char *argv[]) {
 	}
 	if (run_lidar) {
 		std::string lidar_config_path = exe_dir / "../../" / main_config.lidar_config_path;
+		std::filesystem::copy_file(lidar_config_path,
+								   fmt::format("{}/config/config-ins401_{}.yaml", main_config.data_folder_path, main_config.timestamp),
+								   std::filesystem::copy_options::overwrite_existing);
+		// Different config loading schema because of multi-lidar support
 		auto lidar_configs = LMS4xxxTool::LoadConfigs(lidar_config_path);
 		for (auto &cfg: lidar_configs) {
 			cfg.data_folder_path = main_config.data_folder_path;
@@ -166,7 +170,7 @@ int main(int argc, char *argv[]) {
 
 
 	// Activity spinner: shows animation during idle periods (1.5s no console output)
-	Common::ActivitySpinner spinner((exe_dir/ "../../resource/spinner_frames.conf").string());
+	Common::ActivitySpinner spinner((exe_dir / "../../resource/spinner_frames.conf").string());
 	spinner.Attach();
 
 	while (!g_terminate.load(std::memory_order_acquire)) {
