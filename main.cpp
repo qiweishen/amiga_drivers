@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
 	if (run_lidar) {
 		std::string lidar_config_path = exe_dir / "../../" / main_config.lidar_config_path;
 		std::filesystem::copy_file(lidar_config_path,
-								   fmt::format("{}/config/config-ins401_{}.yaml", main_config.data_folder_path, main_config.timestamp),
+								   fmt::format("{}/config/config-lms4xxx_{}.yaml", main_config.data_folder_path, main_config.timestamp),
 								   std::filesystem::copy_options::overwrite_existing);
 		// Different config loading schema because of multi-lidar support
 		auto lidar_configs = LMS4xxxTool::LoadConfigs(lidar_config_path);

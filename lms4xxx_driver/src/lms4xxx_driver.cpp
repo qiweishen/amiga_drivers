@@ -519,9 +519,9 @@ namespace LMS4xxx {
 								   "Set NTP update time");
 			}
 
-			// TSCTCtimezone — hardcoded UTC (0)
+			// TSCTCtimezone — hardcoded COORD_WORLD_TIME (34)
 			if (ntp_ok) {
-				ntp_ok = ntp_write(CommandBuilder::BuildSetNtpTimezone(0), "TSCTCtimezone", "Set NTP timezone");
+				ntp_ok = ntp_write(CommandBuilder::BuildSetNtpTimezone(34), "TSCTCtimezone", "Set NTP timezone");
 			}
 
 			if (ntp_ok) {

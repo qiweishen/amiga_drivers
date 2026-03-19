@@ -477,15 +477,17 @@ std::optional<Eigen::Vector3d> INSDeviceReceiver::ParseGgaCoordinates(const std:
 		double lat_raw = std::stod(fields[2]);
 		double lat_deg = std::floor(lat_raw / 100.0);
 		double latitude = lat_deg + (lat_raw - lat_deg * 100.0) / 60.0;
-		if (fields[3] == "S")
+		if (fields[3] == "S") {
 			latitude = -latitude;
+		}
 
 		// Longitude: dddmm.mmmm -> decimal degrees -> radians
 		double lon_raw = std::stod(fields[4]);
 		double lon_deg = std::floor(lon_raw / 100.0);
 		double longitude = lon_deg + (lon_raw - lon_deg * 100.0) / 60.0;
-		if (fields[5] == "W")
+		if (fields[5] == "W") {
 			longitude = -longitude;
+		}
 
 		// MSL altitude + geoid separation = ellipsoidal height
 		double altitude = fields[9].empty() ? 0.0 : std::stod(fields[9]);
