@@ -1,8 +1,13 @@
-ARG UBUNTU_TAG=20.04
+ARG UBUNTU_TAG=22.04
 FROM docker.io/ubuntu:${UBUNTU_TAG}
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Switch to Australian mirror before apt-get update
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://au.archive.ubuntu.com/ubuntu/|g; \
+            s|http://security.ubuntu.com/ubuntu/|http://au.archive.ubuntu.com/ubuntu/|g' \
+    /etc/apt/sources.list
 
 # ============================================================
 # Base Development Tools

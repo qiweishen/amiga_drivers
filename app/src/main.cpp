@@ -1,10 +1,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <vector>
-
-#include <spdlog/spdlog.h>
 
 #include "ins401_csv_converter.h"
 #include "lms4xxx_csv_converter.h"
@@ -23,7 +22,7 @@ namespace {
 	};
 
 
-	ConvertResult ConvertFile(const fs::path &bin_file, const fs::path &csv_dir) {
+	ConvertResult ConvertFile(const std::filesystem::path &bin_file, const std::filesystem::path &csv_dir) {
 		const std::string filename = bin_file.filename().string();
 		const std::string stem = bin_file.stem().string();
 		const std::string csv_name = stem + ".csv";
@@ -80,29 +79,29 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	const fs::path input_path(argv[1]);
+	const std::filesystem::path input_path(argv[1]);
 
-	if (!fs::exists(input_path)) {
+	if (!std::filesystem::exists(input_path)) {
 		fmt::print(stderr, "Error: path does not exist: {}\n", input_path.string());
 		return 1;
 	}
 
 	std::vector<ConvertResult> results;
 
-	if (fs::is_directory(input_path)) {
+	if (std::filesystem::is_directory(input_path)) {
 		// Scan bin/ subdirectory
-		const fs::path bin_dir = input_path / "bin";
-		if (!fs::is_directory(bin_dir)) {
+		const std::filesystem::path bin_dir = input_path / "bin";
+		if (!std::filesystem::is_directory(bin_dir)) {
 			fmt::print(stderr, "Error: no bin/ subdirectory found in: {}\n", input_path.string());
 			return 1;
 		}
 
 		// CSV output goes to the parent data directory
-		const fs::path csv_dir = input_path;
+		const std::filesystem::path &csv_dir = input_path;
 
 		// Collect and sort .bin files
-		std::vector<fs::path> bin_files;
-		for (const auto &entry : fs::directory_iterator(bin_dir)) {
+		std::vector<std::filesystem::path> bin_files;
+		for (const auto &entry: std::filesystem::directory_iterator(bin_dir)) {
 			if (entry.is_regular_file() && entry.path().extension() == ".bin") {
 				bin_files.push_back(entry.path());
 			}
@@ -116,10 +115,10 @@ int main(int argc, char *argv[]) {
 
 		fmt::print("Found {} .bin file(s) in {}\n", bin_files.size(), bin_dir.string());
 
-		for (const auto &bin_file : bin_files) {
+		for (const auto &bin_file: bin_files) {
 			results.push_back(ConvertFile(bin_file, csv_dir));
 		}
-	} else if (fs::is_regular_file(input_path)) {
+	} else if (std::filesystem::is_regular_file(input_path)) {
 		// Single file mode
 		if (input_path.extension() != ".bin") {
 			fmt::print(stderr, "Error: expected a .bin file, got: {}\n", input_path.string());
@@ -128,8 +127,8 @@ int main(int argc, char *argv[]) {
 
 		// CSV output goes to the same directory as the .bin file's parent's parent
 		// (i.e., if bin is at data/20xx/bin/scan_xxx.bin, CSV goes to data/20xx/)
-		fs::path csv_dir = input_path.parent_path().parent_path();
-		if (!fs::is_directory(csv_dir)) {
+		std::filesystem::path csv_dir = input_path.parent_path().parent_path();
+		if (!std::filesystem::is_directory(csv_dir)) {
 			csv_dir = input_path.parent_path();
 		}
 
@@ -143,7 +142,7 @@ int main(int argc, char *argv[]) {
 	fmt::print("\n=== Conversion Summary ===\n");
 	std::size_t total_records = 0;
 	std::size_t converted_files = 0;
-	for (const auto &r : results) {
+	for (const auto &r: results) {
 		if (r.type == "unknown") {
 			continue;
 		}
