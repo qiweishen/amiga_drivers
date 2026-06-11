@@ -1,9 +1,9 @@
 services:
-    sensor-dev:
-        container_name: sensor-dev
+    amiga-sensor-dev:
+        container_name: amiga-sensor-dev
         build:
             context: ..
-            dockerfile: Docker/Dockerfile
+            dockerfile: .devcontainer/Dockerfile
 
         # Keep container running for interactive use
         stdin_open: true
@@ -12,7 +12,6 @@ services:
         # Network and IPC
         network_mode: host
         ipc: host
-#        privileged: true
         cap_add:
             - NET_ADMIN
             - NET_RAW
@@ -32,7 +31,6 @@ services:
 
         volumes:
             - ..:/workspace
-            - /mnt/SharedData:/workspace/dataset
             # X11 socket and auth
             - /tmp/.X11-unix:/tmp/.X11-unix:rw
             - ${HOME}/.Xauthority:/tmp/.docker.xauth:ro

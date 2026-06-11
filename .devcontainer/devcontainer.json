@@ -1,34 +1,12 @@
 {
-    "name": "Sensor Dev",
-    "dockerComposeFile": "../Docker/docker-compose.yml",
-    "service": "sensor-dev",
+    "name": "Amiga Sensor Dev",
+    "dockerComposeFile": "./docker-compose.yml",
+    "service": "amiga-sensor-dev",
     "workspaceFolder": "/workspace",
 
     // Container user settings
     "remoteUser": "dev",
     "updateRemoteUserUID": false,
-
-	"customizations": {
-		"jetbrains": {
-			"backend": "CLion",
-			"plugins": [
-				"com.github.copilot"
-			],
-		},
-        "vscode": {
-            "extensions": [
-                "ms-vscode.cpptools",
-                "ms-vscode.cmake-tools",
-                "twxs.cmake",
-                "xaver.clang-format",
-                "vadimcn.vscode-lldb"
-            ],
-            "settings": {
-                "cmake.configureOnOpen": false,
-                "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
-            }
-        }
-    },
 
     // Keep container running for CLion remote toolchain connection
     "shutdownAction": "none"
