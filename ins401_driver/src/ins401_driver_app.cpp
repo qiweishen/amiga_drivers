@@ -17,29 +17,26 @@ namespace {
 }
 
 
-InsDriverApp::InsDriverApp(const Common::Config &config) {
+Ins401DriverApp::Ins401DriverApp(const Common::Config &config) {
 	// Store config path from the main config. The actual loading is deferred to init()
 	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
-	config_path_ = exe_dir / "../../" / config.ins_config_path;
+	config_path_ = exe_dir / "../../" / config.ins401_config_path;
 	config_.data_folder_path = config.data_folder_path;
 	config_.timestamp = config.timestamp;
 }
 
 
-InsDriverApp::~InsDriverApp() {
+Ins401DriverApp::~Ins401DriverApp() {
 	shutdown();
 }
 
 
-bool InsDriverApp::Init() {
-	// Load config and initialize the system
+bool Ins401DriverApp::init() {
+	// Load config (the copy into <data_folder>/config/ is done by the unified main)
 	try {
 		INS401Tool::LoadConfig(config_path_, config_);
-		std::filesystem::copy_file(config_path_,
-								   fmt::format("{}/config/config-ins401_{}.yaml", config_.data_folder_path, config_.timestamp),
-								   std::filesystem::copy_options::overwrite_existing);
 	} catch (const std::exception &e) {
-		Common::Log::log_and_throw(kModule, "Config/init failed: {}", e.what());
+		Common::Log::log_and_throw(kModule, "Config/init failed", e.what());
 	}
 
 	// Discover device on the network
@@ -126,7 +123,7 @@ bool InsDriverApp::Init() {
 }
 
 
-void InsDriverApp::run() {
+void Ins401DriverApp::run() {
 	// Block until termination is requested (spinner is now managed by main)
 	while (!terminate_.load(std::memory_order_acquire)) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -134,7 +131,7 @@ void InsDriverApp::run() {
 }
 
 
-void InsDriverApp::shutdown() {
+void Ins401DriverApp::shutdown() {
 	if (shutdown_called_.exchange(true)) {
 		return;
 	}
@@ -163,14 +160,4 @@ void InsDriverApp::shutdown() {
 	}
 
 	Common::Log::log_message(spdlog::level::info, kModule, "INS401 driver shutdown completely");
-}
-
-
-void InsDriverApp::request_shutdown() {
-	terminate_.store(true, std::memory_order_release);
-}
-
-
-std::atomic<bool> &InsDriverApp::terminate_flag() {
-	return terminate_;
 }

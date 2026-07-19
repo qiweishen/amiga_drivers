@@ -1,0 +1,97 @@
+# Septentrio AsteRx GNSS/INS receiver configuration.
+# Referenced by config/config-main.yaml ("ASTERX Driver Config Path").
+#
+# Notes:
+#   * output.dir is overridden to <Output Directory>/<timestamp>/bin/asterx/
+#     (file_prefix / rotate_* still apply).
+#   * asterx logs go to the unified log file; log.level filters asterx messages.
+#   * A startup failure (receiver unreachable, command rejected, geometry
+#     readback mismatch) or a disk-write failure stops the WHOLE unified
+#     process; a link loss after the first successful configure only
+#     reconnects (recording resumes in a new .sbf segment).
+
+connection:
+    host: "10.95.76.111"    # receiver IP or hostname
+    # Single TCP connection: ASCII commands AND the SBF stream share it. The
+    # driver targets setSBFOutput at its own connection descriptor (e.g. IP10),
+    # so the streams stop automatically when the connection closes.
+    port: 28784             # plaintext command port (28783 = TLS, not implemented)
+    user: "admin"
+    password: "septentrio"
+
+receiver:
+    require_aux1: true          # fail fast if the receiver has no Aux1 capability
+
+    imu:
+        # Boot records raw ExtSensorMeas before GNSS time is known. Those early
+        # frames may carry invalid timestamps, as described in the receiver manual.
+        startup_data_mode: Boot   # Boot | GnssTimeKnown
+
+        # SensorDefault assumes the marked IMU X axis points forward, Y right, Z down.
+        # Use manual or fixed if your mounted IMU is not in the nominal orientation.
+        orientation_mode: SensorDefault  # SensorDefault | manual | fixed
+        theta_x_deg: 0.0
+        theta_y_deg: 0.0
+        theta_z_deg: 0.0
+
+        # REQUIRED: lever arm from IMU reference point to main GNSS antenna ARP,
+        # expressed in the vehicle frame, meters.
+        ant_lever_arm_m:
+            x: 0.0
+            y: 0.0
+            z: 0.0
+
+    gnss_attitude:
+        mode: MultiAntenna        # MultiAntenna | none
+        attitude_offset_deg:
+            heading: 0.0
+            pitch: 0.0
+
+    tracking:
+        # Reset receiver-side filters on startup so stale settings cannot silently
+        # disable a constellation/frequency. A low CN0 mask records weak raw
+        # observables too; filter them later in RTK/PPK if needed.
+        enable_all: true
+        cn0_mask_dbhz: 0
+
+    # SBF streams to enable on the receiver. Each stream pushes a list of
+    # blocks at a single rate (MsgInterval token). OnChange means the receiver's
+    # natural renewal rate, avoiding driver-side decimation. Allowed intervals:
+    #   OnChange
+    #   msec5 msec10 msec20 msec40 msec50 msec100 msec200 msec500
+    #   sec1 sec2 sec5 sec10 sec15 sec30 sec60 min2 min5 min10 min15 min30 min60
+    streams:
+        -   id: 1
+            blocks: [ "ExtSensorMeas" ]                                           # raw IMU
+            interval: "OnChange"
+        -   id: 2
+            blocks: [ "MeasEpoch", "MeasExtra", "EndOfMeas" ]                     # main+Aux1 raw obs
+            interval: "OnChange"
+        -   id: 3
+            blocks: [ "AuxAntPositions", "AttEuler", "AttCovEuler", "EndOfAtt" ]  # baseline + attitude
+            interval: "OnChange"
+        -   id: 4
+            blocks: [ "ExtSensorStatus", "ExtSensorInfo", "IMUSetup" ]            # IMU setup/status
+            interval: "OnChange"
+        -   id: 5
+            blocks: [ "ReceiverStatus", "QualityInd", "ReceiverTime", "ChannelStatus" ]
+            interval: "OnChange"
+        -   id: 6
+            # Navigation ephemerides, UTC/ionosphere models, raw nav bits and
+            # correction/setup context needed for self-contained RTK/PPK/RINEX export.
+            # Kept separate from the Measurements stream to avoid duplicate MeasEpoch.
+            blocks: [ "GPS", "GLO", "GAL", "BDS", "QZS", "RawNavBits",
+                      "ReceiverSetup", "Commands", "DiffCorr" ]
+            interval: "OnChange"
+
+output:
+    dir: "./recordings"           # overridden to <data_folder>/bin/asterx/ in unified mode
+    file_prefix: "asterx"
+    # Must stay < 2 GiB: the RxTools converters (sbf2rin/sbf2asc) refuse SBF
+    # inputs of 2 GB or larger; rotation doubles as the post-processing
+    # guarantee.
+    rotate_bytes: 1073741824     # 1 GiB
+    rotate_interval_s: 3600           # 1 hour
+
+log:
+    level: "info"                  # trace|debug|info|warn|err|critical

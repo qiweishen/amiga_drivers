@@ -1,0 +1,159 @@
+// JAI Go-X 原始数据采集 driver 示例配置（config version 1）。
+//
+// - 加载器基于 nlohmann/json 并开启注释支持：允许 "//" 与 "/* */" 注释。
+// - 严格校验：任何位置出现未知键都会直接报错，并给出
+//   "did you mean ...?" 近似键提示 —— 拼写错误永远不会被静默忽略。
+// - 下方所有键的取值均为 include/core/config.hpp 中的编译期默认值；
+//   也就是说：删除某个键，效果与保留其当前值完全一致（convenience 除外，
+//   convenience 中的键是可选的，删除即"不下发该参数、保留相机当前值"）。
+{
+    "version": 1, // 必填，且必须为整数 1
+
+    "logging": {
+        "level": "info" // trace | debug | info | warn | error
+    },
+
+    "stats": {
+        "enabled": true, // 周期打印每相机统计行（fps / 落盘速率 / 队列深度等）
+        "interval_s": 5.0 // 打印间隔，必须 > 0
+    },
+
+    "acquisition": {
+        "max_frames": 0,    // 达到该帧数后优雅停止；0 = 不限
+        "max_duration_s": 0 // 达到该时长（秒）后优雅停止；0 = 不限
+    },
+
+    "preflight": {
+        "fail_on_error": true // Preflight 自检出现 ERROR 时是否阻断启动
+    },
+
+    // 全局 PTP 默认值；每台相机可在 cameras[].ptp 中只写需要覆盖的键（深合并）。
+    "ptp": {
+        "enabled": false,
+        "feature_set": "auto",     // auto | gev_ieee1588 | sfnc_ptp | explicit
+        "enable_feature": "",      // 仅 feature_set = "explicit" 时必填：使能特性名
+        "status_feature": "",      // 仅 feature_set = "explicit" 时必填：状态特性名
+        "required_status": "Slave", // 期望的 PTP 状态（比较时大小写不敏感）
+        "sync_timeout_s": 60.0,    // 等待收敛到 required_status 的超时
+        "poll_interval_ms": 500,   // 状态轮询间隔，必须 > 0
+        "on_timeout": "abort",     // abort（退出码 4）| warn_continue（降级继续采集）
+        "offset_report_interval_s": 60.0, // 宿主/相机时钟偏移周期报告；0 = 仅会话首末
+        "expect_tai_offset": true  // PTP 为 TAI 时标：交叉校验时自动识别 ≈37s 系统差
+    },
+
+    // 全局录制默认值；每台相机可在 cameras[].recording 中只写需要覆盖的键（深合并）。
+    "recording": {
+        "output_dir": "/workspace/dataset/testing_captures", // 会话目录创建于此
+        "session_name": "auto",   // auto = UTC 时间戳 + uuid 前缀，例 20260717T115400Z_a1b2c3
+        "segment_size_gib": 2.0,  // 段文件轮转阈值（GiB），必须 > 0
+        "record_align": 4096,     // 帧记录起始对齐（2 的幂）；1 = 关闭对齐
+        "payload_crc": "none",    // none | crc32c（帧头 CRC 恒开，此项仅控制 payload CRC）
+        "queue_max_frames": 32,   // 有界队列容量 == ChunkPool 大小，必须 >= 2
+        "queue_on_full": "drop_newest", // drop_newest（默认，丢新帧并计数）| block（宁慢勿丢）
+        "on_buffer_error": "record_flagged", // record_flagged（缺包帧打 flag 照录）| drop
+        "flush_interval_mb": 64,  // 每累计 N MB 做一次 sync_file_range 限脏页，必须 > 0
+        "min_free_gib": 10.0,     // 剩余空间低于该值时有序停止；0 = 关闭检查
+        "debug_slowdown_us": 0    // 测试钩子：写盘线程每帧 sleep 微秒数（用于压垮队列）
+    },
+
+    "cameras": [
+        {
+            "id": "cam0",    // 必填，1..63 字符，仅 [A-Za-z0-9_-]（用作目录名）
+            "enabled": true, // false = 跳过该相机（至少要有一台 enabled）
+
+            // 必填。by: mac | ip | serial | user_defined_name
+            "selector": {
+                "by": "mac",
+                "value": "00:0c:df:0a:7a:c8"
+            },
+
+            "discovery": {
+                "timeout_ms": 4000,       // PvSystem 发现超时
+                "retries": 3,             // 未发现时的重试次数
+                "retry_interval_ms": 1000,
+                "force_ip": {             // FORCEIP 临时改地址（掉电失效），用于子网不匹配抢救
+                    "enabled": true,
+                    "ip": "10.95.76.106",             // enabled=true 时必填
+                    "subnet_mask": "255.255.255.0",    // enabled=true 时必填
+                    "gateway": "0.0.0.0"
+                }
+            },
+
+            // 常用参数便捷入口。每个键都是可选的：删除该键 = 不触碰相机当前值。
+            // 内部映射与回退链（如 ExposureTime -> ExposureTimeAbs）见 docs/CONFIG.md。
+            "convenience": {
+                "exposure_us": 50000.0,       // ExposureAuto 先置 Off，再写 ExposureTime
+                "gain": 1.0,                  // GainSelector: AnalogAll -> All -> 跳过
+//                "frame_rate": 0,           // 触发模式开启时跳过并 WARN
+                "pixel_format": "BayerRG12Packed", // GenICam 枚举名，原样下发
+                "roi": {
+                    "width": 0,   // 0 = 不设置（保留相机当前值）
+                    "height": 0,
+                    "offset_x": 0,
+                    "offset_y": 0
+                },
+                "trigger": {
+                    "enabled": false,
+                    "selector": "FrameStart",
+                    "source": "Line1",
+                    "activation": "RisingEdge"
+                }
+            },
+
+            // 有序 GenICam 特性列表：按数组顺序逐条下发，晚于 convenience 应用，
+            // 因此可覆盖 convenience 的结果。value 类型按相机节点类型自动匹配；
+            // null 表示 Command 类型特性（执行，不带值）。
+            // on_error: fail | warn | skip，缺省用 apply.on_error_default。
+            "genicam_features": [
+                // {"feature": "BlackLevel", "value": 0, "on_error": "warn"},
+                // {"feature": "DeviceLinkThroughputLimitMode", "value": "On"},
+                // {"feature": "DeviceLinkThroughputLimit", "value": 100000000},
+                // {"feature": "ChunkModeActive", "value": false, "on_error": "skip"}
+            ],
+
+            "apply": {
+                "verify_readback": true,           // 写后回读校验（不等即按 on_error 处理）
+                "float_verify_tolerance_rel": 0.001, // Float 回读相对容差
+                "on_error_default": "fail"         // fail | warn | skip
+            },
+
+            "stream": {
+                "channel": 0,
+                "buffer_count": 0,  // 0 = 自动：frame_rate x 0.5s，夹逼到 [16, 256]；显式值须 >= 4
+                "packet_size": 0,   // 0 = NegotiatePacketSize（失败回退 1476）；显式值须在 [576, 16000]
+                "socket_rx_buffer_mib": 16, // 用户态收流 socket 缓冲（受宿主 rmem_max 上限约束）
+                "local_ip": "",     // 绑定指定 NIC 收流；空 = 自动
+                "gev_scpd_ticks": 0, // GevSCPD 包间隔（ns tick），多相机带宽划分用
+                "receiver_tuning": [] // 逃生舱：按名字直写 PvStream 参数（格式同 genicam_features）
+            }
+
+            // 可选："ptp": {...} / "recording": {...} —— 与全局对象深合并，
+            // 只需写想覆盖的键。见下方 cam1 注释示例。
+        }
+
+        // ------------------------------------------------------------------
+        // 多相机示例：去掉整块注释即启用第二台相机（每相机独立线程与目录）。
+        // ------------------------------------------------------------------
+        // ,{
+        //     "id": "cam1",
+        //     "enabled": true,
+        //     "selector": { "by": "ip", "value": "192.168.10.12" },
+        //     "convenience": {
+        //         "exposure_us": 2000.0,
+        //         "frame_rate": 20.0,
+        //         "pixel_format": "Mono8"
+        //     },
+        //     "genicam_features": [
+        //         {"feature": "DeviceLinkThroughputLimitMode", "value": "On"},
+        //         {"feature": "DeviceLinkThroughputLimit", "value": 60000000}
+        //     ],
+        //     "stream": {
+        //         "local_ip": "192.168.10.1", // 双相机分流到不同 NIC
+        //         "gev_scpd_ticks": 4000      // 同 NIC 共享带宽时用 GevSCPD 削峰
+        //     },
+        //     // 每相机覆盖（深合并）：只写差异键，其余沿用全局值
+        //     "ptp": { "on_timeout": "warn_continue" },
+        //     "recording": { "queue_max_frames": 64, "payload_crc": "crc32c" }
+        // }
+    ]
+}

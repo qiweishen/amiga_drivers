@@ -529,7 +529,7 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
 		return false;
 	}
 
-	std::string binary_folder_path = fmt::format("{}/{}", output_folder_path_, "bin");
+	std::string binary_folder_path = fmt::format("{}/bin/ins401", output_folder_path_);
 	std::filesystem::create_directories(binary_folder_path);
 
 	gnss_bin_path_ = fmt::format("{}/gnss_{}.bin", binary_folder_path, timestamp_);
@@ -537,8 +537,8 @@ bool INSDeviceReceiver::InitializeWritingFiles() {
 	imu_bin_path_ = fmt::format("{}/imu_{}.bin", binary_folder_path, timestamp_);
 	diagnostic_bin_path_ = fmt::format("{}/diagnostic_{}.bin", binary_folder_path, timestamp_);
 
-	std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_{}.rtcm3", output_folder_path_, timestamp_);
-	std::string nmea_filename = fmt::format("{}/nmea_{}.nmea", output_folder_path_, timestamp_);
+	std::string rtcm_rover_filename = fmt::format("{}/rtcm_rover_{}.rtcm3", binary_folder_path, timestamp_);
+	std::string nmea_filename = fmt::format("{}/nmea_{}.nmea", binary_folder_path, timestamp_);
 
 	gnss_bin_buffer_.resize(write_buffer_size_);
 	gnss_bin_file_.rdbuf()->pubsetbuf(gnss_bin_buffer_.data(), static_cast<std::streamsize>(gnss_bin_buffer_.size()));

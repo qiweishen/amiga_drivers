@@ -1,0 +1,71 @@
+// jai_snapshot 单张拍摄 profile（GUI 预览 / 曝光调节专用）。
+//
+// - selector.value 与 convenience.exposure_us/gain 只是占位——GUI 每次拍摄都会
+//   通过 --ip / --exposure-us / --gain 覆盖（不改写本文件）。
+// - jai_snapshot 会无条件强制：max_frames=1、max_duration_s<=15、ptp.enabled=false，
+//   即使本文件被改动也不受影响。
+// - convenience.pixel_format 必须保持在 scripts/unpack_raw.py 的 PFNC 支持表内，
+//   否则解码 PNG 会失败。
+{
+    "version": 1,
+
+    "logging": { "level": "info" },
+
+    "stats": { "enabled": false }, // 单帧无需周期统计行
+
+    "acquisition": {
+        "max_frames": 1,       // 采到第一帧即停
+        "max_duration_s": 15   // 安全网：绝不让 GUI 挂死等待
+    },
+
+    "preflight": { "fail_on_error": false }, // 预检仅告警：MTU/rmem 提示不应挡住预览
+
+    "ptp": { "enabled": false }, // 预览用自由运行时间戳即可，无需 grandmaster
+
+    "recording": {
+        "output_dir": "/workspace/app/_runtime/snapshot", // 兜底；GUI 始终以 --out 覆盖
+        "session_name": "auto",
+        "segment_size_gib": 1.0,
+        "record_align": 4096,
+        "payload_crc": "none",
+        "queue_max_frames": 4,          // 仅 1 帧，最小化内存（池 = 队列 + 2）
+        "queue_on_full": "block",       // 唯一的一帧绝不能丢
+        "on_buffer_error": "record_flagged", // 不完整帧也落盘；unpack 用 --pad-incomplete 补齐
+        "flush_interval_mb": 64,
+        "min_free_gib": 1.0
+    },
+
+    "cameras": [
+        {
+            "id": "cam0",
+            "enabled": true,
+            "selector": { "by": "ip", "value": "10.95.76.106" }, // 占位；GUI 传 --ip
+            "discovery": {
+                "timeout_ms": 800,       // 单张延迟的大头（默认 4000 对预览太慢）
+                "retries": 1,
+                "retry_interval_ms": 200,
+                "force_ip": { "enabled": false, "ip": "", "subnet_mask": "", "gateway": "0.0.0.0" }
+            },
+            "convenience": {
+                "exposure_us": 20000.0,             // 占位；GUI 传 --exposure-us
+                "gain": 1.0,                        // 占位；GUI 传 --gain
+                "pixel_format": "BayerRG12Packed"   // 必须在 unpack_raw.py 的 PFNC 表内
+            },
+            "genicam_features": [],
+            "apply": {
+                "verify_readback": true,
+                "float_verify_tolerance_rel": 0.001,
+                "on_error_default": "warn" // 预览不应因某个回读怪癖而中止
+            },
+            "stream": {
+                "channel": 0,
+                "buffer_count": 16,        // 取值约束：0(自动) 或 >= 4
+                "packet_size": 0,          // 0 = NegotiatePacketSize，失败回退 1476
+                "socket_rx_buffer_mib": 16,
+                "local_ip": "",
+                "gev_scpd_ticks": 0,
+                "receiver_tuning": []
+            }
+        }
+    ]
+}

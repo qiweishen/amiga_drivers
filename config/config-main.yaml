@@ -4,13 +4,27 @@
 
 # --- General Settings ---
 General:
-    # Root directory for all output files (logs, GNSS, IMU, LiDAR, etc.)
-    Output Directory: ./data
-    # Run mode for the driver
-    Run Mode: 0 # 0: Run both INS401 and LMS4XXX, 1: Run only INS401, 2: Run only LMS4XXX
+    # Root directory for all output. Each run creates <Output Directory>/<timestamp>/
+    # containing log_<timestamp>.log, config/ (per-driver config snapshots) and
+    # bin/<driver>/ (raw sensor data: bin/ins401, bin/lms4xxx, bin/gox, bin/asterx)
+    Output Directory: ./recordings
+    # Per-driver enable switches. Supported topology: one INS401, one AsteRx,
+    # multiple LMS4xxx LiDARs (Instances map in the LMS yaml) and multiple GoX
+    # cameras (cameras[] array in the GoX json)
+    Enable INS401: true
+    Enable LMS4XXX: true
+    Enable GOX: true
+    Enable ASTERX: true
     # Path to the configuration files for each driver
     INS401 Driver Config Path: ./ins401_driver/config/config-ins401.yaml
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
+    # GoX camera config is strict JSON. NOTE: recording.output_dir/session_name
+    # are overridden to <Output Directory>/<timestamp>/bin/gox/, and acquisition
+    # limits (max_frames/max_duration_s) stop the WHOLE unified process.
+    GOX Driver Config Path: ./gox_driver/config/config-gox.json
+    # AsteRx GNSS/INS receiver config (YAML). NOTE: output.dir is overridden to
+    # <Output Directory>/<timestamp>/bin/asterx/ (log.level still filters).
+    ASTERX Driver Config Path: ./asterx_driver/config/config-asterx.yaml
 
 # --- Logging System ---
 Logging System:

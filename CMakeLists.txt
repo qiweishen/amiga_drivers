@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(AmigaDrivers
-        DESCRIPTION "Amiga Drivers - INS401 and LMS41xxx"
+        DESCRIPTION "Amiga Drivers - INS401, LMS4xxx, JAI Go-X and Septentrio AsteRx"
         LANGUAGES CXX C
 )
 
@@ -37,8 +37,13 @@ find_package(Eigen3 REQUIRED)
 
 
 ################################################################################
-# Shared FetchContent libraries (spdlog, yaml-cpp and sick_scan_xd)
+# Shared FetchContent libraries (spdlog and yaml-cpp)
 include(${CMAKE_SOURCE_DIR}/cmake/FetchContent.cmake)
+
+
+################################################################################
+# Testing (ctest; driver test targets register via add_test / gtest_discover_tests)
+enable_testing()
 
 
 ################################################################################
@@ -50,11 +55,13 @@ add_subdirectory(common)
 # Driver Subdirectories
 add_subdirectory(ins401_driver)
 add_subdirectory(lms4xxx_driver)
+add_subdirectory(gox_driver)
+add_subdirectory(asterx_driver)
 
 
 ################################################################################
 # DataConverter (standalone binary-to-CSV post-processing tool)
-add_subdirectory(app)
+#add_subdirectory(parse)
 
 
 ################################################################################
@@ -62,6 +69,8 @@ add_subdirectory(app)
 add_executable(AmigaDrivers main.cpp)
 
 target_link_libraries(AmigaDrivers PRIVATE
+        asterx_lib
+        gox_lib
         ins401_lib
         lms4xxx_lib
 )
@@ -84,6 +93,6 @@ message(STATUS "")
 message(STATUS "  Shared Dependencies:")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")
-message(STATUS "    nlohmann/json:  ${nlohmann_json_SOURCE_DIR}")
+message(STATUS "    nlohmann/json:  gox_driver/third_party (vendored)")
 message(STATUS "========================================")
 message(STATUS "")

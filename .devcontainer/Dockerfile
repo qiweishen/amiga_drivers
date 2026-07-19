@@ -1,13 +1,8 @@
-ARG UBUNTU_TAG=20.04
+ARG UBUNTU_TAG=22.04
 FROM docker.io/ubuntu:${UBUNTU_TAG}
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
-
-# Switch to Australian mirror before apt-get update
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://au.archive.ubuntu.com/ubuntu/|g; \
-            s|http://security.ubuntu.com/ubuntu/|http://au.archive.ubuntu.com/ubuntu/|g' \
-    /etc/apt/sources.list
 
 # ============================================================
 # Base Development Tools
@@ -32,11 +27,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     sudo \
     locales \
-    # ----- Core libraries----- \
+    # ----- 3rd_party libraries ----- \
     libboost-all-dev \
     libeigen3-dev \
     openssl \
-    libssl-dev
+    libssl-dev \
+    qtbase5-dev \
+    libqt5serialport5-dev
+
+# ============================================================
+# Wayland tools (needed by Ubuntu 26.04)
+# ============================================================
+RUN apt-get install -y --no-install-recommends \
+    libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0
+
+# ============================================================
+# eBUS SDK for JAI
+# ============================================================
+COPY gox_driver/resource/eBUS_SDK_JAI_Ubuntu-22.04-x86_64-*.deb /tmp/ebus/
+RUN apt-get update && \
+    (dpkg -i /tmp/ebus/eBUS_SDK_JAI_*.deb || apt-get install -f -y) && \
+    rm -rf /tmp/ebus
+ENV EBUS_SDK_ROOT=/opt/jai/ebus_sdk/Ubuntu-22.04-x86_64
+ENV GENICAM_ROOT_V3_4=${EBUS_SDK_ROOT}/lib/genicam
+ENV LD_LIBRARY_PATH=${EBUS_SDK_ROOT}/lib:${EBUS_SDK_ROOT}/lib/genicam/bin/Linux64_x64
 
 # ============================================================
 # Clean cache to reduce image size

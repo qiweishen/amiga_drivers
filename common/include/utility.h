@@ -51,12 +51,14 @@ namespace Common {
 		// Use for unrecoverable errors where exception-based unwinding is needed
 		void log_and_throw(std::string_view module, std::string_view msg, std::string_view error_detail = "", bool throw_error = true);
 
-		// Forward SICK library log messages (ROS levels: 1=Info, 2=Warn, 3/4=Error)
-		void sick_msg(int32_t log_level, const char *message);
-
 		// Pre-log callback: invoked before each console log write
 		using PreLogCallback = void (*)();
 		void set_pre_log_callback(PreLogCallback cb);
+
+		// Invoke the registered pre-log callback (no-op when none registered).
+		// For logging backends that write via spdlog directly instead of
+		// log_message() (e.g. the GoX driver's jai::Logger bridge)
+		void run_pre_log_callback();
 	}  // namespace Log
 
 

@@ -35,13 +35,10 @@ namespace Common {
                 file_sink->set_level(spdlog::level::trace);
                 file_sink->set_pattern("[%H:%M:%S] [%l] %v");
                 sinks.push_back(file_sink);
-
-                // File-only logger for SICK info messages (no console output)
-                auto sick_logger = std::make_shared<spdlog::logger>("sick", file_sink);
-                sick_logger->set_level(spdlog::level::trace);
-                spdlog::register_logger(sick_logger);
             }
 
+            // The process-wide single spdlog instance: every driver logs through
+            // the default logger (console at info, file at trace)
             auto logger = std::make_shared<spdlog::logger>(logger_name, sinks.begin(), sinks.end());
             logger->set_level(spdlog::level::trace);
             spdlog::set_default_logger(logger);
@@ -52,6 +49,10 @@ namespace Common {
     namespace Log {
         void set_pre_log_callback(PreLogCallback cb) {
             g_pre_log_cb.store(cb, std::memory_order_release);
+        }
+
+        void run_pre_log_callback() {
+            if (auto cb = g_pre_log_cb.load(std::memory_order_acquire)) { cb(); }
         }
 
         void log_message(spdlog::level::level_enum level, std::string_view module,
@@ -82,25 +83,6 @@ namespace Common {
         	if (throw_error) {
         		throw std::runtime_error(std::string(msg));
         	}
-        }
-
-
-        void sick_msg(int32_t log_level, const char *message) {
-            // ROS log levels: 1=Info, 2=Warn, 3=Error, 4=Fatal
-            // Warn and below → file only; Error and above → console + file (default logger)
-            switch (log_level) {
-                case 3:
-                    spdlog::error("[SICK]: {}", message);
-                    break;
-                case 4:
-                    spdlog::critical("[SICK]: {}", message);
-                    break;
-                default:
-                    if (auto sick_logger = spdlog::get("sick")) {
-                        sick_logger->info("[SICK]: {}", message);
-                    }
-                    break;
-            }
         }
     } // namespace Log
 

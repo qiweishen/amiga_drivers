@@ -28,32 +28,29 @@ class TerminalSpinner;
 struct DeviceInfo;
 
 
-class InsDriverApp {
+class Ins401DriverApp {
 public:
 	// @param config_path Path to the INS401 YAML configuration file.
-	explicit InsDriverApp(const Common::Config &config);
+	explicit Ins401DriverApp(const Common::Config &config);
 
-	~InsDriverApp();
+	~Ins401DriverApp();
 
-	InsDriverApp(const InsDriverApp &) = delete;
-	InsDriverApp &operator=(const InsDriverApp &) = delete;
+	Ins401DriverApp(const Ins401DriverApp &) = delete;
+	Ins401DriverApp &operator=(const Ins401DriverApp &) = delete;
 
 	// Discover the device, set up receiver/NTRIP threads, and prepare for run().
 	// @return true on success, false on fatal error (no device found, config failure, etc.)
-	bool Init();
+	[[nodiscard]] bool init();
 
-	// Main loop: blocks until terminate_flag is set. Polls initialization and shows spinner.
+	// Main loop: blocks until the terminate flag is set. Polls initialization and shows spinner.
 	void run();
 
 	// Graceful shutdown: stops receiver, disconnects NTRIP, joins threads,
 	// post-processes binary files, and logs statistics.
 	void shutdown();
 
-	// Called from signal handlers (async-signal-safe: only atomic store).
-	void request_shutdown();
-
 	// Shared terminate flag. Can be wired to a signal handler or set externally.
-	std::atomic<bool> &terminate_flag();
+	[[nodiscard]] std::atomic<bool> &TerminateFlag() { return terminate_; }
 
 private:
 	std::atomic<bool> terminate_{ false };

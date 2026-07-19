@@ -10,16 +10,16 @@
 #include "lms4xxx_scan_record_writer.h"
 
 
-class LidarDriverApp {
+class Lms4xxxDriverApp {
 public:
-	explicit LidarDriverApp(LiDARConfig config);
-	~LidarDriverApp();
+	explicit Lms4xxxDriverApp(LiDARConfig config);
+	~Lms4xxxDriverApp();
 
 	// Non-copyable, non-movable.
-	LidarDriverApp(const LidarDriverApp &) = delete;
-	LidarDriverApp &operator=(const LidarDriverApp &) = delete;
-	LidarDriverApp(LidarDriverApp &&) = delete;
-	LidarDriverApp &operator=(LidarDriverApp &&) = delete;
+	Lms4xxxDriverApp(const Lms4xxxDriverApp &) = delete;
+	Lms4xxxDriverApp &operator=(const Lms4xxxDriverApp &) = delete;
+	Lms4xxxDriverApp(Lms4xxxDriverApp &&) = delete;
+	Lms4xxxDriverApp &operator=(Lms4xxxDriverApp &&) = delete;
 
 	// Initialize the driver: load config, create LMS4xxxDriver, connect.
 	[[nodiscard]] bool init();

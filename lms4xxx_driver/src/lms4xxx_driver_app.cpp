@@ -40,17 +40,17 @@ namespace {
 }  // namespace
 
 
-LidarDriverApp::LidarDriverApp(LiDARConfig config) : impl_(std::make_unique<Impl>()), config_(std::move(config)) {}
+Lms4xxxDriverApp::Lms4xxxDriverApp(LiDARConfig config) : impl_(std::make_unique<Impl>()), config_(std::move(config)) {}
 
 
-LidarDriverApp::~LidarDriverApp() {
+Lms4xxxDriverApp::~Lms4xxxDriverApp() {
 	if (impl_->driver) {
 		shutdown();
 	}
 }
 
 
-bool LidarDriverApp::init() {
+bool Lms4xxxDriverApp::init() {
 	// Determine instance name for logging
 	impl_->instance_name = config_.position_name.empty() ? config_.hostname : config_.position_name;
 
@@ -95,7 +95,7 @@ bool LidarDriverApp::init() {
 	// Create scan record writer
 	if (!config_.data_folder_path.empty()) {
 		LMS4xxx::ScanRecordWriter::Config writer_config;
-		writer_config.bin_path = fmt::format("{}/bin/scan_{}_{}.bin",
+		writer_config.bin_path = fmt::format("{}/bin/lms4xxx/scan_{}_{}.bin",
 											 config_.data_folder_path, impl_->instance_name, config_.timestamp);
 		writer_config.channel_mask = BuildChannelMask(config_.driver_config.scan);
 		writer_config.queue_capacity = config_.recording_queue_capacity;
@@ -136,7 +136,7 @@ bool LidarDriverApp::init() {
 }
 
 
-void LidarDriverApp::run() {
+void Lms4xxxDriverApp::run() {
 	if (!impl_->driver) {
 		Common::Log::log_and_throw(kModule, "run() called without init()", "", true);
 		return;
@@ -192,7 +192,7 @@ void LidarDriverApp::run() {
 }
 
 
-void LidarDriverApp::shutdown() {
+void Lms4xxxDriverApp::shutdown() {
 	if (!impl_->driver) {
 		return;
 	}
