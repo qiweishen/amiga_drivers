@@ -30,14 +30,21 @@ async def detect_mode() -> str:
         _mode = forced
         return _mode
     # auto: does docker know our container at all (running or not)?
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "inspect", "-f", "{{.State.Status}}", CONTAINER,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-    )
+    # A machine without the docker CLI raises FileNotFoundError from the
+    # spawn itself -> that machine is native by definition.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "-f", "{{.State.Status}}", CONTAINER,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        _mode = "native"
+        return _mode
     try:
         code = await asyncio.wait_for(proc.wait(), timeout=5)
-    except (asyncio.TimeoutError, FileNotFoundError):
+    except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         code = 1
     _mode = "docker" if code == 0 else "native"
     return _mode

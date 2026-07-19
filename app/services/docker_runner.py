@@ -20,11 +20,15 @@ class ExecResult:
 
 
 async def _run(*argv: str, timeout: float | None = None) -> ExecResult:
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError) as e:
+        # e.g. docker CLI not installed on this machine
+        return ExecResult(127, "", f"{argv[0]}: {e}")
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
