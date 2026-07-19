@@ -16,9 +16,9 @@ import time
 from collections import deque
 from pathlib import Path
 
-from ..constants import BIN_AMIGA, MAIN_CONFIG_CONTAINER, SESSION_DIR_RE
+from ..constants import BIN_AMIGA, MAIN_CONFIG, SESSION_DIR_RE
 from ..state import STATE, ProcState
-from . import config_store, docker_runner
+from . import config_store, runtime
 from .health import MONITOR
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
@@ -52,12 +52,14 @@ async def preflight() -> tuple[list[str], list[str]]:
     """Returns (errors, warnings). Errors block the start."""
     errors: list[str] = []
     warnings: list[str] = []
-    if not await docker_runner.is_container_up():
-        errors.append("容器 amiga-sensor-dev 未运行")
+    env_ok, detail = await runtime.env_check()
+    if not env_ok:
+        errors.append(detail)
         return errors, warnings
-    if not await docker_runner.binary_exists(BIN_AMIGA):
-        errors.append("未找到 build/bin/AmigaDrivers —— 请先在容器内编译（Build.bash）")
-    if await docker_runner.pgrep(PROCESS_NAME):
+    if not await runtime.binary_exists(BIN_AMIGA):
+        where = "容器内" if runtime.is_docker() else "本机"
+        errors.append(f"未找到 build/bin/AmigaDrivers —— 请先在{where}编译（Build.bash）")
+    if await runtime.pgrep(PROCESS_NAME):
         errors.append("AmigaDrivers 已在运行")
     settings = config_store.main_settings()
     errors.extend(config_store.output_dir_problems(settings["output_dir_raw"]))
@@ -103,15 +105,17 @@ async def start() -> None:
     _cancel(_exit_poll_task)
 
     # File caps for INS401 raw sockets / LMS SCHED_FIFO (mirrors Start.bash).
-    # Must run as root — the container's default user cannot setcap.
-    res = await docker_runner.exec_(
-        ["setcap", "cap_net_raw,cap_sys_nice+ep", BIN_AMIGA], user="root", timeout=10
+    # Needs root: docker -> exec -u root; native -> sudo -n (may be refused —
+    # then run Start.bash manually once, or run the GUI as root).
+    res = await runtime.exec_(
+        ["setcap", "cap_net_raw,cap_sys_nice+ep", runtime.exec_path(BIN_AMIGA)],
+        root=True, timeout=10,
     )
     if not res.ok:
         BUFFER.append(parse_line(f"setcap failed (INS401 may abort): {res.stderr.strip()}",
                                  fallback_module="gui"))
 
-    proc = await docker_runner.spawn([BIN_AMIGA, MAIN_CONFIG_CONTAINER])
+    proc = await runtime.spawn([runtime.exec_path(BIN_AMIGA), runtime.exec_path(MAIN_CONFIG)])
     _watcher_task = asyncio.get_running_loop().create_task(
         _watch(proc, output_dir, known_sessions)
     )
@@ -175,16 +179,16 @@ async def stop(term_timeout: float = 15.0) -> None:
     if STATE.process_state not in (ProcState.RUNNING, ProcState.STARTING):
         return
     STATE.process_state = ProcState.STOPPING
-    await docker_runner.pkill(PROCESS_NAME, "TERM")
+    await runtime.pkill(PROCESS_NAME, "TERM")
     deadline = time.monotonic() + term_timeout
     while time.monotonic() < deadline:
-        if not await docker_runner.pgrep(PROCESS_NAME):
+        if not await runtime.pgrep(PROCESS_NAME):
             break
         await asyncio.sleep(0.5)
     else:
         BUFFER.append(parse_line("graceful stop timed out — sending SIGKILL", fallback_module="gui"))
-        await docker_runner.pkill(PROCESS_NAME, "KILL")
-        while await docker_runner.pgrep(PROCESS_NAME):
+        await runtime.pkill(PROCESS_NAME, "KILL")
+        while await runtime.pgrep(PROCESS_NAME):
             await asyncio.sleep(0.5)
     # The attached watcher (if any) records the exit code; for detached runs
     # the exit poller finishes the transition.
@@ -197,9 +201,10 @@ async def reattach() -> None:
     the exit code is unknowable; a clean stop is inferred from the
     'All drivers shut down' marker)."""
     global _exit_poll_task
-    if not await docker_runner.is_container_up():
+    env_ok, _detail = await runtime.env_check()
+    if not env_ok:
         return
-    if not await docker_runner.pgrep(PROCESS_NAME):
+    if not await runtime.pgrep(PROCESS_NAME):
         return
 
     settings = config_store.main_settings()
@@ -216,7 +221,7 @@ async def reattach() -> None:
         TAILER.start(_log_file(session), replay=True)
 
     async def poll_exit() -> None:
-        while await docker_runner.pgrep(PROCESS_NAME):
+        while await runtime.pgrep(PROCESS_NAME):
             await asyncio.sleep(2.0)
         # Give the 0.5s tailer a moment to ingest the final "All drivers shut
         # down" marker, and let stop() finish its own EXITED transition first.

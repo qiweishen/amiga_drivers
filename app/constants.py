@@ -50,13 +50,15 @@ def mapped_on_both_sides(host_path: Path | str) -> bool:
         return False
 
 
-# --- Binaries (container paths) ---------------------------------------------
-BIN_AMIGA = "/workspace/build/bin/AmigaDrivers"
-BIN_DISCOVER = "/workspace/build/bin/jai_discover"
-BIN_SNAPSHOT = "/workspace/build/bin/jai_snapshot"
+# --- Binaries & configs (HOST paths; convert per execution backend via
+# services.runtime.exec_path) -------------------------------------------------
+BUILD_BIN = REPO_ROOT / "build" / "bin"
+BIN_AMIGA = BUILD_BIN / "AmigaDrivers"
+BIN_DISCOVER = BUILD_BIN / "jai_discover"
+BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 
-MAIN_CONFIG_CONTAINER = "/workspace/config/config-main.yaml"
-SNAPSHOT_CONFIG_CONTAINER = "/workspace/gox_driver/config/config-snapshot.json"
+MAIN_CONFIG = REPO_ROOT / "config" / "config-main.yaml"
+SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-snapshot.json"
 
 # --- GUI ---------------------------------------------------------------------
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")

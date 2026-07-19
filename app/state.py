@@ -43,7 +43,9 @@ class StorageStatus:
 
 @dataclass
 class AppState:
-    container_up: bool = False
+    mode: str = "?"  # "docker" | "native" (resolved at startup)
+    env_ok: bool = False  # docker: container running; native: always True
+    env_detail: str = ""  # human reason when env_ok is False
     process_state: ProcState = ProcState.IDLE
     attached: bool = True  # False after reattach (exit code unknowable)
     exit_code: int | None = None

@@ -79,8 +79,8 @@ def gox_page() -> None:
         def refresh_guard() -> None:
             reason = gox_tools.guard_reason()
             guard_label.set_text(reason or "")
-            allowed = reason is None and STATE.container_up and not STATE.snapshot_busy
-            scan_btn.set_enabled(reason is None and STATE.container_up and not STATE.snapshot_busy)
+            allowed = reason is None and STATE.env_ok and not STATE.snapshot_busy
+            scan_btn.set_enabled(reason is None and STATE.env_ok and not STATE.snapshot_busy)
             snap_btn.set_enabled(allowed and bool(_target_ip()))
             target_label.set_text(
                 f"目标相机: {_target_ip() or '（先扫描并选择一台相机）'}"

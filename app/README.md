@@ -1,17 +1,33 @@
 # Amiga Sensor Console（Web GUI）
 
-基于 NiceGUI 的传感器采集控制台：在**宿主机**上运行（使用仓库根的 uv `.venv`），
-通过 `docker exec` 控制容器 `amiga-sensor-dev` 内的 C++ 二进制。
+基于 NiceGUI 的传感器采集控制台，在**宿主机**上运行（使用仓库根的 uv `.venv`）。
+C++ 二进制支持两种运行后端，GUI 启动时自动选择：
+
+| 模式 | 判定（默认 auto） | 二进制如何运行 |
+|---|---|---|
+| **Docker** | docker CLI 可见容器 `amiga-sensor-dev`（运行中或已停止） | `docker exec` 进容器执行（开发机默认） |
+| **本机 native** | 没有 docker 或没有该容器 | 直接在本机执行 `build/bin/*`（真机免 Docker 部署） |
+
+强制指定：`AMIGA_GUI_MODE=docker` 或 `AMIGA_GUI_MODE=native`（默认 `auto`）。
+当前模式显示在页面顶栏徽章上（Docker / 本机）。
 
 ## 首次运行
 
-1. **构建 C++ 侧**（容器内，一次性）：本 GUI 依赖两个新目标——`jai_snapshot`
-   与带 `--json` 的 `jai_discover`。`.devcontainer/docker-compose.yml` 新增了
-   `cap_add: SYS_NICE`（AmigaDrivers 的文件 caps 需要它），因此需要重建容器：
+1. **构建 C++ 侧**（一次性）：本 GUI 依赖两个新目标——`jai_snapshot`
+   与带 `--json` 的 `jai_discover`。
+
+   Docker 模式（`.devcontainer/docker-compose.yml` 含 `cap_add: SYS_NICE`，
+   AmigaDrivers 的文件 caps 需要它，改动后需重建容器）：
 
    ```bash
    docker compose -f .devcontainer/docker-compose.yml up -d --force-recreate
    docker exec -w /workspace amiga-sensor-dev bash Build.bash
+   ```
+
+   本机 native 模式（真机需已安装 eBUS SDK、Qt5 运行库等依赖）：
+
+   ```bash
+   bash Build.bash
    ```
 
 2. **启动 GUI**（宿主机，仓库根目录）：
@@ -22,6 +38,16 @@
    ```
 
    端口/绑定可用环境变量覆盖：`AMIGA_GUI_PORT`、`AMIGA_GUI_HOST`。
+
+### 本机 native 模式注意
+
+- **setcap**：启动采集前 GUI 会尝试 `sudo -n setcap cap_net_raw,cap_sys_nice+ep`
+  给二进制打文件 caps（INS401 raw socket / LMS SCHED_FIFO 需要）。非 root 且
+  sudo 需要密码时该步会失败并在日志中警告——此时先手动跑一次
+  `sudo bash Start.bash`（或 `sudo setcap ...`），或以 root 运行 GUI。
+- 进程管理用本机 `pgrep`/`pkill`（procps，Linux 标配）。
+- 相对的 Output Directory（如 `./recordings`）在两种模式下都相对仓库根解析；
+  native 模式下也允许任意本机绝对路径（Docker 模式仅限挂载可见范围）。
 
 ## 页面
 

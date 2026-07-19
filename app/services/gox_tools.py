@@ -18,16 +18,14 @@ import numpy as np
 from ..constants import (
     BIN_DISCOVER,
     BIN_SNAPSHOT,
-    REPO_ROOT,
-    SNAPSHOT_CONFIG_CONTAINER,
+    SNAPSHOT_CONFIG,
     SNAPSHOT_DIR,
     SNAPSHOT_KEEP,
     UNPACK_SCRIPT,
     VENV_PYTHON,
-    to_host,
 )
 from ..state import STATE, ProcState
-from . import docker_runner
+from . import runtime
 
 SNAPSHOT_TOOL = "jai_snapshot"
 # GUI-side hard timeout; must stay strictly greater than the in-tool
@@ -82,14 +80,15 @@ def guard_reason() -> str | None:
 
 
 async def discover(timeout_ms: int = 1500) -> DiscoverResult:
-    res = await docker_runner.exec_(
-        [BIN_DISCOVER, "--timeout", str(timeout_ms), "--json"], timeout=timeout_ms / 1000 + 15
+    discover_bin = runtime.exec_path(BIN_DISCOVER)
+    res = await runtime.exec_(
+        [discover_bin, "--timeout", str(timeout_ms), "--json"], timeout=timeout_ms / 1000 + 15
     )
     raw = (res.stdout + ("\n" + res.stderr if res.stderr.strip() else "")).strip()
     if res.code == 2 and "unknown argument" in res.stderr:
         # Old binary without --json: degrade to the human-readable table.
-        res = await docker_runner.exec_(
-            [BIN_DISCOVER, "--timeout", str(timeout_ms)], timeout=timeout_ms / 1000 + 15
+        res = await runtime.exec_(
+            [discover_bin, "--timeout", str(timeout_ms)], timeout=timeout_ms / 1000 + 15
         )
         return DiscoverResult(raw_output=res.stdout + res.stderr, json_supported=False,
                               error="" if res.ok else "jai_discover 失败（旧版二进制，无 --json）")
@@ -123,31 +122,27 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
     if out_host.exists():  # same-second collision on rapid auto-refresh
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = SNAPSHOT_DIR / sid
-    out_container = f"/workspace/app/_runtime/snapshot/{sid}"
-
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-w", "/workspace", docker_runner.CONTAINER,
-        BIN_SNAPSHOT,
-        "--config", SNAPSHOT_CONFIG_CONTAINER,
-        "--out", out_container,
+    proc = await runtime.popen([
+        runtime.exec_path(BIN_SNAPSHOT),
+        "--config", runtime.exec_path(SNAPSHOT_CONFIG),
+        "--out", runtime.exec_path(out_host),
         "--ip", ip,
         "--exposure-us", str(exposure_us),
         "--gain", str(gain),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    ])
     try:
         out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=SNAPSHOT_TIMEOUT_S)
     except asyncio.TimeoutError:
-        # Killing the docker exec client does not touch the remote tool — a
-        # hung jai_snapshot would hold the camera's control channel forever.
-        await docker_runner.pkill(SNAPSHOT_TOOL, "TERM")
+        # In docker mode killing the exec client does not touch the remote
+        # tool — a hung jai_snapshot would hold the camera's control channel
+        # forever; pkill works identically on both backends.
+        await runtime.pkill(SNAPSHOT_TOOL, "TERM")
         await asyncio.sleep(3)
-        if await docker_runner.pgrep(SNAPSHOT_TOOL):
-            await docker_runner.pkill(SNAPSHOT_TOOL, "KILL")
+        if await runtime.pgrep(SNAPSHOT_TOOL):
+            await runtime.pkill(SNAPSHOT_TOOL, "KILL")
         proc.kill()
         await proc.wait()
-        return SnapshotResult(False, reason=f"超时（>{SNAPSHOT_TIMEOUT_S:.0f}s），已终止容器内 jai_snapshot",
+        return SnapshotResult(False, reason=f"超时（>{SNAPSHOT_TIMEOUT_S:.0f}s），已终止 jai_snapshot",
                               elapsed_s=time.monotonic() - t0)
 
     stdout = out_b.decode(errors="replace")
@@ -165,9 +160,9 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
         return SnapshotResult(False, reason=reason, raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 
-    camera_dir_container = marker[len("SNAPSHOT: OK "):].strip()
+    camera_dir_emitted = marker[len("SNAPSHOT: OK "):].strip()
     try:
-        camera_dir = to_host(camera_dir_container)
+        camera_dir = runtime.to_host_path(camera_dir_emitted)
     except ValueError as e:
         return SnapshotResult(False, reason=str(e), raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)

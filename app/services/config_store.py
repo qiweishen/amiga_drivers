@@ -12,7 +12,8 @@ from pathlib import Path, PurePosixPath
 import pyjson5
 import yaml
 
-from ..constants import CONFIG_FILES, ENABLE_KEYS, ConfigFile, to_host
+from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile, to_host
+from . import runtime
 
 
 class ConflictError(Exception):
@@ -88,22 +89,26 @@ def main_settings() -> dict:
     }
 
 
-def container_output_dir(raw: str) -> str:
-    """The Output Directory string is consumed by the BINARY, i.e. in the
-    container namespace: relative entries are resolved against its working dir
-    /workspace; absolute entries must be container paths (/workspace/...)."""
-    if PurePosixPath(raw).is_absolute():
-        return posixpath.normpath(raw)
-    return posixpath.normpath("/workspace/" + raw)
-
-
 def resolve_output_dir(raw: str) -> Path | None:
     """Host-side view of the Output Directory, or None when it is not visible
-    from the host (outside the container mounts)."""
-    try:
-        return to_host(container_output_dir(raw))
-    except ValueError:
-        return None
+    from the host.
+
+    The raw string is consumed by the BINARY in ITS namespace: relative
+    entries resolve against the binary's working dir (/workspace in docker,
+    the repo root natively — runtime.spawn sets both). Natively every path is
+    already a host path; in docker mode absolute paths must be container
+    paths that map back through the mounts."""
+    if runtime.is_docker():
+        if PurePosixPath(raw).is_absolute():
+            container_abs = posixpath.normpath(raw)
+        else:
+            container_abs = posixpath.normpath("/workspace/" + raw)
+        try:
+            return to_host(container_abs)
+        except ValueError:
+            return None
+    p = Path(raw)
+    return p if p.is_absolute() else (REPO_ROOT / p).resolve()
 
 
 def output_dir_problems(raw: str) -> list[str]:
@@ -111,7 +116,7 @@ def output_dir_problems(raw: str) -> list[str]:
     if resolve_output_dir(raw) is not None:
         return []
     return [
-        f"Output Directory ({raw}) 不在容器挂载可见范围内。可用形式：仓库相对路径（如 ./data）、"
+        f"Output Directory ({raw}) 不在容器挂载可见范围内。可用形式：仓库相对路径（如 ./recordings）、"
         "/workspace/... 或共享盘 ./dataset|/workspace/dataset/...；"
         "宿主机风格的绝对路径（/mnt/...、/home/...）在容器内不存在"
     ]

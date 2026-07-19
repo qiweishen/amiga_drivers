@@ -57,7 +57,7 @@ def dashboard_page() -> None:
 
         def refresh() -> None:
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
-            start_btn.set_enabled(STATE.container_up and not running and STATE.process_state is not ProcState.STOPPING)
+            start_btn.set_enabled(STATE.env_ok and not running and STATE.process_state is not ProcState.STOPPING)
             stop_btn.set_enabled(running)
             if STATE.active_session is not None:
                 started = STATE.session_started_at or 0
