@@ -7,5 +7,12 @@
 *.vscode/
 *.DS_Store
 
-/docs/doxygen/
-/lms4000_driver/sick_scan_xd
+# Devcontainer bind mount of the shared dataset disk (docker-compose.yml)
+/dataset/
+
+# Septentrio AsteRx standalone recordings (default output.dir "./recordings")
+/recordings/
+
+# Web GUI scratch space (snapshot sessions, decoded previews)
+/app/_runtime/
+__pycache__/
