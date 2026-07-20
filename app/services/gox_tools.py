@@ -75,7 +75,7 @@ def guard_reason() -> str | None:
     """
     if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING):
         if STATE.enables_at_start.get("gox", False):
-            return "采集进程正在运行且启用了 GoX —— 相机被其独占，请先停止采集"
+            return "Recording is running with GoX enabled — the driver owns the cameras; stop recording first"
     return None
 
 
@@ -91,13 +91,13 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
             [discover_bin, "--timeout", str(timeout_ms)], timeout=timeout_ms / 1000 + 15
         )
         return DiscoverResult(raw_output=res.stdout + res.stderr, json_supported=False,
-                              error="" if res.ok else "jai_discover 失败（旧版二进制，无 --json）")
+                              error="" if res.ok else "jai_discover failed (old binary without --json)")
     if not res.ok:
-        return DiscoverResult(raw_output=raw, error=f"jai_discover 失败 (exit {res.code}): {res.stderr.strip()}")
+        return DiscoverResult(raw_output=raw, error=f"jai_discover failed (exit {res.code}): {res.stderr.strip()}")
     try:
         doc = json.loads(res.stdout)
     except json.JSONDecodeError as e:
-        return DiscoverResult(raw_output=raw, error=f"无法解析 --json 输出: {e}")
+        return DiscoverResult(raw_output=raw, error=f"Cannot parse the --json output: {e}")
     devices = [
         Device(
             model=d.get("model", ""),
@@ -142,7 +142,7 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
             await runtime.pkill(SNAPSHOT_TOOL, "KILL")
         proc.kill()
         await proc.wait()
-        return SnapshotResult(False, reason=f"超时（>{SNAPSHOT_TIMEOUT_S:.0f}s），已终止 jai_snapshot",
+        return SnapshotResult(False, reason=f"Timed out (>{SNAPSHOT_TIMEOUT_S:.0f}s) — jai_snapshot was terminated",
                               elapsed_s=time.monotonic() - t0)
 
     stdout = out_b.decode(errors="replace")
@@ -151,12 +151,12 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
 
     marker = next((ln for ln in reversed(stdout.splitlines()) if ln.startswith("SNAPSHOT: ")), None)
     if marker is None:
-        return SnapshotResult(False, reason=f"未见 SNAPSHOT 标记（exit {proc.returncode}）",
+        return SnapshotResult(False, reason=f"No SNAPSHOT marker in the output (exit {proc.returncode})",
                               raw_output=raw_output, elapsed_s=time.monotonic() - t0)
     if marker.startswith("SNAPSHOT: FAIL"):
         reason = marker[len("SNAPSHOT: FAIL "):]
         if reason.strip().startswith("3"):
-            reason += "（相机不可达或被其他进程占用）"
+            reason += " (camera unreachable or held by another process)"
         return SnapshotResult(False, reason=reason, raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 
@@ -178,14 +178,14 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
         )
     except subprocess.TimeoutExpired as e:
         partial = ((e.stdout or "") + (e.stderr or "")).strip()
-        return SnapshotResult(False, reason=f"解码超时（>{UNPACK_TIMEOUT_S:.0f}s）",
+        return SnapshotResult(False, reason=f"Decode timed out (>{UNPACK_TIMEOUT_S:.0f}s)",
                               raw_output=raw_output + "\n--- unpack (timeout) ---\n" + partial,
                               elapsed_s=time.monotonic() - t0)
     raw_output += "\n--- unpack ---\n" + (unpack.stdout + unpack.stderr).strip()
     incomplete = "INCOMPLETE" in unpack.stderr
     pngs = sorted(out_host.glob("seq*_*.png"))
     if unpack.returncode != 0 or not pngs:
-        return SnapshotResult(False, reason=f"解码失败: {unpack.stderr.strip()[-300:]}",
+        return SnapshotResult(False, reason=f"Decode failed: {unpack.stderr.strip()[-300:]}",
                               raw_output=raw_output, incomplete=incomplete,
                               elapsed_s=time.monotonic() - t0)
     png = pngs[0]
@@ -205,7 +205,7 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
 def _encode_and_histogram(png_path) -> SnapshotResult:
     img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
     if img is None:
-        return SnapshotResult(False, reason="无法读取解码后的 PNG")
+        return SnapshotResult(False, reason="Cannot read the decoded PNG")
     if img.dtype == np.uint16:
         img8 = (img >> 8).astype(np.uint8)
         gray16 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
@@ -215,7 +215,7 @@ def _encode_and_histogram(png_path) -> SnapshotResult:
         gray16 = gray8.astype(np.uint16) << 8
     ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
-        return SnapshotResult(False, reason="JPEG 编码失败")
+        return SnapshotResult(False, reason="JPEG encoding failed")
     hist, _ = np.histogram(gray16, bins=64, range=(0, 65536))
     return SnapshotResult(
         ok=False,  # caller flips to True after filling metadata

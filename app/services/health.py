@@ -48,7 +48,7 @@ class HealthMonitor:
         sensors["ins401"] = SensorStatus("ins401", "INS401")
         for name in lms_names or ["?"]:
             sensors[f"lms:{name}"] = SensorStatus(f"lms:{name}", f"LMS4xxx · {name}")
-        sensors["gox"] = SensorStatus("gox", "GoX 相机")
+        sensors["gox"] = SensorStatus("gox", "GoX Cameras")
         sensors["asterx"] = SensorStatus("asterx", "AsteRx")
         for key, st in sensors.items():
             driver = "lms4xxx" if key.startswith("lms:") else key

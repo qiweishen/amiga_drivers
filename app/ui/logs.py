@@ -12,16 +12,16 @@ _DEFAULT_LEVELS = {"info", "warning", "error", "critical"}
 
 @ui.page("/logs")
 def logs_page() -> None:
-    with layout.frame("日志"):
+    with layout.frame("Logs"):
         with ui.row().classes("items-center gap-4"):
             level_select = ui.select(
-                list(LEVELS), value=sorted(_DEFAULT_LEVELS), multiple=True, label="级别"
+                list(LEVELS), value=sorted(_DEFAULT_LEVELS), multiple=True, label="Levels"
             ).classes("w-64").props("use-chips dense")
             module_select = ui.select(
-                sorted(BUFFER.modules_seen) or [], value=[], multiple=True, label="模块（空=全部）"
+                sorted(BUFFER.modules_seen) or [], value=[], multiple=True, label="Modules (empty = all)"
             ).classes("w-64").props("use-chips dense")
-            follow = ui.switch("跟随", value=True)
-            ui.button("清屏", on_click=lambda: log.clear()).props("flat dense")
+            follow = ui.switch("Follow", value=True)
+            ui.button("Clear", on_click=lambda: log.clear()).props("flat dense")
         log = ui.log(max_lines=1000).classes("w-full h-[70vh] font-mono text-xs")
 
         def _filters() -> tuple[set[str], set[str]]:

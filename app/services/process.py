@@ -57,18 +57,18 @@ async def preflight() -> tuple[list[str], list[str]]:
         errors.append(detail)
         return errors, warnings
     if not await runtime.binary_exists(BIN_AMIGA):
-        where = "容器内" if runtime.is_docker() else "本机"
-        errors.append(f"未找到 build/bin/AmigaDrivers —— 请先在{where}编译（Build.bash）")
+        where = "inside the container" if runtime.is_docker() else "on this machine"
+        errors.append(f"build/bin/AmigaDrivers not found — build it first {where} (Build.bash)")
     if await runtime.pgrep(PROCESS_NAME):
-        errors.append("AmigaDrivers 已在运行")
+        errors.append("AmigaDrivers is already running")
     settings = config_store.main_settings()
     errors.extend(config_store.output_dir_problems(settings["output_dir_raw"]))
     if not settings["enable_logging"]:
-        warnings.append("Enable Logging 为 false：没有会话日志文件，GUI 的健康监控与日志页将失效")
+        warnings.append("Enable Logging is false: no session log file — health monitoring and the Logs page will be blind")
     if not any(settings["enables"].values()):
-        errors.append("没有任何传感器被启用（全部 Enable 为 false）")
+        errors.append("No sensor is enabled (every Enable flag is false)")
     if STATE.snapshot_busy and settings["enables"].get("gox", False):
-        errors.append("GoX 快照正在进行 —— 相机控制通道独占，请等它完成（≤30s）再启动")
+        errors.append("A GoX snapshot is in progress — the camera control channel is exclusive; wait for it to finish (≤30s)")
     return errors, warnings
 
 
@@ -88,7 +88,7 @@ async def start() -> None:
     output_dir: Path | None = settings["output_dir"]
     if output_dir is None:  # preflight blocks this; defensive only
         STATE.process_state = ProcState.FAILED
-        STATE.last_error = "Output Directory 不在容器挂载可见范围内"
+        STATE.last_error = "The Output Directory is outside the container mounts"
         return
     known_sessions = _session_dirs(output_dir)
     STATE.exit_code = None
@@ -155,7 +155,8 @@ async def _watch(proc: asyncio.subprocess.Process, output_dir: Path, known: set[
                 # Keep polling (slow mounts happen) but tell the user something
                 # is off instead of silently sitting in STARTING.
                 STATE.last_error = (
-                    f"30s 内未在 {output_dir} 检测到会话目录 —— 进程仍在运行，继续等待"
+                    f"No session directory appeared under {output_dir} within 30s — "
+                    "the process is still running, still waiting"
                 )
                 warned_at = None
             await asyncio.sleep(0.5)
@@ -232,6 +233,6 @@ async def reattach() -> None:
         STATE.process_state = ProcState.EXITED if MONITOR.clean_stop else ProcState.FAILED
         if not MONITOR.clean_stop:
             err = BUFFER.last_error_line()
-            STATE.last_error = err.raw if err else "进程已退出（退出码未知）"
+            STATE.last_error = err.raw if err else "Process exited (exit code unknown)"
 
     _exit_poll_task = asyncio.get_running_loop().create_task(poll_exit())

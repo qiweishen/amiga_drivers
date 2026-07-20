@@ -1,0 +1,29 @@
+CoolShark Auto66:
+    WebGUI IP: 10.95.78.188
+    PTP/NTP IP: 10.95.78.100
+    Ethernet Port: enp1s0f1
+    Subnetwork: 10.95.78.78
+
+Septentrio AsteRx:
+    IP: 10.95.77.111
+    Ethernet Port: enp1s0f0
+    Subnetwork: 10.95.77.255
+
+JAI Go-x:
+    Mac Address:
+    IP:
+    Ethernet Port: enp1s0f1
+    Subnetwork: 10.95.78.78
+
+Acenna INS401:
+    Mac Address:
+    Ethernet Port: eno1
+    subnetwork: 10.95.76.255
+
+SICK LMS4xxx:
+    Front Left Laser:
+        IP: 10.95.76.111
+    Front Right Laser:
+        IP: 10.95.76.103
+    Ethernet Port: eno1
+    Subnetwork: 10.95.76.255

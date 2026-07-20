@@ -86,13 +86,13 @@ class ConfigFile:
 CONFIG_FILES: dict[str, ConfigFile] = {
     c.id: c
     for c in [
-        ConfigFile("main", "主配置 (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml", "yaml"),
+        ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml", "yaml"),
         ConfigFile("ins401", "INS401", REPO_ROOT / "ins401_driver" / "config" / "config-ins401.yaml", "yaml"),
         ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml", "yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.json", "jsonc"),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml", "yaml"),
         ConfigFile(
-            "snapshot", "GoX 快照 (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-snapshot.json", "jsonc"
+            "snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-snapshot.json", "jsonc"
         ),
     ]
 }

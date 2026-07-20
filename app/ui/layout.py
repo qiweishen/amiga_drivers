@@ -10,19 +10,19 @@ from ..state import STATE, ProcState
 from ..services import docker_runner, runtime
 
 _PROC_BADGE = {
-    ProcState.IDLE: ("空闲", "grey"),
-    ProcState.STARTING: ("启动中…", "orange"),
-    ProcState.RUNNING: ("采集中", "green"),
-    ProcState.STOPPING: ("停止中…", "orange"),
-    ProcState.EXITED: ("已停止", "blue-grey"),
-    ProcState.FAILED: ("异常退出", "red"),
+    ProcState.IDLE: ("Idle", "grey"),
+    ProcState.STARTING: ("Starting…", "orange"),
+    ProcState.RUNNING: ("Recording", "green"),
+    ProcState.STOPPING: ("Stopping…", "orange"),
+    ProcState.EXITED: ("Stopped", "blue-grey"),
+    ProcState.FAILED: ("Crashed", "red"),
 }
 
 _NAV = [
-    ("/", "总览"),
-    ("/config", "配置"),
-    ("/logs", "日志"),
-    ("/gox", "GoX 工具"),
+    ("/", "Overview"),
+    ("/config", "Config"),
+    ("/logs", "Logs"),
+    ("/gox", "GoX Tools"),
 ]
 
 
@@ -42,14 +42,15 @@ def frame(title: str):
     banner_key: list[tuple] = [()]  # last rendered banner state
 
     def refresh_header() -> None:
-        mode_badge.set_text({"docker": "Docker", "native": "本机"}.get(STATE.mode, "…"))
+        mode_badge.set_text({"docker": "Docker", "native": "Native"}.get(STATE.mode, "…"))
         text, color = _PROC_BADGE[STATE.process_state]
         if STATE.process_state is ProcState.RUNNING and not STATE.attached:
-            text += "（重连）"
+            text += " (reattached)"
         badge.set_text(text)
         badge.props(f'color="{color}"')
         # Rebuild the banner only when its state actually changed — a clear()
-        # every tick would destroy/recreate the 启动容器 button and drop clicks.
+        # every tick would destroy/recreate the "Start container" button and
+        # drop clicks landing in the swap window.
         key = (STATE.env_ok, STATE.env_detail, STATE.mode, STATE.pending_config_notice)
         if key == banner_key[0]:
             return
@@ -59,14 +60,14 @@ def frame(title: str):
             with banner_row:
                 with ui.row().classes("w-full items-center bg-red-100 text-red-900 px-4 py-2 rounded"):
                     ui.icon("error")
-                    ui.label(f"{STATE.env_detail or '运行环境不可用'} —— 所有控制均不可用")
+                    ui.label(f"{STATE.env_detail or 'Runtime environment unavailable'} — all controls are disabled")
                     if STATE.mode == "docker":
-                        ui.button("启动容器", on_click=_compose_up).props("flat dense")
+                        ui.button("Start container", on_click=_compose_up).props("flat dense")
         elif STATE.pending_config_notice:
             with banner_row:
                 with ui.row().classes("w-full items-center bg-amber-100 text-amber-900 px-4 py-2 rounded"):
                     ui.icon("info")
-                    ui.label("有已保存但未生效的配置更改 —— 将在下次启动采集时生效")
+                    ui.label("Saved config changes are pending — they take effect on the next recording start")
 
     ui.timer(1.0, refresh_header)
     refresh_header()
@@ -77,10 +78,10 @@ def frame(title: str):
 
 
 async def _compose_up() -> None:
-    ui.notify("正在启动容器（首次可能需要构建镜像，请耐心等待）…")
+    ui.notify("Starting the container (the first run may build the image — please wait)…")
     res = await docker_runner.compose_up()
     if res.ok:
         STATE.env_ok, STATE.env_detail = await runtime.env_check()
-        ui.notify("容器已启动", type="positive")
+        ui.notify("Container started", type="positive")
     else:
-        ui.notify(f"容器启动失败: {res.stderr.strip()[-300:]}", type="negative", multi_line=True)
+        ui.notify(f"Failed to start the container: {res.stderr.strip()[-300:]}", type="negative", multi_line=True)

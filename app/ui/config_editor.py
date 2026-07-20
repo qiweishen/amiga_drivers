@@ -14,10 +14,11 @@ _EDIT_ORDER = ("main", "ins401", "lms4xxx", "gox", "asterx", "snapshot")
 
 @ui.page("/config")
 def config_page() -> None:
-    with layout.frame("配置"):
+    with layout.frame("Config"):
         ui.label(
-            "以原文编辑（注释保留）。此处校验仅检查语法结构；C++ 侧加载时才是最终校验"
-            "（GoX 严格 JSON：未知键直接报错）。运行中保存的更改在下次启动生效。"
+            "Edited as raw text (comments are preserved). Validation here is syntax-only; "
+            "the C++ loader is the final authority (GoX strict JSON rejects unknown keys). "
+            "Changes saved while recording take effect on the next start."
         ).classes("text-sm text-gray-600")
 
         with ui.tabs() as tabs:
@@ -42,7 +43,7 @@ def _editor_panel(config_id: str) -> None:
     dirty_label = ui.label("").classes("text-xs text-amber-700")
 
     def _mark_dirty() -> None:
-        dirty_label.set_text("未保存的修改" if editor.value != state["saved_text"] else "")
+        dirty_label.set_text("Unsaved changes" if editor.value != state["saved_text"] else "")
 
     editor.on_value_change(lambda _: _mark_dirty())
 
@@ -52,16 +53,16 @@ def _editor_panel(config_id: str) -> None:
             for e in errors:
                 ui.notify(e, type="negative", multi_line=True)
             return False
-        ui.notify("语法校验通过（最终以 C++ 加载为准）", type="positive")
+        ui.notify("Syntax check passed (the C++ loader has the final say)", type="positive")
         return True
 
     async def _save(force: bool = False) -> None:
         if config_store.validate(config_id, editor.value):
             with ui.dialog() as dialog, ui.card():
-                ui.label("语法校验未通过，仍要保存吗？")
+                ui.label("Syntax check failed — save anyway?")
                 with ui.row():
-                    ui.button("仍然保存", color="negative", on_click=lambda: dialog.submit(True))
-                    ui.button("取消", on_click=lambda: dialog.submit(False)).props("flat")
+                    ui.button("Save anyway", color="negative", on_click=lambda: dialog.submit(True))
+                    ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
             if not await dialog:
                 return
         try:
@@ -72,16 +73,16 @@ def _editor_panel(config_id: str) -> None:
             _mark_dirty()
             if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING):
                 STATE.pending_config_notice = True
-                ui.notify("已保存，将在下次启动采集时生效", type="info")
+                ui.notify("Saved — takes effect on the next recording start", type="info")
             else:
-                ui.notify("已保存（旧内容备份为 .bak）", type="positive")
+                ui.notify("Saved (previous content backed up as .bak)", type="positive")
         except ConflictError as e:
             with ui.dialog() as dialog, ui.card():
-                ui.label(f"{e} —— 如何处理？")
+                ui.label(f"{e} — how to proceed?")
                 with ui.row():
-                    ui.button("重新加载磁盘内容", on_click=lambda: dialog.submit("reload"))
-                    ui.button("强制覆盖", color="negative", on_click=lambda: dialog.submit("force"))
-                    ui.button("取消", on_click=lambda: dialog.submit("cancel")).props("flat")
+                    ui.button("Reload from disk", on_click=lambda: dialog.submit("reload"))
+                    ui.button("Overwrite anyway", color="negative", on_click=lambda: dialog.submit("force"))
+                    ui.button("Cancel", on_click=lambda: dialog.submit("cancel")).props("flat")
             choice = await dialog
             if choice == "reload":
                 _revert()
@@ -96,6 +97,6 @@ def _editor_panel(config_id: str) -> None:
         _mark_dirty()
 
     with ui.row().classes("gap-2"):
-        ui.button("校验", icon="rule", on_click=_validate).props("outline")
-        ui.button("保存", icon="save", on_click=_save)
-        ui.button("还原", icon="undo", on_click=_revert).props("flat")
+        ui.button("Validate", icon="rule", on_click=_validate).props("outline")
+        ui.button("Save", icon="save", on_click=_save)
+        ui.button("Revert", icon="undo", on_click=_revert).props("flat")

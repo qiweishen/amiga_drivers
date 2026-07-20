@@ -63,7 +63,7 @@ def save(config_id: str, text: str, expected_mtime: float | None) -> float:
     cf = CONFIG_FILES[config_id]
     if expected_mtime is not None and cf.path.exists():
         if abs(cf.path.stat().st_mtime - expected_mtime) > 1e-6:
-            raise ConflictError(f"{cf.path.name} 在磁盘上已被修改")
+            raise ConflictError(f"{cf.path.name} was modified on disk")
     if cf.path.exists():
         shutil.copy2(cf.path, cf.path.with_suffix(cf.path.suffix + ".bak"))
     tmp = cf.path.with_suffix(cf.path.suffix + ".tmp")
@@ -116,9 +116,9 @@ def output_dir_problems(raw: str) -> list[str]:
     if resolve_output_dir(raw) is not None:
         return []
     return [
-        f"Output Directory ({raw}) 不在容器挂载可见范围内。可用形式：仓库相对路径（如 ./recordings）、"
-        "/workspace/... 或共享盘 ./dataset|/workspace/dataset/...；"
-        "宿主机风格的绝对路径（/mnt/...、/home/...）在容器内不存在"
+        f"Output Directory ({raw}) is outside the container mounts. Accepted forms: a repo-relative "
+        "path (e.g. ./recordings), /workspace/..., or the shared disk ./dataset|/workspace/dataset/...; "
+        "host-style absolute paths (/mnt/..., /home/...) do not exist inside the container"
     ]
 
 
@@ -140,5 +140,5 @@ def set_enable(driver: str, value: bool) -> None:
     pattern = re.compile(rf"^(\s*{re.escape(key)}\s*:\s*).*$", re.M)
     new_text, n = pattern.subn(rf"\g<1>{'true' if value else 'false'}", text, count=1)
     if n == 0:  # key missing: append under General is risky — refuse loudly
-        raise KeyError(f"config-main.yaml 中找不到 '{key}:' 行")
+        raise KeyError(f"no '{key}:' line found in config-main.yaml")
     save("main", new_text, expected_mtime=None)

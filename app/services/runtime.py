@@ -161,5 +161,5 @@ async def env_check() -> tuple[bool, str]:
     (missing binaries are caught by preflight per-binary checks)."""
     if is_docker():
         up = await docker_runner.is_container_up()
-        return up, "" if up else f"容器 {CONTAINER} 未运行"
+        return up, "" if up else f"Container {CONTAINER} is not running"
     return True, ""

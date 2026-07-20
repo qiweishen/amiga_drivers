@@ -43,7 +43,7 @@ def main() -> None:
         title="Amiga Sensor Console",
         reload=False,
         show=False,
-        favicon="resource/appn.png"
+        favicon="app/resource/appn.png"
     )
 
 
