@@ -2,8 +2,8 @@
 /// @brief Offline (post-processing) stationary segment detection on recorded IMU data.
 ///        For real-time stationary detection during data collection, see InitializationMonitor.
 
-#ifndef STATIONARY_DETECTOR_H
-#define STATIONARY_DETECTOR_H
+#ifndef INS401_STATIONARY_DETECTOR_H
+#define INS401_STATIONARY_DETECTOR_H
 
 #include <Eigen/Core>
 #include <utility>
@@ -13,6 +13,7 @@
 #include "ins401_tool.h"
 
 
+namespace INS401 {
 class StationaryDetector {
 public:
 	struct Config {
@@ -66,5 +67,6 @@ private:
 	// Build IMU data segments from detected time ranges using binary search.
 	void FindStationaryImuSegments();
 };
+}  // namespace INS401
 
-#endif	// STATIONARY_DETECTOR_H
+#endif	// INS401_STATIONARY_DETECTOR_H

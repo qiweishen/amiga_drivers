@@ -1,283 +1,141 @@
 # Amiga Drivers
 
-Unified data acquisition system for concurrent INS/GNSS and LiDAR sensor operation.
+Unified data acquisition for four sensors — Septentrio **AsteRx** (GNSS/INS),
+JAI **Go-X** GigE cameras, Aceinna **INS401** (INS/GNSS) and SICK **LMS4xxx**
+2D LiDARs — running concurrently in one process with a shared logging,
+configuration and lifecycle framework.
 
 ## Architecture
 
 ```
-                          +----------------------+
-                          |    AmigaDrivers      |
-                          |   (unified main)     |
-                          |                      |
-                          |  Signal Handler      |
-                          |  g_terminate flag    |
-                          +---+-------------+----+
-                              |             |
-                 propagate    |             |   propagate
-                 terminate    |             |   terminate
-                              v             v
-                 +------------+--+   +------+-----------+
-                 |  InsDriverApp |   |    DriverApp      |
-                 |   (INS401)    |   |   (LMS4xxx)      |
-                 +---+--------+-+   +---+--------+------+
-                     |        |         |        |
-            +--------+--+ +---+----+ +--+-----+ +--------+
-            | Receiver  | | NTRIP  | | Writer | | SICK   |
-            | Thread    | | Thread | | Thread | | Callback|
-            +-----+-----+ +---+---+ +---+----+ +----+---+
-                  |            |         |           |
-                  v            v         v           v
-             INS401 Device   NTRIP   Binary File   SICK LMS4xxx
-             (Ethernet)      Caster  (disk)        (TCP/Ethernet)
+                      +--------------------------------------+
+                      |         AmigaDrivers (main.cpp)      |
+                      |  SignalHandler · spdlog (single      |
+                      |  instance) · session folder · config |
+                      |  snapshot · terminate propagation    |
+                      +--+----------+-----------+---------+--+
+                         |          |           |         |
+                 AsterxDriverApp GoxDriverApp Ins401App Lms4xxxApp (xN instances)
+                         |          |           |         |
+                  Qt thread +   eBUS SDK    AF_PACKET   TCP CoLa-B client
+                  SsnRx (TCP)   (GVSP)      raw socket  + SPSC ring buffer
+                         |          |        + NTRIP    + writer thread
+                     SBF files  jai-raw-seg  6 bin/rtcm  scan_*.bin
+                                 segments    /nmea files
 ```
 
-### Build Targets
+Every driver app implements the same duck-typed interface consumed by
+`main.cpp`: `bool init([external_stop])` / `void run()` / `void shutdown()` /
+`std::atomic<bool>& TerminateFlag()`. Each app runs `run()` on its own thread;
+the main thread polls all terminate flags and propagates the first termination
+to everyone (orderly join + shutdown).
+
+### Targets and libraries
 
 | Target | Description |
 |--------|-------------|
-| `AmigaDrivers` | Unified executable running both drivers concurrently |
-| `INS401_Driver` | Standalone INS401 driver |
-| `LMS4xxx_Driver` | Standalone LMS4xxx LiDAR driver |
+| `AmigaDrivers` | The unified executable (the only acquisition entry point) |
+| `jai_discover` / `jai_snapshot` | GigE enumeration / one-shot frame grab (used by the web GUI) |
+| `jai_fake_capture` | SDK-free synthetic-frame test of the gox storage chain |
+| `asterx_lib`, `gox_lib`, `ins401_lib`, `lms4xxx_lib` | Per-driver static libraries |
+| `amiga_common` | Shared infrastructure: logging, config loading, signal handling, SPSC ring buffer, GUI marker contract |
 
-### Libraries
+### Dependencies
 
-| Library | Description |
-|---------|-------------|
-| `ins401_lib` | Static library: INS401 receiver, NTRIP, discovery, initialization |
-| `lms4xxx_lib` | Static library: SICK scanner interface, point cloud writer |
-| `amiga_common` | Static library: logging (spdlog), config (yaml-cpp), signal handling, binary I/O |
-
-## Dependencies
-
-| Dependency | Version | Purpose |
-|-----------|---------|---------|
-| CMake | >= 3.14 | Build system |
-| C++ compiler | C++17 | Language standard |
-| Eigen3 | vendored | Linear algebra (INS401 orientation) |
-| spdlog | v1.16.0 (FetchContent) | Logging |
-| yaml-cpp | 0.9.0 (FetchContent) | Configuration parsing |
-| sick_scan_xd | 3.9.0 (FetchContent + ExternalProject) | SICK LiDAR API |
-| OpenSSL | system | NTRIP client SSL/crypto |
-| Boost | system | CRC, networking utilities |
+| Dependency | Provided by | Used by |
+|-----------|-------------|---------|
+| spdlog v1.17.0 (+fmt) | FetchContent, pinned in `3rd_party/FetchContent/` | all (single process-wide logger) |
+| yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + asterx/ins401/lms4xxx configs |
+| nlohmann/json 3.11.3 | vendored `3rd_party/nlohmann/` | gox (strict JSONC config, session metadata) |
+| doctest 2.4.11 | vendored `3rd_party/doctest/` | common + gox unit tests |
+| Boost (header-only) | system | lms4xxx (Asio TCP), ins401 (CRC) |
+| OpenSSL | system | ins401 (NTRIP Base64) |
+| Eigen3 | system | ins401 (orientation math) |
+| Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
+| eBUS SDK for JAI 6.6.1 | installed in the devcontainer | gox (GigE Vision) |
+| GoogleTest v1.14 | FetchContent (asterx tests only) | asterx unit tests |
+| GeographicLib v2.7 | FetchContent (ins401 tests only, fetched on Debug configure) | ins401 CompareGravityAccuracy test |
 
 ## Building
 
-```bash
-# Configure (Release build)
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-# Build all targets
-cmake --build build --parallel
-
-# Or build specific targets
-cmake --build build --target AmigaDrivers    # Unified
-cmake --build build --target INS401_Driver   # INS only
-cmake --build build --target LMS4xxx_Driver # LiDAR only
-```
-
-Output binaries are placed in `build/bin/`.
-
-### Docker
-
-The project builds in Docker/devcontainer environments. Use your IDE's remote development
-or run the CMake commands above inside the container.
-
-## Usage
-
-### Unified Mode (Both Drivers)
+All C++ builds run inside the `amiga-sensor-dev` Docker container (the repo is
+mounted at `/workspace`):
 
 ```bash
-# Run both drivers with default config paths
-./build/bin/AmigaDrivers
-
-# Run both with explicit configs
-./build/bin/AmigaDrivers \
-    --ins-config ins401_driver/config/config-ins401.yaml \
-    --lidar-config lms4xxx_driver/config/config-lms4xxx.yaml
-
-# Run with LiDAR options
-./build/bin/AmigaDrivers \
-    --ins-config ins401_driver/config/config-ins401.yaml \
-    --lidar-config lms4xxx_driver/config/config-lms4xxx.yaml \
-    --ntp-server 10.75.96.100 \
-    --csv --quiet
+docker exec -w /workspace amiga-sensor-dev bash -lc \
+  'cmake -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)'
+docker exec -w /workspace amiga-sensor-dev bash -lc \
+  'ctest --test-dir build --output-on-failure'
 ```
 
-### Single Driver Mode
+Binaries land in `build/bin/`. Debug builds enable the unit tests
+(`common_tests`, `jai_tests` — doctest; `asterx_test_*` — GoogleTest) by
+default; Release builds skip them.
 
-Provide only one driver's config to run it alone:
+## Running
 
 ```bash
-# INS401 only
-./build/bin/AmigaDrivers --ins-config ins401_driver/config/config-ins401.yaml
-
-# LiDAR only
-./build/bin/AmigaDrivers --lidar-config lms4xxx_driver/config/config-lms4xxx.yaml
+./build/bin/AmigaDrivers [path/to/config-main.yaml]   # default: config/config-main.yaml
 ```
 
-Or use the standalone executables:
+`config/config-main.yaml` selects the drivers (`Enable ASTERX/GOX/INS401/LMS4XXX`),
+their per-driver config paths and the `Output Directory`. Each run creates a
+session folder:
+
+```
+<Output Directory>/<YYYYMMDD_HHMMSS>/
+├── log_<ts>.log          # unified trace-level log (the GUI's primary feed)
+├── config/               # snapshot of every enabled driver's config
+└── bin/<driver>/         # asterx: *.sbf · gox: jai-raw-seg segments
+                          # ins401: gnss/ins/imu/diagnostic .bin + .rtcm3/.nmea
+                          # lms4xxx: scan_<instance>_<ts>.bin
+```
+
+Shutdown: `Ctrl+C` or `SIGTERM` — the signal handler sets the shared terminate
+flag and every driver flushes and closes in order ("All drivers shut down" in
+the log marks a clean exit).
+
+Privileges: ins401 needs `CAP_NET_RAW` (raw Ethernet socket); lms4xxx requests
+`SCHED_FIFO`/CPU affinity and degrades with a warning without `CAP_SYS_NICE`.
+The web GUI applies `setcap` automatically before starting.
+
+## Web GUI
+
+`app/` is a NiceGUI control panel that runs on the host (`uv run amiga-gui`,
+Python env in `.venv/`) and drives the container binaries. It starts/stops
+`AmigaDrivers`, tails the session log, tracks per-sensor health, edits configs
+and previews Go-X snapshots.
+
+**Contract**: the GUI parses the log by line format
+(`[HH:MM:SS] [level] [Module]: msg`) and by verbatim lifecycle marker strings.
+Both are frozen in a single source of truth per side —
+`common/include/driver_markers.h` (C++) mirrored by `app/services/markers.py`
+(Python). After editing either, run:
 
 ```bash
-# INS401 standalone
-./build/bin/INS401_Driver [config-path]
-
-# LMS4xxx standalone
-./build/bin/LMS4xxx_Driver --config lms4xxx_driver/config/config-lms4xxx.yaml
+uv run python tools/check_contracts.py
 ```
 
-### CLI Options (Unified)
+`common_tests` additionally asserts the C++ log output matches the GUI's line
+regex.
 
-| Option | Description |
-|--------|-------------|
-| `--ins-config <path>` | INS401 YAML configuration file |
-| `--lidar-config <path>` | LMS4xxx YAML configuration file |
-| `--lidar-launch <path>` | SICK launch file (overrides config) |
-| `--lidar-output <path>` | LiDAR output binary file path |
-| `--ntp-server <ip>` | NTP server IP for LiDAR time sync |
-| `--csv` | Convert LiDAR output to CSV after recording |
-| `--quiet`, `-q` | Suppress SICK library console output |
-| `--log <path>` | Log file path |
-| `--help`, `-h` | Show help |
-
-### Shutdown
-
-Press `Ctrl+C` (SIGINT) or send SIGTERM. Both drivers shut down gracefully:
-1. Signal handler sets shared terminate flag
-2. Both driver run-loops detect the flag and exit
-3. Each driver stops its internal threads, flushes data, closes files
-4. INS401 post-processes binary files to CSV automatically
-5. LiDAR CSV conversion runs if `--csv` was specified
-
-## Configuration
-
-### INS401 (`config-ins401.yaml`)
-
-```yaml
-General:
-  Output Directory: "./data"
-
-Logging System:
-  Enable Logging: true
-
-NTRIP Client:
-  Enable RTK: false
-  Host: "localhost"
-  Port: 2101
-  Mount Point: "MOUNT"
-  Use VRS: false
-
-Static Initialization:
-  Enable GNSS Checking: false
-  Minimal Stationary Duration: 10.0   # seconds
-  Recompute Interval: 5.0             # seconds
-  Required Stable Count: 5
-```
-
-### LMS4xxx (`config-lms4xxx.yaml`)
-
-```yaml
-General:
-  Output Directory: ./data
-
-Logging System:
-  Enable Logging: true
-
-Sick Launch:
-  SICK Launch file: ../../lms4xxx_driver/config/sick_lms_4xxx.launch
-
-Time Synchronization:
-  NTP Server: 10.75.96.100
-```
-
-The SICK launch file (`sick_lms_4xxx.launch`) configures scanner-specific parameters:
-hostname, port, angle range, binary protocol, intensity, and range limits.
-
-## Driver-Specific Notes
-
-### INS401 Driver
-
-- Communicates via **raw Ethernet sockets** (AF_PACKET) — requires root or `CAP_NET_RAW`
-- **Auto-discovers** INS401 devices on the network at startup
-- Performs **static initialization**: detects stationary period via IMU, computes roll/pitch alignment
-- Optional **NTRIP RTK** corrections: connects to caster, forwards RTCM3 to device
-- **VRS support**: sends GGA position to NTRIP caster for virtual reference station
-- Output: binary files (IMU, GNSS, INS, diagnostic, RTCM, NMEA) auto-converted to CSV
-
-### LMS4xxx Driver
-
-- Uses **SICK scan_xd** library (dynamically loaded at runtime via dlopen)
-- Communicates via **TCP** binary protocol to SICK LMS4xxx scanners
-- Supports **NTP time synchronization** via SOPAS commands to the scanner
-- Output: binary LIDARPCD format, optionally converted to CSV
-- Point cloud data: x, y, z, intensity per point, organized in timestamped frames
-- Invalid points (NaN/Inf) are filtered; zero-filled echoes are preserved as null placeholders
-
-## Project Structure
+## Repository layout
 
 ```
 amiga_drivers/
-├── CMakeLists.txt                  # Top-level build (all targets)
-├── cmake/FetchContent.cmake        # spdlog, yaml-cpp, sick_scan_xd
-├── src/
-│   └── main.cpp                    # Unified entry point
-├── 3rd_party/
-│   └── eigen/                      # Vendored Eigen3
-├── common/                         # Shared library
-│   ├── include/common/
-│   │   ├── logger.h                # spdlog wrapper
-│   │   ├── config_loader.h         # yaml-cpp wrapper
-│   │   ├── binary_writer.h         # Buffered POSIX I/O
-│   │   ├── thread_safe_queue.h     # Bounded producer-consumer queue
-│   │   └── signal_handler.h        # POSIX signal handling
-│   └── src/
-├── ins401_driver/
-│   ├── include/
-│   │   ├── ins_driver_app.h        # App wrapper (init/run/shutdown)
-│   │   ├── ins401_receiver.h       # Packet receiver and parser
-│   │   ├── ntrip_client.h          # NTRIP v2.0 client
-│   │   ├── ethernet_socket.h       # Raw socket I/O
-│   │   └── ...
-│   ├── src/
-│   │   ├── main.cpp                # Standalone entry point
-│   │   ├── ins_driver_app.cpp      # App wrapper implementation
-│   │   └── ...
-│   └── config/
-│       └── config-ins401.yaml
-└── lms4xxx_driver/
-    ├── include/
-    │   ├── driver_app.h            # App wrapper (init/run/shutdown)
-    │   ├── point_cloud_types.h     # PointXYZI, PointCloudFrame
-    │   └── ...
-    ├── src/
-    │   ├── main.cpp                # Standalone entry point
-    │   └── ...
-    └── config/
-        ├── config-lms4xxx.yaml
-        └── sick_lms_4xxx.launch
+├── main.cpp                  # unified entry point
+├── CMakeLists.txt            # top-level build
+├── cmake/FetchContent.cmake  # spdlog + yaml-cpp (sources pinned in-repo)
+├── 3rd_party/                # pinned FetchContent sources + vendored single-header libs
+├── common/                   # amiga_common + tests/
+├── asterx_driver/            # Qt/SsnRx session, SBF writer, GoogleTest tests
+├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + tools/ + tests/
+├── ins401_driver/            # receiver, NTRIP client, static initialization
+├── lms4xxx_driver/           # TCP CoLa-B driver, scan parser, record writer
+├── parse/                    # DataConverter: offline bin -> CSV (currently not in the build)
+├── app/                      # NiceGUI web GUI (host-side, uv-managed .venv)
+└── tools/                    # repo tooling (contract checker, ...)
 ```
 
-## Threading Model
-
-The unified executable manages 5+ threads:
-
-| Thread | Owner | Purpose |
-|--------|-------|---------|
-| Main | Unified main | Signal propagation, monitor both drivers |
-| INS run | InsDriverApp | Polls initialization, shows spinner |
-| INS receiver | INSDeviceReceiver | Raw Ethernet packet receive loop |
-| INS NTRIP | NTRIPClient | RTCM correction data receive + forward |
-| LiDAR run | DriverApp | Polls terminate flag |
-| LiDAR writer | DriverApp | Pops frames from queue, writes to disk |
-| SICK callback | SICK library | Delivers point cloud frames (internal) |
-
-Thread safety is ensured via `std::atomic<bool>` terminate flags, `std::mutex` for shared
-state, and `std::condition_variable` for producer-consumer synchronization.
-
-## Known Limitations and TODOs
-
-- **NTRIP SSL/TLS**: Stubbed but not yet implemented in the NTRIP client
-- **Single INS401 device**: Discovery returns the first device found; multiple INS401 devices are not supported
-- **Raw sockets require privileges**: The INS401 driver needs root or `CAP_NET_RAW` capability
-- **SICK library console output**: Some raw `printf()` calls in the SICK library cannot be fully suppressed via the API; the `--quiet` flag redirects stdout to `/dev/null` during init as a workaround
-- **Spinner config**: The INS401 terminal spinner looks for `./spinner_frames.conf` relative to the working directory
-- **No cross-driver data fusion**: The unified mode runs both drivers concurrently but does not correlate INS and LiDAR data streams
+Per-driver details live in `asterx_driver/README.md` and `gox_driver/README.md`
+(ins401/lms4xxx have no per-driver README yet).

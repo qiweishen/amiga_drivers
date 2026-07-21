@@ -61,7 +61,7 @@ add_subdirectory(asterx_driver)
 
 ################################################################################
 # DataConverter (standalone binary-to-CSV post-processing tool)
-#add_subdirectory(parse)
+add_subdirectory(parse)
 
 
 ################################################################################
@@ -93,6 +93,7 @@ message(STATUS "")
 message(STATUS "  Shared Dependencies:")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")
-message(STATUS "    nlohmann/json:  gox_driver/third_party (vendored)")
+message(STATUS "    nlohmann/json:  3rd_party/ (vendored)")
+message(STATUS "    doctest:        3rd_party/ (vendored)")
 message(STATUS "========================================")
 message(STATUS "")

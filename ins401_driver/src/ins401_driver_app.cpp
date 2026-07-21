@@ -4,16 +4,24 @@
 #include <filesystem>
 #include <spdlog/spdlog.h>
 
+#include "driver_markers.h"
 #include "initialization_monitor.h"
 #include "ins401_discover.h"
 #include "ins401_ntrip_client.h"
 #include "ins401_receiver.h"
 #include "ins401_tool.h"
+#include "logger.h"
+#include "thread_util.h"
 #include "utility.h"
+
+// The app class itself stays global (unified-main convention); its members
+// and locals are INS401 types
+using namespace INS401;
 
 
 namespace {
-	constexpr std::string_view kModule = "INS401App";
+	constexpr std::string_view kModule = Common::Markers::kModuleIns401;
+	Common::DriverLog g_log{ std::string(kModule) };
 }
 
 
@@ -31,32 +39,27 @@ Ins401DriverApp::~Ins401DriverApp() {
 }
 
 
-bool Ins401DriverApp::init() {
+bool Ins401DriverApp::init(const std::function<bool()> & /*external_stop*/) {
 	// Load config (the copy into <data_folder>/config/ is done by the unified main)
 	try {
-		INS401Tool::LoadConfig(config_path_, config_);
+		Tool::LoadConfig(config_path_, config_);
 	} catch (const std::exception &e) {
 		Common::Log::log_and_throw(kModule, "Config/init failed", e.what());
 	}
 
-	// Discover device on the network
 	auto discover = std::make_unique<INSDeviceDiscover>();
 	auto devices = discover->DiscoverDevices();
 	if (devices.empty()) {
-		Common::Log::log_message(spdlog::level::warn, kModule, "No INS401 device found on network");
+		g_log.warn("No INS401 device found on network");
 		return false;
 	}
 	// In our setup, we only support one INS device
 	// If multiple are found, just take the first one
 	device_ = std::make_unique<DeviceInfo>(devices.begin()->second);
-	Common::Log::log_message(
-			spdlog::level::info, kModule,
-			fmt::format("Found {} on interface {} with MAC {}", device_->product, device_->interface_name, device_->mac_address));
+	g_log.info("Found {} on interface {} with MAC {}", device_->product, device_->interface_name, device_->mac_address);
 
-	// Initialize the static initialization monitor
 	init_monitor_ = std::make_shared<InitializationMonitor>(config_);
 
-	// Start receiver thread
 	receiver_ = std::make_shared<INSDeviceReceiver>(device_->interface_name, device_->mac_address, config_);
 	receiver_->SetInitializationMonitor(init_monitor_.get());
 	receiver_->SetImuCallback([monitor = init_monitor_](const RawIMUData &imu) { monitor->OnImuData(imu); });
@@ -68,17 +71,13 @@ bool Ins401DriverApp::init() {
 		try {
 			receiver_->Run();
 		} catch (const std::exception &e) {
-			// Use spdlog::error() directly — log_and_throw() would re-throw inside
-			// a thread with no outer catch, causing std::terminate()
-			spdlog::error("[{}] Receiver exception: {}", kModule, e.what());
+			g_log.error("Receiver exception: {}", e.what());
 			terminate_.store(true, std::memory_order_release);
 		}
 	});
 
-	// Wait for the first GNSS solution and gravity estimate
 	init_monitor_->WaitForFirstGnssAndGravity(std::chrono::seconds(3));
 
-	// Configure NTRIP client
 	ntrip_client_ = std::make_unique<NTRIPClient>(config_);
 	if (config_.use_vrs) {
 		receiver_->SetNtripClient(ntrip_client_.get());
@@ -96,38 +95,33 @@ bool Ins401DriverApp::init() {
 		try {
 			if (!ntrip_client_->Connect()) {
 				if (config_.enable_rtk) {
-					spdlog::error("[{}] NTRIP connection failed", kModule);
+					g_log.error("NTRIP connection failed");
 					terminate_.store(true, std::memory_order_release);
 					return;
 				}
-				Common::Log::log_message(spdlog::level::warn, kModule, "NTRIP connection failed (RTK not required, ignored)");
+				g_log.warn("NTRIP connection failed (RTK not required, ignored)");
 				return;
 			}
 			ntrip_client_->StartReceiving();
 		} catch (const std::exception &e) {
 			if (config_.enable_rtk) {
-				// Cannot use log_message(err) or log_and_throw() inside a thread
-				// catch block — both throw, causing std::terminate()
-				spdlog::error("[{}] NTRIP client exception: {}", kModule, e.what());
+				g_log.error("NTRIP client exception: {}", e.what());
 				terminate_.store(true, std::memory_order_release);
 			} else {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("NTRIP client exception (RTK not required, ignored): {}", e.what()));
+				g_log.warn("NTRIP client exception (RTK not required, ignored): {}", e.what());
 				ntrip_client_->Disconnect();
 			}
 		}
 	});
 
-	Common::Log::log_message(spdlog::level::info, kModule, "INS401 driver initialized");
+	Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kIns401Initialized);
 	return true;
 }
 
 
 void Ins401DriverApp::run() {
 	// Block until termination is requested (spinner is now managed by main)
-	while (!terminate_.load(std::memory_order_acquire)) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
+	Common::ThreadUtil::WaitUntilTerminated(terminate_);
 }
 
 
@@ -136,10 +130,8 @@ void Ins401DriverApp::shutdown() {
 		return;
 	}
 
-	// Signal termination
 	terminate_.store(true, std::memory_order_release);
 
-	// Stop receiver and join its thread
 	if (receiver_) {
 		receiver_->Stop();
 	}
@@ -147,17 +139,18 @@ void Ins401DriverApp::shutdown() {
 		receiver_thread_.join();
 	}
 
-	// Disconnect NTRIP and join its thread
-	if (ntrip_client_) {
-		ntrip_client_->Disconnect();
-	}
+	// Join the ntrip bring-up thread BEFORE Disconnect: it may still be inside
+	// Connect()'s blocking handshake on the TcpClient that Disconnect destroys
 	if (ntrip_thread_.joinable()) {
 		ntrip_thread_.join();
+	}
+	if (ntrip_client_) {
+		ntrip_client_->Disconnect();
 	}
 
 	if (receiver_) {
 		receiver_->LogStatistics();
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule, "INS401 driver shutdown completely");
+	Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kIns401Shutdown);
 }

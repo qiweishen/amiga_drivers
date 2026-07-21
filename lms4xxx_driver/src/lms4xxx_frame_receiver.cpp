@@ -1,13 +1,19 @@
 #include "lms4xxx_frame_receiver.h"
 
-#include <chrono>
+#include "byte_util.h"
+#include "lms4xxx_cola_b.h"
+#include "time_util.h"
+
 #include <cstring>
 
+#include "logger.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxFrameReceiver";
+
+	Common::DriverLog g_log{ std::string(kModule) };
 
 	// Size of the STX header (4 x 0x02).
 	constexpr std::size_t kStxSize = 4;
@@ -15,18 +21,6 @@ namespace {
 	// Size of the header: STX(4) + Length(4).
 	constexpr std::size_t kHeaderSize = kStxSize + 4;
 
-	// Read a big-endian uint32 from a byte buffer.
-	inline std::uint32_t read_uint32_be(const std::uint8_t *p) {
-		return (static_cast<std::uint32_t>(p[0]) << 24) | (static_cast<std::uint32_t>(p[1]) << 16) |
-			   (static_cast<std::uint32_t>(p[2]) << 8) | static_cast<std::uint32_t>(p[3]);
-	}
-
-	// Get current timestamp in microseconds (monotonic clock).
-	inline std::uint64_t now_us() {
-		using clock = std::chrono::steady_clock;
-		auto now = clock::now();
-		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
-	}
 }  // namespace
 
 
@@ -53,7 +47,6 @@ namespace LMS4xxx {
 			if (write_pos < offset + kStxSize) {
 				return write_pos;
 			}
-			// Search for four consecutive 0x02 bytes.
 			const std::size_t search_end = write_pos - kStxSize + 1;
 			for (std::size_t i = offset; i < search_end; ++i) {
 				if (buffer[i] == 0x02 && buffer[i + 1] == 0x02 && buffer[i + 2] == 0x02 && buffer[i + 3] == 0x02) {
@@ -88,15 +81,14 @@ namespace LMS4xxx {
 			}
 
 			// Read the data length field (big-endian).
-			std::uint32_t data_len = read_uint32_be(buffer.data() + pos + kStxSize);
+			std::uint32_t data_len = Common::ByteUtil::LoadBigU32(buffer.data() + pos + kStxSize);
 
 			// Sanity check: data_len must not exceed max_frame_size minus overhead.
 			if (data_len > max_frame_size) {
 				if (on_error) {
 					on_error("frame data length exceeds maximum");
 				}
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Frame data length {} exceeds max {}, skipping STX", data_len, max_frame_size));
+				g_log.warn("Frame data length {} exceeds max {}, skipping STX", data_len, max_frame_size);
 				// Skip past this STX marker and try to resync.
 				return kStxSize;
 			}
@@ -104,47 +96,34 @@ namespace LMS4xxx {
 			// Total frame size: STX(4) + Length(4) + Data(data_len) + Checksum(1).
 			std::size_t total_frame_size = kHeaderSize + data_len + 1;
 
-			// Do we have the complete frame?
 			if (available < total_frame_size) {
 				return 0;  // Need more data.
 			}
 
-			// Pointers to frame components.
 			const std::uint8_t *data_start = buffer.data() + pos + kHeaderSize;
 			std::uint8_t received_cs = buffer[pos + kHeaderSize + data_len];
 
 			// Validate CRC8 (XOR over data portion).
-			std::uint8_t computed_cs = compute_crc8_internal(data_start, data_len);
+			std::uint8_t computed_cs = CoLaBCodec::ComputeChecksum(data_start, data_len);
 
 			if (computed_cs != received_cs) {
 				if (on_error) {
 					on_error("CRC8 checksum mismatch");
 				}
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("CRC8 mismatch: computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs));
+				g_log.warn("CRC8 mismatch: computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs);
 				// Skip past this STX and try to resync.
 				return kStxSize;
 			}
 
-			// Frame is valid — construct RawFrame and deliver.
 			RawFrame frame;
 			frame.data.assign(data_start, data_start + data_len);
-			frame.receive_timestamp_us = now_us();
+			frame.receive_timestamp_us = Common::TimeUtil::SteadyNowUs();
 
 			if (on_frame) {
 				on_frame(std::move(frame));
 			}
 
 			return total_frame_size;
-		}
-
-		// Static CRC8 computation (XOR over all bytes).
-		static std::uint8_t compute_crc8_internal(const std::uint8_t *data, std::size_t len) {
-			std::uint8_t cs = 0;
-			for (std::size_t i = 0; i < len; ++i) {
-				cs ^= data[i];
-			}
-			return cs;
 		}
 	};
 
@@ -170,7 +149,6 @@ namespace LMS4xxx {
 			impl_->buffer.resize(impl_->write_pos + len + impl_->max_frame_size);
 		}
 
-		// Append incoming data.
 		std::memcpy(impl_->buffer.data() + impl_->write_pos, data, len);
 		impl_->write_pos += len;
 
@@ -178,7 +156,6 @@ namespace LMS4xxx {
 		std::size_t scan_pos = 0;
 
 		while (scan_pos < impl_->write_pos) {
-			// Find the next STX marker.
 			std::size_t stx_pos = impl_->find_stx(scan_pos);
 
 			if (stx_pos == impl_->write_pos) {
@@ -195,7 +172,6 @@ namespace LMS4xxx {
 				scan_pos = stx_pos;
 			}
 
-			// Try to extract a complete frame at stx_pos.
 			std::size_t consumed = impl_->try_extract_frame(stx_pos);
 
 			if (consumed == 0) {
@@ -206,7 +182,6 @@ namespace LMS4xxx {
 			scan_pos = stx_pos + consumed;
 		}
 
-		// Compact: remove fully processed bytes.
 		impl_->compact(scan_pos);
 	}
 
@@ -217,7 +192,7 @@ namespace LMS4xxx {
 
 
 	std::uint8_t FrameReceiver::ComputeCrc8(const std::uint8_t *data, std::size_t len) {
-		return Impl::compute_crc8_internal(data, len);
+		return CoLaBCodec::ComputeChecksum(data, len);
 	}
 
 

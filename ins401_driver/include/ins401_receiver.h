@@ -1,5 +1,5 @@
-#ifndef INS_RECEIVER_H
-#define INS_RECEIVER_H
+#ifndef INS401_RECEIVER_H
+#define INS401_RECEIVER_H
 
 #include <atomic>
 #include <fstream>
@@ -8,10 +8,12 @@
 #include <optional>
 #include <vector>
 
+#include "file_writer.h"
 #include "ins401_data_type.h"
 #include "ins401_ethernet_socket.h"
 
 
+namespace INS401 {
 class InitializationMonitor;
 class NTRIPClient;
 
@@ -107,23 +109,16 @@ private:
 	std::string timestamp_;
 
 	// Binary files written during collection (raw payloads)
-	std::ofstream gnss_bin_file_;
-	std::ofstream ins_bin_file_;
-	std::ofstream imu_bin_file_;
-	std::ofstream diagnostic_bin_file_;
+	Common::BufferedFileWriter gnss_bin_file_;
+	Common::BufferedFileWriter ins_bin_file_;
+	Common::BufferedFileWriter imu_bin_file_;
+	Common::BufferedFileWriter diagnostic_bin_file_;
 
 	// Direct-write files (no post-processing needed)
-	std::ofstream rtcm_rover_file_;
-	std::ofstream nmea_file_;
+	Common::BufferedFileWriter rtcm_rover_file_;
+	Common::BufferedFileWriter nmea_file_;
 
 	const std::size_t write_buffer_size_ = 256 * 1024;
-
-	std::vector<char> gnss_bin_buffer_;
-	std::vector<char> ins_bin_buffer_;
-	std::vector<char> imu_bin_buffer_;
-	std::vector<char> diagnostic_bin_buffer_;
-	std::vector<char> rtcm_rover_file_buffer_;
-	std::vector<char> nmea_file_buffer_;
 
 	// Binary file paths
 	std::string gnss_bin_path_;
@@ -188,23 +183,12 @@ private:
 
 	void HandleNMEAMessage(const std::uint8_t *packet, std::size_t max_len);
 
-	// Binary-to-struct parsing (shared between real-time callbacks and post-processing)
-	static GNSSSolutionData ParseGNSSSolutionData(const std::uint8_t *payload);
-
-	static INSSolutionData ParseINSSolutionData(const std::uint8_t *payload);
-
-	static DiagnosticMessage ParseDiagnosticMessage(const std::uint8_t *payload);
-
-	static RawIMUData ParseRawIMUData(const std::uint8_t *payload);
-
-	// static
-
 	static bool IsGgaSentence(const std::string &nmea);
 
 	void HandleGgaMessage(const std::string &nmea);
 
 	void MonitorGNSSStatus(GNSSSolutionData &gnss);
 };
-
+}  // namespace INS401
 
 #endif

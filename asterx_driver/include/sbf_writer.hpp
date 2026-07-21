@@ -1,13 +1,13 @@
-// SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <filesystem>
 #include <string>
 
 #include <QByteArray>
+
+#include "file_writer.h"
 
 namespace asterx {
     struct WriterStats {
@@ -17,13 +17,16 @@ namespace asterx {
     };
 
     // Streams CRC-validated SBF blocks (as delivered by SsnRx::newSBFBlock) to
-    // disk, one file at a time, rotating when the current file passes a size or
-    // wall-time threshold.
+    // disk on the shared rotating-file core, one file at a time, rotating when
+    // the current file passes a size or wall-time threshold. rotate_bytes is a
+    // HARD cap (pre-write check): the RxTools converters refuse files >= 2 GB.
     //
     // Output filenames: <prefix>-YYYYMMDDTHHMMSSZ-<seq>.sbf  (seq starts at 1).
     //
     // Blocks arrive wire-exact (sync 0x24 0x40, CRC, ID, Length, body), so the
     // writer is a plain append; rotation boundaries always fall between blocks.
+    // Runs synchronously on the Qt event loop thread: a disk failure surfaces
+    // immediately as std::runtime_error (Session turns it into fatalError).
     class SbfWriter {
     public:
         struct Config {
@@ -53,21 +56,11 @@ namespace asterx {
         // Flush + close the current file (final shutdown).
         void close() noexcept;
 
-        [[nodiscard]] const WriterStats &stats() const noexcept { return stats_; }
-        [[nodiscard]] std::filesystem::path current_file() const noexcept { return current_path_; }
+        [[nodiscard]] WriterStats stats() const noexcept;
+        [[nodiscard]] std::filesystem::path current_file() const noexcept { return writer_.CurrentPath(); }
 
     private:
-        void open_new_file_();
-
-        void rotate_if_needed_();
-
         Config cfg_;
-        std::FILE *fp_{nullptr};
-        std::filesystem::path current_path_;
-        std::uint64_t current_size_{0};
-        std::chrono::steady_clock::time_point file_start_{};
-        int seq_{0};
-
-        WriterStats stats_{};
+        Common::RotatingFileWriter writer_;
     };
 } // namespace asterx

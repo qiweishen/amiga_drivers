@@ -14,18 +14,11 @@ from pathlib import Path
 from typing import Callable
 
 from .log_buffer import LogLine, parse_line
+from .markers import REPLAY_MARKER_SUBSTRINGS
 
-# Substrings that make a line load-bearing for HealthMonitor during replay.
-MARKER_SUBSTRINGS = (
-    "driver initialized",
-    "initialized successfully",
-    "shutdown completely",
-    "initialization failed",
-    "run() exception",
-    "All drivers shut down",
-    "Received signal",
-    "Starting Amiga Drivers",
-)
+# Substrings that make a line load-bearing for HealthMonitor during replay
+# (defined in markers.py, the C++ contract mirror).
+MARKER_SUBSTRINGS = REPLAY_MARKER_SUBSTRINGS
 
 REPLAY_TAIL_LINES = 500
 

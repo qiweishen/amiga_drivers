@@ -1,8 +1,8 @@
 /// @file ethernet_socket.h
 /// @brief Raw Ethernet socket abstraction and Aceinna packet-level utilities for INS401 communication.
 
-#ifndef ETHERNET_SOCKET_H
-#define ETHERNET_SOCKET_H
+#ifndef INS401_ETHERNET_SOCKET_H
+#define INS401_ETHERNET_SOCKET_H
 
 #include <array>
 #include <cstdio>
@@ -16,6 +16,7 @@
 #include <vector>
 
 
+namespace INS401 {
 // Ethernet frame sizing constants.
 inline constexpr std::size_t kMacAddressSize = 6;
 
@@ -179,6 +180,6 @@ namespace Ethernet {
 		[[nodiscard]] uint32_t CalculateRTCM3_CRC24(const void *data, std::size_t nBytes);
 	}  // namespace CRC
 }  // namespace Ethernet
-
+}  // namespace INS401
 
 #endif

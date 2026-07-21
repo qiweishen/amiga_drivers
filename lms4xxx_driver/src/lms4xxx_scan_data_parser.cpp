@@ -4,11 +4,14 @@
 
 #include "lms4xxx_cola_b.h"
 #include "lms4xxx_error.h"
+#include "logger.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxScanDataParser";
+
+	Common::DriverLog g_log{ std::string(kModule) };
 
 	// Maximum allowed 16-bit channel count (DIST1, RSSI1, REFL1, ANGL1).
 	constexpr std::uint16_t kMax16BitChannelCount = 4;
@@ -16,8 +19,6 @@ namespace {
 	// Maximum allowed 8-bit channel count (QLTY1 only).
 	constexpr std::uint16_t kMax8BitChannelCount = 1;
 
-	// Maximum data points per channel.
-	constexpr std::uint16_t kMaxDataPoints = 841;
 }  // namespace
 
 
@@ -62,12 +63,10 @@ namespace LMS4xxx {
 	}
 
 	std::error_code ScanDataParser::Parse(const std::uint8_t *data, std::size_t len, ScanData &out) {
-		// Clear output
 		out = ScanData{};
 
-		// Minimum payload size check
 		if (len < 52) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Payload too short: {} bytes (minimum ~52)", len));
+			g_log.warn("Payload too short: {} bytes (minimum ~52)", len);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -131,15 +130,14 @@ namespace LMS4xxx {
 		// + Digital inputs (2x1B) + Digital outputs (2x1B)
 		// + Reserved (2B)
 		if (!r.has_bytes(28)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated device info block, pos={}", r.pos));
+			g_log.warn("Truncated device info block, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
 		// Version & device info
 		out.device_info.version_number = r.read_uint16();
 		if (out.device_info.version_number != 1) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("Unexpected version number: {} (expected 1)", out.device_info.version_number));
+			g_log.warn("Unexpected version number: {} (expected 1)", out.device_info.version_number);
 		}
 
 		out.device_info.device_number = r.read_uint16();
@@ -170,7 +168,7 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParseFrequency(Reader &r, ScanData &out) {
 		// Scan frequency (4B) + Measurement frequency (4B)
 		if (!r.has_bytes(8)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated frequency block, pos={}", r.pos));
+			g_log.warn("Truncated frequency block, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -183,7 +181,7 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParseEncoder(Reader &r, ScanData &out) {
 		// Amount of encoder (2B)
 		if (!r.has_bytes(2)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated encoder count, pos={}", r.pos));
+			g_log.warn("Truncated encoder count, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -193,7 +191,7 @@ namespace LMS4xxx {
 		if (encoder_count > 0) {
 			// Encoder position (4B) + Reserved (2B) per encoder
 			if (!r.has_bytes(6)) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated encoder data, pos={}", r.pos));
+				g_log.warn("Truncated encoder data, pos={}", r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 			out.encoder.position = r.read_uint32();
@@ -206,15 +204,14 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParseChannels16bit(Reader &r, ScanData &out) {
 		// Amount of 16-bit channels (2B)
 		if (!r.has_bytes(2)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated 16-bit channel count, pos={}", r.pos));
+			g_log.warn("Truncated 16-bit channel count, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
 		const auto channel_count = r.read_uint16();
 
 		if (channel_count > kMax16BitChannelCount) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("Invalid 16-bit channel count: {} (max {})", channel_count, kMax16BitChannelCount));
+			g_log.warn("Invalid 16-bit channel count: {} (max {})", channel_count, kMax16BitChannelCount);
 			return make_error_code(ErrorCode::kProtocolError);
 		}
 
@@ -225,8 +222,7 @@ namespace LMS4xxx {
 			//                + StartAngle(4B) + AngularStep(2B) + DataCount(2B)
 			constexpr std::size_t kChannelHeaderSize = 5 + 4 + 4 + 4 + 2 + 2;
 			if (!r.has_bytes(kChannelHeaderSize)) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Truncated 16-bit channel {} header, pos={}", ch, r.pos));
+				g_log.warn("Truncated 16-bit channel {} header, pos={}", ch, r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -242,19 +238,15 @@ namespace LMS4xxx {
 			channel.angle_step = r.read_uint16();
 			channel.num_data = r.read_uint16();
 
-			if (channel.num_data > kMaxDataPoints) {
-				Common::Log::log_message(
-						spdlog::level::warn, kModule,
-						fmt::format("Channel {} data count {} exceeds maximum {}", name, channel.num_data, kMaxDataPoints));
+			if (channel.num_data > kMaxPointsPerScan) {
+				g_log.warn("Channel {} data count {} exceeds maximum {}", name, channel.num_data, kMaxPointsPerScan);
 				return make_error_code(ErrorCode::kProtocolError);
 			}
 
 			// Read data points (2 bytes each)
 			const std::size_t data_bytes = static_cast<std::size_t>(channel.num_data) * 2;
 			if (!r.has_bytes(data_bytes)) {
-				Common::Log::log_message(
-						spdlog::level::warn, kModule,
-						fmt::format("Truncated 16-bit channel {} data: need {} bytes, have {}", name, data_bytes, r.remaining()));
+				g_log.warn("Truncated 16-bit channel {} data: need {} bytes, have {}", name, data_bytes, r.remaining());
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -272,15 +264,14 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParseChannels8bit(Reader &r, ScanData &out) {
 		// Amount of 8-bit channels (2B)
 		if (!r.has_bytes(2)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated 8-bit channel count, pos={}", r.pos));
+			g_log.warn("Truncated 8-bit channel count, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
 		const auto channel_count = r.read_uint16();
 
 		if (channel_count > kMax8BitChannelCount) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("Invalid 8-bit channel count: {} (max {})", channel_count, kMax8BitChannelCount));
+			g_log.warn("Invalid 8-bit channel count: {} (max {})", channel_count, kMax8BitChannelCount);
 			return make_error_code(ErrorCode::kProtocolError);
 		}
 
@@ -291,8 +282,7 @@ namespace LMS4xxx {
 			//                + StartAngle(4B) + AngularStep(2B) + DataCount(2B)
 			constexpr std::size_t kChannelHeaderSize = 5 + 4 + 4 + 4 + 2 + 2;
 			if (!r.has_bytes(kChannelHeaderSize)) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Truncated 8-bit channel {} header, pos={}", ch, r.pos));
+				g_log.warn("Truncated 8-bit channel {} header, pos={}", ch, r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -309,18 +299,14 @@ namespace LMS4xxx {
 			channel.angle_step = r.read_uint16();
 			channel.num_data = r.read_uint16();
 
-			if (channel.num_data > kMaxDataPoints) {
-				Common::Log::log_message(
-						spdlog::level::warn, kModule,
-						fmt::format("Channel {} data count {} exceeds maximum {}", name, channel.num_data, kMaxDataPoints));
+			if (channel.num_data > kMaxPointsPerScan) {
+				g_log.warn("Channel {} data count {} exceeds maximum {}", name, channel.num_data, kMaxPointsPerScan);
 				return make_error_code(ErrorCode::kProtocolError);
 			}
 
 			// Read data points (1 byte each)
 			if (!r.has_bytes(channel.num_data)) {
-				Common::Log::log_message(
-						spdlog::level::warn, kModule,
-						fmt::format("Truncated 8-bit channel {} data: need {} bytes, have {}", name, channel.num_data, r.remaining()));
+				g_log.warn("Truncated 8-bit channel {} data: need {} bytes, have {}", name, channel.num_data, r.remaining());
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -338,7 +324,7 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParsePosition(Reader &r, ScanData &out) {
 		// Y rotation (4B) — no reserved prefix on LMS4000
 		if (!r.has_bytes(4)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated position block, pos={}", r.pos));
+			g_log.warn("Truncated position block, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -350,7 +336,7 @@ namespace LMS4xxx {
 	std::error_code ScanDataParser::ParseDeviceName(Reader &r, ScanData &out) {
 		// Name flag (2B), then conditionally: Name length (2B) + Name (var)
 		if (!r.has_bytes(2)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated device name flag, pos={}", r.pos));
+			g_log.warn("Truncated device name flag, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -359,18 +345,18 @@ namespace LMS4xxx {
 
 		if (out.has_device_name) {
 			if (!r.has_bytes(2)) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated device name length, pos={}", r.pos));
+				g_log.warn("Truncated device name length, pos={}", r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
 			const auto name_len = r.read_uint16();
 			if (name_len > 16) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Device name length {} exceeds max 16", name_len));
+				g_log.warn("Device name length {} exceeds max 16", name_len);
 				return make_error_code(ErrorCode::kProtocolError);
 			}
 
 			if (!r.has_bytes(name_len)) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated device name string, pos={}", r.pos));
+				g_log.warn("Truncated device name string, pos={}", r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -385,7 +371,7 @@ namespace LMS4xxx {
 		//   Year (2B) + Month (1B) + Day (1B) + Hour (1B) + Minute (1B)
 		//   + Second (1B) + Microsecond (4B) = 11 bytes
 		if (!r.has_bytes(2)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated timestamp flag, pos={}", r.pos));
+			g_log.warn("Truncated timestamp flag, pos={}", r.pos);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -394,7 +380,7 @@ namespace LMS4xxx {
 
 		if (out.has_timestamp) {
 			if (!r.has_bytes(11)) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Truncated timestamp data, pos={}", r.pos));
+				g_log.warn("Truncated timestamp data, pos={}", r.pos);
 				return make_error_code(ErrorCode::kFrameTooShort);
 			}
 
@@ -424,7 +410,7 @@ namespace LMS4xxx {
 			return ChannelContent16::kAngl1;
 		}
 
-		Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Unknown 16-bit channel name: '{}'", name));
+		g_log.warn("Unknown 16-bit channel name: '{}'", name);
 		return ChannelContent16::kUnknown;
 	}
 
@@ -433,7 +419,7 @@ namespace LMS4xxx {
 			return ChannelContent8::kQlty1;
 		}
 
-		Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Unknown 8-bit channel name: '{}'", name));
+		g_log.warn("Unknown 8-bit channel name: '{}'", name);
 		return ChannelContent8::kUnknown;
 	}
 

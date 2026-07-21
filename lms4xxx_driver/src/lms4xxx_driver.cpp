@@ -1,14 +1,12 @@
 #include "lms4xxx_driver.h"
 
 #include <array>
-#include <charconv>
+#include <boost/asio/ip/address_v4.hpp>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <initializer_list>
 #include <mutex>
-#include <pthread.h>
-#include <sched.h>
 #include <string_view>
 #include <thread>
 
@@ -19,11 +17,15 @@
 #include "lms4xxx_scan_data_parser.h"
 #include "lms4xxx_spsc_ring_buffer.h"
 #include "lms4xxx_tcp_client.h"
+#include "logger.h"
+#include "thread_util.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxDriver";
+
+	Common::DriverLog g_log{ std::string(kModule) };
 
 	// Read buffer size for the receive thread (16 KB).
 	constexpr std::size_t kReadBufferSize = 16 * 1024;
@@ -80,7 +82,7 @@ namespace LMS4xxx {
 				try {
 					cb(new_state);
 				} catch (const std::exception &e) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Connection callback threw", e.what());
+					g_log.warn("Connection callback threw - {}", e.what());
 				}
 			}
 		}
@@ -96,7 +98,7 @@ namespace LMS4xxx {
 				try {
 					cb(ec, detail);
 				} catch (const std::exception &e) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Error callback threw", e.what());
+					g_log.warn("Error callback threw - {}", e.what());
 				}
 			}
 		}
@@ -109,7 +111,6 @@ namespace LMS4xxx {
 				return make_error_code(ErrorCode::kNotConnected);
 			}
 
-			// Send command.
 			auto ec = tcp_client->Write(frame);
 			if (ec) {
 				return ec;
@@ -129,9 +130,7 @@ namespace LMS4xxx {
 
 			// Verify STX
 			if (header[0] != 0x02 || header[1] != 0x02 || header[2] != 0x02 || header[3] != 0x02) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Invalid STX in response: {:02X} {:02X} {:02X} {:02X}", header[0], header[1],
-													 header[2], header[3]));
+				g_log.warn("Invalid STX in response: {:02X} {:02X} {:02X} {:02X}", header[0], header[1], header[2], header[3]);
 				return make_error_code(ErrorCode::kProtocolError);
 			}
 
@@ -139,7 +138,7 @@ namespace LMS4xxx {
 			const auto data_len = CoLaBCodec::DecodeUint32(header + 4);
 
 			if (data_len > 64 * 1024) {
-				Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Response data length {} exceeds max", data_len));
+				g_log.warn("Response data length {} exceeds max", data_len);
 				return make_error_code(ErrorCode::kFrameTooLong);
 			}
 
@@ -157,9 +156,7 @@ namespace LMS4xxx {
 			const auto computed_cs = CoLaBCodec::ComputeChecksum(data_and_cs.data(), data_len);
 			const auto received_cs = data_and_cs[data_len];
 			if (computed_cs != received_cs) {
-				Common::Log::log_message(
-						spdlog::level::warn, kModule,
-						fmt::format("CRC mismatch in response: computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs));
+				g_log.warn("CRC mismatch in response: computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs);
 				return make_error_code(ErrorCode::kCrcError);
 			}
 
@@ -171,55 +168,41 @@ namespace LMS4xxx {
 		[[nodiscard]] std::error_code validate_response(const CoLaBMessage &msg, std::string_view expected_type,
 														std::string_view expected_name) {
 			if (msg.command_type != expected_type) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Unexpected response type '{}', expected '{}'", msg.command_type, expected_type));
+				g_log.warn("Unexpected response type '{}', expected '{}'", msg.command_type, expected_type);
 				return make_error_code(ErrorCode::kUnexpectedResponse);
 			}
 			if (msg.command_name != expected_name) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Unexpected response name '{}', expected '{}'", msg.command_name, expected_name));
+				g_log.warn("Unexpected response name '{}', expected '{}'", msg.command_name, expected_name);
 				return make_error_code(ErrorCode::kUnexpectedResponse);
 			}
 			return {};
 		}
 
-		// Configure the receive thread for real-time scheduling.
+		// Configure the receive thread for real-time scheduling (failures are
+		// expected without CAP_SYS_NICE, e.g. inside Docker: warn and degrade).
 		void configure_receive_thread() {
-			// Set SCHED_FIFO priority.
 			if (config.network.receive_thread_priority > 0) {
-				struct sched_param param{};
-				param.sched_priority = config.network.receive_thread_priority;
-				int ret = pthread_setschedparam(receive_thread.native_handle(), SCHED_FIFO, &param);
-				if (ret != 0) {
-					Common::Log::log_message(spdlog::level::warn, kModule,
-											 fmt::format("Failed to set SCHED_FIFO priority {}: {} (requires root or CAP_SYS_NICE)",
-														 param.sched_priority, std::strerror(ret)));
+				const int prio = config.network.receive_thread_priority;
+				if (const int ret = Common::ThreadUtil::SetRealtimePriority(receive_thread, prio); ret != 0) {
+					g_log.warn("Failed to set SCHED_FIFO priority {}: {} (requires root or CAP_SYS_NICE)", prio, std::strerror(ret));
 				} else {
-					Common::Log::log_message(spdlog::level::trace, kModule,
-											 fmt::format("Receive thread: SCHED_FIFO priority {}", param.sched_priority));
+					g_log.trace("Receive thread: SCHED_FIFO priority {}", prio);
 				}
 			}
 
-			// Set CPU affinity.
 			if (config.network.receive_thread_cpu >= 0) {
-				cpu_set_t cpuset;
-				CPU_ZERO(&cpuset);
-				CPU_SET(config.network.receive_thread_cpu, &cpuset);
-				int ret = pthread_setaffinity_np(receive_thread.native_handle(), sizeof(cpu_set_t), &cpuset);
-				if (ret != 0) {
-					Common::Log::log_message(spdlog::level::warn, kModule,
-											 fmt::format("Failed to set CPU affinity to core {}: {}",
-														 config.network.receive_thread_cpu, std::strerror(ret)));
+				const int cpu = config.network.receive_thread_cpu;
+				if (const int ret = Common::ThreadUtil::PinToCpu(receive_thread, cpu); ret != 0) {
+					g_log.warn("Failed to set CPU affinity to core {}: {}", cpu, std::strerror(ret));
 				} else {
-					Common::Log::log_message(spdlog::level::trace, kModule,
-											 fmt::format("Receive thread pinned to CPU {}", config.network.receive_thread_cpu));
+					g_log.trace("Receive thread pinned to CPU {}", cpu);
 				}
 			}
 		}
 
 		// Receive thread main loop.
 		void receive_loop() {
-			Common::Log::log_message(spdlog::level::trace, kModule, "Receive thread started");
+			g_log.trace("Receive thread started");
 
 			std::vector<std::uint8_t> buf(kReadBufferSize);
 
@@ -229,7 +212,7 @@ namespace LMS4xxx {
 
 				if (ec) {
 					if (receive_running.load(std::memory_order_relaxed)) {
-						Common::Log::log_and_throw(kModule, "Receive thread: read error", ec.message(), false);
+						g_log.error("Receive thread: read error - {}", ec.message());
 						report_error(ec, "receive thread read error");
 						set_state(ConnectionState::kError);
 					}
@@ -242,13 +225,13 @@ namespace LMS4xxx {
 				}
 			}
 
-			Common::Log::log_message(spdlog::level::trace, kModule, "Receive thread stopped");
+			g_log.trace("Receive thread stopped");
 		}
 
 
 		// Parse thread main loop.
 		void parse_loop() {
-			Common::Log::log_message(spdlog::level::trace, kModule, "Parse thread started");
+			g_log.trace("Parse thread started");
 
 			bool first_frame = true;
 
@@ -260,12 +243,11 @@ namespace LMS4xxx {
 					continue;
 				}
 
-				// Decode the CoLa B message.
 				CoLaBMessage msg;
 				auto ec = CoLaBCodec::Decode(frame.data.data(), frame.data.size(), msg);
 				if (ec) {
 					stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
-					Common::Log::log_message(spdlog::level::warn, kModule, "Frame decode error", ec.message());
+					g_log.warn("Frame decode error - {}", ec.message());
 					continue;
 				}
 
@@ -274,12 +256,11 @@ namespace LMS4xxx {
 					continue;
 				}
 
-				// Parse scan data from payload.
 				ScanData scan;
 				ec = ScanDataParser::Parse(msg.payload.data(), msg.payload.size(), scan);
 				if (ec) {
 					stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
-					Common::Log::log_message(spdlog::level::warn, kModule, "Scan data parse error", ec.message());
+					g_log.warn("Scan data parse error - {}", ec.message());
 					continue;
 				}
 
@@ -293,9 +274,7 @@ namespace LMS4xxx {
 						const auto gap = (scan.telegram_counter >= expected) ? scan.telegram_counter - expected
 																			 : (0x10000 + scan.telegram_counter - expected);
 						stats.counter_gaps.fetch_add(1, std::memory_order_relaxed);
-						Common::Log::log_message(spdlog::level::warn, kModule,
-												 fmt::format("Telegram counter gap: expected {}, got {} (missed ~{} frames)", expected,
-															 scan.telegram_counter, gap));
+						g_log.warn("Telegram counter gap: expected {}, got {} (missed ~{} frames)", expected, scan.telegram_counter, gap);
 					}
 				}
 				first_frame = false;
@@ -304,7 +283,6 @@ namespace LMS4xxx {
 				stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);
 				stats.last_frame_time_us.store(frame.receive_timestamp_us, std::memory_order_relaxed);
 
-				// Invoke user callback.
 				ScanDataCallback cb;
 				{
 					std::lock_guard lock(callback_mutex);
@@ -314,12 +292,12 @@ namespace LMS4xxx {
 					try {
 						cb(scan);
 					} catch (const std::exception &e) {
-						Common::Log::log_message(spdlog::level::warn, kModule, "Scan callback threw", e.what());
+						g_log.warn("Scan callback threw - {}", e.what());
 					}
 				}
 			}
 
-			Common::Log::log_message(spdlog::level::trace, kModule, "Parse thread stopped");
+			g_log.trace("Parse thread stopped");
 		}
 	};
 
@@ -337,7 +315,6 @@ namespace LMS4xxx {
 
 
 	std::error_code LMS4xxxDriver::Connect() {
-		// Validate config
 		auto ec = impl_->config.Validate();
 		if (ec) {
 			return ec;
@@ -345,10 +322,8 @@ namespace LMS4xxx {
 
 		impl_->set_state(ConnectionState::kConnecting);
 
-		// Create TCP client
-		impl_->tcp_client = std::make_unique<TCPClient>(impl_->config.device, impl_->config.network);
+		impl_->tcp_client = std::make_unique<TCPClient>(MakeTcpOptions(impl_->config.device, impl_->config.network));
 
-		// Connect with timeout.
 		ec = impl_->tcp_client->Connect(impl_->config.network.connect_timeout_ms);
 		if (ec) {
 			impl_->set_state(ConnectionState::kError);
@@ -357,8 +332,7 @@ namespace LMS4xxx {
 		}
 
 		impl_->set_state(ConnectionState::kConnected);
-		Common::Log::log_message(spdlog::level::trace, kModule,
-								 fmt::format("Connected to {}", impl_->tcp_client->RemoteEndpointStr()));
+		g_log.trace("Connected to {}", impl_->tcp_client->RemoteEndpointStr());
 		return {};
 	}
 
@@ -378,7 +352,7 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, timeout);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Login failed", ec.message(), false);
+				g_log.error("Login failed - {}", ec.message());
 				impl_->set_state(ConnectionState::kError);
 				return ec;
 			}
@@ -389,11 +363,11 @@ namespace LMS4xxx {
 
 			// Check response: payload[0] should be 0x01 (success)
 			if (response.payload.empty() || response.payload[0] != 0x01) {
-				Common::Log::log_and_throw(kModule, "Login rejected by device", "", false);
+				g_log.error("Login rejected by device");
 				impl_->set_state(ConnectionState::kError);
 				return make_error_code(ErrorCode::kAccessDenied);
 			}
-			Common::Log::log_message(spdlog::level::trace, kModule, "Logged in as Authorized Client");
+			g_log.trace("Logged in as Authorized Client");
 		}
 
 
@@ -403,14 +377,14 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, timeout);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Set scan data config failed", ec.message(), false);
+				g_log.error("Set scan data config failed - {}", ec.message());
 				impl_->set_state(ConnectionState::kError);
 				return ec;
 			}
 			ec = impl_->validate_response(response, CommandType::kWriteAnswer, "LMDscandatacfg");
 			if (ec)
 				return ec;
-			Common::Log::log_message(spdlog::level::trace, kModule, "Scan data configuration set");
+			g_log.trace("Scan data configuration set");
 		}
 
 
@@ -420,17 +394,15 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, timeout);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Set output range failed", ec.message(), false);
+				g_log.error("Set output range failed - {}", ec.message());
 				impl_->set_state(ConnectionState::kError);
 				return ec;
 			}
 			ec = impl_->validate_response(response, CommandType::kWriteAnswer, "LMPoutputRange");
 			if (ec)
 				return ec;
-			Common::Log::log_message(
-					spdlog::level::trace, kModule,
-					fmt::format("Output range set: {:.4f}° to {:.4f}° @ {:.4f}° resolution", impl_->config.scan.start_angle_deg,
-								impl_->config.scan.stop_angle_deg, impl_->config.scan.angular_resolution_deg));
+			g_log.trace("Output range set: {:.4f}° to {:.4f}° @ {:.4f}° resolution", impl_->config.scan.start_angle_deg,
+						impl_->config.scan.stop_angle_deg, impl_->config.scan.angular_resolution_deg);
 		}
 
 
@@ -449,10 +421,10 @@ namespace LMS4xxx {
 				CoLaBMessage response;
 				auto ec = impl_->send_and_receive(frame, response, timeout);
 				if (ec) {
-					Common::Log::log_message(spdlog::level::warn, kModule, "Filter disable command failed", ec.message());
+					g_log.warn("Filter disable command failed - {}", ec.message());
 				}
 			}
-			Common::Log::log_message(spdlog::level::trace, kModule, "All filters disabled");
+			g_log.trace("All filters disabled");
 		}
 
 
@@ -464,14 +436,12 @@ namespace LMS4xxx {
 				CoLaBMessage response;
 				auto ec = impl_->send_and_receive(frame, response, timeout);
 				if (ec) {
-					Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("{} failed: {}", desc, ec.message()));
+					g_log.warn("{} failed: {}", desc, ec.message());
 					return false;
 				}
 				ec = impl_->validate_response(response, CommandType::kWriteAnswer, cmd_name);
 				if (ec) {
-					Common::Log::log_message(
-							spdlog::level::warn, kModule,
-							fmt::format("{} rejected (response: {} {})", desc, response.command_type, response.command_name));
+					g_log.warn("{} rejected (response: {} {})", desc, response.command_type, response.command_name);
 					return false;
 				}
 				return true;
@@ -484,31 +454,12 @@ namespace LMS4xxx {
 
 			// TSCTCSrvAddr — parse server_ip string to 4 bytes
 			if (ntp_ok) {
-				std::array<std::uint8_t, 4> ip_bytes{};
-				std::string_view sv = impl_->config.ntp.server_ip;
-				bool ip_ok = true;
-				for (int i = 0; i < 4 && ip_ok; ++i) {
-					auto dot = (i < 3) ? sv.find('.') : sv.size();
-					if (dot == std::string_view::npos) {
-						ip_ok = false;
-						break;
-					}
-					unsigned val = 0;
-					auto [ptr, ec_cv] = std::from_chars(sv.data(), sv.data() + dot, val);
-					if (ec_cv != std::errc{} || ptr != sv.data() + dot || val > 255) {
-						ip_ok = false;
-						break;
-					}
-					ip_bytes[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(val);
-					if (i < 3) {
-						sv.remove_prefix(dot + 1);
-					}
-				}
-				if (ip_ok) {
-					ntp_ok = ntp_write(CommandBuilder::BuildSetNtpServer(ip_bytes), "TSCTCSrvAddr", "Set NTP server");
+				boost::system::error_code bec;
+				const auto addr = boost::asio::ip::make_address_v4(impl_->config.ntp.server_ip, bec);
+				if (!bec) {
+					ntp_ok = ntp_write(CommandBuilder::BuildSetNtpServer(addr.to_bytes()), "TSCTCSrvAddr", "Set NTP server");
 				} else {
-					Common::Log::log_message(spdlog::level::warn, kModule,
-											 fmt::format("Invalid NTP server IP: {}", impl_->config.ntp.server_ip));
+					g_log.warn("Invalid NTP server IP: {}", impl_->config.ntp.server_ip);
 					ntp_ok = false;
 				}
 			}
@@ -525,10 +476,8 @@ namespace LMS4xxx {
 			}
 
 			if (ntp_ok) {
-				Common::Log::log_message(spdlog::level::info, kModule,
-										 fmt::format("NTP configured: role={}, server={}, interval={}s, timezone=UTC",
-													 static_cast<int>(impl_->config.ntp.role), impl_->config.ntp.server_ip,
-													 impl_->config.ntp.update_interval_s));
+				g_log.info("NTP configured: role={}, server={}, interval={}s, timezone=UTC", static_cast<int>(impl_->config.ntp.role),
+						   impl_->config.ntp.server_ip, impl_->config.ntp.update_interval_s);
 
 				// Record the host wall-clock time of successful NTP configuration.
 				struct timespec ts{};
@@ -537,7 +486,7 @@ namespace LMS4xxx {
 					impl_->stats.ntp_configured_at_us.store(us, std::memory_order_relaxed);
 				}
 			} else {
-				Common::Log::log_message(spdlog::level::warn, kModule, "NTP configuration failed, continuing without NTP");
+				g_log.warn("NTP configuration failed, continuing without NTP");
 				impl_->config.ntp.enable = false;
 			}
 		} else {
@@ -545,10 +494,9 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(CommandBuilder::BuildSetTimeSyncRole(static_cast<std::uint8_t>(TscRole::kOff)), response, timeout);
 			if (ec) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("Failed to disable TSCRole (non-fatal): {}", ec.message()));
+				g_log.warn("Failed to disable TSCRole (non-fatal): {}", ec.message());
 			}
-			Common::Log::log_message(spdlog::level::info, kModule, "NTP disabled (Timestamp role=Off)");
+			g_log.info("NTP disabled (Timestamp role=Off)");
 		}
 
 
@@ -558,16 +506,13 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, timeout);
 			if (ec) {
-				Common::Log::log_message(spdlog::level::warn, kModule,
-										 fmt::format("mEEwriteall failed: {} (params activated but not persisted)", ec.message()));
+				g_log.warn("mEEwriteall failed: {} (params activated but not persisted)", ec.message());
 			} else {
 				ec = impl_->validate_response(response, CommandType::kMethodAnswer, "mEEwriteall");
 				if (ec) {
-					Common::Log::log_message(
-							spdlog::level::warn, kModule,
-							fmt::format("mEEwriteall unexpected response: {} {}", response.command_type, response.command_name));
+					g_log.warn("mEEwriteall unexpected response: {} {}", response.command_type, response.command_name);
 				} else {
-					Common::Log::log_message(spdlog::level::trace, kModule, "Parameters saved (mEEwriteall)");
+					g_log.trace("Parameters saved (mEEwriteall)");
 				}
 			}
 		}
@@ -579,7 +524,7 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Start measurement command failed", ec.message(), false);
+				g_log.error("Start measurement command failed - {}", ec.message());
 				return ec;
 			}
 			auto validate_ec = impl_->validate_response(response, CommandType::kMethodAnswer, "LMCstartmeas");
@@ -588,7 +533,7 @@ namespace LMS4xxx {
 			}
 
 			if (response.payload.empty() || response.payload[0] != 0x00) {
-				Common::Log::log_and_throw(kModule, "Start measurement rejected", "", false);
+				g_log.error("Start measurement rejected");
 				return make_error_code(ErrorCode::kCommandRejected);
 			}
 		}
@@ -600,7 +545,7 @@ namespace LMS4xxx {
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, timeout);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Run command failed", ec.message(), false);
+				g_log.error("Run command failed - {}", ec.message());
 				impl_->set_state(ConnectionState::kError);
 				return ec;
 			}
@@ -610,11 +555,11 @@ namespace LMS4xxx {
 			}
 
 			if (response.payload.empty() || response.payload[0] != 0x01) {
-				Common::Log::log_and_throw(kModule, "Run command rejected", "", false);
+				g_log.error("Run command rejected");
 				impl_->set_state(ConnectionState::kError);
 				return make_error_code(ErrorCode::kCommandRejected);
 			}
-			Common::Log::log_message(spdlog::level::trace, kModule, "Configuration activated (Run)");
+			g_log.trace("Configuration activated (Run)");
 		}
 
 		impl_->set_state(ConnectionState::kConnected);
@@ -630,13 +575,10 @@ namespace LMS4xxx {
 			return make_error_code(ErrorCode::kAlreadyScanning);
 		}
 
-		// Reset statistics.
 		impl_->stats.Reset();
 
-		// Create ring buffer.
 		impl_->ring_buffer = std::make_unique<FrameRingBuffer>(impl_->config.network.ring_buffer_frames);
 
-		// Create frame receiver with callbacks.
 		auto *stats_ptr = &impl_->stats;
 		auto *ring_ptr = impl_->ring_buffer.get();
 
@@ -658,13 +600,12 @@ namespace LMS4xxx {
 					}
 				});
 
-		// Send start stream command
 		{
 			auto frame = CommandBuilder::BuildStartStream();
 			CoLaBMessage response;
 			auto ec = impl_->send_and_receive(frame, response, impl_->config.network.response_timeout_ms);
 			if (ec) {
-				Common::Log::log_and_throw(kModule, "Start stream command failed", ec.message(), false);
+				g_log.error("Start stream command failed - {}", ec.message());
 				return ec;
 			}
 			auto validate_ec = impl_->validate_response(response, CommandType::kEventAnswer, "LMDscandata");
@@ -673,12 +614,11 @@ namespace LMS4xxx {
 			}
 
 			if (response.payload.empty() || response.payload[0] != 0x01) {
-				Common::Log::log_and_throw(kModule, "Start stream rejected", "", false);
+				g_log.error("Start stream rejected");
 				return make_error_code(ErrorCode::kCommandRejected);
 			}
 		}
 
-		// Start threads
 		impl_->scanning.store(true, std::memory_order_release);
 		impl_->receive_running.store(true, std::memory_order_release);
 		impl_->parse_running.store(true, std::memory_order_release);
@@ -690,8 +630,7 @@ namespace LMS4xxx {
 		impl_->configure_receive_thread();
 
 		impl_->set_state(ConnectionState::kScanning);
-		Common::Log::log_message(spdlog::level::trace, kModule,
-								 fmt::format("Scanning started (ring buffer capacity: {} frames)", impl_->ring_buffer->capacity()));
+		g_log.trace("Scanning started (ring buffer capacity: {} frames)", impl_->ring_buffer->capacity());
 		return {};
 	}
 
@@ -701,9 +640,8 @@ namespace LMS4xxx {
 			return make_error_code(ErrorCode::kNotScanning);
 		}
 
-		Common::Log::log_message(spdlog::level::trace, kModule, "Stopping scan...");
+		g_log.trace("Stopping scan...");
 
-		// Signal threads to stop.
 		impl_->receive_running.store(false, std::memory_order_release);
 		impl_->parse_running.store(false, std::memory_order_release);
 		impl_->scanning.store(false, std::memory_order_release);
@@ -714,12 +652,12 @@ namespace LMS4xxx {
 			auto frame = CommandBuilder::BuildStopStream();
 			auto ec = impl_->tcp_client->Write(frame);
 			if (ec) {
-				Common::Log::log_message(spdlog::level::warn, kModule, "Failed to send stop stream command (non-fatal)", ec.message());
+				g_log.warn("Failed to send stop stream command (non-fatal) - {}", ec.message());
 			}
 			frame = CommandBuilder::BuildStandby();
 			ec = impl_->tcp_client->Write(frame);
 			if (ec) {
-				Common::Log::log_message(spdlog::level::warn, kModule, "Failed to send standby command (non-fatal)", ec.message());
+				g_log.warn("Failed to send standby command (non-fatal) - {}", ec.message());
 			}
 		}
 
@@ -732,7 +670,6 @@ namespace LMS4xxx {
 			impl_->tcp_client->ShutdownReceive();
 		}
 
-		// Join threads.
 		if (impl_->receive_thread.joinable()) {
 			impl_->receive_thread.join();
 		}
@@ -741,7 +678,7 @@ namespace LMS4xxx {
 		}
 
 		impl_->set_state(ConnectionState::kConnected);
-		Common::Log::log_message(spdlog::level::trace, kModule, "Scanning stopped");
+		g_log.trace("Scanning stopped");
 		return {};
 	}
 
@@ -759,7 +696,7 @@ namespace LMS4xxx {
 		impl_->ring_buffer.reset();
 
 		impl_->set_state(ConnectionState::kDisconnected);
-		Common::Log::log_message(spdlog::level::trace, kModule, "Disconnected");
+		g_log.trace("Disconnected");
 	}
 
 
@@ -804,23 +741,19 @@ namespace LMS4xxx {
 
 	void LMS4xxxDriver::LogStatistics() const {
 		const auto s = impl_->stats.GetSnapshot();
-		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : bytes={}, frames_recv={}, delivery={:.1f}%",
-											 s.bytes_received, s.frames_received, s.DeliveryRate()));
-		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : parsed={}, dropped={}, counter_gaps={}",
-											 s.frames_parsed, s.frames_dropped, s.counter_gaps));
-		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : crc_err={}, framing_err={}, parse_err={}",
-											 s.crc_errors, s.framing_errors, s.parse_errors));
+		g_log.info("=== LMS4xxx RECEIVING STATISTICS === : bytes={}, frames_recv={}, delivery={:.1f}%", s.bytes_received,
+				   s.frames_received, s.DeliveryRate());
+		g_log.info("=== LMS4xxx RECEIVING STATISTICS === : parsed={}, dropped={}, counter_gaps={}", s.frames_parsed, s.frames_dropped,
+				   s.counter_gaps);
+		g_log.info("=== LMS4xxx RECEIVING STATISTICS === : crc_err={}, framing_err={}, parse_err={}", s.crc_errors, s.framing_errors,
+				   s.parse_errors);
 		if (s.ntp_configured_at_us != 0) {
 			const auto sec = static_cast<std::time_t>(s.ntp_configured_at_us / 1'000'000ULL);
 			char buf[32]{};
 			struct tm tm_info{};
 			gmtime_r(&sec, &tm_info);
 			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_info);
-			Common::Log::log_message(spdlog::level::info, kModule,
-									 fmt::format("=== LMS4xxx RECEIVING STATISTICS === : NTP configured at host time: {}", buf));
+			g_log.info("=== LMS4xxx RECEIVING STATISTICS === : NTP configured at host time: {}", buf);
 		}
 	}
 
@@ -863,7 +796,7 @@ namespace LMS4xxx {
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
 		}
-		Common::Log::log_message(spdlog::level::trace, kModule, "Measurement started");
+		g_log.trace("Measurement started");
 		return {};
 	}
 
@@ -884,7 +817,7 @@ namespace LMS4xxx {
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
 		}
-		Common::Log::log_message(spdlog::level::trace, kModule, "Measurement stopped");
+		g_log.trace("Measurement stopped");
 		return {};
 	}
 
@@ -905,7 +838,7 @@ namespace LMS4xxx {
 		if (response.payload.empty() || response.payload[0] != 0x00) {
 			return make_error_code(ErrorCode::kCommandRejected);
 		}
-		Common::Log::log_message(spdlog::level::info, kModule, "Entered standby mode");
+		g_log.info("Entered standby mode");
 		return {};
 	}
 
@@ -918,7 +851,7 @@ namespace LMS4xxx {
 			return ec;
 		}
 
-		Common::Log::log_message(spdlog::level::info, kModule, "Reboot command sent");
+		g_log.info("Reboot command sent");
 		return {};
 	}
 
@@ -934,35 +867,31 @@ namespace LMS4xxx {
 
 	std::error_code DriverConfig::Validate() const {
 		if (device.ip.empty()) {
-			Common::Log::log_and_throw(kModule, "Device IP is empty", "", false);
+			g_log.error("Device IP is empty");
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (device.port == 0) {
-			Common::Log::log_and_throw(kModule, "Device port is 0", "", false);
+			g_log.error("Device port is 0");
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (scan.start_angle_deg >= scan.stop_angle_deg) {
-			Common::Log::log_and_throw(
-					kModule,
-					fmt::format("Start angle ({}) must be less than stop angle ({})", scan.start_angle_deg, scan.stop_angle_deg), "",
-					false);
+			g_log.error("Start angle ({}) must be less than stop angle ({})", scan.start_angle_deg, scan.stop_angle_deg);
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (scan.angular_resolution_deg <= 0.0) {
-			Common::Log::log_and_throw(kModule, "Angular resolution must be positive", "", false);
+			g_log.error("Angular resolution must be positive");
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (scan.output_rate == 0) {
-			Common::Log::log_and_throw(kModule, "Output rate must be >= 1", "", false);
+			g_log.error("Output rate must be >= 1");
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (network.ring_buffer_frames < 16) {
-			Common::Log::log_and_throw(kModule, fmt::format("Ring buffer too small: {} (minimum 16)", network.ring_buffer_frames), "",
-									   false);
+			g_log.error("Ring buffer too small: {} (minimum 16)", network.ring_buffer_frames);
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		if (ntp.enable && ntp.server_ip.empty()) {
-			Common::Log::log_and_throw(kModule, "NTP enabled but server IP is empty", "", false);
+			g_log.error("NTP enabled but server IP is empty");
 			return make_error_code(ErrorCode::kInvalidConfig);
 		}
 		return {};

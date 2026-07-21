@@ -13,7 +13,6 @@ endif()
 
 ################################################################################
 # Required System Packages (Threads provided by top-level)
-find_package(OpenSSL REQUIRED)
 find_package(Boost REQUIRED)
 
 
@@ -53,8 +52,6 @@ target_include_directories(ins401_lib PUBLIC
 
 target_link_libraries(ins401_lib PUBLIC
         # System libraries
-        OpenSSL::SSL
-        OpenSSL::Crypto
         Threads::Threads
         # Boost
         Boost::boost

@@ -1,5 +1,5 @@
-#ifndef LIDAR_DATA_TYPE_H
-#define LIDAR_DATA_TYPE_H
+#ifndef LMS4XXX_DATA_TYPE_H
+#define LMS4XXX_DATA_TYPE_H
 
 #include <string>
 
@@ -30,4 +30,4 @@ struct LiDARConfig {
 	std::string config_path;
 };
 
-#endif	// LIDAR_DATA_TYPE_H
+#endif	// LMS4XXX_DATA_TYPE_H

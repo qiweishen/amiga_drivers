@@ -1,15 +1,19 @@
 #include "lms4xxx_tool.h"
 
+#include "string_util.h"
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 
+#include "logger.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxTool";
+	Common::DriverLog g_log{ std::string(kModule) };
 }  // namespace
 
 
@@ -77,7 +81,7 @@ namespace LMS4xxxTool {
 		// Per-instance configuration
 		const auto &instances = root["Instances"];
 		if (!instances || !instances.IsMap()) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("No 'Instances' section found in {}", config_path));
+			g_log.warn("No 'Instances' section found in {}", config_path);
 			return configs;
 		}
 
@@ -101,40 +105,19 @@ namespace LMS4xxxTool {
 			cfg.recording_write_buffer_size = shared_write_buffer_size;
 			cfg.recording_max_file_bytes = shared_max_file_bytes;
 
-			Common::Log::log_message(
-					spdlog::level::info, kModule,
-					fmt::format("Loaded LiDAR instance [{}] ({}:{})", cfg.position_name, cfg.hostname, cfg.driver_config.device.port));
+			g_log.info("Loaded LiDAR instance [{}] ({}:{})", cfg.position_name, cfg.hostname, cfg.driver_config.device.port);
 
 			configs.push_back(std::move(cfg));
 		}
 
-		Common::Log::log_message(spdlog::level::trace, kModule,
-								 fmt::format("Loaded {} LiDAR instance(s) from {}", configs.size(), config_path));
+		g_log.trace("Loaded {} LiDAR instance(s) from {}", configs.size(), config_path);
 		return configs;
 	}
 
 
 	std::string ToSnakeCase(std::string_view name) {
-		std::string result;
-		result.reserve(name.size());
-
-		for (std::size_t i = 0; i < name.size(); ++i) {
-			char ch = name[i];
-
-			if (ch == ' ' || ch == '-') {
-				result.push_back('_');
-			} else if (std::isupper(static_cast<unsigned char>(ch))) {
-				if (i > 0 && name[i - 1] != ' ' && name[i - 1] != '-' && name[i - 1] != '_' &&
-					std::islower(static_cast<unsigned char>(name[i - 1]))) {
-					result.push_back('_');
-				}
-				result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-			} else {
-				result.push_back(ch);
-			}
-		}
-		return result;
+		return Common::StringUtil::ToSnakeCase(name);
 	}
 
 
-}  // namespace LidarTool
+}  // namespace LMS4xxxTool

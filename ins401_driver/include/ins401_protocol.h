@@ -11,6 +11,7 @@
 #include "ins401_data_type.h"
 
 
+namespace INS401 {
 // Aceinna packet framing: header = [0x5555(2) | MsgID(2) | PayloadLen(4)], trailer = [CRC16(2)].
 // ACEINNA_HEADER_LEN = preamble(2) + msg_id(2) + payload_len(4) = 8 bytes.
 inline constexpr std::string_view BROADCAST_MAC = "FF:FF:FF:FF:FF:FF";
@@ -27,19 +28,11 @@ inline constexpr std::uint8_t NMEA_ASCII_START = '$';
 // Output messages (device-to-host).
 inline constexpr std::uint16_t RAW_IMU_DATA_MESSAGE_ID = 0x0A01;
 
-inline constexpr std::size_t RAW_IMU_DATA_LENGTH = 30;
-
 inline constexpr std::uint16_t GNSS_SOLUTION_PACKET_MESSAGE_ID = 0x0A02;
-
-inline constexpr std::size_t GNSS_SOLUTION_PACKET_LENGTH = 77;
 
 inline constexpr std::uint16_t INS_SOLUTION_PACKET_MESSAGE_ID = 0x0A03;
 
-inline constexpr std::size_t INS_SOLUTION_PACKET_LENGTH = 110;
-
 inline constexpr std::uint16_t DIAGNOSTIC_MESSAGE_ID = 0x0A05;
-
-inline constexpr std::size_t DIAGNOSTIC_MESSAGE_LENGTH = 22;
 
 inline constexpr std::uint16_t RTCM_ROVER_DATA_MESSAGE_ID = 0x0A06;
 
@@ -75,6 +68,6 @@ inline constexpr auto RTCM_ROVER_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RT
 inline constexpr auto RTCM_BASE_DATA_MESSAGE_ID_BYTES = ConvertUint16ToUint8(RTCM_BASE_DATA_MESSAGE_ID, EndianType::LSB);
 
 inline constexpr auto REQUEST_INFO_COMMAND_BYTES = ConvertUint16ToUint8(REQUEST_INFO_COMMAND, EndianType::LSB);
-
+}  // namespace INS401
 
 #endif

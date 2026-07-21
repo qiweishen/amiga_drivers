@@ -1,5 +1,5 @@
-#ifndef INS_DISCOVER_H
-#define INS_DISCOVER_H
+#ifndef INS401_DISCOVER_H
+#define INS401_DISCOVER_H
 
 #include <array>
 #include <atomic>
@@ -12,6 +12,7 @@
 #include "ins401_ethernet_socket.h"
 
 
+namespace INS401 {
 // Information reported by a discovered device.
 struct DeviceInfo {
 	std::string interface_name;
@@ -59,6 +60,6 @@ private:
 
 	void SendDiscoveryPing(const std::shared_ptr<EthernetSocket> &socket_ptr) const;
 };
-
+}  // namespace INS401
 
 #endif

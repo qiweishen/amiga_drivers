@@ -22,6 +22,6 @@ namespace Common {
         std::string timestamp;
         std::string data_folder_path;
     };
-};
+} // namespace Common
 
 #endif //COMMON_DATA_TYPE_H

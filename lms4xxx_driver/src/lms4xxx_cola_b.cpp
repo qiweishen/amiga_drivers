@@ -1,13 +1,17 @@
 #include "lms4xxx_cola_b.h"
 
+#include "byte_util.h"
+
 #include <cstring>
 
 #include "lms4xxx_error.h"
+#include "logger.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxCoLaBCodec";
+	Common::DriverLog g_log{ std::string(kModule) };
 }  // namespace
 
 
@@ -21,9 +25,7 @@ namespace LMS4xxx {
 
 		// Command type (3 bytes)
 		data.insert(data.end(), command_type.begin(), command_type.end());
-		// Space
 		data.push_back(kCoLaBSpace);
-		// Command name
 		data.insert(data.end(), command_name.begin(), command_name.end());
 
 		// Parameters (preceded by space if present)
@@ -40,13 +42,9 @@ namespace LMS4xxx {
 		std::vector<std::uint8_t> frame;
 		frame.reserve(4 + 4 + data.size() + 1);
 
-		// STX
 		frame.insert(frame.end(), kCoLaBStx.begin(), kCoLaBStx.end());
-		// Length
 		frame.insert(frame.end(), len_bytes.begin(), len_bytes.end());
-		// Data
 		frame.insert(frame.end(), data.begin(), data.end());
-		// Checksum
 		frame.push_back(checksum);
 
 		return frame;
@@ -54,12 +52,9 @@ namespace LMS4xxx {
 
 
 	std::array<std::uint8_t, 4> CoLaBCodec::EncodeUint32(std::uint32_t value) {
-		return { {
-				static_cast<std::uint8_t>((value >> 24) & 0xFF),
-				static_cast<std::uint8_t>((value >> 16) & 0xFF),
-				static_cast<std::uint8_t>((value >> 8) & 0xFF),
-				static_cast<std::uint8_t>(value & 0xFF),
-		} };
+		std::array<std::uint8_t, 4> out{};
+		Common::ByteUtil::StoreBigU32(out.data(), value);
+		return out;
 	}
 
 
@@ -86,7 +81,7 @@ namespace LMS4xxx {
 	std::error_code CoLaBCodec::Decode(const std::uint8_t *data, std::size_t len, CoLaBMessage &msg) {
 		// Minimum: CommandType(3) + Space(1) = 4 bytes
 		if (len < 4) {
-			Common::Log::log_message(spdlog::level::warn, kModule, fmt::format("Frame data too short: {} bytes", len));
+			g_log.warn("Frame data too short: {} bytes", len);
 			return make_error_code(ErrorCode::kFrameTooShort);
 		}
 
@@ -98,8 +93,7 @@ namespace LMS4xxx {
 
 		// Expect space separator
 		if (data[pos] != kCoLaBSpace) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("Expected space after command type, got 0x{:02X}", data[pos]));
+			g_log.warn("Expected space after command type, got 0x{:02X}", data[pos]);
 			return make_error_code(ErrorCode::kProtocolError);
 		}
 		pos++;
@@ -111,7 +105,7 @@ namespace LMS4xxx {
 		}
 
 		if (pos == name_start) {
-			Common::Log::log_message(spdlog::level::warn, kModule, "Empty command name");
+			g_log.warn("Empty command name");
 			return make_error_code(ErrorCode::kProtocolError);
 		}
 
@@ -133,13 +127,12 @@ namespace LMS4xxx {
 
 
 	std::uint32_t CoLaBCodec::DecodeUint32(const std::uint8_t *buf) {
-		return (static_cast<std::uint32_t>(buf[0]) << 24) | (static_cast<std::uint32_t>(buf[1]) << 16) |
-			   (static_cast<std::uint32_t>(buf[2]) << 8) | static_cast<std::uint32_t>(buf[3]);
+		return Common::ByteUtil::LoadBigU32(buf);
 	}
 
 
 	std::uint16_t CoLaBCodec::DecodeUint16(const std::uint8_t *buf) {
-		return static_cast<std::uint16_t>((static_cast<std::uint16_t>(buf[0]) << 8) | buf[1]);
+		return Common::ByteUtil::LoadBigU16(buf);
 	}
 
 

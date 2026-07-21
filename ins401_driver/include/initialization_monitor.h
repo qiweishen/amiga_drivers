@@ -1,5 +1,5 @@
-#ifndef INITIALIZATION_MONITOR_H
-#define INITIALIZATION_MONITOR_H
+#ifndef INS401_INITIALIZATION_MONITOR_H
+#define INS401_INITIALIZATION_MONITOR_H
 
 #include <Eigen/Core>
 #include <atomic>
@@ -12,6 +12,7 @@
 #include "orientation_initializer.h"
 
 
+namespace INS401 {
 // Monitors incoming IMU and GNSS data to determine when static initialization is complete.
 //
 // Flow:
@@ -110,6 +111,6 @@ private:
 
 	void Reset();
 };
+}  // namespace INS401
 
-
-#endif	// INITIALIZATION_MONITOR_H
+#endif	// INS401_INITIALIZATION_MONITOR_H

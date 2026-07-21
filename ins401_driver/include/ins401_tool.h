@@ -11,7 +11,7 @@
 #include "ins401_data_type.h"
 
 
-namespace INS401Tool {
+namespace INS401::Tool {
 	namespace Earth {
 		double ComputeGravity(const Eigen::Vector3d &blh);
 	}  // namespace Earth
@@ -21,7 +21,7 @@ namespace INS401Tool {
 	}  // namespace Utility
 
 	void LoadConfig(std::string_view config_path, INSConfig &config);
-}  // namespace InsTool
+}  // namespace INS401::Tool
 
 
 #endif

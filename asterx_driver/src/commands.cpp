@@ -1,16 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//
-// Builds the small subset of the Septentrio ASCII command interface that the
-// slim driver needs, and verifies the get* readbacks of the geometry
-// parameters (IMU orientation, INS lever arm, GNSS attitude + offset).
-//
-// Transport, prompt handling and reply/error classification live in the
-// Septentrio SsnRx SDK (3rd_party/RxTools/ssnrx); everything here is pure
-// string logic so it stays unit-testable.
-//
-// Reference: docs/AsteRx-i3 D Pro+ Firmware v1.5.2 Reference Guide.pdf
-//
+/// @file commands.cpp
+/// @brief Builds the Septentrio ASCII commands the driver needs and verifies
+/// the get* readbacks of the geometry parameters. Transport/prompt/reply
+/// classification live in the SsnRx SDK (3rd_party/RxTools/ssnrx); everything
+/// here is pure string logic so it stays unit-testable.
+/// Reference: docs/AsteRx-i3 D Pro+ Firmware v1.5.2 Reference Guide.pdf
 #include "commands.hpp"
+
+#include "string_util.h"
 
 #include <algorithm>
 #include <cctype>
@@ -23,46 +19,12 @@ namespace asterx {
     namespace {
         constexpr std::size_t kMaxAsciiCommandLength = 2000;
 
-        std::string join(const std::vector<std::string> &parts, char sep) {
-            std::string out;
-            for (std::size_t i = 0; i < parts.size(); ++i) {
-                if (i) out.push_back(sep);
-                out.append(parts[i]);
-            }
-            return out;
-        }
-
-        std::string trim(std::string s) {
-            auto not_space = [](unsigned char c) { return !std::isspace(c); };
-            s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-            s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-            return s;
-        }
-
-        std::string lower_copy(std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return s;
-        }
-
-        bool equals_ci(const std::string &a, const std::string &b) {
-            return lower_copy(a) == lower_copy(b);
-        }
-
-        bool starts_with_ci(const std::string &s, const std::string &prefix) {
-            if (s.size() < prefix.size()) return false;
-            return lower_copy(s.substr(0, prefix.size())) == lower_copy(prefix);
-        }
-
-        std::vector<std::string> split(const std::string &s, char sep) {
-            std::vector<std::string> out;
-            std::stringstream ss(s);
-            std::string part;
-            while (std::getline(ss, part, sep)) {
-                out.push_back(trim(part));
-            }
-            return out;
-        }
+        using Common::StringUtil::EqualsCi;
+        using Common::StringUtil::Join;
+        using Common::StringUtil::SplitTrim;
+        using Common::StringUtil::StartsWithCi;
+        using Common::StringUtil::ToLower;
+        using Common::StringUtil::Trim;
 
         std::string fmt_command_decimal(double v) {
             if (std::fabs(v) < 0.0005) {
@@ -74,7 +36,7 @@ namespace asterx {
         }
 
         int parse_int_prefix(const std::string &s, const std::string &field) {
-            std::istringstream is(trim(s));
+            std::istringstream is(Trim(s));
             int v = 0;
             if (!(is >> v)) {
                 throw ConfigError("could not parse integer field '" + field + "' from '" + s + "'");
@@ -83,7 +45,7 @@ namespace asterx {
         }
 
         double parse_double_prefix(const std::string &s, const std::string &field) {
-            std::istringstream is(trim(s));
+            std::istringstream is(Trim(s));
             double v = 0.0;
             if (!(is >> v)) {
                 throw ConfigError("could not parse numeric field '" + field + "' from '" + s + "'");
@@ -100,9 +62,9 @@ namespace asterx {
             std::string line;
             const std::string prefix = key + ",";
             while (std::getline(lines, line)) {
-                line = trim(line);
-                if (starts_with_ci(line, prefix)) {
-                    return trim(line.substr(prefix.size()));
+                line = Trim(line);
+                if (StartsWithCi(line, prefix)) {
+                    return Trim(line.substr(prefix.size()));
                 }
             }
             throw ConfigError("receiver reply did not contain '" + key + "' line: " + reply);
@@ -155,7 +117,7 @@ namespace asterx {
             "sec1", "sec2", "sec5", "sec10", "sec15", "sec30", "sec60",
             "min2", "min5", "min10", "min15", "min30", "min60",
         };
-        return allowed.find(lower_copy(interval)) != allowed.end();
+        return allowed.find(ToLower(interval)) != allowed.end();
     }
 
     std::string build_sbf_output_command(const SbfStream &stream,
@@ -174,7 +136,7 @@ namespace asterx {
         const std::string cmd =
                 "setSBFOutput, Stream" + std::to_string(stream.stream_id) +
                 ", " + descriptor +
-                ", " + join(stream.blocks, '+') +
+                ", " + Join(stream.blocks, '+') +
                 ", " + stream.interval;
         enforce_command_length(cmd);
         return cmd;
@@ -185,7 +147,7 @@ namespace asterx {
     }
 
     std::string build_imu_orientation_command(const ReceiverSettings &settings) {
-        if (equals_ci(settings.imu_orientation_mode, "SensorDefault")) {
+        if (EqualsCi(settings.imu_orientation_mode, "SensorDefault")) {
             return "setIMUOrientation, SensorDefault";
         }
         return "setIMUOrientation, " + settings.imu_orientation_mode + ", " +
@@ -282,15 +244,15 @@ namespace asterx {
 
     ReceiverCapabilities parse_receiver_capabilities_reply(const std::string &reply) {
         const std::string payload = compact_payload_after_key(reply, "ReceiverCapabilities");
-        const auto fields = split(payload, ',');
+        const auto fields = SplitTrim(payload, ',');
         if (fields.size() < 7) {
             throw ConfigError("ReceiverCapabilities reply had too few fields: " + reply);
         }
 
         ReceiverCapabilities caps;
-        for (const auto &antenna: split(fields[0], '+')) {
-            if (equals_ci(antenna, "Main")) caps.has_main = true;
-            if (equals_ci(antenna, "Aux1")) caps.has_aux1 = true;
+        for (const auto &antenna: SplitTrim(fields[0], '+')) {
+            if (EqualsCi(antenna, "Main")) caps.has_main = true;
+            if (EqualsCi(antenna, "Aux1")) caps.has_aux1 = true;
         }
 
         caps.measurement_interval_ms = parse_int_prefix(fields[fields.size() - 3], "measurement_interval_ms");
@@ -300,15 +262,15 @@ namespace asterx {
     }
 
     void verify_imu_orientation_reply(const std::string &reply, const ReceiverSettings &settings) {
-        const auto fields = split(find_config_line_payload(reply, "IMUOrientation"), ',');
+        const auto fields = SplitTrim(find_config_line_payload(reply, "IMUOrientation"), ',');
         if (fields.empty()) {
             throw ConfigError("IMUOrientation reply did not contain an orientation mode");
         }
-        if (!equals_ci(fields[0], settings.imu_orientation_mode)) {
+        if (!EqualsCi(fields[0], settings.imu_orientation_mode)) {
             throw ConfigError("IMU orientation mismatch: expected " +
                               settings.imu_orientation_mode + ", got " + fields[0]);
         }
-        if (!equals_ci(settings.imu_orientation_mode, "SensorDefault")) {
+        if (!EqualsCi(settings.imu_orientation_mode, "SensorDefault")) {
             if (fields.size() < 4) {
                 throw ConfigError("IMUOrientation reply did not include theta values");
             }
@@ -324,7 +286,7 @@ namespace asterx {
     }
 
     void verify_ins_ant_lever_arm_reply(const std::string &reply, Vec3 expected) {
-        const auto fields = split(find_config_line_payload(reply, "INSAntLeverArm"), ',');
+        const auto fields = SplitTrim(find_config_line_payload(reply, "INSAntLeverArm"), ',');
         if (fields.size() < 3) {
             throw ConfigError("INSAntLeverArm reply did not contain x/y/z values");
         }
@@ -341,18 +303,18 @@ namespace asterx {
     }
 
     void verify_gnss_attitude_reply(const std::string &reply, const std::string &expected_mode) {
-        const auto fields = split(find_config_line_payload(reply, "GNSSAttitude"), ',');
+        const auto fields = SplitTrim(find_config_line_payload(reply, "GNSSAttitude"), ',');
         if (fields.empty()) {
             throw ConfigError("GNSSAttitude reply did not contain a mode");
         }
-        if (!equals_ci(fields[0], expected_mode)) {
+        if (!EqualsCi(fields[0], expected_mode)) {
             throw ConfigError("GNSS attitude mode mismatch: expected " +
                               expected_mode + ", got " + fields[0]);
         }
     }
 
     void verify_attitude_offset_reply(const std::string &reply, AttitudeOffset expected) {
-        const auto fields = split(find_config_line_payload(reply, "AttitudeOffset"), ',');
+        const auto fields = SplitTrim(find_config_line_payload(reply, "AttitudeOffset"), ',');
         if (fields.size() < 2) {
             throw ConfigError("AttitudeOffset reply did not contain heading/pitch values");
         }
@@ -365,13 +327,13 @@ namespace asterx {
     }
 
     void validate_receiver_settings(const ReceiverSettings &settings) {
-        if (!equals_ci(settings.imu_startup_data_mode, "Boot") &&
-            !equals_ci(settings.imu_startup_data_mode, "GnssTimeKnown")) {
+        if (!EqualsCi(settings.imu_startup_data_mode, "Boot") &&
+            !EqualsCi(settings.imu_startup_data_mode, "GnssTimeKnown")) {
             throw ConfigError("receiver.imu.startup_data_mode must be Boot or GnssTimeKnown");
         }
-        if (!equals_ci(settings.imu_orientation_mode, "SensorDefault") &&
-            !equals_ci(settings.imu_orientation_mode, "manual") &&
-            !equals_ci(settings.imu_orientation_mode, "fixed")) {
+        if (!EqualsCi(settings.imu_orientation_mode, "SensorDefault") &&
+            !EqualsCi(settings.imu_orientation_mode, "manual") &&
+            !EqualsCi(settings.imu_orientation_mode, "fixed")) {
             throw ConfigError("receiver.imu.orientation_mode must be SensorDefault, manual, or fixed");
         }
         if (!settings.ant_lever_arm_configured) {
@@ -383,8 +345,8 @@ namespace asterx {
             !in_lever_range(settings.ant_lever_arm_m.z)) {
             throw ConfigError("receiver.imu.ant_lever_arm_m components must be in [-100, 100] meters");
         }
-        if (!equals_ci(settings.gnss_attitude_mode, "none") &&
-            !equals_ci(settings.gnss_attitude_mode, "MultiAntenna")) {
+        if (!EqualsCi(settings.gnss_attitude_mode, "none") &&
+            !EqualsCi(settings.gnss_attitude_mode, "MultiAntenna")) {
             throw ConfigError("receiver.gnss_attitude.mode must be none or MultiAntenna");
         }
         if (settings.cn0_mask_dbhz < 0 || settings.cn0_mask_dbhz > 60) {

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
 #include <cstdint>
@@ -34,10 +33,10 @@ namespace asterx {
 
         ~Session() override;
 
-        // Kick off the first connection attempt.
+        // Kick off the first connection attempt
         void start();
 
-        // Flush + close everything; no reconnect. Safe to call more than once.
+        // Flush + close everything; no reconnect. Safe to call more than once
         void shutdown();
 
     signals:
@@ -45,8 +44,8 @@ namespace asterx {
         // already run (files flushed). The wrapper terminates the whole rig.
         void fatalError();
 
-        // Emitted on every entry into Recording; the first emission (full
-        // command sequence + geometry readback ok) is the wrapper's init() gate.
+        // Emitted on every entry into Recording; the first emission is the
+        // wrapper's init() gate.
         void configured();
 
     private:

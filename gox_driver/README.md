@@ -26,9 +26,10 @@
   `<Output Directory>/<时间戳>/bin/gox/`（与其他传感器数据同会话目录），
   gox 日志并入统一 log 文件，`acquisition` 上限到达会关停整个 AmigaDrivers 进程。
 - **调试工具**（standalone 采集入口已移除）：`build/bin/jai_discover`（GigE 设备
-  枚举）与 `build/bin/jai_fake_capture`（无相机验证存储链路）。
-- 日志走进程唯一的 spdlog 实例（父工程 FetchContent v1.17.0）；`third_party/`
-  只保留 nlohmann/json 与 doctest。
+  枚举）、`build/bin/jai_snapshot`（GUI 单张拍照预览）与 `build/bin/jai_fake_capture`
+  （无相机验证存储链路）。
+- 日志走进程唯一的 spdlog 实例（父工程 FetchContent v1.17.0）；nlohmann/json
+  与 doctest vendored 于仓库级 `3rd_party/`。
 
 ## 快速开始（3 步）
 
@@ -72,10 +73,9 @@ cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc) && ctest --output-on-failur
 | `include/` / `src/gox_driver_app.cpp` | **统一入口适配层** `GoxDriverApp`（init/run/shutdown + TerminateFlag，供根 main.cpp 使用，目标 `gox_lib`） |
 | `src/core/` | **SDK-free 层**：config 解析、落盘格式、Recorder、队列/缓冲池、统计、日志、信号处理——不 include 任何 `Pv*.h`，可脱离 SDK 单测（目标 `jai_core`） |
 | `src/ebus/` + `src/capture_runner.cpp` | **SDK 依赖层**：设备发现、连接控制、GenICam 参数下发、PTP、收流 + 采集编排 `CaptureRunner`（目标 `jai_ebus`） |
-| `tools/` | `jai_discover`（设备枚举）、`jai_fake_capture`（合成帧灌 Recorder，无相机验证存储链路） |
+| `tools/` | `jai_discover`（设备枚举）、`jai_snapshot`（GUI 单张拍照预览）、`jai_fake_capture`（合成帧灌 Recorder，无相机验证存储链路） |
 | `tests/` | doctest 单元测试（只链 `jai_core`，无 SDK/无相机可跑；开关 `GOX_BUILD_TESTS`，Debug 默认开） |
 | `scripts/` | `setup_host_network.sh`（宿主机网络调优）、`inspect_raw.py`（格式校验/索引重建/单帧导出）、`unpack_raw.py`、`env_ebus.sh` |
-| `third_party/` | vendored 单头文件库：nlohmann/json、doctest（spdlog 由父工程提供） |
 | `docs/` | eBUS SDK 官方 PDF |
 
 ## 会话结束码

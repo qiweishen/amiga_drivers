@@ -34,7 +34,7 @@ receiver:
     std::filesystem::remove(path);
 }
 
-TEST(AppConfig, LegacyUseSensorDefaultMigratesToManual) {
+TEST(AppConfig, LoadsManualOrientationConfig) {
     const auto path = write_temp_config(R"yaml(
 connection:
   host: "192.0.2.10"
@@ -43,7 +43,7 @@ connection:
 receiver:
   imu:
     startup_data_mode: Boot
-    use_sensor_default: false
+    orientation_mode: manual
     theta_x_deg: 1.0
     theta_y_deg: 2.0
     theta_z_deg: 3.0
@@ -70,24 +70,6 @@ receiver:
     EXPECT_FALSE(cfg.receiver.configure_all_tracking);
     EXPECT_EQ(cfg.receiver.cn0_mask_dbhz, 12);
     EXPECT_EQ(cfg.receiver.streams.front().interval, "OnChange");
-    std::filesystem::remove(path);
-}
-
-TEST(AppConfig, RejectsRemovedIpsFields) {
-    const auto path = write_temp_config(R"yaml(
-receiver:
-  ips_port: 28785
-  imu:
-    startup_data_mode: Boot
-    orientation_mode: SensorDefault
-    ant_lever_arm_m:
-      x: 0.0
-      y: 0.0
-      z: 0.0
-)yaml");
-
-    EXPECT_THROW((void) asterx::load_app_config(path.string()),
-                 asterx::ConfigLoadError);
     std::filesystem::remove(path);
 }
 

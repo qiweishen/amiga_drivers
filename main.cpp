@@ -6,9 +6,11 @@
 /// managed by a single GoxDriverApp via the cameras[] array in its JSON). Each
 /// driver runs in its own thread; shutdown is orderly via shared terminate flags
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <spdlog/fmt/chrono.h>
 #include <spdlog/spdlog.h>
 #include <string>
@@ -19,6 +21,8 @@
 #include "activity_spinner.h"
 #include "asterx_driver_app.h"
 #include "data_type.h"
+#include "driver_app.h"
+#include "driver_markers.h"
 #include "gox_driver_app.h"
 #include "ins401_driver_app.h"
 #include "lms4xxx_driver_app.h"
@@ -28,7 +32,7 @@
 
 
 namespace {
-    constexpr std::string_view kModule = "Main";
+    constexpr std::string_view kModule = Common::Markers::kModuleMain;
 
     void LoadConfig(std::string_view config_path, Common::Config &config) {
         // Delegate YAML I/O to the common ConfigLoader (throws on error)
@@ -99,20 +103,27 @@ int main(int argc, char *argv[]) {
         Common::Log::log_and_throw(kModule, "No drivers enabled in the main config");
     }
     Common::Log::log_message(spdlog::level::info, kModule,
-                             "Starting Amiga Drivers" + std::string(run_asterx ? " [AsteRx]" : "") +
+                             std::string(Common::Markers::kStartingDrivers) + std::string(run_asterx ? " [AsteRx]" : "") +
                              std::string(run_gox ? " [GoX]" : "") + std::string(run_ins401 ? " [INS401]" : "") +
                              std::string(run_lms4xxx ? " [LMS4xxx]" : ""));
 
-    // Create driver apps. LMS4xxx maps one app per LiDAR instance; multiple Go-X
-    // cameras are managed inside the single GoxDriverApp (cameras[] in its JSON)
-    std::unique_ptr<AsterxDriverApp> asterx_app;
-    std::unique_ptr<GoxDriverApp> gox_app;
-    std::unique_ptr<Ins401DriverApp> ins401_app;
-    std::vector<std::unique_ptr<Lms4xxxDriverApp> > lms4xxx_apps;
+    // Create driver apps behind the unified IDriverApp interface. LMS4xxx maps
+    // one app per LiDAR instance; multiple Go-X cameras are managed inside the
+    // single GoxDriverApp (cameras[] in its JSON)
+    struct DriverSlot {
+        std::unique_ptr<Common::IDriverApp> app;
+        std::string_view name;           // failure-log prefix ("AsteRx"...), GUI maps it to a sensor
+        std::string_view init_failed;    // Common::Markers::k*InitFailed
+        std::string_view run_exception;  // Common::Markers::k*RunException
+        std::thread thread;
+    };
+    std::vector<DriverSlot> drivers;
 
-    // Uniform bring-up per enabled driver: resolve the driver config path, snapshot
-    // it into <data_folder>/config/, then create the app(s)
-    const auto resolve_path = [&exe_dir](const std::string &relative) { return (exe_dir / "../../" / relative).string(); };
+    // Uniform bring-up per enabled driver: resolve the driver config path, snapshot it into <data_folder>/config/,
+    // then create the app(s)
+    const auto resolve_path = [&exe_dir](const std::string &relative) {
+        return (exe_dir / "../../" / relative).string();
+    };
     const auto copy_config = [&main_config](const std::string &src, std::string_view name, std::string_view ext) {
         try {
             std::filesystem::copy_file(src,
@@ -120,23 +131,27 @@ int main(int argc, char *argv[]) {
                                                    main_config.timestamp, ext),
                                        std::filesystem::copy_options::overwrite_existing);
         } catch (const std::exception &e) {
-            Common::Log::log_and_throw(kModule, fmt::format("Cannot copy {} config", name), e.what(), true);
+            // Terminate program
+            Common::Log::log_and_throw(kModule, fmt::format("Cannot copy {} config", name), e.what());
         }
     };
 
     if (run_asterx) {
         // Currently we only support one AsteRx equipment
         copy_config(resolve_path(main_config.asterx_config_path), "asterx", "yaml");
-        asterx_app = std::make_unique<AsterxDriverApp>(main_config);
+        drivers.push_back({ std::make_unique<AsterxDriverApp>(main_config), "AsteRx",
+                            Common::Markers::kAsterxInitFailed, Common::Markers::kAsterxRunException, {} });
     }
     if (run_gox) {
         copy_config(resolve_path(main_config.gox_config_path), "gox", "json");
-        gox_app = std::make_unique<GoxDriverApp>(main_config);
+        drivers.push_back({ std::make_unique<GoxDriverApp>(main_config), "GoX",
+                            Common::Markers::kGoxInitFailed, Common::Markers::kGoxRunException, {} });
     }
     if (run_ins401) {
         // Currently we only support one INS401 equipment
         copy_config(resolve_path(main_config.ins401_config_path), "ins401", "yaml");
-        ins401_app = std::make_unique<Ins401DriverApp>(main_config);
+        drivers.push_back({ std::make_unique<Ins401DriverApp>(main_config), "INS401",
+                            Common::Markers::kIns401InitFailed, Common::Markers::kIns401RunException, {} });
     }
     if (run_lms4xxx) {
         const std::string lms4xxx_config_path = resolve_path(main_config.lms4xxx_config_path);
@@ -145,94 +160,43 @@ int main(int argc, char *argv[]) {
         for (auto &cfg: lms4xxx_configs) {
             cfg.data_folder_path = main_config.data_folder_path;
             cfg.timestamp = main_config.timestamp;
-            lms4xxx_apps.push_back(std::make_unique<Lms4xxxDriverApp>(std::move(cfg)));
+            drivers.push_back({ std::make_unique<Lms4xxxDriverApp>(std::move(cfg)), "LMS4xxx",
+                                Common::Markers::kLms4xxxInitFailed, Common::Markers::kLms4xxxRunException, {} });
         }
-        Common::Log::log_message(spdlog::level::info, kModule,
-                                 fmt::format("Created {} LiDAR instance(s)", lms4xxx_apps.size()));
     }
 
-    // Initialize drivers
-    if (ins401_app) {
-        if (!ins401_app->init()) {
-            // Program will be terminated
-            Common::Log::log_and_throw(kModule, "INS401 driver initialization failed");
-        }
-    }
-    for (auto it = lms4xxx_apps.begin(); it != lms4xxx_apps.end();) {
-        if (!(*it)->init()) {
-            // Program will be terminated
-            Common::Log::log_and_throw(kModule, "LMS4xxx driver initialization failed");
-        }
-        ++it;
-    }
-
-    // AsteRx bring-up is bounded (TCP connect + command sequence; failures are fail-fast before the first configure);
-    // it blocks until the receiver is configured and recording. The predicate keeps Ctrl+C responsive.
-    if (asterx_app) {
-        if (!asterx_app->init([] { return g_terminate.load(std::memory_order_acquire); })) {
+    // Initialize drivers in creation order. The predicate keeps Ctrl+C
+    // responsive during blocking bring-ups (AsteRx: TCP connect + command
+    // sequence; GoX: camera discovery retries + PTP convergence can take tens
+    // of seconds). On an interrupt, remaining drivers are skipped and the rig
+    // proceeds straight to the orderly shutdown of what already runs.
+    const auto external_stop = [] { return g_terminate.load(std::memory_order_acquire); };
+    std::size_t initialized = 0;
+    for (auto &d: drivers) {
+        if (!d.app->init(external_stop)) {
             if (g_terminate.load(std::memory_order_acquire)) {
-                // Interrupted by a signal during bring-up: fall through to the orderly shutdown of the already-running drivers
-                Common::Log::log_message(spdlog::level::warn, kModule, "AsteRx bring-up interrupted, shutting down");
-            } else {
-                // Program will be terminated
-                Common::Log::log_and_throw(kModule, "AsteRx driver initialization failed");
+                Common::Log::log_message(spdlog::level::warn, kModule,
+                                         fmt::format("{} bring-up interrupted, shutting down", d.name));
+                break;
             }
+            // Program will be terminated
+            Common::Log::log_and_throw(kModule, d.init_failed);
         }
+        ++initialized;
     }
 
-    // Last: camera discovery retries + PTP convergence can take tens of seconds and must not delay the cheaper
-    // drivers' init. The predicate keeps Ctrl+C responsive during the blocking bring-up.
-    if (gox_app) {
-        if (!gox_app->init([] { return g_terminate.load(std::memory_order_acquire); })) {
-            if (g_terminate.load(std::memory_order_acquire)) {
-                // Interrupted by a signal during bring-up: fall through to the orderly shutdown of the already-running drivers
-                Common::Log::log_message(spdlog::level::warn, kModule, "GoX bring-up interrupted, shutting down");
-            } else {
-                // Program will be terminated
-                Common::Log::log_and_throw(kModule, "GoX driver initialization failed");
-            }
-        }
-    }
-
-    // Run all drivers concurrently
-    std::thread ins_thread;
-    std::vector<std::thread> lidar_threads;
-    if (ins401_app) {
-        ins_thread = std::thread([&ins401_app]() {
+    // Run the successfully initialized drivers concurrently, one thread each.
+    // No push_back after this point: the lambdas hold references into `drivers`
+    for (std::size_t i = 0; i < initialized; ++i) {
+        auto &d = drivers[i];
+        d.thread = std::thread([&d]() {
             try {
-                ins401_app->run();
+                d.app->run();
             } catch (const std::exception &e) {
-                // Program will be terminated
-                Common::Log::log_and_throw(kModule, "INS401 run() exception", e.what());
-            }
-        });
-    }
-    for (auto &app: lms4xxx_apps) {
-        lidar_threads.emplace_back([&app]() {
-            try {
-                app->run();
-            } catch (const std::exception &e) {
-                Common::Log::log_and_throw(kModule, "LMS4xxx run() exception", e.what());
-            }
-        });
-    }
-    std::thread gox_thread;
-    if (gox_app) {
-        gox_thread = std::thread([&gox_app]() {
-            try {
-                gox_app->run();
-            } catch (const std::exception &e) {
-                Common::Log::log_and_throw(kModule, "GoX run() exception", e.what());
-            }
-        });
-    }
-    std::thread asterx_thread;
-    if (asterx_app) {
-        asterx_thread = std::thread([&asterx_app]() {
-            try {
-                asterx_app->run();
-            } catch (const std::exception &e) {
-                Common::Log::log_and_throw(kModule, "AsteRx run() exception", e.what());
+                // Never rethrow inside a std::thread (std::terminate); log and
+                // let the terminate flag propagate an orderly shutdown
+                Common::Log::log_and_throw(kModule, d.run_exception, e.what(), /*throw_error=*/false);
+                d.app->TerminateFlag().store(true, std::memory_order_release);
             }
         });
     }
@@ -241,23 +205,12 @@ int main(int argc, char *argv[]) {
     Common::ActivitySpinner spinner((exe_dir / "../../resource/spinner_frames.conf").string());
     spinner.Attach();
 
+    // Any driver's termination (or a signal) takes the whole rig down together
     while (!g_terminate.load(std::memory_order_acquire)) {
-        if (ins401_app && ins401_app->TerminateFlag().load(std::memory_order_acquire)) {
-            break;
-        }
-        bool any_lidar_terminated = false;
-        for (auto &app: lms4xxx_apps) {
-            if (app->TerminateFlag().load(std::memory_order_acquire)) {
-                any_lidar_terminated = true;
-                break;
-            }
-        }
-        if (any_lidar_terminated)
-            break;
-        if (gox_app && gox_app->TerminateFlag().load(std::memory_order_acquire)) {
-            break;
-        }
-        if (asterx_app && asterx_app->TerminateFlag().load(std::memory_order_acquire)) {
+        const bool any_terminated =
+                std::any_of(drivers.begin(), drivers.end(),
+                            [](DriverSlot &d) { return d.app->TerminateFlag().load(std::memory_order_acquire); });
+        if (any_terminated) {
             break;
         }
         spinner.Tick();
@@ -268,54 +221,26 @@ int main(int argc, char *argv[]) {
     spinner.Clear();
 
     // Propagate termination to all drivers
-    if (ins401_app) {
-        ins401_app->TerminateFlag().store(true, std::memory_order_release);
-    }
-    for (auto &app: lms4xxx_apps) {
-        app->TerminateFlag().store(true, std::memory_order_release);
-    }
-    if (gox_app) {
-        gox_app->TerminateFlag().store(true, std::memory_order_release);
-    }
-    if (asterx_app) {
-        asterx_app->TerminateFlag().store(true, std::memory_order_release);
+    for (auto &d: drivers) {
+        d.app->TerminateFlag().store(true, std::memory_order_release);
     }
 
     if (int sig = g_signal_received.load(std::memory_order_relaxed); sig != 0) {
         Common::Log::log_message(spdlog::level::warn, kModule,
-                                 fmt::format("Received signal {}, shutting down all drivers...", sig));
+                                 fmt::format(fmt::runtime(Common::Markers::kReceivedSignalTpl), sig));
     }
 
-    // Join driver threads
-    if (ins_thread.joinable()) {
-        ins_thread.join();
-    }
-    for (auto &t: lidar_threads) {
-        if (t.joinable()) {
-            t.join();
+    // Join run threads, then shut down in reverse creation order (shutdown()
+    // is idempotent and safe after a failed or interrupted init)
+    for (auto &d: drivers) {
+        if (d.thread.joinable()) {
+            d.thread.join();
         }
     }
-    if (gox_thread.joinable()) {
-        gox_thread.join();
-    }
-    if (asterx_thread.joinable()) {
-        asterx_thread.join();
+    for (auto it = drivers.rbegin(); it != drivers.rend(); ++it) {
+        it->app->shutdown();
     }
 
-    // Shutdown all drivers
-    if (ins401_app) {
-        ins401_app->shutdown();
-    }
-    for (auto &app: lms4xxx_apps) {
-        app->shutdown();
-    }
-    if (gox_app) {
-        gox_app->shutdown();
-    }
-    if (asterx_app) {
-        asterx_app->shutdown();
-    }
-
-    Common::Log::log_message(spdlog::level::info, kModule, "All drivers shut down");
+    Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kAllDriversShutDown);
     return 0;
 }

@@ -99,9 +99,10 @@ int main(int argc, char *argv[]) {
 		// CSV output goes to the parent data directory
 		const std::filesystem::path &csv_dir = input_path;
 
-		// Collect and sort .bin files
+		// Collect and sort .bin files (recursive: drivers write into
+		// bin/<driver>/ subdirectories)
 		std::vector<std::filesystem::path> bin_files;
-		for (const auto &entry: std::filesystem::directory_iterator(bin_dir)) {
+		for (const auto &entry: std::filesystem::recursive_directory_iterator(bin_dir)) {
 			if (entry.is_regular_file() && entry.path().extension() == ".bin") {
 				bin_files.push_back(entry.path());
 			}

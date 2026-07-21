@@ -4,12 +4,16 @@
 #include <filesystem>
 #include <thread>
 
+#include "driver_markers.h"
 #include "lms4xxx_tool.h"
+#include "logger.h"
 #include "utility.h"
 
 
 namespace {
-	constexpr std::string_view kModule = "LMS4xxxApp";
+	constexpr std::string_view kModule = Common::Markers::kModuleLms4xxx;
+
+	Common::DriverLog g_log{ std::string(kModule) };
 
 	// Statistics logging interval during scanning
 	constexpr auto kStatsInterval = std::chrono::seconds(30);
@@ -50,13 +54,11 @@ Lms4xxxDriverApp::~Lms4xxxDriverApp() {
 }
 
 
-bool Lms4xxxDriverApp::init() {
-	// Determine instance name for logging
+bool Lms4xxxDriverApp::init(const std::function<bool()> & /*external_stop*/) {
 	impl_->instance_name = config_.position_name.empty() ? config_.hostname : config_.position_name;
 
-	Common::Log::log_message(spdlog::level::trace, kModule,
-							 fmt::format("Initializing LiDAR instance '{}' ({}:{})", impl_->instance_name,
-										 config_.driver_config.device.ip, config_.driver_config.device.port));
+	g_log.trace("Initializing LiDAR instance '{}' ({}:{})", impl_->instance_name,
+				config_.driver_config.device.ip, config_.driver_config.device.port);
 
 	// Apply hostname override to driver config
 	if (!config_.hostname.empty()) {
@@ -72,27 +74,22 @@ bool Lms4xxxDriverApp::init() {
 		config_.driver_config.ntp.update_interval_s = static_cast<std::uint32_t>(config_.sync_time);
 	}
 
-	// Validate config
 	auto ec = config_.driver_config.Validate();
 	if (ec) {
 		Common::Log::log_and_throw(kModule, fmt::format("Invalid configuration for {}", impl_->instance_name), ec.message(), true);
 		return false;
 	}
 
-	// Create driver
 	impl_->driver = std::make_unique<LMS4xxx::LMS4xxxDriver>(config_.driver_config);
 
-	// Register callbacks.
 	impl_->driver->SetConnectionCallback([name = impl_->instance_name](LMS4xxx::ConnectionState state) {
-		Common::Log::log_message(spdlog::level::trace, kModule, fmt::format("[{}] Connection: {}", name, LMS4xxx::ToString(state)));
+		g_log.trace("[{}] Connection: {}", name, LMS4xxx::ToString(state));
 	});
 
 	impl_->driver->SetErrorCallback([name = impl_->instance_name](std::error_code err, const std::string &detail) {
-		Common::Log::log_and_throw(
-				kModule, fmt::format("[{}] Error: {}{}", name, err.message(), detail.empty() ? "" : " (" + detail + ")"), "", false);
+		g_log.error("[{}] Error: {}{}", name, err.message(), detail.empty() ? "" : " (" + detail + ")");
 	});
 
-	// Create scan record writer
 	if (!config_.data_folder_path.empty()) {
 		LMS4xxx::ScanRecordWriter::Config writer_config;
 		writer_config.bin_path = fmt::format("{}/bin/lms4xxx/scan_{}_{}.bin",
@@ -103,35 +100,32 @@ bool Lms4xxxDriverApp::init() {
 		writer_config.max_file_bytes = config_.recording_max_file_bytes;
 
 		impl_->writer = std::make_unique<LMS4xxx::ScanRecordWriter>(writer_config);
-		// Register scan callback to feed the writer.
 		impl_->driver->SetScanCallback([writer = impl_->writer.get()](const LMS4xxx::ScanData &scan) {
 			writer->OnScan(scan);
 		});
 
-		Common::Log::log_message(spdlog::level::trace, kModule,
-								 fmt::format("[{}] Scan recording enabled (channels: 0x{:02X})",
-											 impl_->instance_name, writer_config.channel_mask));
+		g_log.trace("[{}] Scan recording enabled (channels: 0x{:02X})",
+					impl_->instance_name, writer_config.channel_mask);
 	} else {
-		Common::Log::log_and_throw(kModule, fmt::format("Failed to set up writing module on [{}]", impl_->instance_name), "", false);
+		g_log.error("Failed to set up writing module on [{}]", impl_->instance_name);
 		return false;
 	}
 
-	// Connect
 	ec = impl_->driver->Connect();
 	if (ec) {
-		Common::Log::log_and_throw(kModule, fmt::format("Failed to connect [{}]", impl_->instance_name), ec.message(), false);
+		g_log.error("Failed to connect [{}] - {}", impl_->instance_name, ec.message());
 		return false;
 	}
 
-	// Configure
 	ec = impl_->driver->Configure();
 	if (ec) {
-		Common::Log::log_and_throw(kModule, fmt::format("Failed to configure [{}]", impl_->instance_name), ec.message(), false);
+		g_log.error("Failed to configure [{}] - {}", impl_->instance_name, ec.message());
 		impl_->driver->Disconnect();
 		return false;
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule, fmt::format("LiDAR instance [{}] initialized successfully", impl_->instance_name));
+	Common::Log::log_message(spdlog::level::info, kModule,
+							 fmt::format(fmt::runtime(Common::Markers::kLmsInitializedTpl), impl_->instance_name));
 	return true;
 }
 
@@ -145,14 +139,12 @@ void Lms4xxxDriverApp::run() {
 	// Start scan record writer before scanning so no frames are missed.
 	if (impl_->writer) {
 		if (!impl_->writer->Start(config_.driver_config.scan)) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("[{}] Failed to start scan writer, continuing without recording",
-												 impl_->instance_name));
+			g_log.warn("[{}] Failed to start scan writer, continuing without recording",
+					   impl_->instance_name);
 			impl_->writer.reset();
 		}
 	}
 
-	// Start scanning.
 	auto ec = impl_->driver->StartScanning();
 	if (ec) {
 		Common::Log::log_and_throw(kModule, fmt::format("Failed to start scanning '{}'", impl_->instance_name), ec.message(), true);
@@ -163,8 +155,7 @@ void Lms4xxxDriverApp::run() {
 		return;
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule,
-							 fmt::format("LiDAR instance [{}] start scanning", impl_->instance_name));
+	g_log.info("LiDAR instance [{}] start scanning", impl_->instance_name);
 
 	// Main loop: wait for termination, periodically log statistics
 	auto last_stats = std::chrono::steady_clock::now();
@@ -174,13 +165,11 @@ void Lms4xxxDriverApp::run() {
 
 		// Check if driver is still healthy
 		if (!impl_->driver->IsScanning()) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("LiDAR instance [{}] stopped scanning unexpectedly", impl_->instance_name));
+			g_log.warn("LiDAR instance [{}] stopped scanning unexpectedly", impl_->instance_name);
 			terminate_.store(true, std::memory_order_release);
 			break;
 		}
 
-		// Periodic statistics logging
 		auto now = std::chrono::steady_clock::now();
 		if (now - last_stats >= kStatsInterval) {
 			impl_->driver->LogStatistics();
@@ -188,7 +177,7 @@ void Lms4xxxDriverApp::run() {
 		}
 	}
 
-	Common::Log::log_message(spdlog::level::trace, kModule, fmt::format("LiDAR instance [{}] Run() exiting", impl_->instance_name));
+	g_log.trace("LiDAR instance [{}] Run() exiting", impl_->instance_name);
 }
 
 
@@ -197,12 +186,10 @@ void Lms4xxxDriverApp::shutdown() {
 		return;
 	}
 
-	// Stop scanning if active
 	if (impl_->driver->IsScanning()) {
 		impl_->driver->StopScanning();
 	}
 
-	// Log final driver statistics
 	impl_->driver->LogStatistics();
 
 	// Stop recording: flush remaining frames and close binary file
@@ -211,10 +198,10 @@ void Lms4xxxDriverApp::shutdown() {
 		impl_->writer->LogStatistics();
 	}
 
-	// Disconnect.
 	impl_->driver->Disconnect();
 
-	Common::Log::log_message(spdlog::level::info, kModule, fmt::format("LiDAR instance [{}] driver shutdown completely", impl_->instance_name));
+	Common::Log::log_message(spdlog::level::info, kModule,
+							 fmt::format(fmt::runtime(Common::Markers::kLmsShutdownTpl), impl_->instance_name));
 
 	// Reset driver so destructor and repeated shutdown() calls are no-ops.
 	impl_->driver.reset();

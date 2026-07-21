@@ -1,12 +1,14 @@
 #include "ins401_tool.h"
 
+#include "string_util.h"
+
 #include <filesystem>
 #include <spdlog/spdlog.h>
 
 #include "utility.h"
 
 
-namespace INS401Tool {
+namespace INS401::Tool {
 	namespace Earth {
 		constexpr std::string_view kModule = "INS401Tool::Earth";
 
@@ -38,18 +40,7 @@ namespace INS401Tool {
 		constexpr std::string_view kModule = "INS401Tool::Utility";
 
 		std::vector<std::string> SplitString(std::string_view str, char delimiter) {
-			std::vector<std::string> tokens;
-			size_t start = 0;
-			size_t end = str.find(delimiter);
-			while (end != std::string_view::npos) {
-				tokens.emplace_back(str.substr(start, end - start));
-				start = end + 1;
-				end = str.find(delimiter, start);
-			}
-			if (start <= str.size()) {
-				tokens.emplace_back(str.substr(start));
-			}
-			return tokens;
+			return Common::StringUtil::Split(str, delimiter);
 		}
 	}  // namespace Utility
 
@@ -88,4 +79,4 @@ namespace INS401Tool {
 			config.enable_logging = root["Logging System"]["Enable Logging"].as<bool>(true);
 		}
 	}
-}  // namespace InsTool
+}  // namespace INS401::Tool

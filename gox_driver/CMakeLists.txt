@@ -2,7 +2,7 @@
 # JAI Go-X Camera Driver (eBUS SDK for JAI)
 # This is a subdirectory of the top-level AmigaDrivers project.
 # spdlog is provided by the parent (FetchContent, target spdlog::spdlog);
-# nlohmann/json and doctest remain vendored in third_party/.
+# nlohmann/json and doctest are vendored at the repo level in 3rd_party/.
 # The eBUS SDK is a hard requirement (see cmake/FindeBUS.cmake); the
 # devcontainer installs it from gox_driver/resource/.
 
@@ -82,10 +82,12 @@ target_include_directories(jai_core PUBLIC
 # SYSTEM: keep -Wall/-Wextra/-Wpedantic from firing inside vendored headers
 # (nlohmann/json, doctest).
 target_include_directories(jai_core SYSTEM PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/3rd_party
 )
+# amiga_common carries the unified logging layer (jai::Logger delegates to
+# Common::Log) and provides spdlog/Threads transitively
 target_link_libraries(jai_core PUBLIC
-    spdlog::spdlog
+    amiga_common
     Threads::Threads
 )
 

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <sstream>
 #include <string>
 
@@ -12,10 +11,10 @@ namespace jai {
 	// unknown input and sets *ok to false if provided.
 	LogLevel parse_log_level(const std::string &s, bool *ok = nullptr);
 
-	// Thin level/prefix facade over spdlog's default logger — the single
-	// process-wide spdlog instance (set up by the unified main; tools fall back
-	// to spdlog's implicit stdout logger). Use through the LOG_* macros below
-	// or logger().
+	// Thin level facade over the common logging layer: every message lands on
+	// the process-wide spdlog default logger as "[GoX]: <msg>" (tools without
+	// Logger::init fall back to spdlog's implicit stdout logger). Never throws
+	// at any level. Use through the LOG_* macros below or logger().
 	class Logger {
 	public:
 		Logger() = default;
@@ -24,17 +23,10 @@ namespace jai {
 		LogLevel level() const { return level_; }
 		bool enabled(LogLevel level) const { return static_cast<int>(level) >= static_cast<int>(level_); }
 
-		// message_prefix (e.g. "[GoX]: ") is prepended to every message;
-		// pre_log_hook (optional) runs before each emitted message (host spinner
-		// line-clear). Call once, before worker threads exist.
-		void configure(const std::string &message_prefix = {}, std::function<void()> pre_log_hook = {});
-
 		void log(LogLevel level, const std::string &msg);
 
 	private:
 		LogLevel level_ = LogLevel::Info;  // cached for a cheap enabled() fast path
-		std::string prefix_;			   // prepended to every message (unified mode)
-		std::function<void()> pre_log_;	   // runs before each emitted message (unified mode)
 	};
 
 	Logger &logger();

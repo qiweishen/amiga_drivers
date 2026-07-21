@@ -1,5 +1,5 @@
-#ifndef LIDAR_TOOL_H
-#define LIDAR_TOOL_H
+#ifndef LMS4XXX_TOOL_H
+#define LMS4XXX_TOOL_H
 
 #include <string>
 #include <string_view>
@@ -15,6 +15,6 @@ namespace LMS4xxxTool {
 	// Convert a position name to snake_case (e.g., "Front Left" -> "front_left")
 	std::string ToSnakeCase(std::string_view name);
 
-}  // namespace LidarTool
+}  // namespace LMS4xxxTool
 
-#endif	// LIDAR_TOOL_H
+#endif	// LMS4XXX_TOOL_H

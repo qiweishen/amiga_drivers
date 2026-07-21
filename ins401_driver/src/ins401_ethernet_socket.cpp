@@ -23,11 +23,14 @@
 
 #include "ins401_protocol.h"
 #include "ins401_tool.h"
+#include "logger.h"
 #include "utility.h"
 
 
+namespace INS401 {
 namespace {
 	constexpr std::string_view kModule = "INS401EthernetSocket";
+	Common::DriverLog g_log{ std::string(kModule) };
 }
 
 
@@ -112,7 +115,7 @@ void EthernetSocket::CreateSocket() {
 
 	int flags = fcntl(socket_fd_, F_GETFL, 0);
 	if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-		Common::Log::log_message(spdlog::level::warn, kModule, "Failed to set non-blocking mode", std::strerror(errno));
+		g_log.warn("Failed to set non-blocking mode - {}", std::strerror(errno));
 	}
 
 	ifreq ifr{};
@@ -141,9 +144,7 @@ void EthernetSocket::CreateSocket() {
 	if (recv_buffer_size_ > 0) {
 		int buf_size = static_cast<int>(std::min(recv_buffer_size_, static_cast<size_t>(std::numeric_limits<int>::max())));
 		if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size)) < 0) {
-			Common::Log::log_message(spdlog::level::warn, kModule,
-									 fmt::format("Failed to set receive buffer size on interface {}", interface_name_),
-									 std::strerror(errno));
+			g_log.warn("Failed to set receive buffer size on interface {} - {}", interface_name_, std::strerror(errno));
 		}
 	}
 }
@@ -183,7 +184,6 @@ namespace Ethernet {
 	std::vector<std::pair<std::string, std::string> > GetNetworkInterfaces() {
 		std::vector<std::pair<std::string, std::string> > interfaces;
 
-		// Retrieve linked list of network interfaces
 		ifaddrs *ifaddr = nullptr;
 		if (getifaddrs(&ifaddr) == -1) {
 			Common::Log::log_and_throw(kModule, "Failed to get network interfaces", std::strerror(errno));
@@ -198,14 +198,11 @@ namespace Ethernet {
 		}
 		FdGuard fd_guard(fd);
 
-		// Iterate through all network interfaces
 		for (ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-			// Skip invalid entries
 			if (!ifa->ifa_addr || !ifa->ifa_name) {
 				continue;
 			}
 
-			// Skip loopback interfaces
 			if (strcmp(ifa->ifa_name, "lo") == 0 || strcmp(ifa->ifa_name, "lo0") == 0) {
 				continue;
 			}
@@ -214,16 +211,13 @@ namespace Ethernet {
 			if (ifa->ifa_addr->sa_family == AF_PACKET) {
 				const auto *sll = reinterpret_cast<const sockaddr_ll *>(ifa->ifa_addr);
 
-				// Verify MAC address length (6 bytes for standard Ethernet MAC)
 				if (sll->sll_halen != 6) {
 					continue;
 				}
-				// Prepare interface request structure for ioctl
 				ifreq ifr{};
 				strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ - 1);
 				ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 
-				// Query interface flags using the managed socket
 				if (ioctl(fd, SIOCGIFFLAGS, &ifr) >= 0) {
 					const bool is_up = (ifr.ifr_flags & IFF_UP) != 0;
 					const bool is_running = (ifr.ifr_flags & IFF_RUNNING) != 0;
@@ -233,8 +227,7 @@ namespace Ethernet {
 						interfaces.emplace_back(ifa->ifa_name, std::move(mac_str));
 					}
 				} else {
-					Common::Log::log_message(spdlog::level::warn, kModule,
-											 fmt::format("Failed to get flags for interface {}", ifa->ifa_name), std::strerror(errno));
+					g_log.warn("Failed to get flags for interface {} - {}", ifa->ifa_name, std::strerror(errno));
 				}
 			}
 		}
@@ -314,7 +307,7 @@ namespace Ethernet {
 		};
 
 		if (setsockopt(socket_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0) {
-			Common::Log::log_message(spdlog::level::warn, kModule, "Failed to attach BPF filter", std::strerror(errno));
+			g_log.warn("Failed to attach BPF filter - {}", std::strerror(errno));
 			return false;
 		}
 
@@ -412,19 +405,12 @@ namespace Ethernet {
 
 	namespace CRC {
 		uint16_t CalculateINS401_CRC16(const uint8_t *buf, const uint16_t &length) {
-			uint16_t crc = 0x1D0F;
-			for (int i = 0; i < length; i++) {
-				crc ^= buf[i] << 8;
-				for (int j = 0; j < 8; j++) {
-					if (crc & 0x8000) {
-						crc = (crc << 1) ^ 0x1021;
-					} else {
-						crc = crc << 1;
-					}
-				}
-			}
+			// CRC-16/AUG-CCITT: poly 0x1021, init 0x1D0F, no reflect, no final xor
+			boost::crc_optimal<16, 0x1021, 0x1D0F, 0, false, false> crc;
+			crc.process_bytes(buf, length);
+			const uint16_t result = crc.checksum();
 			// Byte-swap to match INS401 LSB-first wire format
-			return ((crc << 8) & 0xFF00) | ((crc >> 8) & 0xFF);
+			return static_cast<uint16_t>(((result << 8) & 0xFF00) | ((result >> 8) & 0xFF));
 		}
 
 
@@ -443,3 +429,4 @@ namespace Ethernet {
 		}
 	}  // namespace CRC
 }  // namespace Ethernet
+}  // namespace INS401

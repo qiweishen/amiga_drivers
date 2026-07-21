@@ -1,29 +1,32 @@
-// SPDX-License-Identifier: BSD-3-Clause
 #include "sbf_writer.hpp"
 
-#include <cerrno>
-#include <cstring>
-#include <ctime>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
 
 #include "asterx_log.hpp"
+#include "time_util.h"
 
 namespace asterx {
     namespace {
-        std::string utc_timestamp_now() {
-            const auto t = std::chrono::system_clock::now();
-            const auto tt = std::chrono::system_clock::to_time_t(t);
-            std::tm tm{};
-            gmtime_r(&tt, &tm);
-            char buf[32];
-            std::strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", &tm);
-            return std::string(buf);
+        Common::RotatingFileWriter::Options make_options(const SbfWriter::Config &cfg) {
+            Common::RotatingFileWriter::Options opts;
+            // Fresh UTC stamp per file; seq is 0-based in the core, 1-based in
+            // names. Capture by value: the lambda outlives this function
+            opts.make_path = [dir = cfg.output_dir, prefix = cfg.file_prefix](std::uint32_t seq) {
+                return (dir /
+                        (prefix + "-" + Common::TimeUtil::CompactUtcNow() + "-" +
+                         std::to_string(seq + 1) + ".sbf"))
+                        .string();
+            };
+            opts.max_file_bytes = cfg.rotate_bytes;
+            opts.rotate_interval = cfg.rotate_interval;
+            opts.precheck_size_cap = true; // rotate_bytes is a hard cap (RxTools < 2 GB)
+            return opts;
         }
     } // namespace
 
-    SbfWriter::SbfWriter(Config cfg) : cfg_(std::move(cfg)) {
+    SbfWriter::SbfWriter(Config cfg) : cfg_(std::move(cfg)), writer_(make_options(cfg_)) {
         std::error_code ec;
         std::filesystem::create_directories(cfg_.output_dir, ec);
         if (ec) {
@@ -34,79 +37,35 @@ namespace asterx {
 
     SbfWriter::~SbfWriter() { close(); }
 
-    void SbfWriter::close() noexcept {
-        if (fp_) {
-            std::fflush(fp_);
-            std::fclose(fp_);
-            fp_ = nullptr;
-            current_size_ = 0;
-        }
-    }
+    void SbfWriter::close() noexcept { writer_.Close(); }
 
     void SbfWriter::end_segment() noexcept {
-        if (fp_) {
+        if (writer_.IsOpen()) {
             log::info("[writer] closing segment {} ({} bytes)",
-                         current_path_.string(), current_size_);
-            close();
-        }
-    }
-
-    void SbfWriter::open_new_file_() {
-        if (fp_) {
-            std::fflush(fp_);
-            std::fclose(fp_);
-            fp_ = nullptr;
-        }
-        ++seq_;
-        ++stats_.files_opened;
-        current_path_ = cfg_.output_dir /
-                        (cfg_.file_prefix + "-" + utc_timestamp_now() + "-" +
-                         std::to_string(seq_) + ".sbf");
-        fp_ = std::fopen(current_path_.string().c_str(), "wb");
-        if (!fp_) {
-            throw std::runtime_error("cannot open output file '" +
-                                     current_path_.string() +
-                                     "': " + std::strerror(errno));
-        }
-        current_size_ = 0;
-        file_start_ = std::chrono::steady_clock::now();
-        log::info("[writer] opened {}", current_path_.string());
-    }
-
-    void SbfWriter::rotate_if_needed_() {
-        if (!fp_) return;
-        const auto now = std::chrono::steady_clock::now();
-        const bool by_size = current_size_ >= cfg_.rotate_bytes;
-        const bool by_time = (now - file_start_) >= cfg_.rotate_interval;
-        if (by_size || by_time) {
-            log::info("[writer] rotating ({} bytes, {} s)",
-                         current_size_,
-                         std::chrono::duration_cast<std::chrono::seconds>(now - file_start_).count());
-            open_new_file_();
+                      writer_.CurrentPath(), writer_.CurrentFileBytes());
+            writer_.EndSegment();
         }
     }
 
     void SbfWriter::write_block(const QByteArray &block) {
         if (block.isEmpty()) return;
-        if (!fp_) open_new_file_();
 
-        const auto n = static_cast<std::size_t>(block.size());
-
-        // Rotate BEFORE a write that would push the file past rotate_bytes, so
-        // rotate_bytes is a hard segment-size cap (the RxTools converters refuse
-        // files of 2 GB or larger).
-        if (current_size_ > 0 && current_size_ + n > cfg_.rotate_bytes) {
-            log::info("[writer] rotating at size cap ({} bytes)", current_size_);
-            open_new_file_();
+        const auto files_before = writer_.GetStats().files_opened;
+        if (!writer_.Append(block.constData(), static_cast<std::size_t>(block.size()))) {
+            if (!writer_.IsOpen()) {
+                throw std::runtime_error("cannot open SBF output file in '" +
+                                         cfg_.output_dir.string() + "'");
+            }
+            throw std::runtime_error("cannot write SBF block to '" +
+                                     writer_.CurrentPath() + "'");
         }
-
-        if (std::fwrite(block.constData(), 1, n, fp_) != n) {
-            throw std::runtime_error("fwrite(sbf block) failed");
+        if (writer_.GetStats().files_opened != files_before) {
+            log::info("[writer] rotating to {}", writer_.CurrentPath());
         }
-        current_size_ += n;
-        stats_.bytes_written += n;
-        ++stats_.blocks_written;
+    }
 
-        rotate_if_needed_();
+    WriterStats SbfWriter::stats() const noexcept {
+        const auto &s = writer_.GetStats();
+        return WriterStats{ s.bytes_written, s.records_written, s.files_opened };
     }
 } // namespace asterx

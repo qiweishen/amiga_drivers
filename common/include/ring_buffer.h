@@ -2,7 +2,7 @@
 /// @brief Lock-free Single-Producer Single-Consumer (SPSC) ring buffer.
 ///
 /// Designed for the callback→writer hot path in sensor drivers (e.g., SICK LiDAR
-/// at 600Hz). Replaces mutex-based ThreadSafeQueue for SPSC scenarios.
+/// at 600Hz); no mutex-based queue is needed for SPSC scenarios.
 ///
 /// Key design decisions:
 /// - Capacity rounded up to power of 2 for fast modulo via bitmask

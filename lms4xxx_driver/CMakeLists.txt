@@ -25,7 +25,6 @@ set(LIB_SOURCES
         src/lms4xxx_driver_app.cpp
         src/lms4xxx_scan_record_writer.cpp
         src/lms4xxx_tool.cpp
-        src/lms4xxx_tcp_client.cpp
         src/lms4xxx_frame_receiver.cpp
         src/lms4xxx_cola_b.cpp
         src/lms4xxx_command_builder.cpp

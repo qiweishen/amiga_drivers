@@ -6,13 +6,14 @@
 
 #include <Eigen/Core>
 #include <string>
+#include "ins401_wire_format.h"
 
 
+namespace INS401 {
 // Endianness selection for conversion helpers.
 enum class EndianType { LSB, MSB };
 
 
-// Configurations
 struct INSConfig {
 	bool enable_rtk;
 	std::string host;
@@ -36,90 +37,6 @@ struct INSConfig {
 	bool enable_logging = true;
 	std::string data_folder_path;
 	std::string timestamp;
-};
-
-
-// Parsed GNSS position and velocity solution.
-struct GNSSSolutionData {
-	std::uint16_t gps_week;
-	std::uint32_t gps_millisecs;  // ms
-	std::uint8_t position_type;	  // 0: Invalid; 1: SPP; 2: RTD; 3: INS_PROPOGATED; 4: RTK_FIXED; 5: RTK_FLOAT
-	double latitude;			  // deg
-	double longitude;			  // deg
-	double height;				  // m
-	float latitude_std;			  // m
-	float longitude_std;		  // m
-	float height_std;			  // m
-	std::uint8_t num_of_SVs;
-	std::uint8_t num_of_SVs_in_solution;
-	float hdop;
-	float diffage;		  // s
-	float north_vel;	  // m/s
-	float east_vel;		  // m/s
-	float up_vel;		  // m/s
-	float north_vel_std;  // m/s
-	float east_vel_std;	  // m/s
-	float up_vel_std;	  // m/s
-};
-
-
-// Parsed INS navigation solution.
-struct INSSolutionData {
-	std::uint16_t gps_week;
-	std::uint32_t gps_millisecs;  // ms
-	std::uint8_t ins_status;
-	// 0: Invalid; 1: INS_ALIGNING; 2: INS_HIGH_VARIANCE; 3: INS_SOLUTION_GOOD; 4: INS_SOLUTION_FREE; 5: INS_ALIGNMENT_COMPLETE
-	std::uint8_t ins_position_type;
-	// 0: Invalid; 1: SPP/INS; 2: RTD/INS; 3: INS_PROPOGATED; 4: RTK_FIXED/INS; 5: RTK_FLOAT/INS
-	double latitude;		 // deg
-	double longitude;		 // deg
-	double height;			 // m
-	float north_vel;		 // m/s
-	float east_vel;			 // m/s
-	float up_vel;			 // m/s
-	float longitudinal_vel;	 // m/s
-	float lateral_vel;		 // m/s
-	float roll;				 // deg
-	float pitch;			 // deg
-	float heading;			 // deg
-	float latitude_std;		 // m
-	float longitude_std;	 // m
-	float height_std;		 // m
-	float north_vel_std;	 // m/s
-	float east_vel_std;		 // m/s
-	float up_vel_std;		 // m/s
-	float long_vel_std;		 // m/s
-	float lat_vel_std;		 // m/s
-	float roll_std;			 // deg
-	float pitch_std;		 // deg
-	float heading_std;		 // deg
-	std::uint16_t continent_id;
-	// -2: ID_NONE; -1: ID_ERROR; 0: ID_UNKNOWN; 1: ID_AISA; 2: ID_EUROPE; 3: ID_OCEANIA; 4: ID_AFRICA; 5: ID_NORTHAMERICA; 6:
-	// ID_SOUTHAMERICA; 7: ID_ANTARCTICA
-};
-
-
-// Device diagnostic and health status.
-struct DiagnosticMessage {
-	std::uint16_t gps_week;
-	std::uint32_t gps_millisecs;		// ms
-	std::array<int, 32> device_status;	// Refer to the Table 7 in manual
-	float imu_temperature;				// ℃
-	float mcu_temperature;				// ℃
-	float gnss_chip_temperature;		// ℃
-};
-
-
-// Raw IMU accelerometer and gyroscope measurements.
-struct RawIMUData {
-	std::uint16_t gps_week;
-	std::uint32_t gps_millisecs;  // ms
-	float acc_x;				  // m/s^2
-	float acc_y;				  // m/s^2
-	float acc_z;				  // m/s^2
-	float gyro_x;				  // deg/s
-	float gyro_y;				  // deg/s
-	float gyro_z;				  // deg/s
 };
 
 
@@ -149,7 +66,6 @@ inline double GpsWeekTowToSec(std::uint16_t week, std::uint32_t millisecs) {
 }
 
 
-// Convert RawIMUData to ImuData with Eigen vectors.
 inline ImuData ToImuData(const RawIMUData &raw) {
 	ImuData d;
 	d.gps_week = raw.gps_week;
@@ -160,7 +76,6 @@ inline ImuData ToImuData(const RawIMUData &raw) {
 }
 
 
-// Convert GNSSSolutionData to GnssData with Eigen vectors.
 inline GnssData ToGnssData(const GNSSSolutionData &raw) {
 	GnssData d;
 	d.gps_week = raw.gps_week;
@@ -196,6 +111,6 @@ struct ImuWindowStats {
 		accel_sq_sum -= sample.accel.squaredNorm();
 	}
 };
-
+}  // namespace INS401
 
 #endif

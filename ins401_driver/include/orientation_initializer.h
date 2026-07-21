@@ -1,5 +1,5 @@
-#ifndef ORIENTATION_INITIALIZER_H
-#define ORIENTATION_INITIALIZER_H
+#ifndef INS401_ORIENTATION_INITIALIZER_H
+#define INS401_ORIENTATION_INITIALIZER_H
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -9,6 +9,7 @@
 #include "ins401_data_type.h"
 
 
+namespace INS401 {
 struct InitializationResult {
 	std::uint32_t timestamp = 0;
 	Eigen::Vector3d position = Eigen::Vector3d::Zero();				  // ENU
@@ -72,6 +73,6 @@ private:
 	ImuMeanStats imu_mean_stats_;
 	AlignmentCache alignment_cache_;
 };
+}  // namespace INS401
 
-
-#endif	// ORIENTATION_INITIALIZER_H
+#endif	// INS401_ORIENTATION_INITIALIZER_H

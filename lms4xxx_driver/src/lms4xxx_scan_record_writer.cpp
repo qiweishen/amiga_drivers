@@ -9,12 +9,15 @@
 #include <vector>
 #include <spdlog/spdlog.h>
 
+#include "file_writer.h"
+#include "logger.h"
 #include "ring_buffer.h"
 #include "utility.h"
 
 
 namespace {
 	constexpr std::string_view kModule = "LMS4xxxScanRecordWriter";
+	Common::DriverLog g_log{ std::string(kModule) };
 	constexpr auto kWriteBackoffSleep = std::chrono::microseconds(500);
 	constexpr std::size_t kBatchSize = 32;
 }  // namespace
@@ -40,13 +43,9 @@ namespace LMS4xxx {
 		std::thread write_thread;
 		std::atomic<bool> running{false};
 
-		// Output file
-		std::ofstream bin_file;
-		std::vector<char> file_buffer;
-
-		// File splitting state
-		std::uint32_t file_index = 0;
-		std::size_t current_file_bytes = 0;
+		// Output file: shared rotating core (size-based splits, per-file header
+		// via on_new_file); on-disk layout is unchanged
+		std::unique_ptr<Common::RotatingFileWriter> file;
 		ScanFileHeader file_header{};  // Cached copy, written to each split file
 
 		// Statistics
@@ -204,62 +203,42 @@ namespace LMS4xxx {
 			return (parent / filename).string();
 		}
 
-		// Close current file and open next split file. Returns true on success.
-		bool OpenNextFile() {
-			if (bin_file.is_open()) {
-				bin_file.flush();
-				bin_file.close();
-			}
-
-			std::string path = GenerateFilePath(file_index);
-
-			// pubsetbuf must be called before open; reuse the existing file_buffer
-			bin_file.rdbuf()->pubsetbuf(file_buffer.data(),
-										static_cast<std::streamsize>(file_buffer.size()));
-			bin_file.open(path, std::ios::out | std::ios::binary);
-
-			if (!bin_file.is_open()) {
-				Common::Log::log_message(spdlog::level::err, kModule,
-										 fmt::format("Failed to open split file: {}", path));
-				return false;
-			}
-
-			// Write file header to new split file
-			bin_file.write(reinterpret_cast<const char *>(&file_header), sizeof(file_header));
-			current_file_bytes = sizeof(ScanFileHeader);
-			++file_index;
-			stat_files_created.fetch_add(1, std::memory_order_relaxed);
-
-			Common::Log::log_message(spdlog::level::trace, kModule,
-									 fmt::format("Opened split file: {}", path));
-			return true;
+		// Build the rotating-file core: split naming, size threshold and the
+		// per-file format header, all unchanged from the previous in-place code.
+		[[nodiscard]] std::unique_ptr<Common::RotatingFileWriter> MakeFile() {
+			Common::RotatingFileWriter::Options opts;
+			opts.make_path = [this](std::uint32_t seq) { return GenerateFilePath(seq); };
+			opts.max_file_bytes = config.max_file_bytes;
+			opts.buffer_bytes = config.write_buffer_size;
+			opts.on_new_file = [this](std::ofstream &f) {
+				f.write(reinterpret_cast<const char *>(&file_header), sizeof(file_header));
+				if (!f) {
+					return false;
+				}
+				stat_files_created.fetch_add(1, std::memory_order_relaxed);
+				g_log.trace("Opened split file");
+				return true;
+			};
+			return std::make_unique<Common::RotatingFileWriter>(std::move(opts));
 		}
 
-		// Write thread main loop.
+		// Write thread main loop. Append() handles the size-based split
+		// (per-file header via on_new_file) internally.
 		void WriteLoop() {
-			Common::Log::log_message(spdlog::level::trace, kModule, "Write thread started");
-
-			const bool splitting_enabled = config.max_file_bytes > 0;
+			g_log.trace("Write thread started");
 
 			while (running.load(std::memory_order_acquire)) {
 				std::size_t count = 0;
 				WriteRecord record;
 
 				while (count < kBatchSize && queue->try_pop(record)) {
-					bin_file.write(reinterpret_cast<const char *>(record.data),
-								   static_cast<std::streamsize>(record.size));
+					if (!file->Append(record.data, record.size)) {
+						g_log.error("Failed to write split file, stopping write loop");
+						return;
+					}
 					stat_bytes_written.fetch_add(record.size, std::memory_order_relaxed);
 					stat_frames_written.fetch_add(1, std::memory_order_relaxed);
-					current_file_bytes += record.size;
 					++count;
-
-					if (splitting_enabled && current_file_bytes >= config.max_file_bytes) {
-						if (!OpenNextFile()) {
-							Common::Log::log_message(spdlog::level::err, kModule,
-													 "Failed to open next split file, stopping write loop");
-							return;
-						}
-					}
 				}
 
 				if (count == 0) {
@@ -270,22 +249,15 @@ namespace LMS4xxx {
 			// Drain remaining records after stop signal.
 			WriteRecord record;
 			while (queue->try_pop(record)) {
-				bin_file.write(reinterpret_cast<const char *>(record.data),
-							   static_cast<std::streamsize>(record.size));
+				if (!file->Append(record.data, record.size)) {
+					g_log.error("Failed to write split file during drain");
+					break;
+				}
 				stat_bytes_written.fetch_add(record.size, std::memory_order_relaxed);
 				stat_frames_written.fetch_add(1, std::memory_order_relaxed);
-				current_file_bytes += record.size;
-
-				if (splitting_enabled && current_file_bytes >= config.max_file_bytes) {
-					if (!OpenNextFile()) {
-						Common::Log::log_message(spdlog::level::err, kModule,
-												 "Failed to open next split file during drain");
-						break;
-					}
-				}
 			}
 
-			Common::Log::log_message(spdlog::level::trace, kModule, "Write thread stopped");
+			g_log.trace("Write thread stopped");
 		}
 	};
 
@@ -302,13 +274,12 @@ namespace LMS4xxx {
 
 	bool ScanRecordWriter::Start(const ScanConfig &scan_config) {
 		if (impl_->running.load(std::memory_order_relaxed)) {
-			Common::Log::log_message(spdlog::level::warn, kModule, "Already running");
+			g_log.warn("Already running");
 			return false;
 		}
 
 		impl_->record_size = impl_->ComputeRecordSize();
 
-		// Ensure parent directory exists.
 		std::filesystem::path parent = std::filesystem::path(impl_->config.bin_path).parent_path();
 		if (!parent.empty()) {
 			std::filesystem::create_directories(parent);
@@ -322,30 +293,22 @@ namespace LMS4xxx {
 		impl_->file_header.angle_step = scan_config.AngularResolutionDevice();
 		impl_->file_header.record_size = impl_->record_size;
 
-		// Allocate file buffer once (reused across split files).
-		impl_->file_buffer.resize(impl_->config.write_buffer_size);
-
-		// Reset splitting state.
-		impl_->file_index = 0;
-		impl_->current_file_bytes = 0;
-
-		// Open first split file (index 0).
-		if (!impl_->OpenNextFile()) {
+		// Open first split file (index 0) eagerly so a bad path fails Start()
+		impl_->file = impl_->MakeFile();
+		if (!impl_->file->OpenNext()) {
+			g_log.error("Failed to open split file: {}", impl_->GenerateFilePath(0));
 			return false;
 		}
 
-		// Create SPSC queue.
 		impl_->queue = std::make_unique<Common::RingBuffer<WriteRecord>>(impl_->config.queue_capacity);
 
-		// Start write thread.
 		impl_->running.store(true, std::memory_order_release);
 		impl_->write_thread = std::thread([this]() { impl_->WriteLoop(); });
 
-		Common::Log::log_message(spdlog::level::trace, kModule,
-								 fmt::format("Recording to {} (record: {} B, channels: 0x{:02X}, queue: {} frames, max file: {} MB)",
-											 impl_->config.bin_path, impl_->record_size,
-											 impl_->config.channel_mask, impl_->config.queue_capacity,
-											 impl_->config.max_file_bytes / (1024 * 1024)));
+		g_log.trace("Recording to {} (record: {} B, channels: 0x{:02X}, queue: {} frames, max file: {} MB)",
+					impl_->config.bin_path, impl_->record_size,
+					impl_->config.channel_mask, impl_->config.queue_capacity,
+					impl_->config.max_file_bytes / (1024 * 1024));
 		return true;
 	}
 
@@ -361,14 +324,14 @@ namespace LMS4xxx {
 			impl_->write_thread.join();
 		}
 
-		if (impl_->bin_file.is_open()) {
-			impl_->bin_file.flush();
-			impl_->bin_file.close();
+		if (impl_->file) {
+			impl_->file->Close();
+			impl_->file.reset();
 		}
 
 		impl_->queue.reset();
 
-		Common::Log::log_message(spdlog::level::trace, kModule, "Recording stopped");
+		g_log.trace("Recording stopped");
 	}
 
 
@@ -394,11 +357,10 @@ namespace LMS4xxx {
 
 	void ScanRecordWriter::LogStatistics() const {
 		const auto stats = GetStatistics();
-		Common::Log::log_message(spdlog::level::info, kModule,
-								 fmt::format("=== LMS4xxx RECORDING STATISTICS === : Total frames written: {}, dropped: {}, total bytes: {:.2f} MB, files created: {}",
-											 stats.frames_written, stats.frames_dropped,
-											 static_cast<double>(stats.bytes_written) / (1024.0 * 1024.0),
-											 stats.files_created));
+		g_log.info("=== LMS4xxx RECORDING STATISTICS === : Total frames written: {}, dropped: {}, total bytes: {:.2f} MB, files created: {}",
+				   stats.frames_written, stats.frames_dropped,
+				   static_cast<double>(stats.bytes_written) / (1024.0 * 1024.0),
+				   stats.files_created);
 	}
 
 }  // namespace LMS4xxx

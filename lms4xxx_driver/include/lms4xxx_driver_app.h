@@ -1,37 +1,29 @@
-#ifndef LIDAR_DRIVER_APP_H
-#define LIDAR_DRIVER_APP_H
+#ifndef LMS4XXX_DRIVER_APP_H
+#define LMS4XXX_DRIVER_APP_H
 
-#include <atomic>
 #include <memory>
 #include <string>
 
+#include "driver_app.h"
 #include "lms4xxx_data_type.h"
 #include "lms4xxx_driver.h"
 #include "lms4xxx_scan_record_writer.h"
 
 
-class Lms4xxxDriverApp {
+class Lms4xxxDriverApp final : public Common::IDriverApp {
 public:
 	explicit Lms4xxxDriverApp(LiDARConfig config);
-	~Lms4xxxDriverApp();
-
-	// Non-copyable, non-movable.
-	Lms4xxxDriverApp(const Lms4xxxDriverApp &) = delete;
-	Lms4xxxDriverApp &operator=(const Lms4xxxDriverApp &) = delete;
-	Lms4xxxDriverApp(Lms4xxxDriverApp &&) = delete;
-	Lms4xxxDriverApp &operator=(Lms4xxxDriverApp &&) = delete;
+	~Lms4xxxDriverApp() override;
 
 	// Initialize the driver: load config, create LMS4xxxDriver, connect.
-	[[nodiscard]] bool init();
+	// The external_stop predicate is unused: connect/configure are bounded by timeouts.
+	[[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override;
 
 	// Run the driver (blocks until terminate_flag is set).
-	void run();
+	void run() override;
 
 	// Graceful shutdown: stop scanning, disconnect.
-	void shutdown();
-
-	// Shared termination flag (set by main.cpp signal handler).
-	[[nodiscard]] std::atomic<bool> &TerminateFlag() { return terminate_; }
+	void shutdown() override;
 
 private:
 	struct Impl {
@@ -41,8 +33,7 @@ private:
 	};
 
 	std::unique_ptr<Impl> impl_;
-	std::atomic<bool> terminate_{ false };
 	LiDARConfig config_;
 };
 
-#endif	// LIDAR_DRIVER_APP_H
+#endif	// LMS4XXX_DRIVER_APP_H

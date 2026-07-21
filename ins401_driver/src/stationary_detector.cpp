@@ -5,6 +5,7 @@
 #include "utility.h"
 
 
+namespace INS401 {
 namespace {
 	constexpr std::string_view kModule = "StationaryDetector";
 }
@@ -20,7 +21,6 @@ StationaryDetector::StationaryDetector(const std::vector<RawIMUData> &raw_imu_da
 	min_duration_s_(cfg.min_duration_s),
 	window_samples_(static_cast<size_t>(min_duration_s_ * imu_freq_)),
 	local_gravity_(local_gravity < 0.0 ? -local_gravity : local_gravity) {
-	// Convert RawIMUData to ImuData
 	imu_data_.reserve(raw_imu_data.size());
 	for (const auto &raw: raw_imu_data) {
 		imu_data_.push_back(ToImuData(raw));
@@ -160,3 +160,4 @@ void StationaryDetector::FindStationaryImuSegments() {
 		}
 	}
 }
+}  // namespace INS401

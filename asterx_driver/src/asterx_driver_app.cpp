@@ -11,17 +11,19 @@
 
 #include "app_config.hpp"
 #include "asterx_log.hpp"
+#include "driver_markers.h"
 #include "session.hpp"
+#include "thread_util.h"
 #include "utility.h"
 
 
 namespace {
-	constexpr std::string_view kModule = "AsterxApp";
+	constexpr std::string_view kModule = Common::Markers::kModuleAsterx;
 }
 
 
 AsterxDriverApp::AsterxDriverApp(const Common::Config &config) {
-	// Store config path from the main config. The actual loading is deferred to init()
+	// Actual config loading is deferred to init()
 	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
 	config_path_ = exe_dir / "../../" / config.asterx_config_path;
 	data_folder_path_ = config.data_folder_path;
@@ -102,10 +104,10 @@ bool AsterxDriverApp::init(const std::function<bool()> &external_stop) {
 	// Unified-mode override: SBF segments go under the unified session folder
 	cfg.output_dir = std::filesystem::path(data_folder_path_) / "bin" / "asterx";
 
-	// Route asterx logs into the unified logger (prefix + spinner pre-log hook).
+	// Route asterx logs into the unified logger under the "AsteRx" module tag
+	// (prefix + spinner pre-log hook are built into Common::DriverLog).
 	// Must run before the Qt thread starts (configure is not thread-safe).
-	asterx::log::configure("[AsteRx]: ", [] { Common::Log::run_pre_log_callback(); },
-						   spdlog::level::from_str(cfg.log_level));
+	asterx::log::configure("AsteRx", spdlog::level::from_str(cfg.log_level));
 
 	// Start the Qt worker thread and wait until the receiver reaches Recording
 	// or fails (pre-configure failures are fail-fast via fatalError); the wait
@@ -123,7 +125,7 @@ bool AsterxDriverApp::init(const std::function<bool()> &external_stop) {
 	lk.unlock();
 
 	if (outcome == BringUp::Recording) {
-		Common::Log::log_message(spdlog::level::info, kModule, "AsteRx driver initialized (receiver configured, recording)");
+		Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kAsterxInitialized);
 		return true;
 	}
 	if (outcome == BringUp::Failed) {
@@ -151,9 +153,7 @@ void AsterxDriverApp::run() {
 	// Block until termination is requested; the Qt thread does the recording.
 	// The only internal exit path (Session::fatalError) already sets
 	// terminate_, and QtThreadMain sets it again unconditionally on exit.
-	while (!terminate_.load(std::memory_order_acquire)) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
+	Common::ThreadUtil::WaitUntilTerminated(terminate_);
 }
 
 
@@ -169,5 +169,5 @@ void AsterxDriverApp::shutdown() {
 		qt_thread_.join();
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule, "AsteRx driver shutdown completely");
+	Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kAsterxShutdown);
 }

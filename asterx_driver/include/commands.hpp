@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
 #include <stdexcept>
@@ -60,8 +59,6 @@ namespace asterx {
             },
         };
 
-        // Legacy config compatibility: load_config maps this to imu_orientation_mode.
-        bool use_sensor_default{true};
 
         // IMU setup. OrientationMode is SensorDefault, manual, or fixed.
         std::string imu_startup_data_mode{"Boot"};

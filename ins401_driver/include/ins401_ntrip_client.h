@@ -1,40 +1,36 @@
 /// @file ntrip_client.h
 /// @brief NTRIP v2.0 client for receiving RTK correction data (RTCM3) and forwarding it to INS401.
+///
+/// Transport rides on Common::TcpClient; the protocol layer here keeps the
+/// NTRIP domain logic: the HTTP GET handshake (casters answer with the
+/// non-standard "ICY 200 OK" status line, so no generic HTTP library fits),
+/// periodic GGA upload for VRS, 1024-byte RTCM chunking to fit the raw-socket
+/// MTU towards the device, source-table parsing and reconnection with
+/// exponential backoff.
 
-#ifndef NTRIP_CLIENT_H
-#define NTRIP_CLIENT_H
+#ifndef INS401_NTRIP_CLIENT_H
+#define INS401_NTRIP_CLIENT_H
 
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <openssl/ssl.h>
-#include <queue>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "bounded_queue.h"
 #include "ins401_data_type.h"
 #include "ins401_ethernet_socket.h"
+#include "tcp_client.h"
 
 
-// HTTP response structure
-struct HTTPResponse {
-	int status_code;
-	std::string status_text;
-	std::map<std::string, std::string> headers;
-	std::string body;
-	bool is_chunked;
-};
-
-
+namespace INS401 {
 class NTRIPClient {
 public:
 	struct Options {
@@ -44,8 +40,6 @@ public:
 		std::string mount_point;  // Mount point name
 		std::string username;	  // Authentication username
 		std::string password;	  // Authentication password
-		bool is_ssl = false;	  // Use SSL/TLS connection
-		bool verify_ssl = false;  // Verify SSL certificate
 		bool use_vrs;			  // Enable periodic GGA for VRS
 		int gga_interval = 30;	  // GGA send interval in seconds
 
@@ -141,17 +135,15 @@ public:
 	Statistics GetStatistics() const;
 
 private:
+	using DataQueue = Common::BoundedQueue<std::vector<uint8_t> >;
+
 	void StopReceiving();
 
 	// Loading config
 	void LoadConfig(const INSConfig &config);
 
-	// Network operations
-	bool CreateSocket(int family);
-
+	// Network operations (on Common::TcpClient)
 	bool ConnectSocket();
-
-	bool InitSSL();
 
 	bool SendRequest() const;
 
@@ -162,13 +154,19 @@ private:
 	void SendGGA();
 
 	// Data operations
-	ssize_t SendData(const void *data, size_t size) const;
+	[[nodiscard]] bool SendData(const void *data, size_t size) const;
 
-	ssize_t ReceiveData(void *buffer, size_t size) const;
+	// Returns bytes read (> 0), 0 on idle timeout (no data yet), sets ec on
+	// connection loss or error.
+	[[nodiscard]] size_t ReceiveData(void *buffer, size_t size, std::error_code &ec) const;
 
 	// Split raw RTCM stream into 1024-byte blocks that fit within the Ethernet MTU
 	// for raw socket transmission to the INS401 device.
 	std::vector<std::vector<uint8_t> > ChunkRTCMData(const uint8_t *data, size_t size);
+
+	// Deliver received bytes to the process queue, dropping the OLDEST entry
+	// when full (fresh RTK corrections beat stale ones).
+	void EnqueueReceived(std::vector<uint8_t> data);
 
 	// Thread functions
 	void ReceiveThread();
@@ -177,11 +175,6 @@ private:
 
 	// Reconnection
 	void HandleReconnect();
-
-	// Utility
-	static std::string GetSSLError();
-
-	static std::string GetSSLErrorString(int ssl_error);
 
 	std::string BuildHTTPRequest(const std::string &path) const;
 
@@ -193,27 +186,25 @@ private:
 	// Configuration
 	Options config_{};
 
-	// Network
-	int socket_fd_ = -1;
-	std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ssl_ctx_{ nullptr, SSL_CTX_free };
-	std::unique_ptr<SSL, decltype(&SSL_free)> ssl_{ nullptr, SSL_free };
+	// Network (guarded by connection_mutex_ for connect/close transitions)
+	mutable std::mutex connection_mutex_;
+	std::unique_ptr<Common::TcpClient> tcp_;
 
 	// State
 	std::atomic<bool> connected_{ false };
 	std::atomic<bool> disconnected_{ false };
 	std::atomic<bool> receiving_{ false };
+	std::atomic<bool> stopping_{ false };
 
 	// Thread management
-	mutable std::mutex connection_mutex_;  // Protects socket and SSL operations
-	mutable std::mutex thread_mutex_;	   // Protects thread lifecycle
+	mutable std::mutex thread_mutex_;  // Protects thread lifecycle
 	std::unique_ptr<std::thread> receive_thread_;
 	std::unique_ptr<std::thread> process_thread_;
 
-	// Data queue
-	std::queue<std::vector<uint8_t> > data_queue_;
-	mutable std::mutex queue_mutex_;
-	std::condition_variable queue_cv_;
-	std::vector<uint8_t> pending_data_;
+	// Data queue (recreated on every StartReceiving; close() wakes ProcessThread)
+	std::unique_ptr<DataQueue> queue_;
+	mutable std::mutex pending_mutex_;
+	std::vector<uint8_t> pending_data_;	 // body bytes that arrived with the HTTP response
 
 	// VRS GGA
 	mutable std::mutex gga_mutex_;
@@ -232,16 +223,6 @@ private:
 	// RTCM buffer
 	std::vector<uint8_t> rtcm_buffer_;
 	size_t rtcm_sync_lost_count_ = 0;
-
-	// RTCM base stream recording (for PPK)
-	std::string output_folder_path_;
-	std::ofstream rtcm_base_file_;
-	std::array<char, 256 * 1024> rtcm_base_file_buffer_{};
-
-	// OpenSSL initialization
-	static std::once_flag ssl_init_flag_;
-
-	static void InitOpenSSL();
 };
 
 
@@ -285,6 +266,6 @@ private:
 	static constexpr int kMaxSendRetries = 3;
 	static constexpr int kSendRetryDelayMs = 10;
 };
-
+}  // namespace INS401
 
 #endif

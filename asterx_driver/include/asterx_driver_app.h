@@ -12,12 +12,12 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
 
 #include "data_type.h"
+#include "driver_app.h"
 
 
 // Forward declaration to keep Qt/asterx headers out of the unified main.
@@ -26,25 +26,16 @@ namespace asterx {
 }
 
 
-class AsterxDriverApp {
+class AsterxDriverApp final : public Common::IDriverApp {
 public:
 	explicit AsterxDriverApp(const Common::Config &config);
-	~AsterxDriverApp();
+	~AsterxDriverApp() override;
 
-	// Non-copyable, non-movable.
-	AsterxDriverApp(const AsterxDriverApp &) = delete;
-	AsterxDriverApp &operator=(const AsterxDriverApp &) = delete;
-	AsterxDriverApp(AsterxDriverApp &&) = delete;
-	AsterxDriverApp &operator=(AsterxDriverApp &&) = delete;
+	[[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override;
 
-	bool init(const std::function<bool()> &external_stop = {});
+	void run() override;
 
-	void run();
-
-	void shutdown();
-
-	// Shared termination flag (set by main.cpp signal handler).
-	std::atomic<bool> &TerminateFlag() { return terminate_; }
+	void shutdown() override;
 
 private:
 	enum class BringUp { Pending, Recording, Failed };
@@ -60,7 +51,6 @@ private:
 	std::condition_variable bring_up_cv_;
 	BringUp bring_up_{ BringUp::Pending };
 
-	std::atomic<bool> terminate_{ false };
 	std::atomic<bool> shutdown_called_{ false };
 };
 

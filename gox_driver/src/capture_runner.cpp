@@ -3,7 +3,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <sys/stat.h>
+#include <filesystem>
 #include <sys/statvfs.h>
 #include <thread>
 
@@ -19,20 +19,10 @@ namespace jai {
 	namespace {
 
 		void make_dirs(const std::string &path) {
-			std::string partial;
-			for (size_t i = 0; i <= path.size(); ++i) {
-				if (i == path.size() || path[i] == '/') {
-					if (!partial.empty() && partial != "/") {
-						if (::mkdir(partial.c_str(), 0755) != 0 && errno != EEXIST) {
-							throw std::runtime_error("mkdir " + partial + ": " + std::strerror(errno));
-						}
-					}
-					if (i < path.size()) {
-						partial.push_back('/');
-					}
-				} else {
-					partial.push_back(path[i]);
-				}
+			std::error_code ec;
+			std::filesystem::create_directories(path, ec);
+			if (ec) {
+				throw std::runtime_error("mkdir " + path + ": " + ec.message());
 			}
 		}
 
@@ -87,7 +77,6 @@ namespace jai {
 	bool CaptureRunner::init(const std::string &session_dir_override, bool validate_only) {
 		validate_only_ = validate_only;
 
-		// Session directory + metadata skeleton.
 		gen_uuid_v4(session_uuid_);
 		start_rt_ = now_realtime_ns();
 		start_mono_ = now_monotonic_ns();
@@ -132,7 +121,6 @@ namespace jai {
 												 { "genicam_env", version::kGenicamEnvName } };
 		doc_["config"] = cfg_.raw;
 
-		// Preflight (network self-checks), then the initial session.json.
 		ebus::PreflightReport preflight = ebus::run_preflight(cfg_);
 		preflight.log();
 		preflight_had_error_ = preflight.has_error();
@@ -151,7 +139,6 @@ namespace jai {
 			return false;
 		}
 
-		// Bring the cameras up.
 		for (size_t i = 0; i < cfg_.cameras.size(); ++i) {
 			if (cfg_.cameras[i].enabled) {
 				sessions_.push_back(std::make_unique<ebus::CameraSession>(static_cast<uint32_t>(i), cfg_.cameras[i], cfg_.acquisition,
@@ -202,7 +189,6 @@ namespace jai {
 			return;
 		}
 
-		// Main loop: stats, limits, PTP offset reports.
 		// max_duration_s measures CAPTURE time: the clock starts after bring-up
 		// (discovery/PTP convergence can eat tens of seconds and must not count
 		// against the configured duration).
@@ -274,7 +260,6 @@ namespace jai {
 			return exit_code_;
 		}
 
-		// Ordered shutdown + final accounting.
 		LOG_INFO("stopping (reason: ", stop_reason_name(stop_->reason()), ")");
 		events_.log("session_stop", nlohmann::ordered_json{ { "reason", stop_reason_name(stop_->reason()) } });
 		for (auto &s: sessions_) {

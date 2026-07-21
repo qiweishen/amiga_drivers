@@ -10,17 +10,18 @@
 #include "core/config.hpp"
 #include "core/logger.hpp"
 #include "core/signal_stop.hpp"
+#include "driver_markers.h"
 #include "ebus/env_bootstrap.hpp"
 #include "utility.h"
 
 
 namespace {
-	constexpr std::string_view kModule = "GoXApp";
+	constexpr std::string_view kModule = Common::Markers::kModuleGox;
 }
 
 
 GoxDriverApp::GoxDriverApp(const Common::Config &config) : stop_(std::make_unique<jai::StopController>()) {
-	// Store config path from the main config. The actual loading is deferred to init()
+	// Actual config loading is deferred to init()
 	std::filesystem::path exe_dir = Common::GetExecutableDir();	 // exe_dir + "../../" -> project root
 	config_path_ = exe_dir / "../../" / config.gox_config_path;
 	data_folder_path_ = config.data_folder_path;
@@ -33,9 +34,7 @@ GoxDriverApp::~GoxDriverApp() {
 
 
 bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
-	// NOTE: error paths must use log_and_throw(..., throw_error=false):
-	// log_message(err) would throw. The config copy into <data_folder>/config/
-	// is done by the unified main.
+	// The config copy into <data_folder>/config/ is done by the unified main.
 
 	// Strict JSON config load (unknown keys are fatal)
 	jai::AppConfig cfg;
@@ -46,9 +45,9 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
 		return false;
 	}
 
-	// Route gox logs into the unified logger (prefix + spinner pre-log hook)
+	// gox logs land on the unified logger via jai::Logger -> Common::Log
+	// ("[GoX]: " prefix and spinner pre-log hook are built in)
 	jai::logger().set_level(cfg.logging.level);
-	jai::logger().configure("[GoX]: ", [] { Common::Log::run_pre_log_callback(); });
 
 	// GenICam environment; must precede the first eBUS SDK call
 	jai::ebus::bootstrap_env();
@@ -92,7 +91,7 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
 		return false;
 	}
 
-	Common::Log::log_message(spdlog::level::info, kModule, "GoX driver initialized");
+	Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kGoxInitialized);
 	return true;
 }
 
@@ -114,7 +113,6 @@ void GoxDriverApp::shutdown() {
 		return;
 	}
 
-	// Signal termination
 	terminate_.store(true, std::memory_order_release);
 
 	if (!runner_) {
@@ -122,9 +120,9 @@ void GoxDriverApp::shutdown() {
 	}
 	const int code = runner_->shutdown();
 	if (code == 0) {
-		Common::Log::log_message(spdlog::level::info, kModule, "GoX driver shutdown completely");
+		Common::Log::log_message(spdlog::level::info, kModule, Common::Markers::kGoxShutdown);
 	} else {
 		Common::Log::log_message(spdlog::level::warn, kModule,
-								 fmt::format("GoX session ended with issues (standalone exit code {})", code));
+								 fmt::format("{} (standalone exit code {})", Common::Markers::kGoxSessionIssues, code));
 	}
 }

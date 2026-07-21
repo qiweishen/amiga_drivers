@@ -1,73 +1,27 @@
 #ifndef LMS4XXX_TCP_CLIENT_H
 #define LMS4XXX_TCP_CLIENT_H
 
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <system_error>
-#include <vector>
-
 #include "lms4xxx_config.h"
+#include "tcp_client.h"
 
 
 namespace LMS4xxx {
 
-	// TCP client wrapping Boost.Asio for sensor communication.
-	//
-	// Thread safety:
-	//   - Connect()/Disconnect() must be called from the control thread.
-	//   - Read()/ReadSome() are called from the receive thread.
-	//   - Write() may be called from the control thread (command sending).
-	//   - Concurrent read + write is safe (Boost.Asio full-duplex).
-	//   - Concurrent read + read or write + write is NOT safe.
-	class TCPClient {
-	public:
-		explicit TCPClient(const DeviceConfig &device_config, const NetworkConfig &network_config);
-		~TCPClient();
+	// The TCP client implementation lives in common (Common::TcpClient); this
+	// adapter maps the LMS4xxx config structs onto its options.
+	using TCPClient = Common::TcpClient;
 
-		// Non-copyable, movable.
-		TCPClient(const TCPClient &) = delete;
-		TCPClient &operator=(const TCPClient &) = delete;
-		TCPClient(TCPClient &&) noexcept;
-		TCPClient &operator=(TCPClient &&) noexcept;
-
-		// Connect to the sensor. Configures SO_RCVBUF and TCP keepalive.
-		[[nodiscard]] std::error_code Connect(int timeout_ms);
-
-		// Shut down the receive side of the socket to unblock any pending ReadSome()
-		// call in the receive thread. The send side remains open.
-		// Safe to call from a different thread than the one calling ReadSome().
-		void ShutdownReceive();
-
-		// Close the connection. Safe to call multiple times.
-		void Disconnect();
-
-		// Check if the socket is connected.
-		[[nodiscard]] bool IsConnected() const;
-
-		// Synchronous blocking read. Reads exactly `len` bytes into `buf`.
-		// If `timeout_ms` > 0, returns ErrorCode::kResponseTimeout when the
-		// deadline is exceeded.  Pass 0 for no deadline (retries indefinitely).
-		[[nodiscard]] std::size_t Read(std::uint8_t *buf, std::size_t len, std::error_code &ec, int timeout_ms = 0);
-
-		// Synchronous non-blocking read. Returns whatever data is available.
-		[[nodiscard]] std::size_t ReadSome(std::uint8_t *buf, std::size_t max_len, std::error_code &ec);
-
-		// Synchronous write. Sends all `len` bytes.
-		[[nodiscard]] std::error_code Write(const std::uint8_t *data, std::size_t len);
-
-		// Convenience: write a vector.
-		[[nodiscard]] std::error_code Write(const std::vector<std::uint8_t> &data);
-
-		// Get the remote endpoint string (for logging).
-		[[nodiscard]] std::string RemoteEndpointStr() const;
-
-	private:
-		struct Impl;
-		std::unique_ptr<Impl> impl_;
-	};
+	[[nodiscard]] inline Common::TcpClient::Options MakeTcpOptions(const DeviceConfig &device, const NetworkConfig &network) {
+		Common::TcpClient::Options opts;
+		opts.host = device.ip;
+		opts.port = device.port;
+		opts.recv_buffer_bytes = network.recv_buffer_bytes;
+		opts.tcp_keepalive = network.tcp_keepalive;
+		opts.keepalive_idle_s = network.keepalive_idle_s;
+		opts.keepalive_interval_s = network.keepalive_interval_s;
+		opts.keepalive_count = network.keepalive_count;
+		return opts;
+	}
 
 }  // namespace LMS4xxx
 

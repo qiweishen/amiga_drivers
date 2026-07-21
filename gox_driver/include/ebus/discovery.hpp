@@ -1,14 +1,10 @@
 #pragma once
 
 // GigE Vision device discovery and selector matching on top of PvSystem.
-//
-// Lifetime design (important): every PvDeviceInfo* is owned by the PvSystem
-// that produced it and dies with it. Instead of copying data out and
-// re-finding the device later, a Discovery instance owns its PvSystem in a
-// unique_ptr member and hands out the matched PvDeviceInfoGEV* — the caller
-// (CameraSession) simply keeps the Discovery object alive until
-// PvDeviceGEV::Connect() has returned, then lets it go out of scope. This is
-// the simplest arrangement that cannot dangle and needs no second Find().
+// Lifetime invariant: every PvDeviceInfo* is owned by its PvSystem and dies
+// with it — a Discovery instance owns the PvSystem and hands out the matched
+// PvDeviceInfoGEV*; the caller keeps the Discovery alive until
+// PvDeviceGEV::Connect() has returned (cannot dangle, no second Find()).
 
 #include <PvDeviceInfoGEV.h>
 #include <PvSystem.h>

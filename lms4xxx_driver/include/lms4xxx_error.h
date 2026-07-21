@@ -32,8 +32,6 @@ namespace LMS4xxx {
 
 		// Configuration errors
 		kInvalidConfig = 400,		///< Invalid configuration parameter
-		kConfigFileNotFound = 401,	///< Configuration file does not exist
-		kConfigParseError = 402,	///< JSON/YAML parse failure
 
 		// Runtime errors
 		kBufferOverflow = 500,	  ///< Ring buffer full, frame dropped
@@ -80,10 +78,6 @@ namespace LMS4xxx {
 					return "command rejected by device";
 				case ErrorCode::kInvalidConfig:
 					return "invalid configuration parameter";
-				case ErrorCode::kConfigFileNotFound:
-					return "configuration file not found";
-				case ErrorCode::kConfigParseError:
-					return "configuration parse error";
 				case ErrorCode::kBufferOverflow:
 					return "ring buffer overflow (frame dropped)";
 				case ErrorCode::kNotConnected:

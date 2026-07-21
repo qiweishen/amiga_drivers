@@ -1,45 +1,38 @@
 #include "core/util.hpp"
 
 #include <cctype>
-#include <cinttypes>
 #include <cstdio>
-#include <ctime>
 #include <fstream>
 #include <random>
 
+#include "time_util.h"
+
 namespace jai {
 
+	// Time and human-readable formatting delegate to the shared helpers;
+	// the jai:: signatures stay for the existing call sites.
 	uint64_t now_realtime_ns() {
-		timespec ts{};
-		clock_gettime(CLOCK_REALTIME, &ts);
-		return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+		return Common::TimeUtil::RealtimeNowNs();
 	}
 
 	uint64_t now_monotonic_ns() {
-		timespec ts{};
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+		return Common::TimeUtil::MonotonicNowNs();
 	}
 
 	std::string iso8601_utc(uint64_t realtime_ns) {
-		time_t secs = static_cast<time_t>(realtime_ns / 1000000000ull);
-		unsigned ms = static_cast<unsigned>((realtime_ns % 1000000000ull) / 1000000ull);
-		tm tm_utc{};
-		gmtime_r(&secs, &tm_utc);
-		char buf[80];  // generous: silences -Wformat-truncation for absurd tm_year values
-		snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
-				 tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec, ms);
-		return buf;
+		return Common::TimeUtil::Iso8601Utc(realtime_ns);
 	}
 
 	std::string compact_utc(uint64_t realtime_ns) {
-		time_t secs = static_cast<time_t>(realtime_ns / 1000000000ull);
-		tm tm_utc{};
-		gmtime_r(&secs, &tm_utc);
-		char buf[72];  // generous: silences -Wformat-truncation for absurd tm_year values
-		snprintf(buf, sizeof(buf), "%04d%02d%02dT%02d%02d%02dZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
-				 tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
-		return buf;
+		return Common::TimeUtil::CompactUtc(realtime_ns);
+	}
+
+	std::string human_bytes(uint64_t bytes) {
+		return Common::TimeUtil::HumanBytes(bytes);
+	}
+
+	std::string human_duration(uint64_t seconds) {
+		return Common::TimeUtil::HumanDuration(seconds);
 	}
 
 	void gen_uuid_v4(uint8_t out[16]) {
@@ -92,29 +85,6 @@ namespace jai {
 			out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
 		}
 		return out.size() == 12 ? out : std::string{};
-	}
-
-	std::string human_bytes(uint64_t bytes) {
-		static const char *units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
-		double v = static_cast<double>(bytes);
-		int u = 0;
-		while (v >= 1024.0 && u < 4) {
-			v /= 1024.0;
-			++u;
-		}
-		char buf[32];
-		if (u == 0) {
-			snprintf(buf, sizeof(buf), "%" PRIu64 " B", bytes);
-		} else {
-			snprintf(buf, sizeof(buf), "%.2f %s", v, units[u]);
-		}
-		return buf;
-	}
-
-	std::string human_duration(uint64_t seconds) {
-		char buf[32];
-		snprintf(buf, sizeof(buf), "%02" PRIu64 ":%02" PRIu64 ":%02" PRIu64, seconds / 3600, (seconds % 3600) / 60, seconds % 60);
-		return buf;
 	}
 
 }  // namespace jai

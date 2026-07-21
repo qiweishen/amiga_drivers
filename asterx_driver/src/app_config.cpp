@@ -1,21 +1,13 @@
-// SPDX-License-Identifier: BSD-3-Clause
 #include "app_config.hpp"
 
-#include <algorithm>
-#include <cctype>
-#include <sstream>
 #include <utility>
 
 #include <yaml-cpp/yaml.h>
 
+#include "utility.h"
+
 namespace asterx {
     namespace {
-        std::string lower_copy(std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return s;
-        }
-
         std::uint16_t read_port(const YAML::Node &n, const char *key) {
             const int value = n[key].as<int>();
             if (value < 1 || value > 65535) {
@@ -51,12 +43,6 @@ namespace asterx {
         }
 
         void parse_receiver(const YAML::Node &n, ReceiverSettings &receiver) {
-            if (n["ips_id"] || n["ips_port"]) {
-                throw ConfigLoadError(
-                    "receiver.ips_id / receiver.ips_port were removed: the driver now "
-                    "receives SBF on the command connection itself (single-connection "
-                    "design) — delete these fields from the config");
-            }
             if (n["require_aux1"]) {
                 receiver.require_aux1 = n["require_aux1"].as<bool>();
             }
@@ -68,9 +54,6 @@ namespace asterx {
 
                 if (im["orientation_mode"]) {
                     receiver.imu_orientation_mode = im["orientation_mode"].as<std::string>();
-                } else if (im["use_sensor_default"]) {
-                    receiver.use_sensor_default = im["use_sensor_default"].as<bool>();
-                    receiver.imu_orientation_mode = receiver.use_sensor_default ? "SensorDefault" : "manual";
                 }
 
                 if (im["theta_x_deg"]) {
@@ -120,12 +103,6 @@ namespace asterx {
                     receiver.streams.push_back(std::move(st));
                 }
             }
-
-            if (lower_copy(receiver.imu_orientation_mode) == "sensordefault") {
-                receiver.use_sensor_default = true;
-            } else {
-                receiver.use_sensor_default = false;
-            }
         }
     } // namespace
 
@@ -133,7 +110,8 @@ namespace asterx {
         AppConfig c;
         YAML::Node root;
         try {
-            root = YAML::LoadFile(path);
+            // Unified loading path (ConfigLoader logs and throws on failure)
+            root = Common::ConfigLoader(path).root();
         } catch (const std::exception &e) {
             throw ConfigLoadError(std::string("failed to load config '") + path + "': " + e.what());
         }
@@ -177,11 +155,12 @@ namespace asterx {
             }
 
             // sbf2rin refuses SBF inputs of 2 GB or larger; rotation doubles as
-            // the post-processing guarantee.
-            if (c.rotate_bytes >= (2ull << 30)) {
+            // the post-processing guarantee, so it must be enabled (> 0) and
+            // stay under the cap.
+            if (c.rotate_bytes == 0 || c.rotate_bytes >= (2ull << 30)) {
                 throw ConfigLoadError(
-                    "output.rotate_bytes must be < 2 GiB (sbf2rin cannot convert "
-                    "SBF files of 2 GB or larger)");
+                    "output.rotate_bytes must be > 0 and < 2 GiB (sbf2rin cannot "
+                    "convert SBF files of 2 GB or larger)");
             }
             if (c.rotate_interval_seconds <= 0) {
                 throw ConfigLoadError("output.rotate_interval_s must be positive");
