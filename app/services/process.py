@@ -19,6 +19,7 @@ from pathlib import Path
 from ..constants import BIN_AMIGA, MAIN_CONFIG, SESSION_DIR_RE
 from ..state import STATE, ProcState
 from . import config_store, runtime
+from .asterx_live import LIVE as ASTERX_LIVE
 from .health import MONITOR
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
@@ -67,8 +68,8 @@ async def preflight() -> tuple[list[str], list[str]]:
         warnings.append("Enable Logging is false: no session log file — health monitoring and the Logs page will be blind")
     if not any(settings["enables"].values()):
         errors.append("No sensor is enabled (every Enable flag is false)")
-    if STATE.snapshot_busy and settings["enables"].get("gox", False):
-        errors.append("A GoX snapshot is in progress — the camera control channel is exclusive; wait for it to finish (≤30s)")
+    if STATE.snapshot_busy and (settings["enables"].get("gox", False) or settings["enables"].get("fx10", False)):
+        errors.append("A camera snapshot is in progress — the GigE control channel is exclusive; wait for it to finish (≤30s)")
     return errors, warnings
 
 
@@ -144,6 +145,7 @@ async def _watch(proc: asyncio.subprocess.Process, output_dir: Path, known: set[
                 STATE.active_session = session
                 STATE.session_started_at = time.time()
                 TAILER.start(_log_file(session), replay=False)
+                ASTERX_LIVE.start(session, replay=False)
                 # stop() may already have flipped to STOPPING — don't undo it
                 if STATE.process_state is ProcState.STARTING:
                     STATE.process_state = ProcState.RUNNING
@@ -220,6 +222,7 @@ async def reattach() -> None:
         STATE.active_session = session
         STATE.session_started_at = session.stat().st_mtime
         TAILER.start(_log_file(session), replay=True)
+        ASTERX_LIVE.start(session, replay=True)
 
     async def poll_exit() -> None:
         while await runtime.pgrep(PROCESS_NAME):

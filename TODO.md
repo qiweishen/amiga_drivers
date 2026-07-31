@@ -23,6 +23,10 @@ Modularization roadmap (decided 2026-07; details in the session notes):
 - [x] P7 — Config & parse: asterx via `Common::ConfigLoader`, shared ins401
       wire-format header, DataConverter recursive `bin/<driver>/` scan,
       re-enable `parse/` in the build
+- [x] F — fx10 integration: root FindeBUS unification (single Pleora SDK for
+      gox + fx10), `Fx10DriverApp` on `IDriverApp` + `Common::DriverLog`, GUI
+      contract markers + `/fx10` tools page + `fx10_snapshot`; the ENVI on-disk
+      format stays frozen (see `fx10_driver/docs/BRINGUP.md`)
 - [ ] P8 — Style finalization: one-shot clang-format (tab), comment slimming
       per the three-way policy, header-guard/namespace cleanup
 

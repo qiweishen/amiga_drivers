@@ -52,6 +52,8 @@ target_compile_options(ssnrx PRIVATE -w)
 add_library(asterx_lib STATIC
         src/app_config.cpp
         src/commands.cpp
+        src/sbf_live_recorder.cpp
+        src/sbf_parsers.cpp
         src/sbf_writer.cpp
         src/session.cpp
         src/asterx_driver_app.cpp

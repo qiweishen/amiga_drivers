@@ -1,25 +1,31 @@
 #include "session.hpp"
 
-#include "asterx_log.hpp"
+#include "logger.h"
 #include "string_util.h"
 
 
 namespace asterx {
     namespace {
+        constexpr std::string_view kModule = "AsteRx";
+        Common::DriverLog g_log{std::string(kModule)};
+
         constexpr int kRetryDelayMs = 5000; // fixed backoff: the peer is a LAN receiver
         constexpr int kWatchdogMs = 30000; // link up but no SBF -> reconnect
         constexpr int kCommandTimeoutMs = 15000; // no reply to a configure command
-        constexpr int kStatsPeriodMs = 5000;
 
         // Command replies can be multi-line; compact them for single-line logging.
         using Common::StringUtil::OneLine;
     } // namespace
 
     Session::Session(AppConfig cfg, QObject *parent) : QObject(parent), cfg_(std::move(cfg)),
-                                                       writer_(SbfWriter::Config{
-                                                           cfg_.output_dir, cfg_.file_prefix, cfg_.rotate_bytes,
-                                                           std::chrono::seconds(cfg_.rotate_interval_seconds),
-                                                       }) {
+                                                       writer_(
+                                                           SbfWriter::Config{
+                                                               cfg_.output_dir,
+                                                               cfg_.file_prefix,
+                                                               cfg_.rotate_bytes,
+                                                               std::chrono::seconds(cfg_.rotate_interval_seconds),
+                                                           }),
+                                                       live_(SbfLiveRecorder::Config{cfg_.output_dir, cfg_.live_csv}) {
         retry_timer_.setSingleShot(true);
         watchdog_timer_.setSingleShot(true);
         command_timer_.setSingleShot(true);
@@ -46,7 +52,8 @@ namespace asterx {
 
     void Session::connect_rx_signals_() {
         connect(rx_.get(), &SSN::SsnRx::connected, this, [this]() {
-            log::info("[session] TCP connected to {}:{}", cfg_.host, cfg_.ctrl_port);
+            g_log.info("Connected");
+            g_log.trace("[session] TCP connected to {}:{}", cfg_.host, cfg_.ctrl_port);
             state_ = State::WaitingDescriptor;
             // Covers waiting for the first prompt/descriptor as well
             command_timer_.start(kCommandTimeoutMs);
@@ -56,7 +63,7 @@ namespace asterx {
         connect(rx_.get(), &SSN::SsnRx::newConnectionDescriptor, this,
                 [this](const QString &d) {
                     descriptor_ = d.toStdString();
-                    log::info("[session] connection descriptor: {}", descriptor_);
+                    g_log.trace("[session] connection descriptor: {}", descriptor_);
                     if (state_ != State::WaitingDescriptor) {
                         return;
                     }
@@ -81,7 +88,7 @@ namespace asterx {
 
         connect(rx_.get(), &SSN::SsnRx::sbfCRCError, this, [this]() {
             ++crc_errors_;
-            log::warn("[session] SBF CRC error (total {})", crc_errors_);
+            g_log.warn("[session] SBF CRC error (total {})", crc_errors_);
         });
 
         connect(rx_.get(), &SSN::SsnRx::discardedBytes, this, [this](int n) {
@@ -100,7 +107,7 @@ namespace asterx {
 
 
     void Session::start() {
-        stats_timer_.start(kStatsPeriodMs);
+        stats_timer_.start(cfg_.stats_period_ms);
         start_connect_();
     }
 
@@ -119,7 +126,7 @@ namespace asterx {
         rx_ = std::make_unique<SSN::SsnRx>();
         connect_rx_signals_();
 
-        log::info("[session] connecting to {}:{} ...", cfg_.host, cfg_.ctrl_port);
+        g_log.info("Connecting to {}:{} ...", cfg_.host, cfg_.ctrl_port);
         rx_->connectTcp(QString::fromStdString(cfg_.host), cfg_.ctrl_port);
     }
 
@@ -130,8 +137,7 @@ namespace asterx {
             return;
         }
         const auto &cmd = cmds_[cmd_index_];
-        log::info("[session] -> ({}/{}) {}", cmd_index_ + 1, cmds_.size(),
-                  redact_cmd(cmd.text));
+        g_log.trace("[session] -> ({}/{}) {}", cmd_index_ + 1, cmds_.size(), redact_cmd(cmd.text));
         command_timer_.start(kCommandTimeoutMs);
         rx_->sendASCIICommand(QString::fromStdString(cmd.text));
     }
@@ -139,7 +145,7 @@ namespace asterx {
 
     void Session::handle_command_reply_(const std::string &reply, bool error) {
         if (state_ != State::Configuring || cmd_index_ >= cmds_.size()) {
-            log::debug("[session] stray command reply ignored: {}", OneLine(reply));
+            g_log.trace("[session] Stray command reply ignored: {}", OneLine(reply));
             return;
         }
         command_timer_.stop();
@@ -147,46 +153,59 @@ namespace asterx {
 
         if (error) {
             if (cmd.kind == CommandKind::ToleratedError) {
-                log::debug("[session] tolerated error for '{}': {}",
-                           redact_cmd(cmd.text), OneLine(reply));
+                g_log.trace("[session] Tolerated error for '{}': {}", redact_cmd(cmd.text), OneLine(reply));
             } else {
-                handle_failure_("receiver rejected '" + redact_cmd(cmd.text) +
-                                "': " + OneLine(reply));
+                handle_failure_("receiver rejected '" + redact_cmd(cmd.text) + "': " + OneLine(reply));
                 return;
             }
         } else {
-            log::debug("[session] <- {}", OneLine(reply));
+            g_log.trace("[session] <- {}", OneLine(reply));
             try {
                 switch (cmd.kind) {
                     case CommandKind::CheckCapabilities: {
                         const auto caps = parse_receiver_capabilities_reply(reply);
-                        log::info("[session] capabilities: main={} aux1={} meas={}ms pvt={}ms ins={}ms",
-                                  caps.has_main, caps.has_aux1,
-                                  caps.measurement_interval_ms, caps.pvt_interval_ms,
-                                  caps.ins_interval_ms);
+                        g_log.trace("[session] Capabilities: main={} aux1={} meas={}ms pvt={}ms ins={}ms",
+                                    caps.has_main,
+                                    caps.has_aux1,
+                                    caps.measurement_interval_ms,
+                                    caps.pvt_interval_ms,
+                                    caps.ins_interval_ms
+                        );
                         if (cfg_.receiver.require_aux1 && !caps.has_aux1) {
-                            throw ConfigError("receiver capabilities do not include Aux1; "
-                                "dual-antenna collection is not available");
+                            throw ConfigError(
+                                "receiver capabilities do not include Aux1; dual-antenna collection is not available");
                         }
                         break;
                     }
                     case CommandKind::VerifyImuOrientation:
                         verify_imu_orientation_reply(reply, cfg_.receiver);
-                        log::info("[session] verified IMU orientation ({})",
-                                  cfg_.receiver.imu_orientation_mode);
+                        if (Common::StringUtil::EqualsCi(cfg_.receiver.imu_orientation_mode, "SensorDefault")) {
+                            g_log.info("Verified IMU orientation ({})", cfg_.receiver.imu_orientation_mode);
+                        } else {
+                            g_log.info("Verified IMU orientation (ThetaX: {} deg, ThetaY: {}, ThetaZ: {} deg)",
+                                       cfg_.receiver.theta_x_deg,
+                                       cfg_.receiver.theta_y_deg,
+                                       cfg_.receiver.theta_z_deg
+                            );
+                        }
                         break;
                     case CommandKind::VerifyLeverArm:
                         verify_ins_ant_lever_arm_reply(reply, cfg_.receiver.ant_lever_arm_m);
-                        log::info("[session] verified INS antenna lever arm");
+                        g_log.info("Verified main antenna lever arm (x: {} m, y: {} m, z: {} m)",
+                                   cfg_.receiver.ant_lever_arm_m.x,
+                                   cfg_.receiver.ant_lever_arm_m.y,
+                                   cfg_.receiver.ant_lever_arm_m.z
+                        );
                         break;
                     case CommandKind::VerifyGnssAttitude:
                         verify_gnss_attitude_reply(reply, cfg_.receiver.gnss_attitude_mode);
-                        log::info("[session] verified GNSS attitude mode ({})",
-                                  cfg_.receiver.gnss_attitude_mode);
+                        g_log.info("Verified GNSS attitude mode ({})", cfg_.receiver.gnss_attitude_mode);
                         break;
                     case CommandKind::VerifyAttitudeOffset:
                         verify_attitude_offset_reply(reply, cfg_.receiver.attitude_offset_deg);
-                        log::info("[session] verified attitude offset");
+                        g_log.info("Verified attitude offset (heading: {} deg, pitch: {} deg)",
+                                   cfg_.receiver.attitude_offset_deg.heading_deg,
+                                   cfg_.receiver.attitude_offset_deg.pitch_deg);
                         break;
                     case CommandKind::Plain:
                     case CommandKind::ToleratedError:
@@ -208,27 +227,29 @@ namespace asterx {
         ever_configured_ = true;
         command_timer_.stop();
         watchdog_timer_.start(kWatchdogMs);
-        log::info("[session] configured; recording SBF from {} ({} commands OK)",
-                  descriptor_, cmds_.size());
+        g_log.info("Acquisition started");
         emit configured();
     }
 
 
     void Session::on_sbf_block_(const QByteArray &block) {
         if (state_ == State::Backoff || state_ == State::Stopping) {
-            // Never write while the session considers the link down: segment
-            // boundaries must coincide with link gaps.
+            // Never write while the session considers the link down
+            // Segment boundaries must coincide with link gaps
             return;
         }
         try {
             writer_.write_block(block);
         } catch (const std::exception &e) {
-            // Disk failure is not survivable for a recorder.
-            log::critical("[session] disk write failed: {}", e.what());
+            // Disk failure is not survivable for a recorder
+            g_log.critical("Disk write failed: {}", e.what());
             shutdown();
             emit fatalError();
             return;
         }
+        // Live CSV side channel: noexcept, degrades itself on failure
+        // The .sbf recording path above stays authoritative
+        live_.on_block(reinterpret_cast<const std::uint8_t *>(block.constData()), static_cast<std::size_t>(block.size()));
         if (state_ == State::Recording) {
             watchdog_timer_.start(kWatchdogMs);
         }
@@ -244,7 +265,7 @@ namespace asterx {
         }
         if (message.find("Invalid SBF block length") != std::string::npos) {
             ++length_errors_;
-            log::warn("[session] invalid SBF block length (total {})", length_errors_);
+            g_log.warn("invalid SBF block length (total {})", length_errors_);
             return;
         }
         handle_failure_("communication error: " + message);
@@ -259,9 +280,8 @@ namespace asterx {
             fail_startup_(reason);
             return;
         }
-        log::warn("[session] {} — reconnecting in {} s", reason, kRetryDelayMs / 1000);
-        // Set Backoff BEFORE closing: closeConnection() may synchronously re-emit
-        // connectionClosed, which the guard above absorbs.
+        g_log.warn("Connect Failed: {} — reconnecting in {} s", reason, kRetryDelayMs / 1000);
+        // Set Backoff BEFORE closing: closeConnection() may synchronously re-emit connectionClosed, which the guard above absorbs.
         state_ = State::Backoff;
         command_timer_.stop();
         watchdog_timer_.stop();
@@ -269,6 +289,7 @@ namespace asterx {
             rx_->closeConnection(); // the socket may still be open (e.g. prompt failure)
         }
         writer_.end_segment();
+        live_.flush(); // keep the GUI tail current across the link gap; files stay open
         retry_timer_.start(kRetryDelayMs);
     }
 
@@ -277,8 +298,7 @@ namespace asterx {
         if (state_ == State::Stopping) {
             return;
         }
-        log::critical("[session] startup failed: {} — check host, credentials and "
-                      "receiver state, then relaunch", reason);
+        g_log.critical("Startup Failed: {} — check host, credentials and  receiver state, then relaunch", reason);
         shutdown();
         emit fatalError();
     }
@@ -312,9 +332,11 @@ namespace asterx {
             return;
         }
         const auto &s = writer_.stats();
-        log::info("[session] blocks={} bytes={} files={} crc_fail={} len_fail={} discarded={}",
-                  s.blocks_written, s.bytes_written, s.files_opened,
-                  crc_errors_, length_errors_, discarded_bytes_);
+        const auto &lv = live_.stats();
+        g_log.info(
+            "[Statistics] blocks={}  bytes={}  files={}  crc_fail={}  len_fail={}  discarded={}  live_rows={}  live_parse_err={}",
+            s.blocks_written, s.bytes_written, s.files_opened,
+            crc_errors_, length_errors_, discarded_bytes_, lv.rows_written, lv.parse_errors);
     }
 
 
@@ -331,9 +353,14 @@ namespace asterx {
             rx_->closeConnection(); // closing the socket also stops the IPxx streams
         }
         writer_.close();
+        live_.close();
         const auto &s = writer_.stats();
-        log::info("[session] final stats: blocks={} bytes={} files={} crc_fail={} len_fail={} discarded={}",
-                  s.blocks_written, s.bytes_written, s.files_opened,
-                  crc_errors_, length_errors_, discarded_bytes_);
+        const auto &lv = live_.stats();
+        g_log.info(
+            "Acquisition stopped ({} blocks delivered)", s.blocks_written);
+        g_log.info(
+            "[STATISTICS] Final Stats: blocks={}  bytes={}  files={}  crc_fail={}  len_fail={}  discarded={}  live_rows={}  live_parse_err={}",
+            s.blocks_written, s.bytes_written, s.files_opened,
+            crc_errors_, length_errors_, discarded_bytes_, lv.rows_written, lv.parse_errors);
     }
 } // namespace asterx

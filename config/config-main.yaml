@@ -1,32 +1,37 @@
-# =============================================================================
+# =============================================================
 # Amiga Driver Configuration
-# =============================================================================
+# =============================================================
+
 
 # --- General Settings ---
 General:
-    # Root directory for all output. Each run creates <Output Directory>/<timestamp>/
-    # containing log_<timestamp>.log, config/ (per-driver config snapshots) and
-    # bin/<driver>/ (raw sensor data: bin/ins401, bin/lms4xxx, bin/gox, bin/asterx)
+    # Root output data directory for all output
     Output Directory: ./recordings
-    # Per-driver enable switches. Supported topology: one INS401, one AsteRx,
-    # multiple LMS4xxx LiDARs (Instances map in the LMS yaml) and multiple GoX
-    # cameras (cameras[] array in the GoX json)
-    Enable INS401: true
-    Enable LMS4XXX: true
-    Enable GOX: true
-    Enable ASTERX: true
-    # Path to the configuration files for each driver
-    INS401 Driver Config Path: ./ins401_driver/config/config-ins401.yaml
-    LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
-    # GoX camera config is strict JSON. NOTE: recording.output_dir/session_name
-    # are overridden to <Output Directory>/<timestamp>/bin/gox/, and acquisition
-    # limits (max_frames/max_duration_s) stop the WHOLE unified process.
-    GOX Driver Config Path: ./gox_driver/config/config-gox.json
-    # AsteRx GNSS/INS receiver config (YAML). NOTE: output.dir is overridden to
-    # <Output Directory>/<timestamp>/bin/asterx/ (log.level still filters).
-    ASTERX Driver Config Path: ./asterx_driver/config/config-asterx.yaml
 
+    # Per-driver enable switches
+    # It will be overrided by GUI
+    Enable ASTERX: false
+    Enable FX10: true
+    Enable GOX: true
+    Enable LMS4XXX: false
+
+    # Path to the configuration files for each driver
+    ASTERX Driver Config Path: ./asterx_driver/config/config-asterx.yaml
+    FX10 Driver Config Path: ./fx10_driver/config/config-fx10.yaml
+    GOX Driver Config Path: ./gox_driver/config/config-gox.yaml
+    LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
+
+    # INS401 will not be supported in future update
+    Enable INS401: false
+    INS401 Driver Config Path: ./ins401_driver/config/config-ins401.yaml
+
+
+# =============================================================
+# NOT RECOMMEND TO CHANGE
+# =============================================================
 # --- Logging System ---
+# Logging is managed centrally
 Logging System:
     # Enable/disable system-wide logging for debugging and diagnostics
+    # Disable will stop GUI
     Enable Logging: true

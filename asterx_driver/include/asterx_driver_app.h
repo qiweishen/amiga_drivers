@@ -1,12 +1,3 @@
-/// @file asterx_driver_app.h
-/// @brief Application wrapper for the Septentrio AsteRx GNSS/INS receiver.
-///
-/// Hosts the driver's Qt event loop (QCoreApplication + Session + SsnRx) on a
-/// dedicated worker thread behind the init/run/shutdown pattern matching the
-/// INS401/LMS4xxx/GoX DriverApp interface, so the unified main can run all
-/// drivers concurrently. The wrapper thread itself never touches a QObject:
-/// all cross-thread control is atomic flags + join.
-
 #ifndef ASTERX_DRIVER_APP_H
 #define ASTERX_DRIVER_APP_H
 
@@ -22,36 +13,37 @@
 
 // Forward declaration to keep Qt/asterx headers out of the unified main.
 namespace asterx {
-	struct AppConfig;
+    struct AppConfig;
 }
 
 
 class AsterxDriverApp final : public Common::IDriverApp {
 public:
-	explicit AsterxDriverApp(const Common::Config &config);
-	~AsterxDriverApp() override;
+    explicit AsterxDriverApp(const Common::Config &config);
 
-	[[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override;
+    ~AsterxDriverApp() override;
 
-	void run() override;
+    [[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override;
 
-	void shutdown() override;
+    void run() override;
+
+    void shutdown() override;
 
 private:
-	enum class BringUp { Pending, Recording, Failed };
+    enum class BringUp { Pending, Recording, Failed };
 
-	void QtThreadMain(asterx::AppConfig cfg);  // Qt world lives entirely in here
-	void NotifyBringUp(BringUp outcome);	   // Pending -> outcome (first wins), notify_all
+    void QtThreadMain(asterx::AppConfig cfg); // Qt world lives entirely in here
+    void NotifyBringUp(BringUp outcome); // Pending -> outcome (first wins), notify_all
 
-	std::string config_path_;		// resolved: exe_dir/../../ + asterx_config_path
-	std::string data_folder_path_;	// <output>/<timestamp>
+    std::string config_path_; // resolved: exe_dir/../../ + asterx_config_path
+    std::string data_folder_path_; // <output>/<timestamp>
 
-	std::thread qt_thread_;
-	std::mutex bring_up_mutex_;
-	std::condition_variable bring_up_cv_;
-	BringUp bring_up_{ BringUp::Pending };
+    std::thread qt_thread_;
+    std::mutex bring_up_mutex_;
+    std::condition_variable bring_up_cv_;
+    BringUp bring_up_{BringUp::Pending};
 
-	std::atomic<bool> shutdown_called_{ false };
+    std::atomic<bool> shutdown_called_{false};
 };
 
 

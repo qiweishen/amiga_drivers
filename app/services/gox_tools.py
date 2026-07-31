@@ -156,7 +156,7 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
     if marker.startswith("SNAPSHOT: FAIL"):
         reason = marker[len("SNAPSHOT: FAIL "):]
         if reason.strip().startswith("3"):
-            reason += " (camera unreachable or held by another process)"
+            reason += " (connect/control failure — see the raw output for the failing node)"
         return SnapshotResult(False, reason=reason, raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 

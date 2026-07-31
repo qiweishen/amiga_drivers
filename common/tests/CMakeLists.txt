@@ -4,6 +4,7 @@
 add_executable(common_tests
         doctest_main.cpp
         test_driver_app.cpp
+        test_drivers_json.cpp
         test_file_writer.cpp
         test_logger.cpp
         test_util.cpp

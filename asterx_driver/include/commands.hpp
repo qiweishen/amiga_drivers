@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+
 namespace asterx {
     class ConfigError : public std::runtime_error {
     public:

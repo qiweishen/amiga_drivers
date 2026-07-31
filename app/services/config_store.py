@@ -9,7 +9,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-import pyjson5
 import yaml
 
 from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile, to_host
@@ -39,17 +38,13 @@ def read(config_id: str) -> LoadedConfig:
 def validate(config_id: str, text: str) -> list[str]:
     """Structure-only validation. An empty list means 'parses fine'.
 
-    The C++ side re-validates strictly on load (the GoX parser rejects unknown
-    keys with a did-you-mean hint) — surface that in the UI as the final word.
+    The C++ loaders re-validate on load (lenient parsing, but critical
+    invariants still throw) — surface that in the UI as the final word.
     """
-    cf = CONFIG_FILES[config_id]
     errors: list[str] = []
     try:
-        if cf.fmt == "yaml":
-            yaml.safe_load(text)
-        else:  # jsonc
-            pyjson5.decode(text)
-    except Exception as e:  # yaml.YAMLError / pyjson5 errors
+        yaml.safe_load(text)
+    except Exception as e:  # yaml.YAMLError
         errors.append(str(e))
     return errors
 

@@ -50,6 +50,19 @@ namespace Common::TimeUtil {
 		return buf;
 	}
 
+	// "2026-07-17T11:54:00Z" (second precision) from a CLOCK_REALTIME timestamp.
+	// The FX10 ENVI .hdr freezes this exact format — do not add
+	// milliseconds here; use Iso8601Utc for that.
+	inline std::string Iso8601UtcSec(std::uint64_t realtime_ns) {
+		const auto secs = static_cast<time_t>(realtime_ns / 1000000000ull);
+		tm tm_utc{};
+		gmtime_r(&secs, &tm_utc);
+		char buf[72];  // generous: silences -Wformat-truncation for absurd tm_year values
+		snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+				 tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+		return buf;
+	}
+
 	// Compact UTC stamp usable in file names: "20260717T115400Z"
 	inline std::string CompactUtc(std::uint64_t realtime_ns) {
 		const auto secs = static_cast<time_t>(realtime_ns / 1000000000ull);

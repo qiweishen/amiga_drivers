@@ -169,7 +169,7 @@ def gox_page() -> None:
                 f"{result.decode_name} · exposure {exposure.value:.0f}µs · gain {gain.value:.1f}dB · "
                 f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
             )
-            warn_label.set_text("Incomplete frame (packet loss? check MTU/rmem and the preflight hints)" if result.incomplete else "")
+            warn_label.set_text("Incomplete frame (packet loss? check MTU/rmem)" if result.incomplete else "")
 
         # Auto preview: a client-bound timer (NiceGUI cancels it when the tab's
         # client is deleted, and an async callback is awaited to completion

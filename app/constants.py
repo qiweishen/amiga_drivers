@@ -56,9 +56,10 @@ BUILD_BIN = REPO_ROOT / "build" / "bin"
 BIN_AMIGA = BUILD_BIN / "AmigaDrivers"
 BIN_DISCOVER = BUILD_BIN / "jai_discover"
 BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
+BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 
 MAIN_CONFIG = REPO_ROOT / "config" / "config-main.yaml"
-SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-snapshot.json"
+SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-snapshot.yaml"
 
 # --- GUI ---------------------------------------------------------------------
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
@@ -66,6 +67,7 @@ GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 
 RUNTIME_DIR = REPO_ROOT / "app" / "_runtime"
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
+FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs
 
 UNPACK_SCRIPT = REPO_ROOT / "gox_driver" / "scripts" / "unpack_raw.py"
@@ -79,29 +81,29 @@ SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 class ConfigFile:
     id: str
     label: str
-    path: Path  # host path
-    fmt: str  # "yaml" | "jsonc"
+    path: Path  # host path; all configs are YAML
 
 
 CONFIG_FILES: dict[str, ConfigFile] = {
     c.id: c
     for c in [
-        ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml", "yaml"),
-        ConfigFile("ins401", "INS401", REPO_ROOT / "ins401_driver" / "config" / "config-ins401.yaml", "yaml"),
-        ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml", "yaml"),
-        ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.json", "jsonc"),
-        ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml", "yaml"),
-        ConfigFile(
-            "snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-snapshot.json", "jsonc"
-        ),
+        ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml"),
+        ConfigFile("ins401", "INS401", REPO_ROOT / "ins401_driver" / "config" / "config-ins401.yaml"),
+        ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml"),
+        ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
+        ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
+        ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
+        ConfigFile("snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-snapshot.yaml"),
     ]
 }
 
+
 # Sensors shown on the dashboard; lms4xxx expands into one card per instance.
-DRIVERS = ("ins401", "lms4xxx", "gox", "asterx")
+DRIVERS = ("ins401", "lms4xxx", "gox", "asterx", "fx10")
 ENABLE_KEYS = {
-    "ins401": "Enable INS401",
+    "asterx": "Enable ASTERX",
     "lms4xxx": "Enable LMS4XXX",
     "gox": "Enable GOX",
-    "asterx": "Enable ASTERX",
+    "fx10": "Enable FX10",
+    "ins401": "Enable INS401"
 }

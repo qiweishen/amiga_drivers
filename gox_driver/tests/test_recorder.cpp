@@ -4,11 +4,11 @@
 // shares no code with the Recorder, so the on-disk format itself is what is
 // being verified (as scripts/inspect_raw.py will see it).
 
-#include "core/recorder.hpp"
+#include "../include/recorder.hpp"
 
-#include "core/format.hpp"
+#include "../include/format.hpp"
 #include "core/frame.hpp"
-#include "core/stats.hpp"
+#include "../include/stats.hpp"
 
 #include <doctest/doctest.h>
 #include <nlohmann/json.hpp>
@@ -24,32 +24,30 @@
 #include <vector>
 
 namespace {
+    constexpr uint32_t kPfncMono8 = 0x01080001u;
 
-constexpr uint32_t kPfncMono8 = 0x01080001u;
-
-std::string make_temp_dir() {
-    const char* base = std::getenv("TMPDIR");
-    std::string tmpl = std::string(base && *base ? base : "/tmp") + "/jai_recorder_test_XXXXXX";
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    char* dir = ::mkdtemp(buf.data());
-    REQUIRE(dir != nullptr);
-    return std::string(dir);
-}
-
-std::vector<std::string> read_lines(const std::string& path) {
-    std::ifstream in(path);
-    REQUIRE(in.is_open());
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty()) {
-            lines.push_back(line);
-        }
+    std::string make_temp_dir() {
+        const char *base = std::getenv("TMPDIR");
+        std::string tmpl = std::string(base && *base ? base : "/tmp") + "/jai_recorder_test_XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        char *dir = ::mkdtemp(buf.data());
+        REQUIRE(dir != nullptr);
+        return std::string(dir);
     }
-    return lines;
-}
 
+    std::vector<std::string> read_lines(const std::string &path) {
+        std::ifstream in(path);
+        REQUIRE(in.is_open());
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
 } // namespace
 
 TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byte-level re-parse") {
@@ -88,13 +86,12 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
     std::memcpy(opts.session_uuid, uuid, 16);
     opts.segment_max_bytes = 8192;
     opts.record_align = 512;
-    opts.payload_crc = true;
     // min_free_bytes = 0 disables the free-space check; ENOSPC cannot be
     // forced portably, so only the disabled path is exercised here.
     opts.min_free_bytes = 0;
 
     // ---- write phase --------------------------------------------------
-    std::vector<std::vector<uint8_t>> payloads;
+    std::vector<std::vector<uint8_t> > payloads;
     jai::CameraStats stats;
     {
         jai::Recorder rec(opts, &stats);
@@ -142,7 +139,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         const uint64_t file_size = std::filesystem::file_size(seg_path);
         CHECK(file_size == expect_seg_bytes[seg - 1]);
 
-        std::FILE* f = std::fopen(seg_path.c_str(), "rb");
+        std::FILE *f = std::fopen(seg_path.c_str(), "rb");
         REQUIRE(f != nullptr);
 
         fmt::FileHeader fh{};
@@ -159,7 +156,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         CHECK(std::string(fh.camera_serial) == "FAKE-1234");
         CHECK(fh.frame_header_size == fmt::kFrameHeaderSize);
         CHECK(fh.record_align == 512u);
-        CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) != 0u);
+        CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) == 0u); // payload CRC option removed
         CHECK((fh.segment_flags & fmt::kSegFlagChunkData) == 0u); // always 0 in v1
         CHECK(fmt::verify_file_header(fh));
 
@@ -195,7 +192,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             std::vector<uint8_t> payload(sizes[g]);
             REQUIRE(std::fread(payload.data(), 1, payload.size(), f) == payload.size());
             CHECK(payload == payloads[g]); // payload round-trips byte for byte
-            CHECK(h.payload_crc32c == fmt::crc32c(payload.data(), payload.size()));
+            CHECK(h.payload_crc32c == 0u); // payload CRC option removed; field stays zero
 
             // Padding up to the next boundary must be zero.
             const uint64_t rec_bytes = fmt::align_up(fmt::kFrameHeaderSize + sizes[g], 512);
@@ -248,7 +245,8 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         uint64_t seq_first, seq_last, bid_first, bid_last;
     };
     const SegExpect seg_expect[4] = {
-        {0, 2, 1000, 1002}, {3, 3, 1003, 1003}, {4, 4, 1004, 1004}, {5, 7, 1005, 1007}};
+        {0, 2, 1000, 1002}, {3, 3, 1003, 1003}, {4, 4, 1004, 1004}, {5, 7, 1005, 1007}
+    };
     for (size_t s = 0; s < 4; ++s) {
         CAPTURE(s);
         const nlohmann::json j = nlohmann::json::parse(seg_lines[s]);
@@ -262,16 +260,16 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         CHECK(j.at("bid_first").get<uint64_t>() == seg_expect[s].bid_first);
         CHECK(j.at("bid_last").get<uint64_t>() == seg_expect[s].bid_last);
         CHECK(j.at("dts_first").get<uint64_t>() ==
-              1'000'000'000ull + seg_expect[s].seq_first * 10'000'000ull);
+            1'000'000'000ull + seg_expect[s].seq_first * 10'000'000ull);
         CHECK(j.at("dts_last").get<uint64_t>() ==
-              1'000'000'000ull + seg_expect[s].seq_last * 10'000'000ull);
+            1'000'000'000ull + seg_expect[s].seq_last * 10'000'000ull);
         CHECK(j.at("closed_clean").get<bool>());
     }
 
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("recorder: payload_crc off leaves the crc field zero but headers stay sealed") {
+TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
     namespace fmt = jai::format;
 
     const std::string tmp = make_temp_dir();
@@ -281,7 +279,6 @@ TEST_CASE("recorder: payload_crc off leaves the crc field zero but headers stay 
     opts.camera_serial = "";
     opts.segment_max_bytes = 1u << 20;
     opts.record_align = 1; // alignment disabled: records are packed back to back
-    opts.payload_crc = false;
 
     std::vector<uint8_t> payload(1000);
     for (size_t j = 0; j < payload.size(); ++j) {
@@ -302,7 +299,7 @@ TEST_CASE("recorder: payload_crc off leaves the crc field zero but headers stay 
     // With record_align = 1 there is no padding at all.
     CHECK(std::filesystem::file_size(seg_path) == 512u + 2u * (96u + 1000u));
 
-    std::FILE* f = std::fopen(seg_path.c_str(), "rb");
+    std::FILE *f = std::fopen(seg_path.c_str(), "rb");
     REQUIRE(f != nullptr);
     fmt::FileHeader fh{};
     REQUIRE(std::fread(&fh, sizeof(fh), 1, f) == 1u);
@@ -315,7 +312,7 @@ TEST_CASE("recorder: payload_crc off leaves the crc field zero but headers stay 
         REQUIRE(std::fread(&h, sizeof(h), 1, f) == 1u);
         CHECK(h.frame_magic == fmt::kFrameMagic);
         CHECK(fmt::verify_frame_header(h)); // header CRC is always on
-        CHECK(h.payload_crc32c == 0u);      // payload CRC disabled
+        CHECK(h.payload_crc32c == 0u); // payload CRC option removed
         CHECK(h.frame_seq == static_cast<uint64_t>(i));
         REQUIRE(std::fseek(f, static_cast<long>(h.payload_size), SEEK_CUR) == 0);
     }

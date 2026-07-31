@@ -36,7 +36,7 @@ services:
             - /mnt/SharedData/Post_Processing_Data:/workspace/dataset
             # X11 socket and auth
             - /tmp/.X11-unix:/tmp/.X11-unix:rw
-            - ${HOME}/.Xauthority:/tmp/.docker.xauth:ro
+            - /tmp/.docker.xauth:/tmp/.docker.xauth:ro
             # WSLg (safe to include on native Linux)
             - /mnt/wslg:/mnt/wslg
             # User runtime (audio, D-Bus, etc.)

@@ -1,23 +1,21 @@
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <QObject>
-#include <QTimer>
 
 #include <ssnrx.h>
 
 #include "app_config.hpp"
 #include "commands.hpp"
+#include "sbf_live_recorder.hpp"
 #include "sbf_writer.hpp"
+
 
 namespace asterx {
     // Single-threaded driver lifecycle on the Qt event loop:
-    //   Connecting -> WaitingDescriptor -> Configuring -> Recording, with
-    //   Backoff (retry timer) looping back to Connecting.
+    //     Connecting -> WaitingDescriptor -> Configuring -> Recording, with
+    //     Backoff (retry timer) looping back to Connecting.
     // Commands and SBF share ONE TCP connection (SsnRx demultiplexes; the
     // streams die with the connection). A FRESH SsnRx is created per attempt:
     // the SDK keeps its parse buffer across closeConnection(), so a stale
@@ -89,6 +87,7 @@ namespace asterx {
         AppConfig cfg_;
         std::unique_ptr<SSN::SsnRx> rx_; // recreated per connection attempt
         SbfWriter writer_;
+        SbfLiveRecorder live_; // real-time CSV side channel (never fatal)
 
         State state_{State::Idle};
         bool ever_configured_{false};

@@ -19,7 +19,8 @@ namespace Common {
 		void init(const Config &config, const std::string &logger_name) {
 			auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
 			// Quiet mode: suppress INFO-level messages from the console (WARN+ still shown)
-			console_sink->set_level(config.quiet ? spdlog::level::warn : spdlog::level::info);
+			// TODO: Debug
+			console_sink->set_level(config.quiet ? spdlog::level::warn : spdlog::level::trace);
 			console_sink->set_pattern("%^[%H:%M:%S] [%l] %v%$");
 
 			std::vector<spdlog::sink_ptr> sinks{ console_sink };
@@ -45,11 +46,13 @@ namespace Common {
 			g_pre_log_cb.store(cb, std::memory_order_release);
 		}
 
+
 		void run_pre_log_callback() {
 			if (auto cb = g_pre_log_cb.load(std::memory_order_acquire)) {
 				cb();
 			}
 		}
+
 
 		void log_message(spdlog::level::level_enum level, std::string_view module,
 						 std::string_view msg, std::string_view error_detail) {

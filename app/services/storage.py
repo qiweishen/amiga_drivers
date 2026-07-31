@@ -40,7 +40,7 @@ def _collect(session: Path) -> dict[str, int]:
     """Sensor-key -> bytes for the active session's bin/ tree."""
     sizes: dict[str, int] = {}
     bin_dir = session / "bin"
-    for driver in ("ins401", "gox", "asterx"):
+    for driver in ("ins401", "gox", "asterx", "fx10"):
         d = bin_dir / driver
         if d.is_dir():
             sizes[driver] = _du(d)

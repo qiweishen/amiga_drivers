@@ -1,10 +1,12 @@
 ################################################################################
 # JAI Go-X Camera Driver (eBUS SDK for JAI)
 # This is a subdirectory of the top-level AmigaDrivers project.
-# spdlog is provided by the parent (FetchContent, target spdlog::spdlog);
-# nlohmann/json and doctest are vendored at the repo level in 3rd_party/.
-# The eBUS SDK is a hard requirement (see cmake/FindeBUS.cmake); the
-# devcontainer installs it from gox_driver/resource/.
+# spdlog and nlohmann/json are provided by the parent (FetchContent, targets
+# spdlog::spdlog / nlohmann_json::nlohmann_json); doctest is vendored at the
+# repo level in 3rd_party/.
+# The eBUS SDK is a hard requirement (see the shared root cmake/FindeBUS.cmake,
+# one Pleora SDK serves gox and fx10); the devcontainer installs it from
+# fx10_driver/resource/.
 
 # Build options
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -13,51 +15,35 @@ else ()
     option(GOX_BUILD_TESTS "Build gox unit tests (SDK-free)" OFF)
 endif ()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
 # Directory-scoped: applies only to targets defined in this directory
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 
 ################################################################################
-# eBUS SDK (proprietary, installed out-of-tree; see cmake/FindeBUS.cmake)
+# eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake)
 find_package(eBUS)
 if (NOT eBUS_FOUND)
     message(FATAL_ERROR
-        "eBUS SDK not found. Install the eBUS SDK for JAI "
+        "eBUS SDK not found "
         "(expected under /opt/jai/ebus_sdk/<dist> or /opt/pleora/ebus_sdk/<dist>) "
         "or pass -DEBUS_SDK_ROOT=/path/to/sdk. The devcontainer installs it from "
-        "gox_driver/resource/ (see .devcontainer/Dockerfile).")
+        "fx10_driver/resource/ (see .devcontainer/Dockerfile).")
 endif ()
 
 
 ################################################################################
-# Generated version.hpp (driver version, git SHA, compile-time SDK/GenICam
-# paths consumed by ebus/env_bootstrap.cpp)
-set(GOX_DRIVER_VERSION "0.1.0")
-if (NOT DEFINED EBUS_SDK_ROOT_DIR)
-    set(EBUS_SDK_ROOT_DIR "")
-endif ()
+# Compile-time GenICam env constants for ebus/env_bootstrap.cpp (directory-
+# scoped, same mechanism as fx10). Values come from root cmake/FindeBUS.cmake.
 if (NOT DEFINED EBUS_GENICAM_ROOT_DIR)
     set(EBUS_GENICAM_ROOT_DIR "")
 endif ()
 if (NOT DEFINED EBUS_GENICAM_ENV_NAME)
     set(EBUS_GENICAM_ENV_NAME "GENICAM_ROOT_V3_4")
 endif ()
-find_package(Git QUIET)
-set(JAI_DRIVER_GIT_SHA "unknown")
-if (GIT_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE JAI_DRIVER_GIT_SHA_RAW
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET RESULT_VARIABLE GIT_SHA_RESULT)
-    if (GIT_SHA_RESULT EQUAL 0)
-        set(JAI_DRIVER_GIT_SHA "${JAI_DRIVER_GIT_SHA_RAW}")
-    endif ()
-endif ()
-configure_file(src/version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
+add_compile_definitions(
+    GOX_GENICAM_ENV_NAME="${EBUS_GENICAM_ENV_NAME}"
+    GOX_GENICAM_ROOT="${EBUS_GENICAM_ROOT_DIR}"
+)
 
 
 ################################################################################
@@ -65,27 +51,24 @@ configure_file(src/version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version
 # Headers live under include/ (include/core, include/ebus, ...); includes are
 # rooted there, e.g. #include "core/config.hpp".
 add_library(jai_core STATIC
-    src/core/chunk_pool.cpp
-    src/core/config.cpp
-    src/core/format.cpp
-    src/core/logger.cpp
-    src/core/recorder.cpp
-    src/core/session_log.cpp
-    src/core/signal_stop.cpp
-    src/core/stats.cpp
-    src/core/util.cpp
+        src/chunk_pool.cpp
+        src/app_config.cpp
+        src/format.cpp
+        src/recorder.cpp
+        src/signal_stop.cpp
+        src/stats.cpp
+        src/util.cpp
 )
 target_include_directories(jai_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 # SYSTEM: keep -Wall/-Wextra/-Wpedantic from firing inside vendored headers
-# (nlohmann/json, doctest).
+# (doctest).
 target_include_directories(jai_core SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/3rd_party
 )
-# amiga_common carries the unified logging layer (jai::Logger delegates to
-# Common::Log) and provides spdlog/Threads transitively
+# amiga_common carries the unified logging layer and provides spdlog/Threads/
+# nlohmann (via drivers_json) transitively
 target_link_libraries(jai_core PUBLIC
     amiga_common
     Threads::Threads
@@ -103,7 +86,6 @@ add_library(jai_ebus STATIC
     src/ebus/camera_session.cpp
     src/ebus/discovery.cpp
     src/ebus/env_bootstrap.cpp
-    src/ebus/preflight.cpp
     src/ebus/ptp_manager.cpp
     src/ebus/sdk_error.cpp
     src/ebus/stream_receiver.cpp
@@ -132,20 +114,11 @@ add_executable(jai_discover tools/discover_main.cpp)
 target_link_libraries(jai_discover PRIVATE jai_ebus)
 
 # jai_snapshot - one-shot frame grab for the web GUI preview loop
-# (config/config-snapshot.json + CLI overrides; see tools/snapshot_main.cpp)
+# (config/config-snapshot.yaml + CLI overrides; see tools/snapshot_main.cpp)
 add_executable(jai_snapshot tools/snapshot_main.cpp)
 target_link_libraries(jai_snapshot PRIVATE jai_ebus)
 
 set_target_properties(jai_discover jai_snapshot PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-
-################################################################################
-# SDK-free tools
-add_executable(jai_fake_capture tools/fake_capture_main.cpp)
-target_link_libraries(jai_fake_capture PRIVATE jai_core)
-set_target_properties(jai_fake_capture PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 

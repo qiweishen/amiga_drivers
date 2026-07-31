@@ -13,121 +13,107 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <string>
-#include <vector>
 
-#include "core/config.hpp"
-#include "core/session_log.hpp"
-#include "core/signal_stop.hpp"
+#include "app_config.hpp"
+#include "signal_stop.hpp"
 #include "ebus/discovery.hpp"
 
 namespace jai::ebus {
+    // Generic typed GenICam write. Dispatches on PvGenParameter::GetType()
+    // (Integer/Float/Boolean/Enum/String/Command) and, when
+    // apply.verify_readback is set, reads the value back and verifies it:
+    // Integer within GetIncrement() rounding, Float within
+    // float_verify_tolerance_rel (relative), everything else exact. Commands are
+    // executed, never verified. On failure the effective on_error policy
+    // (f.on_error, falling back to apply.on_error_default) decides: "fail"
+    // throws SdkError, "warn" logs a warning, "skip" logs at debug level.
+    // Returns true when the value was applied (and verified). `readback`, when
+    // non-null, receives the read-back value on success (for logging).
+    bool apply_genicam_feature(PvGenParameterArray *params, const GenicamFeature &f, const ApplyConfig &apply,
+                               const std::string &context, std::string *readback = nullptr);
 
-	// Outcome of one feature application, kept for session.json.
-	struct AppliedFeature {
-		std::string name;
-		std::string requested;
-		std::string readback;  // empty when verification was off / not applicable
-		std::string status;	   // "ok" | "warned: ..." | "skipped: ..."
-	};
+    // By-name read/execute helpers shared with ptp_manager and stream_receiver.
+    // All return false (without logging) when the parameter is missing or the
+    // access fails, so callers can silently skip optional features.
+    bool feature_exists(PvGenParameterArray *params, const std::string &name);
 
-	// Generic typed GenICam write. Dispatches on PvGenParameter::GetType()
-	// (Integer/Float/Boolean/Enum/String/Command) and, when
-	// apply.verify_readback is set, reads the value back and verifies it:
-	// Integer within GetIncrement() rounding, Float within
-	// float_verify_tolerance_rel (relative), everything else exact. Commands are
-	// executed, never verified. On failure the effective on_error policy
-	// (f.on_error, falling back to apply.on_error_default) decides: "fail"
-	// throws SdkError, "warn" logs a warning, "skip" logs at debug level.
-	// Returns true when the value was applied (and verified). `record`, when
-	// non-null, receives the outcome regardless.
-	bool apply_genicam_feature(PvGenParameterArray *params, const GenicamFeature &f, const ApplyConfig &apply,
-							   const std::string &context, AppliedFeature *record = nullptr);
+    bool read_int_feature(PvGenParameterArray *params, const std::string &name, int64_t &out);
 
-	// By-name read/execute helpers shared with ptp_manager and stream_receiver.
-	// All return false (without logging) when the parameter is missing or the
-	// access fails, so callers can silently skip optional features.
-	bool feature_exists(PvGenParameterArray *params, const std::string &name);
-	bool read_int_feature(PvGenParameterArray *params, const std::string &name, int64_t &out);
-	bool read_float_feature(PvGenParameterArray *params, const std::string &name, double &out);
-	bool read_enum_feature(PvGenParameterArray *params, const std::string &name, std::string &out);
-	bool read_feature_as_string(PvGenParameterArray *params, const std::string &name, std::string &out);
-	bool execute_command_feature(PvGenParameterArray *params, const std::string &name);
+    bool read_float_feature(PvGenParameterArray *params, const std::string &name, double &out);
 
-	class CameraController : protected PvDeviceEventSink {
-	public:
-		CameraController(std::string camera_id, StopController *stop, EventLog *events);
-		~CameraController();
+    bool read_enum_feature(PvGenParameterArray *params, const std::string &name, std::string &out);
 
-		CameraController(const CameraController &) = delete;
-		CameraController &operator=(const CameraController &) = delete;
+    bool read_feature_as_string(PvGenParameterArray *params, const std::string &name, std::string &out);
 
-		// Connects with PvAccessControl (not Exclusive: keeps eBUS Player
-		// read-only debugging possible), sets communication parameters
-		// (AnswerTimeout/CommandRetries) and registers the link-disconnected
-		// sink. `info` must still be owned by a live Discovery instance;
-		// `identity` is the plain-data snapshot kept for the session metadata.
-		// Warns loudly when the vendor name does not start with "JAI".
-		void connect(const PvDeviceInfoGEV *info, const DiscoveredDevice &identity);
+    bool execute_command_feature(PvGenParameterArray *params, const std::string &name);
 
-		// Unregisters the sink and disconnects. Idempotent.
-		void disconnect();
+    class CameraController : protected PvDeviceEventSink {
+    public:
+        explicit CameraController(std::string camera_id, StopController *stop);
 
-		bool connected() const;
-		bool link_lost() const { return link_lost_.load(std::memory_order_relaxed); }
+        ~CameraController();
 
-		// Ordered configuration per plan: autos off -> binning (hoisted from
-		// genicam_features) -> offsets zeroed -> Width -> Height -> OffsetX/Y ->
-		// PixelFormat -> exposure/gain/frame_rate/trigger convenience mappings ->
-		// remaining genicam_features in listed order -> GevGVSPExtendedIDMode
-		// forced On when Off -> GevTimestampTickFrequency read. Throws SdkError
-		// when a feature with policy "fail" cannot be applied.
-		void apply_config(const CameraConfig &cfg);
+        CameraController(const CameraController &) = delete;
 
-		// Reproducibility snapshot: full parameter-array walk to a text file
-		// (category/name = value, unreadable entries kept with a placeholder)
-		// plus PvConfigurationWriter::Store to a .pvcfg. Best-effort: failures
-		// are logged, never thrown.
-		void write_feature_snapshot(const std::string &text_path, const std::string &pvcfg_path);
+        CameraController &operator=(const CameraController &) = delete;
 
-		// TLParamsLocked management + acquisition commands (PvGenCommand).
-		void stream_enable();
-		void stream_disable(bool ignore_errors);
-		void acquisition_start();
-		void acquisition_stop(bool ignore_errors);
+        // Connects by connection string (IP address or a discovery connection
+        // ID — no PvSystem needed, fx10-aligned) with PvAccessControl (not
+        // Exclusive: keeps eBUS Player read-only debugging possible), sets
+        // communication parameters (AnswerTimeout/CommandRetries) and registers
+        // the link-disconnected sink. `identity` carries what the caller knows
+        // (full from discovery, just the IP on a direct dial); missing fields
+        // are filled from the standard GenICam device nodes after connect.
+        void connect(const std::string &target, DiscoveredDevice identity);
 
-		uint32_t payload_size();
+        // Unregisters the sink and disconnects. Idempotent.
+        void disconnect();
 
-		PvGenParameterArray *params();
-		PvDeviceGEV *device() { return device_.get(); }
-		const DiscoveredDevice &identity() const { return identity_; }
+        bool connected() const;
 
-		// GevTimestampTickFrequency read during apply_config(); 0 when absent.
-		int64_t timestamp_tick_frequency() const { return tick_frequency_; }
+        bool link_lost() const { return link_lost_.load(std::memory_order_relaxed); }
 
-		// Applied-feature list (ordered) for session.json.
-		nlohmann::ordered_json applied_json() const;
+        // Ordered configuration per plan: autos off -> binning (hoisted from
+        // genicam_features) -> offsets zeroed -> Width -> Height -> OffsetX/Y ->
+        // PixelFormat -> exposure/gain/frame_rate/trigger convenience mappings ->
+        // remaining genicam_features in listed order -> GevGVSPExtendedIDMode
+        // forced On when Off. Throws SdkError when a feature with policy
+        // "fail" cannot be applied.
+        void apply_config(const CameraConfig &cfg);
 
-	protected:
-		// PvDeviceEventSink
-		void OnLinkDisconnected(PvDevice *device) override;
+        // TLParamsLocked management + acquisition commands (PvGenCommand).
+        void stream_enable();
 
-	private:
-		// Applies name=value with an explicit policy. When required is false a
-		// missing parameter is a silent (debug-level) no-op returning false.
-		bool try_apply(const std::string &name, const std::string &value, bool value_is_string, const ApplyConfig &apply,
-					   const std::string &policy, bool required);
+        void stream_disable(bool ignore_errors);
 
-		std::string camera_id_;
-		StopController *stop_;
-		EventLog *events_;
+        void acquisition_start();
 
-		std::unique_ptr<PvDeviceGEV> device_;
-		DiscoveredDevice identity_;
-		std::vector<AppliedFeature> applied_;
-		std::atomic<bool> link_lost_{ false };
-		int64_t tick_frequency_ = 0;
-	};
+        void acquisition_stop(bool ignore_errors);
 
-}  // namespace jai::ebus
+        uint32_t payload_size();
+
+        PvGenParameterArray *params();
+
+        PvDeviceGEV *device() { return device_.get(); }
+        const DiscoveredDevice &identity() const { return identity_; }
+
+    protected:
+        // PvDeviceEventSink
+        void OnLinkDisconnected(PvDevice *device) override;
+
+    private:
+        // Applies name=value with an explicit policy. When required is false a
+        // missing parameter is a silent (debug-level) no-op returning false.
+        bool try_apply(const std::string &name, const std::string &value, bool value_is_string,
+                       const ApplyConfig &apply,
+                       const std::string &policy, bool required);
+
+        std::string camera_id_;
+        StopController *stop_;
+
+        std::unique_ptr<PvDeviceGEV> device_;
+        DiscoveredDevice identity_;
+        std::atomic<bool> link_lost_{false};
+    };
+} // namespace jai::ebus

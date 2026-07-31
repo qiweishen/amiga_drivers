@@ -1,10 +1,10 @@
 // Tests for CameraStats/StatsReporter (core/stats.cpp) and the ChunkPool
 // (core/chunk_pool.cpp).
 
-#include "core/stats.hpp"
+#include "../include/stats.hpp"
 
-#include "core/chunk_pool.hpp"
-#include "core/frame.hpp"
+#include "../include/chunk_pool.hpp"
+#include "../include/frame.hpp"
 
 #include <doctest/doctest.h>
 
@@ -12,11 +12,9 @@
 #include <vector>
 
 namespace {
-
-bool contains(const std::string& s, const std::string& needle) {
-    return s.find(needle) != std::string::npos;
-}
-
+    bool contains(const std::string &s, const std::string &needle) {
+        return s.find(needle) != std::string::npos;
+    }
 } // namespace
 
 TEST_CASE("stats: snapshot copies every counter") {
@@ -65,11 +63,11 @@ TEST_CASE("stats: periodic_line computes rates against the previous snapshot") {
 
     jai::StatsReporter rep("cam0", &st);
     const std::string line = rep.periodic_line(/*interval_s=*/2.0, /*uptime_s=*/65,
-                                               /*free_disk_bytes=*/1ull << 30);
+                                                              /*free_disk_bytes=*/1ull << 30);
     CAPTURE(line);
     CHECK(contains(line, "[cam0]"));
     CHECK(contains(line, "up=00:01:05"));
-    CHECK(contains(line, "fps=50.0"));     // 100 frames / 2 s against the zero snapshot
+    CHECK(contains(line, "fps=50.0")); // 100 frames / 2 s against the zero snapshot
     CHECK(contains(line, "disk=0.5MB/s")); // 1e6 bytes / 2 s
     CHECK(contains(line, "ok=101"));
     CHECK(contains(line, "incomp=1"));
@@ -84,7 +82,7 @@ TEST_CASE("stats: periodic_line computes rates against the previous snapshot") {
     const std::string line2 = rep.periodic_line(2.0, 67, 1ull << 30);
     CAPTURE(line2);
     CHECK(contains(line2, "up=00:01:07"));
-    CHECK(contains(line2, "fps=25.0"));     // (150 - 100) / 2
+    CHECK(contains(line2, "fps=25.0")); // (150 - 100) / 2
     CHECK(contains(line2, "disk=1.0MB/s")); // (3e6 - 1e6) / 2
 
     // A zero interval must not divide by zero.

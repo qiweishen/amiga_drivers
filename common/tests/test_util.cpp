@@ -20,6 +20,8 @@ TEST_CASE("TimeUtil formatting") {
 	// 2021-01-02 03:04:05.678 UTC
 	constexpr std::uint64_t ns = 1609556645678000000ull;
 	CHECK(Iso8601Utc(ns) == "2021-01-02T03:04:05.678Z");
+	// Second precision is a frozen FX10 ENVI .hdr format
+	CHECK(Iso8601UtcSec(ns) == "2021-01-02T03:04:05Z");
 	CHECK(CompactUtc(ns) == "20210102T030405Z");
 	CHECK(std::regex_match(CompactUtcNow(), std::regex(R"(\d{8}T\d{6}Z)")));
 
@@ -49,6 +51,13 @@ TEST_CASE("StringUtil basics") {
 	CHECK(ToSnakeCase("FrontLeft") == "front_left");
 	CHECK(ToSnakeCase("front-left") == "front_left");
 	CHECK(OneLine("a\r\nb\tc") == "a  b c");
+	// NormalizeMac: all common spellings collapse to lowercase 12-hex-digit
+	CHECK(NormalizeMac("00:0C:DF:12:34:56") == "000cdf123456");
+	CHECK(NormalizeMac("00-0c-df-12-34-56") == "000cdf123456");
+	CHECK(NormalizeMac("000cdf123456") == "000cdf123456");
+	CHECK(NormalizeMac("00:0c:df:12:34") == "");	  // too short
+	CHECK(NormalizeMac("zz:zz:zz:zz:zz:zz") == "");	  // not hex
+	CHECK(NormalizeMac("") == "");
 }
 
 

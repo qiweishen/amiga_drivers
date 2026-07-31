@@ -13,6 +13,12 @@
 # Septentrio AsteRx standalone recordings (default output.dir "./recordings")
 /recordings/
 
+# fx10 standalone-era capture output (unified runs write to <Output Directory>)
+captures/
+
 # Web GUI scratch space (snapshot sessions, decoded previews)
 /app/_runtime/
 __pycache__/
+
+# NiceGUI runtime storage (created on app start)
+/.nicegui/

@@ -22,17 +22,15 @@
 #include <PvSystem.h>
 
 namespace {
-
-void print_usage(const char* argv0) {
-    std::printf("Usage: %s [--timeout <ms>] [--json]\n"
-                "Enumerates GigE Vision devices on all interfaces (default timeout 4000 ms).\n"
-                "  --json  print one JSON document on stdout instead of the table\n",
-                argv0);
-}
-
+    void print_usage(const char *argv0) {
+        std::printf("Usage: %s [--timeout <ms>] [--json]\n"
+                    "Enumerates GigE Vision devices on all interfaces (default timeout 4000 ms).\n"
+                    "  --json  print one JSON document on stdout instead of the table\n",
+                    argv0);
+    }
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     // Must run before the first eBUS SDK call (GenICam environment).
     jai::ebus::bootstrap_env();
 
@@ -80,7 +78,7 @@ int main(int argc, char** argv) {
 
     uint32_t total_devices = 0;
     for (uint32_t i = 0; i < system.GetInterfaceCount(); ++i) {
-        const PvInterface* iface = system.GetInterface(i);
+        const PvInterface *iface = system.GetInterface(i);
         if (iface == nullptr) {
             continue;
         }
@@ -89,7 +87,7 @@ int main(int argc, char** argv) {
         if (!json_mode) {
             std::printf("\nInterface: %s\n", jai::ebus::to_std(iface->GetName()).c_str());
         }
-        const auto* nic = dynamic_cast<const PvNetworkAdapter*>(iface);
+        const auto *nic = dynamic_cast<const PvNetworkAdapter *>(iface);
         if (nic != nullptr) {
             if (!json_mode) {
                 std::printf("  MAC %s", jai::ebus::to_std(nic->GetMACAddress()).c_str());
@@ -102,8 +100,10 @@ int main(int argc, char** argv) {
                                 jai::ebus::to_std(nic->GetSubnetMask(k)).c_str());
                 }
                 jiface["addresses"].push_back(
-                    {{"ip", jai::ebus::to_std(nic->GetIPAddress(k))},
-                     {"subnet_mask", jai::ebus::to_std(nic->GetSubnetMask(k))}});
+                    {
+                        {"ip", jai::ebus::to_std(nic->GetIPAddress(k))},
+                        {"subnet_mask", jai::ebus::to_std(nic->GetSubnetMask(k))}
+                    });
             }
             if (!json_mode) {
                 std::printf("\n");
@@ -122,14 +122,15 @@ int main(int argc, char** argv) {
                         "MAC", "IP", "SERIAL", "FIRMWARE", "USER_NAME", "CONFIG");
         }
         for (uint32_t j = 0; j < iface->GetDeviceCount(); ++j) {
-            const PvDeviceInfo* info = iface->GetDeviceInfo(j);
-            const auto* gev = dynamic_cast<const PvDeviceInfoGEV*>(info);
+            const PvDeviceInfo *info = iface->GetDeviceInfo(j);
+            const auto *gev = dynamic_cast<const PvDeviceInfoGEV *>(info);
             if (gev == nullptr) {
                 // Non-GEV devices carry none of the fields below; table-only.
                 if (!json_mode) {
                     std::printf("  (non-GEV device: %s)\n",
-                                info != nullptr ? jai::ebus::to_std(info->GetDisplayID()).c_str()
-                                                : "?");
+                                info != nullptr
+                                    ? jai::ebus::to_std(info->GetDisplayID()).c_str()
+                                    : "?");
                 }
                 continue;
             }
@@ -146,14 +147,16 @@ int main(int argc, char** argv) {
                             gev->IsConfigurationValid() ? "valid" : "INVALID-SUBNET");
             }
             jiface["devices"].push_back(
-                {{"model", jai::ebus::to_std(gev->GetModelName())},
-                 {"vendor", jai::ebus::to_std(gev->GetVendorName())},
-                 {"mac", jai::ebus::to_std(gev->GetMACAddress())},
-                 {"ip", jai::ebus::to_std(gev->GetIPAddress())},
-                 {"serial", jai::ebus::to_std(gev->GetSerialNumber())},
-                 {"firmware", jai::ebus::to_std(gev->GetVersion())},
-                 {"user_name", jai::ebus::to_std(gev->GetUserDefinedName())},
-                 {"config_valid", gev->IsConfigurationValid()}});
+                {
+                    {"model", jai::ebus::to_std(gev->GetModelName())},
+                    {"vendor", jai::ebus::to_std(gev->GetVendorName())},
+                    {"mac", jai::ebus::to_std(gev->GetMACAddress())},
+                    {"ip", jai::ebus::to_std(gev->GetIPAddress())},
+                    {"serial", jai::ebus::to_std(gev->GetSerialNumber())},
+                    {"firmware", jai::ebus::to_std(gev->GetVersion())},
+                    {"user_name", jai::ebus::to_std(gev->GetUserDefinedName())},
+                    {"config_valid", gev->IsConfigurationValid()}
+                });
         }
         doc["interfaces"].push_back(std::move(jiface));
     }

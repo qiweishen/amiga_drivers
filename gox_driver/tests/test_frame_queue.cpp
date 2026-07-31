@@ -5,7 +5,7 @@
 
 #include "core/frame_queue.hpp"
 
-#include "core/frame.hpp"
+#include "../include/frame.hpp"
 
 #include <doctest/doctest.h>
 
@@ -135,7 +135,7 @@ TEST_CASE("frame_queue: producer/consumer stress preserves order, count and capa
             break;
         }
     }
-    CHECK(in_order);              // exact sequence: nothing lost, duplicated or reordered
+    CHECK(in_order); // exact sequence: nothing lost, duplicated or reordered
     CHECK(max_size <= kCapacity); // size() never exceeded the configured capacity
 }
 
@@ -144,7 +144,7 @@ TEST_CASE("frame_queue: FrameChunkPtr moves through without copies") {
     jai::FrameChunkPtr chunk = std::make_unique<jai::FrameChunk>(64);
     chunk->meta.block_id = 7;
     chunk->data[0] = 0xAB;
-    const jai::FrameChunk* raw = chunk.get();
+    const jai::FrameChunk *raw = chunk.get();
 
     REQUIRE(q.try_push(std::move(chunk)));
     CHECK(chunk == nullptr); // ownership transferred on a successful push

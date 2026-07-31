@@ -22,7 +22,9 @@ _NAV = [
     ("/", "Overview"),
     ("/config", "Config"),
     ("/logs", "Logs"),
+    ("/asterx", "AsteRx Live"),
     ("/gox", "GoX Tools"),
+    ("/fx10", "FX10 Tools"),
 ]
 
 

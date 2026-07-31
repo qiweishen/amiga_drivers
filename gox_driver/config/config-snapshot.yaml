@@ -1,0 +1,65 @@
+# =============================================================
+# GoX Driver Configuration --- For Snapshot
+# =============================================================
+
+# Single-shot capture profile for jai_snapshot (GUI preview / exposure tuning).
+#
+# - selector.value and convenience.exposure_us/gain are placeholders only: the
+#   GUI overrides them per shot via --ip / --exposure-us / --gain (this file is
+#   never rewritten).
+# - jai_snapshot unconditionally forces max_frames=1, max_duration_s<=15 and
+#   ptp.enabled=false, even if this file is edited.
+# - convenience.pixel_format must stay within the PFNC table supported by
+#   scripts/unpack_raw.py, otherwise the PNG decode fails.
+
+acquisition:
+    max_frames: 1                 # stop right after the first frame
+    max_duration_s: 15            # safety net: never let the GUI hang waiting
+
+
+ptp:
+    enabled: false                # free-running timestamps are fine for a preview, no grandmaster needed
+
+recording:
+    output_dir: "/workspace/app/_runtime/snapshot" # fallback; the GUI always overrides via --out
+    session_name: "auto"
+    segment_size_gib: 1.0
+    record_align: 4096
+    queue_max_frames: 4           # only 1 frame: minimize memory (pool = queue + 2)
+    queue_on_full: "block"        # the single frame must never be dropped
+    on_buffer_error: "record_flagged" # record incomplete frames too; unpack pads them with --pad-incomplete
+    flush_interval_mb: 64
+    min_free_gib: 1.0
+
+cameras:
+    -   id: "cam0"
+        enabled: true
+        selector:
+            by: "ip"
+            value: "10.95.76.106" # placeholder; the GUI passes --ip
+        discovery:                # unused with by=ip (direct connect); kept for --mac overrides
+            timeout_ms: 800
+            retries: 1
+            retry_interval_ms: 200
+            force_ip:
+                enabled: false
+                ip: ""
+                subnet_mask: ""
+                gateway: "0.0.0.0"
+        convenience:
+            exposure_us: 20000.0  # placeholder; the GUI passes --exposure-us
+            gain: 1.0             # placeholder; the GUI passes --gain
+            pixel_format: "BayerRG12Packed" # must be in unpack_raw.py's PFNC table
+        genicam_features: [ ]
+        apply:
+            verify_readback: true
+            float_verify_tolerance_rel: 0.001
+            on_error_default: "warn" # a preview must not abort over a read-back quirk
+        stream:
+            channel: 0
+            buffer_count: 16      # constraint: 0 (auto) or >= 4
+            packet_size: 0        # 0 = NegotiatePacketSize (fallback 1476)
+            socket_rx_buffer_mib: 16
+            local_ip: ""
+            gev_scpd_ticks: 0
+            receiver_tuning: [ ]

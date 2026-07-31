@@ -2,7 +2,7 @@
 
 基于 **eBUS SDK for JAI 6.x（C++ API）** 的原始数据采集 driver，面向 JAI Go-X 系列 GigE Vision 相机：
 
-- 通过一份 `config.json` 控制相机全部采集参数（GenICam 特性逐条下发 + 写后回读校验）
+- 通过一份 YAML 配置（`config/config-gox.yaml`）控制相机全部采集参数（GenICam 特性逐条下发 + 写后回读校验）
 - 相机时间同步走 **PTP (IEEE 1588)**：网络中已有 grandmaster，driver 只负责使能相机 PTP
   从模式并校验同步状态（时间戳为 TAI 纳秒，原样落盘）
 - **只采集原始数据**：GVSP payload 原样落盘，不解包、不去马赛克、不做像素转换，
@@ -21,7 +21,7 @@
   devcontainer 镜像已从 `gox_driver/resource/` 安装其 .deb；非标准路径用
   `-DEBUS_SDK_ROOT=/path/to/sdk` 指定。
 - **运行**：`config/config-main.yaml` 中设 `Enable GOX: true`，
-  `GOX Driver Config Path` 指向本目录 `config/config-gox.json`。
+  `GOX Driver Config Path` 指向本目录 `config/config-gox.yaml`。
   `recording.output_dir` / `session_name` 被覆盖为
   `<Output Directory>/<时间戳>/bin/gox/`（与其他传感器数据同会话目录），
   gox 日志并入统一 log 文件，`acquisition` 上限到达会关停整个 AmigaDrivers 进程。
@@ -69,7 +69,7 @@ cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc) && ctest --output-on-failur
 |---|---|
 | `CMakeLists.txt` | 构建入口（作为父工程 AmigaDrivers 的子目录被引入） |
 | `cmake/FindeBUS.cmake` | 定位 eBUS SDK（`EBUS_SDK_ROOT` → `/opt/jai/ebus_sdk/*` → `/opt/pleora/ebus_sdk/*`），导出 `eBUS::eBUS`（含 RPATH 传递） |
-| `config/config-gox.json` | 统一模式默认配置；`config/config.example.json` 为带注释的完整示例（含多相机示例） |
+| `config/config-gox.yaml` | 统一模式默认配置（宽松解析，与 asterx/fx10 风格一致）；`config-snapshot.yaml` 为 jai_snapshot 单张拍摄 profile |
 | `include/` / `src/gox_driver_app.cpp` | **统一入口适配层** `GoxDriverApp`（init/run/shutdown + TerminateFlag，供根 main.cpp 使用，目标 `gox_lib`） |
 | `src/core/` | **SDK-free 层**：config 解析、落盘格式、Recorder、队列/缓冲池、统计、日志、信号处理——不 include 任何 `Pv*.h`，可脱离 SDK 单测（目标 `jai_core`） |
 | `src/ebus/` + `src/capture_runner.cpp` | **SDK 依赖层**：设备发现、连接控制、GenICam 参数下发、PTP、收流 + 采集编排 `CaptureRunner`（目标 `jai_ebus`） |
@@ -88,7 +88,7 @@ cmake -DCMAKE_BUILD_TYPE=Debug .. && make -j$(nproc) && ctest --output-on-failur
 |---|---|
 | 0 | 干净完成且零丢帧 |
 | 1 | 采集完成，但存在**任何**丢帧/缺包帧/网络层丢块（零容忍；数据已在盘上，明细见最终统计与 session.json） |
-| 2 | 配置错误（未知键、取值非法、文件无法解析） |
+| 2 | 配置错误（取值非法、关键约束不满足、文件无法解析） |
 | 3 | 设备发现、连接或 GenICam 参数应用/回读校验失败 |
 | 4 | PTP 同步超时（`ptp.on_timeout = "abort"` 策略下） |
 | 5 | 流建立失败（打开流/包大小协商/buffer 分配失败），或 Preflight 出现 ERROR 且 `preflight.fail_on_error=true` |

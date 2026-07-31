@@ -1,7 +1,8 @@
 #
-# Slim unit tests. Two suites:
-#   asterx_test_commands    - command composition + geometry readback verifiers
-#   asterx_test_app_config  - YAML config loading/validation
+# Slim unit tests. Three suites:
+#   asterx_test_commands     - command composition + geometry readback verifiers
+#   asterx_test_app_config   - YAML config loading/validation
+#   asterx_test_sbf_parsers  - live SBF block parsers (synthetic frames)
 #
 # The Septentrio SsnRx SDK itself is vendor-verified code and is not unit
 # tested here; it is exercised end-to-end by the unified AmigaDrivers binary.
@@ -34,3 +35,6 @@ asterx_add_test(asterx_test_commands
 
 asterx_add_test(asterx_test_app_config
     SRCS test_app_config.cpp)
+
+asterx_add_test(asterx_test_sbf_parsers
+    SRCS test_sbf_parsers.cpp)

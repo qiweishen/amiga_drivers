@@ -26,6 +26,7 @@ namespace asterx {
         using Common::StringUtil::ToLower;
         using Common::StringUtil::Trim;
 
+
         std::string fmt_command_decimal(double v) {
             if (std::fabs(v) < 0.0005) {
                 v = 0.0;
@@ -34,6 +35,7 @@ namespace asterx {
             os << std::fixed << std::setprecision(3) << v;
             return os.str();
         }
+
 
         int parse_int_prefix(const std::string &s, const std::string &field) {
             std::istringstream is(Trim(s));
@@ -44,6 +46,7 @@ namespace asterx {
             return v;
         }
 
+
         double parse_double_prefix(const std::string &s, const std::string &field) {
             std::istringstream is(Trim(s));
             double v = 0.0;
@@ -53,9 +56,11 @@ namespace asterx {
             return v;
         }
 
+
         bool close_enough(double a, double b) {
             return std::fabs(a - b) <= 0.001;
         }
+
 
         std::string find_config_line_payload(const std::string &reply, const std::string &key) {
             std::istringstream lines(reply);
@@ -69,6 +74,7 @@ namespace asterx {
             }
             throw ConfigError("receiver reply did not contain '" + key + "' line: " + reply);
         }
+
 
         std::string compact_payload_after_key(const std::string &reply, const std::string &key) {
             const std::string marker = key + ",";
@@ -88,11 +94,13 @@ namespace asterx {
             return payload;
         }
 
+
         void enforce_command_length(const std::string &cmd) {
             if (cmd.size() > kMaxAsciiCommandLength) {
                 throw ConfigError("ASCII command exceeds Septentrio 2000-character limit");
             }
         }
+
 
         void enforce_descriptor(const std::string &descriptor) {
             if (descriptor.empty() ||
@@ -102,11 +110,13 @@ namespace asterx {
             }
         }
 
+
         std::string set_vec3_command(const std::string &name, Vec3 v) {
             return name + ", " + fmt_command_decimal(v.x) + ", " +
                    fmt_command_decimal(v.y) + ", " + fmt_command_decimal(v.z);
         }
     } // namespace
+
 
     bool is_valid_sbf_interval(const std::string &interval) {
         static const std::unordered_set<std::string> allowed{
@@ -120,6 +130,7 @@ namespace asterx {
         return allowed.find(ToLower(interval)) != allowed.end();
     }
 
+
     std::string build_sbf_output_command(const SbfStream &stream,
                                          const std::string &descriptor) {
         if (stream.stream_id < 1 || stream.stream_id > 10) {
@@ -130,7 +141,7 @@ namespace asterx {
             throw ConfigError("SBF stream must contain at least one block");
         }
         if (!is_valid_sbf_interval(stream.interval)) {
-            throw ConfigError("unsupported SBF interval '" + stream.interval + "'");
+            throw ConfigError("Unsupported SBF interval '" + stream.interval + "'");
         }
 
         const std::string cmd =
@@ -142,9 +153,11 @@ namespace asterx {
         return cmd;
     }
 
+
     std::string build_ins_ant_lever_arm_command(Vec3 lever_arm_m) {
         return set_vec3_command("setINSAntLeverArm", lever_arm_m);
     }
+
 
     std::string build_imu_orientation_command(const ReceiverSettings &settings) {
         if (EqualsCi(settings.imu_orientation_mode, "SensorDefault")) {
@@ -155,6 +168,7 @@ namespace asterx {
                fmt_command_decimal(settings.theta_y_deg) + ", " +
                fmt_command_decimal(settings.theta_z_deg);
     }
+
 
     std::vector<Command> build_command_list(const ReceiverSettings &settings,
                                             const std::string &descriptor) {
@@ -242,6 +256,7 @@ namespace asterx {
         return cmds;
     }
 
+
     ReceiverCapabilities parse_receiver_capabilities_reply(const std::string &reply) {
         const std::string payload = compact_payload_after_key(reply, "ReceiverCapabilities");
         const auto fields = SplitTrim(payload, ',');
@@ -251,8 +266,12 @@ namespace asterx {
 
         ReceiverCapabilities caps;
         for (const auto &antenna: SplitTrim(fields[0], '+')) {
-            if (EqualsCi(antenna, "Main")) caps.has_main = true;
-            if (EqualsCi(antenna, "Aux1")) caps.has_aux1 = true;
+            if (EqualsCi(antenna, "Main")) {
+                caps.has_main = true;
+            }
+            if (EqualsCi(antenna, "Aux1")) {
+                caps.has_aux1 = true;
+            }
         }
 
         caps.measurement_interval_ms = parse_int_prefix(fields[fields.size() - 3], "measurement_interval_ms");
@@ -260,6 +279,7 @@ namespace asterx {
         caps.ins_interval_ms = parse_int_prefix(fields[fields.size() - 1], "ins_interval_ms");
         return caps;
     }
+
 
     void verify_imu_orientation_reply(const std::string &reply, const ReceiverSettings &settings) {
         const auto fields = SplitTrim(find_config_line_payload(reply, "IMUOrientation"), ',');
@@ -285,6 +305,7 @@ namespace asterx {
         }
     }
 
+
     void verify_ins_ant_lever_arm_reply(const std::string &reply, Vec3 expected) {
         const auto fields = SplitTrim(find_config_line_payload(reply, "INSAntLeverArm"), ',');
         if (fields.size() < 3) {
@@ -302,16 +323,17 @@ namespace asterx {
         }
     }
 
+
     void verify_gnss_attitude_reply(const std::string &reply, const std::string &expected_mode) {
         const auto fields = SplitTrim(find_config_line_payload(reply, "GNSSAttitude"), ',');
         if (fields.empty()) {
             throw ConfigError("GNSSAttitude reply did not contain a mode");
         }
         if (!EqualsCi(fields[0], expected_mode)) {
-            throw ConfigError("GNSS attitude mode mismatch: expected " +
-                              expected_mode + ", got " + fields[0]);
+            throw ConfigError("GNSS attitude mode mismatch: expected " + expected_mode + ", got " + fields[0]);
         }
     }
+
 
     void verify_attitude_offset_reply(const std::string &reply, AttitudeOffset expected) {
         const auto fields = SplitTrim(find_config_line_payload(reply, "AttitudeOffset"), ',');
@@ -325,6 +347,7 @@ namespace asterx {
             throw ConfigError("GNSS attitude offset does not match requested config");
         }
     }
+
 
     void validate_receiver_settings(const ReceiverSettings &settings) {
         if (!EqualsCi(settings.imu_startup_data_mode, "Boot") &&
@@ -361,6 +384,7 @@ namespace asterx {
             (void) build_sbf_output_command(s, "IP10");
         }
     }
+
 
     std::string redact_cmd(const std::string &cmd) {
         if (cmd.rfind("login", 0) == 0) {

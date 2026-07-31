@@ -49,6 +49,10 @@ namespace Common {
 
 		[[nodiscard]] bool IsOpen() const { return file_.is_open(); }
 
+		// False once any write/flush failed (badbit/failbit); IsOpen() stays
+		// true on a failed stream, so error detection must use this
+		[[nodiscard]] bool Good() const { return file_.good(); }
+
 		void Write(const void *data, std::size_t len) {
 			file_.write(static_cast<const char *>(data), static_cast<std::streamsize>(len));
 		}

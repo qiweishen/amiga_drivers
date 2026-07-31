@@ -23,7 +23,7 @@
 
 
 namespace {
-	constexpr std::string_view kModule = "LMS4xxxDriver";
+	constexpr std::string_view kModule = "LMS4xxx";
 
 	Common::DriverLog g_log{ std::string(kModule) };
 
@@ -123,10 +123,12 @@ namespace LMS4xxx {
 			std::uint8_t header[8];
 			std::error_code read_ec;
 			auto bytes = tcp_client->Read(header, 8, read_ec, timeout_ms);
-			if (read_ec)
+			if (read_ec) {
 				return read_ec;
-			if (bytes < 8)
+			}
+			if (bytes < 8) {
 				return make_error_code(ErrorCode::kFrameTooShort);
+			}
 
 			// Verify STX
 			if (header[0] != 0x02 || header[1] != 0x02 || header[2] != 0x02 || header[3] != 0x02) {

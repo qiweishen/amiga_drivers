@@ -38,6 +38,7 @@ class HealthMonitor:
             sensors[f"lms:{name}"] = SensorStatus(f"lms:{name}", f"LMS4xxx · {name}")
         sensors["gox"] = SensorStatus("gox", "GoX Cameras")
         sensors["asterx"] = SensorStatus("asterx", "AsteRx")
+        sensors["fx10"] = SensorStatus("fx10", "FX10 Hyperspectral")
         for key, st in sensors.items():
             driver = "lms4xxx" if key.startswith("lms:") else key
             st.state = SensorState.WAITING if enables.get(driver, False) else SensorState.DISABLED
@@ -101,6 +102,14 @@ class HealthMonitor:
                 self._set("asterx", SensorState.STOPPED)
             elif line.level in ("error", "critical"):
                 self._set("asterx", SensorState.FAILED, msg)
+
+        elif module == markers.MODULE_FX10:
+            if markers.FX10_INITIALIZED in msg:
+                self._set("fx10", SensorState.RUNNING)
+            elif markers.FX10_SHUTDOWN in msg or markers.FX10_SESSION_ISSUES in msg:
+                self._set("fx10", SensorState.STOPPED)
+            elif line.level in ("error", "critical"):
+                self._set("fx10", SensorState.FAILED, msg)
 
         elif module == markers.MODULE_MAIN:
             if markers.RECEIVED_SIGNAL_PREFIX in msg:

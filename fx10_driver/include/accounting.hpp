@@ -1,0 +1,77 @@
+#pragma once
+
+#include <cstdint>
+
+// Zero-loss accounting: BlockID continuity tracking and the run counter ledger.
+// Everything here is pure and single-threaded — the acquisition loop is the only
+// writer (write-in-retrieve-loop topology), so no atomics are needed.
+
+namespace fx10 {
+    // GVSP BlockID continuity. Wire IDs are 16-bit (GVSP 1.x: valid IDs 1..65535,
+    // 0 is skipped on wrap: ... 65534, 65535, 1, 2 ...) unless the camera runs
+    // GevGVSPExtendedIDMode (64-bit). kAuto starts 16-bit-compatible and switches to
+    // 64-bit permanently once an ID above 65535 is observed.
+    class BlockIdTracker {
+    public:
+        enum class Mode { kAuto, k16Bit, k64Bit };
+
+        struct Observation {
+            std::uint64_t gap_before = 0; // frames missing between previous and this one
+            std::uint64_t first_missing = 0; // first absent BlockID when gap_before > 0
+            bool anomaly = false; // duplicate / backwards / invalid ID (not a gap)
+        };
+
+        explicit BlockIdTracker(Mode mode = Mode::kAuto) : mode_(mode) {
+        }
+
+        Observation observe(std::uint64_t block_id);
+
+        std::uint64_t observed() const { return observed_; }
+        std::uint64_t totalMissed() const { return total_missed_; }
+        std::uint64_t anomalies() const { return anomalies_; }
+
+    private:
+        Mode mode_;
+        bool first_ = true;
+        bool saw_wide_ = false; // an ID > 65535 has been seen (kAuto -> 64-bit)
+        std::uint64_t prev_ = 0;
+        std::uint64_t observed_ = 0;
+        std::uint64_t total_missed_ = 0;
+        std::uint64_t anomalies_ = 0;
+    };
+
+    // Session counter ledger, logged at recorder stop. SINGLE-WRITER
+    // rule per field (violating it double-counts):
+    //   acquisition loop: retrieve_ok, retrieve_timeouts, op_errors, blockid_anomalies
+    //   recorder (via onFrame/onGap): blockid_gap_events, frames_missed_rx,
+    //     size_mismatch_drops, frames_written, gap_lines_padded, bytes_written,
+    //     write_errors, segments_finalized
+    //   control channel: missed_trigger_delta
+    // The transport reports gaps by CALLING IFrameSink::onGap only — it must not
+    // touch the gap counters itself.
+    struct Counters {
+        std::uint64_t retrieve_ok = 0;
+        std::uint64_t retrieve_timeouts = 0; // normal idle in triggered mode
+        std::uint64_t op_errors = 0; // buffer retrieved but invalid
+        std::uint64_t blockid_gap_events = 0;
+        std::uint64_t frames_missed_rx = 0; // sum of gap sizes
+        std::uint64_t blockid_anomalies = 0;
+        std::uint64_t size_mismatch_drops = 0;
+        std::uint64_t frames_written = 0; // real frames on disk (excludes padding)
+        std::uint64_t gap_lines_padded = 0; // synthetic zero lines (pad_zero policy)
+        std::uint64_t bytes_written = 0; // .bil bytes on disk (incl. padded lines)
+        std::uint64_t write_errors = 0;
+        std::uint64_t segments_finalized = 0;
+        // Camera-side missed-trigger counter delta over the run; -1 = node not mapped.
+        std::int64_t missed_trigger_delta = -1;
+    };
+
+    enum class RunStatus { kClean, kDegraded };
+
+    // CLEAN iff nothing was lost or irregular: no RX gaps, no op errors, no size
+    // mismatches, no write errors, no BlockID anomalies, and no missed triggers
+    // (unmapped counter = -1 does not count against CLEAN).
+    RunStatus classify(const Counters &counters);
+
+    const char *toString(RunStatus status);
+} // namespace fx10

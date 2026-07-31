@@ -13,10 +13,10 @@
 // on disk (max_duration_s safety net fired before the first frame).
 
 #include "capture_runner.hpp"
-#include "core/config.hpp"
-#include "core/format.hpp"
-#include "core/logger.hpp"
-#include "core/signal_stop.hpp"
+#include "app_config.hpp"
+#include "format.hpp"
+#include "logger.h"
+#include "signal_stop.hpp"
 #include "ebus/env_bootstrap.hpp"
 
 #include <cerrno>
@@ -28,52 +28,50 @@
 #include <string>
 
 namespace {
-
-void print_usage(const char* argv0) {
-    std::printf(
-        "Usage: %s --config <snapshot.json> --out <dir> [overrides]\n"
-        "\n"
-        "Grabs exactly one frame from one camera and writes a jai-raw-seg session\n"
-        "into <dir> (frame at <dir>/<camera_id>/seg_00001.raw).\n"
-        "\n"
-        "Required:\n"
-        "  --config <path>    strict JSONC config (see config/config-snapshot.json)\n"
-        "  --out <dir>        session directory, used verbatim\n"
-        "Overrides (applied to cameras[0] after the config is loaded):\n"
-        "  --ip <addr>        selector = {by: ip, value: <addr>}\n"
-        "  --mac <addr>       selector = {by: mac, value: <addr>}\n"
-        "  --exposure-us <n>  convenience.exposure_us (microseconds, >= 0)\n"
-        "  --gain <db>        convenience.gain\n"
-        "  -h, --help         show this help and exit\n"
-        "\n"
-        "Last stdout line: \"SNAPSHOT: OK <camera_dir>\" or \"SNAPSHOT: FAIL <code> <reason>\".\n",
-        argv0);
-}
-
-// Single exit funnel: every failure path emits the parseable marker.
-int fail(int code, const std::string& reason) {
-    std::printf("SNAPSHOT: FAIL %d %s\n", code, reason.c_str());
-    std::fflush(stdout);
-    return code;
-}
-
-bool parse_double(const char* s, double& out) {
-    if (s == nullptr || *s == '\0') {
-        return false;
+    void print_usage(const char *argv0) {
+        std::printf(
+            "Usage: %s --config <snapshot.yaml> --out <dir> [overrides]\n"
+            "\n"
+            "Grabs exactly one frame from one camera and writes a jai-raw-seg session\n"
+            "into <dir> (frame at <dir>/<camera_id>/seg_00001.raw).\n"
+            "\n"
+            "Required:\n"
+            "  --config <path>    YAML config (see config/config-snapshot.yaml)\n"
+            "  --out <dir>        session directory, used verbatim\n"
+            "Overrides (applied to cameras[0] after the config is loaded):\n"
+            "  --ip <addr>        selector = {by: ip, value: <addr>}\n"
+            "  --mac <addr>       selector = {by: mac, value: <addr>}\n"
+            "  --exposure-us <n>  convenience.exposure_us (microseconds, >= 0)\n"
+            "  --gain <db>        convenience.gain\n"
+            "  -h, --help         show this help and exit\n"
+            "\n"
+            "Last stdout line: \"SNAPSHOT: OK <camera_dir>\" or \"SNAPSHOT: FAIL <code> <reason>\".\n",
+            argv0);
     }
-    errno = 0;
-    char* end = nullptr;
-    const double v = std::strtod(s, &end);
-    if (errno != 0 || end == s || *end != '\0') {
-        return false;
-    }
-    out = v;
-    return true;
-}
 
+    // Single exit funnel: every failure path emits the parseable marker.
+    int fail(int code, const std::string &reason) {
+        std::printf("SNAPSHOT: FAIL %d %s\n", code, reason.c_str());
+        std::fflush(stdout);
+        return code;
+    }
+
+    bool parse_double(const char *s, double &out) {
+        if (s == nullptr || *s == '\0') {
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        const double v = std::strtod(s, &end);
+        if (errno != 0 || end == s || *end != '\0') {
+            return false;
+        }
+        out = v;
+        return true;
+    }
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     // Must run before the first eBUS SDK call (GenICam environment).
     jai::ebus::bootstrap_env();
 
@@ -93,7 +91,7 @@ int main(int argc, char** argv) {
         if (i + 1 >= argc) {
             return fail(2, "bad arguments: " + arg + " requires a value (see --help)");
         }
-        const char* val = argv[++i];
+        const char *val = argv[++i];
         if (arg == "--config") {
             config_path = val;
         } else if (arg == "--out") {
@@ -128,7 +126,7 @@ int main(int argc, char** argv) {
     jai::AppConfig cfg;
     try {
         cfg = jai::load_config(config_path);
-    } catch (const jai::ConfigError& e) {
+    } catch (const jai::ConfigError &e) {
         std::fprintf(stderr, "%s\n", e.what());
         return fail(2, std::string("config-error: ") + e.what());
     }
@@ -136,7 +134,7 @@ int main(int argc, char** argv) {
     // CLI overrides on the first camera (load_config guarantees cameras is
     // non-empty); any further cameras are disabled — a snapshot is one frame
     // from one camera.
-    jai::CameraConfig& cam = cfg.cameras[0];
+    jai::CameraConfig &cam = cfg.cameras[0];
     cam.enabled = true;
     for (size_t i = 1; i < cfg.cameras.size(); ++i) {
         cfg.cameras[i].enabled = false;
@@ -165,37 +163,19 @@ int main(int argc, char** argv) {
     }
     cfg.ptp.enabled = false;
     cam.ptp.enabled = false; // per-camera copy was deep-merged before the override
-
-    // Mirror the effective values into cfg.raw so the session.json embedded
-    // config matches what actually ran.
-    try {
-        cfg.raw["acquisition"]["max_frames"] = cfg.acquisition.max_frames;
-        cfg.raw["acquisition"]["max_duration_s"] = cfg.acquisition.max_duration_s;
-        cfg.raw["ptp"]["enabled"] = false;
-        auto& raw_cam = cfg.raw["cameras"][0];
-        raw_cam["selector"] = {{"by", cam.selector.by}, {"value", cam.selector.value}};
-        if (cam.convenience.exposure_us) {
-            raw_cam["convenience"]["exposure_us"] = *cam.convenience.exposure_us;
-        }
-        if (cam.convenience.gain) {
-            raw_cam["convenience"]["gain"] = *cam.convenience.gain;
-        }
-    } catch (const nlohmann::json::exception&) {
-        // Provenance only — never fail the capture over it.
-    }
+    cfg.stats_interval_s = 0; // a single frame needs no periodic stats line
 
     const std::string camera_dir = out_dir + "/" + cam.id; // capture before move
     // A fresh segment is exactly align_up(file header, record_align) bytes;
     // any recorded frame adds at least a frame header beyond that.
     const std::uintmax_t empty_segment_size =
-        jai::format::align_up(jai::format::kFileHeaderSize, cam.recording.record_align);
+            jai::format::align_up(jai::format::kFileHeaderSize, cam.recording.record_align);
 
-    jai::logger().set_level(cfg.logging.level);
     jai::StopController stop;
     jai::install_signal_handlers(&stop); // GUI cancel (SIGTERM) drains gracefully
 
     jai::CaptureRunner runner(std::move(cfg), &stop);
-    if (runner.init(out_dir, /*validate_only=*/false)) {
+    if (runner.init(out_dir)) {
         runner.run_until_stop(); // exits on LimitReached (frame 1) / signal / error
     }
     const int code = runner.shutdown();
@@ -215,7 +195,7 @@ int main(int argc, char** argv) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(camera_dir + "/seg_00001.raw", ec);
     if (ec || size <= empty_segment_size) {
-        return fail(7, "no-frame (trigger or timeout? see " + out_dir + "/events.jsonl)");
+        return fail(7, "no-frame (trigger or timeout? see the log)");
     }
 
     std::printf("SNAPSHOT: OK %s\n", camera_dir.c_str());

@@ -24,9 +24,9 @@ namespace asterx {
         std::string file_prefix{"asterx"};
         std::uint64_t rotate_bytes{1ull << 30};
         int rotate_interval_seconds{3600};
+        bool live_csv{true}; // per-block live_*.csv beside the .sbf (GUI live view)
 
-        // Log-level filter for the shim; output goes to the unified spdlog logger
-        std::string log_level{"info"};
+        int stats_period_ms{2500}; // ms
 
         ReceiverSettings receiver{};
     };

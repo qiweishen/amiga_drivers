@@ -57,7 +57,7 @@ Lms4xxxDriverApp::~Lms4xxxDriverApp() {
 bool Lms4xxxDriverApp::init(const std::function<bool()> & /*external_stop*/) {
 	impl_->instance_name = config_.position_name.empty() ? config_.hostname : config_.position_name;
 
-	g_log.trace("Initializing LiDAR instance '{}' ({}:{})", impl_->instance_name,
+	g_log.trace("[{}] Initializing LiDAR ({}:{})", impl_->instance_name,
 				config_.driver_config.device.ip, config_.driver_config.device.port);
 
 	// Apply hostname override to driver config
@@ -76,7 +76,7 @@ bool Lms4xxxDriverApp::init(const std::function<bool()> & /*external_stop*/) {
 
 	auto ec = config_.driver_config.Validate();
 	if (ec) {
-		Common::Log::log_and_throw(kModule, fmt::format("Invalid configuration for {}", impl_->instance_name), ec.message(), true);
+		Common::Log::log_and_throw(kModule, fmt::format("[{}] Invalid configuration", impl_->instance_name), ec.message(), true);
 		return false;
 	}
 

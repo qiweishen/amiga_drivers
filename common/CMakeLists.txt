@@ -6,6 +6,7 @@ find_package(Boost REQUIRED)  # header-only usage (Asio for tcp_client)
 
 add_library(amiga_common STATIC
         src/activity_spinner.cpp
+        src/drivers_json.cpp
         src/logger.cpp
         src/signal_handler.cpp
         src/tcp_client.cpp
@@ -27,6 +28,7 @@ target_link_libraries(amiga_common PUBLIC
         Boost::boost
         spdlog::spdlog
         yaml-cpp::yaml-cpp
+        nlohmann_json::nlohmann_json
         Threads::Threads
 )
 

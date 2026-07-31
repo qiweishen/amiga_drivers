@@ -9,7 +9,7 @@ from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
 from . import layout
 
-_EDIT_ORDER = ("main", "ins401", "lms4xxx", "gox", "asterx", "snapshot")
+_EDIT_ORDER = ("main", "ins401", "lms4xxx", "gox", "asterx", "fx10", "snapshot")
 
 
 @ui.page("/config")
@@ -17,7 +17,7 @@ def config_page() -> None:
     with layout.frame("Config"):
         ui.label(
             "Edited as raw text (comments are preserved). Validation here is syntax-only; "
-            "the C++ loader is the final authority (GoX strict JSON rejects unknown keys). "
+            "the C++ loader is the final authority. "
             "Changes saved while recording take effect on the next start."
         ).classes("text-sm text-gray-600")
 
@@ -37,7 +37,7 @@ def _editor_panel(config_id: str) -> None:
     ui.label(str(cf.path)).classes("text-xs text-gray-500 font-mono")
     editor = ui.codemirror(
         value=loaded.text,
-        language="YAML" if cf.fmt == "yaml" else "JavaScript",  # JS mode tolerates // comments
+        language="YAML",
         theme="basicDark",
     ).classes("w-full h-[60vh] text-xs")
     dirty_label = ui.label("").classes("text-xs text-amber-700")

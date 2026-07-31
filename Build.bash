@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-if [ ! -d /opt/jai/ebus_sdk/Ubuntu-22.04-x86_64 ]; then
-    sudo dpkg -i gox_driver/resource/eBUS_SDK_JAI_Ubuntu-22.04-x86_64-6.6.1-7475.deb || sudo apt-get install -f -y
+# Single Pleora eBUS SDK 6.5.1 serves both the JAI Go-X and the Specim FX10
+# (mirrors .devcontainer/Dockerfile).
+if [ ! -d /opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64 ]; then
+    sudo dpkg -i fx10_driver/resource/eBUS_SDK_Ubuntu-22.04-x86_64-6.5.1-6797.deb || sudo apt-get install -f -y
 fi
 
 rm -rf build

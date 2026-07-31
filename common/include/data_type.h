@@ -9,11 +9,13 @@ namespace Common {
         std::string output_directory;
 
         bool enable_asterx{false};
+        bool enable_fx10{false};
         bool enable_gox{false};
         bool enable_ins401{true};
         bool enable_lms4xxx{true};
 
         std::string asterx_config_path;
+        std::string fx10_config_path;
         std::string gox_config_path;
         std::string ins401_config_path;
         std::string lms4xxx_config_path;

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from nicegui import app, ui
 
 from .constants import GUI_HOST, GUI_PORT, RUNTIME_DIR
-from .services import process, runtime, storage
+from .services import asterx_live, process, runtime, storage
 from .services.health import MONITOR
 from .services.log_buffer import BUFFER
 from .services.session_tailer import TAILER
 from .state import STATE
 
 # Pages register themselves via @ui.page on import.
-from .ui import config_editor, dashboard, gox, logs  # noqa: F401
+from .ui import asterx, config_editor, dashboard, fx10, gox, logs  # noqa: F401
 
 
 async def _startup() -> None:
@@ -21,6 +24,9 @@ async def _startup() -> None:
     await _check_env()
     await process.reattach()  # adopt an already-running acquisition, if any
     await storage.poll()
+    sim = os.environ.get("AMIGA_ASTERX_SIM")  # dev-only: point the live
+    if sim:  # tailer at a fake session (tools/asterx_sim_feed.py)
+        asterx_live.LIVE.start(Path(sim), replay=False)
 
 
 async def _check_env() -> None:
@@ -28,8 +34,6 @@ async def _check_env() -> None:
 
 
 def main() -> None:
-    # The tailer is the single primary feed: health first (state transitions),
-    # then the buffer (pages render what health already classified).
     TAILER.subscribe(MONITOR.on_line)
     TAILER.subscribe(BUFFER.append)
 
@@ -43,7 +47,7 @@ def main() -> None:
         title="Amiga Sensor Console",
         reload=False,
         show=False,
-        favicon="app/resource/appn.png"
+        favicon="app/resource/appn.svg"
     )
 
 

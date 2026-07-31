@@ -1,10 +1,10 @@
 #include "app_config.hpp"
 
 #include <utility>
-
 #include <yaml-cpp/yaml.h>
 
 #include "utility.h"
+
 
 namespace asterx {
     namespace {
@@ -15,6 +15,7 @@ namespace asterx {
             }
             return static_cast<std::uint16_t>(value);
         }
+
 
         Vec3 read_vec3(const YAML::Node &n, const std::string &path) {
             if (!n) {
@@ -32,6 +33,7 @@ namespace asterx {
             return Vec3{n["x"].as<double>(), n["y"].as<double>(), n["z"].as<double>()};
         }
 
+
         AttitudeOffset read_attitude_offset(const YAML::Node &n) {
             if (!n) {
                 return AttitudeOffset{};
@@ -41,6 +43,7 @@ namespace asterx {
             }
             return AttitudeOffset{n["heading"].as<double>(), n["pitch"].as<double>()};
         }
+
 
         void parse_receiver(const YAML::Node &n, ReceiverSettings &receiver) {
             if (n["require_aux1"]) {
@@ -66,8 +69,7 @@ namespace asterx {
                     receiver.theta_z_deg = im["theta_z_deg"].as<double>();
                 }
                 if (im["ant_lever_arm_m"]) {
-                    receiver.ant_lever_arm_m = read_vec3(im["ant_lever_arm_m"],
-                                                         "receiver.imu.ant_lever_arm_m");
+                    receiver.ant_lever_arm_m = read_vec3(im["ant_lever_arm_m"], "receiver.imu.ant_lever_arm_m");
                     receiver.ant_lever_arm_configured = true;
                 }
             }
@@ -106,6 +108,7 @@ namespace asterx {
         }
     } // namespace
 
+
     AppConfig load_app_config(const std::string &path) {
         AppConfig c;
         YAML::Node root;
@@ -113,13 +116,13 @@ namespace asterx {
             // Unified loading path (ConfigLoader logs and throws on failure)
             root = Common::ConfigLoader(path).root();
         } catch (const std::exception &e) {
-            throw ConfigLoadError(std::string("failed to load config '") + path + "': " + e.what());
+            throw ConfigLoadError(std::string("Failed to load config '") + path + "': " + e.what());
         }
 
         try {
-            if (auto n = root["connection"]) {
-                if (n["host"]) {
-                    c.host = n["host"].as<std::string>();
+            if (auto n = root["device"]) {
+                if (n["ip"]) {
+                    c.host = n["ip"].as<std::string>();
                 }
                 if (n["port"]) {
                     c.ctrl_port = read_port(n, "port");
@@ -132,8 +135,8 @@ namespace asterx {
                 }
             }
             if (auto n = root["output"]) {
-                if (n["dir"]) {
-                    c.output_dir = n["dir"].as<std::string>();
+                if (n["output_dir"]) {
+                    c.output_dir = n["output_dir"].as<std::string>();
                 }
                 if (n["file_prefix"]) {
                     c.file_prefix = n["file_prefix"].as<std::string>();
@@ -144,19 +147,18 @@ namespace asterx {
                 if (n["rotate_interval_s"]) {
                     c.rotate_interval_seconds = n["rotate_interval_s"].as<int>();
                 }
-            }
-            if (auto n = root["log"]) {
-                if (n["level"]) {
-                    c.log_level = n["level"].as<std::string>();
+                if (n["live_csv"]) {
+                    c.live_csv = n["live_csv"].as<bool>();
                 }
+            }
+            if (auto n = root["stats_period_s"]) {
+                c.stats_period_ms = static_cast<int>(n.as<double>() * 1000);
             }
             if (auto n = root["receiver"]) {
                 parse_receiver(n, c.receiver);
             }
 
-            // sbf2rin refuses SBF inputs of 2 GB or larger; rotation doubles as
-            // the post-processing guarantee, so it must be enabled (> 0) and
-            // stay under the cap.
+            // sbf2rin refuses SBF inputs of 2 GB or largerRotation doubles as the post-processing guarantee, so it must be enabled (> 0) and stay under the cap.
             if (c.rotate_bytes == 0 || c.rotate_bytes >= (2ull << 30)) {
                 throw ConfigLoadError(
                     "output.rotate_bytes must be > 0 and < 2 GiB (sbf2rin cannot "
@@ -174,7 +176,7 @@ namespace asterx {
         } catch (const ConfigError &e) {
             throw ConfigLoadError(e.what());
         } catch (const std::exception &e) {
-            throw ConfigLoadError(std::string("invalid config '") + path + "': " + e.what());
+            throw ConfigLoadError(std::string("Invalid config '") + path + "': " + e.what());
         }
 
         return c;

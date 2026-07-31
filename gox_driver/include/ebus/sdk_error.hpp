@@ -11,29 +11,28 @@
 #include <string>
 
 namespace jai::ebus {
+    // PvString -> std::string (PvString::GetAscii can return NULL).
+    inline std::string to_std(const PvString &s) {
+        const char *p = s.GetAscii();
+        return p == nullptr ? std::string() : std::string(p);
+    }
 
-	// PvString -> std::string (PvString::GetAscii can return NULL).
-	inline std::string to_std(const PvString &s) {
-		const char *p = s.GetAscii();
-		return p == nullptr ? std::string() : std::string(p);
-	}
+    // "OK", or "TIMEOUT (Operation timed out)" style rendering built from
+    // GetCodeString() and GetDescription().
+    std::string pv_result_to_string(const PvResult &result);
 
-	// "OK", or "TIMEOUT (Operation timed out)" style rendering built from
-	// GetCodeString() and GetDescription().
-	std::string pv_result_to_string(const PvResult &result);
+    class SdkError : public std::runtime_error {
+    public:
+        SdkError(const std::string &what, const PvResult &result);
 
-	class SdkError : public std::runtime_error {
-	public:
-		SdkError(const std::string &what, const PvResult &result);
-		explicit SdkError(const std::string &what);
+        explicit SdkError(const std::string &what);
 
-		const PvResult &result() const { return result_; }
+        const PvResult &result() const { return result_; }
 
-	private:
-		PvResult result_;
-	};
-
-}  // namespace jai::ebus
+    private:
+        PvResult result_;
+    };
+} // namespace jai::ebus
 
 // Evaluates a PvResult-returning expression and throws SdkError (carrying
 // the result) when it is not OK. `what` is a short description of the call.

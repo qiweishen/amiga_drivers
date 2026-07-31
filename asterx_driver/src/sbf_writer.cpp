@@ -4,11 +4,15 @@
 #include <system_error>
 #include <utility>
 
-#include "asterx_log.hpp"
+#include "logger.h"
 #include "time_util.h"
+
 
 namespace asterx {
     namespace {
+        constexpr std::string_view kModule = "AsteRx";
+        Common::DriverLog g_log{ std::string(kModule) };
+
         Common::RotatingFileWriter::Options make_options(const SbfWriter::Config &cfg) {
             Common::RotatingFileWriter::Options opts;
             // Fresh UTC stamp per file; seq is 0-based in the core, 1-based in
@@ -26,43 +30,47 @@ namespace asterx {
         }
     } // namespace
 
+
     SbfWriter::SbfWriter(Config cfg) : cfg_(std::move(cfg)), writer_(make_options(cfg_)) {
         std::error_code ec;
         std::filesystem::create_directories(cfg_.output_dir, ec);
         if (ec) {
-            throw std::runtime_error("cannot create output directory '" +
-                                     cfg_.output_dir.string() + "': " + ec.message());
+            g_log.error("[Writer] Cannot create output directory '" + cfg_.output_dir.string() + "': " + ec.message());
         }
     }
 
+
     SbfWriter::~SbfWriter() { close(); }
+
 
     void SbfWriter::close() noexcept { writer_.Close(); }
 
+
     void SbfWriter::end_segment() noexcept {
         if (writer_.IsOpen()) {
-            log::info("[writer] closing segment {} ({} bytes)",
-                      writer_.CurrentPath(), writer_.CurrentFileBytes());
+            g_log.info("[Writer] Closing segment {} ({} bytes)", writer_.CurrentPath(), writer_.CurrentFileBytes());
             writer_.EndSegment();
         }
     }
 
+
     void SbfWriter::write_block(const QByteArray &block) {
-        if (block.isEmpty()) return;
+        if (block.isEmpty()) {
+            return;
+        }
 
         const auto files_before = writer_.GetStats().files_opened;
         if (!writer_.Append(block.constData(), static_cast<std::size_t>(block.size()))) {
             if (!writer_.IsOpen()) {
-                throw std::runtime_error("cannot open SBF output file in '" +
-                                         cfg_.output_dir.string() + "'");
+                g_log.error("[Writer] Cannot open SBF output file in '" + cfg_.output_dir.string() + "'");
             }
-            throw std::runtime_error("cannot write SBF block to '" +
-                                     writer_.CurrentPath() + "'");
+            g_log.error("[Writer] Cannot write SBF block to '" + writer_.CurrentPath() + "'");
         }
         if (writer_.GetStats().files_opened != files_before) {
-            log::info("[writer] rotating to {}", writer_.CurrentPath());
+            g_log.info("[Writer] Recording to {}", writer_.CurrentPath());
         }
     }
+
 
     WriterStats SbfWriter::stats() const noexcept {
         const auto &s = writer_.GetStats();
