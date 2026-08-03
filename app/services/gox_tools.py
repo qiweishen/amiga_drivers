@@ -119,7 +119,7 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
     t0 = time.monotonic()
     sid = time.strftime("%Y%m%d_%H%M%S")
     out_host = SNAPSHOT_DIR / sid
-    if out_host.exists():  # same-second collision on rapid auto-refresh
+    if out_host.exists():  # same-second collision on rapid consecutive shots
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = SNAPSHOT_DIR / sid
     proc = await runtime.popen([

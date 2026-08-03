@@ -1,6 +1,6 @@
 CoolShark Auto66:
-    WebGUI IP: 10.95.78.188
-    PTP/NTP IP: 10.95.78.100
+    WebGUI IP: 10.95.76.188
+    PTP/NTP IP: 10.95.76.121
     Ethernet Port: enp1s0f1
     Subnetwork: 10.95.78.78
 

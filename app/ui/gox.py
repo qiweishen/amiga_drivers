@@ -51,7 +51,6 @@ def gox_page() -> None:
                 gain_num = ui.number(min=0.0, max=48.0, step=0.1, suffix="dB").bind_value(gain)
         with ui.row().classes("items-center gap-4"):
             snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _snap_once())
-            auto = ui.switch("Auto refresh")
             busy = ui.spinner(size="sm").classes("hidden")
             meta_label = ui.label("").classes("text-sm text-gray-600")
         warn_label = ui.label("").classes("text-sm text-amber-700")
@@ -85,8 +84,6 @@ def gox_page() -> None:
             target_label.set_text(
                 f"Target camera: {_target_ip() or '(scan and select a camera first)'}"
             )
-            if reason and auto.value:
-                auto.set_value(False)
 
         ui.timer(1.0, refresh_guard)
         refresh_guard()
@@ -170,15 +167,6 @@ def gox_page() -> None:
                 f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
             )
             warn_label.set_text("Incomplete frame (packet loss? check MTU/rmem)" if result.incomplete else "")
-
-        # Auto preview: a client-bound timer (NiceGUI cancels it when the tab's
-        # client is deleted, and an async callback is awaited to completion
-        # before the next tick — no overlapping shots, no orphaned loops).
-        async def _auto_tick() -> None:
-            if auto.value and not STATE.snapshot_busy and gox_tools.guard_reason() is None and _target_ip():
-                await _snap_once()
-
-        ui.timer(0.5, _auto_tick)
 
         # block "start acquisition" while a shot is in flight and GOX enabled
         # (reverse guard lives in process.preflight via STATE.snapshot_busy)

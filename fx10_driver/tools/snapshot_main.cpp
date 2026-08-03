@@ -64,7 +64,7 @@ namespace {
 				"ENVI session into <dir> (segment at <dir>/snap_<utc>/segment_0001.{bil,hdr}).\n"
 				"\n"
 				"Required:\n"
-				"  --config <path>    YAML config (see config/config-fx10.yaml)\n"
+				"  --config <path>    YAML config (see config/config-fx10-snapshot.yaml)\n"
 				"  --out <dir>        recording output_dir, used verbatim\n"
 				"Overrides (applied after the config is loaded):\n"
 				"  --ip <addr>        device.ip (clears device.id/mac so the IP wins)\n"

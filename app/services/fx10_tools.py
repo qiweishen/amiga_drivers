@@ -1,11 +1,10 @@
 """FX10 helpers: eBUS device discovery (fx10_snapshot --list) and the snapshot
 pipeline (fx10_snapshot in the container -> ENVI BIL decode on the host ->
-8-bit waterfall JPEG for the browser + brightness histogram)."""
+per-band spectral statistics over ~1 s of frames, normalized to 100%)."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import re
 import shutil
@@ -13,8 +12,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
+import yaml
 
 from ..constants import (
     BIN_FX10_SNAPSHOT,
@@ -58,10 +57,11 @@ class DiscoverResult:
 class SnapshotResult:
     ok: bool
     reason: str = ""  # FAIL reason / pipeline error
-    jpeg_b64: str = ""  # data-URL payload for ui.interactive_image
-    histogram: list[int] = field(default_factory=list)  # 64 bins over the raw range
+    wavelengths_nm: list[float] = field(default_factory=list)  # x axis, one per band
+    # Per-band statistics over ALL captured frames and samples, as % of full scale
+    spectrum_pct: dict[str, list[float]] = field(default_factory=dict)
     clipped_pct: float = 0.0  # saturated pixels over the FULL cube
-    mean_pct: float = 0.0  # mean of the displayed image as % of full scale
+    mean_pct: float = 0.0  # cube mean as % of full scale
     lines: int = 0
     bands: int = 0
     samples: int = 0
@@ -114,14 +114,18 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
     return DiscoverResult(devices=devices, raw_output=raw)
 
 
-async def snapshot(ip: str, exposure_ms: float, frames: int, band_mode: str) -> SnapshotResult:
-    """One full preview waterfall. Caller must have checked guard_reason() and
-    must serialize calls (STATE.snapshot_busy)."""
+async def snapshot(ip: str, exposure_ms: float) -> SnapshotResult:
+    """One spectral preview: capture ~1 second of frames and reduce them to
+    per-band statistics. Caller must have checked guard_reason() and must
+    serialize calls (STATE.snapshot_busy)."""
     t0 = time.monotonic()
+    # All frames of ONE second at the achievable rate (the tool caps its fps
+    # the same way, so this is exactly the frames it can deliver in 1 s).
+    frames = max(1, round(min(SNAPSHOT_FPS, 1000.0 / max(exposure_ms, 0.01))))
     timeout_s = _timeout_s(frames, exposure_ms)
     sid = time.strftime("%Y%m%d_%H%M%S")
     out_host = FX10_SNAPSHOT_DIR / sid
-    if out_host.exists():  # same-second collision on rapid auto-refresh
+    if out_host.exists():  # same-second collision on rapid consecutive shots
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = FX10_SNAPSHOT_DIR / sid
     proc = await runtime.popen([
@@ -169,8 +173,9 @@ async def snapshot(ip: str, exposure_ms: float, frames: int, band_mode: str) -> 
         return SnapshotResult(False, reason=str(e), raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 
-    # Decode on the host (venv has numpy + opencv): ENVI BIL -> waterfall JPEG.
-    result = await asyncio.to_thread(_decode_envi, session_dir, band_mode)
+    # Decode on the host (venv has numpy): ENVI BIL -> per-band statistics,
+    # normalized against the configured pixel format's ADC full scale.
+    result = await asyncio.to_thread(_decode_envi, session_dir, _configured_full_scale())
     result.raw_output = raw_output
     result.elapsed_s = time.monotonic() - t0
     if result.reason:
@@ -187,9 +192,51 @@ def _hdr_int(text: str, key: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _decode_envi(session_dir: Path, band_mode: str) -> SnapshotResult:
-    """Decode the single snapshot segment: ENVI BIL cube (lines, bands, samples)
-    collapsed to an 8-bit waterfall (lines x samples) + raw-range stats."""
+# ADC full scale implied by each supported pixel format (10-bit formats are
+# stored in the same canonical uint16 as 12-bit ones, so the ENVI data type
+# alone cannot distinguish them).
+_PIXEL_FULL_SCALE = {
+    "Mono8": 255,
+    "Mono10": 1023,
+    "Mono10Packed": 1023,
+    "Mono12": 4095,
+    "Mono12Packed": 4095,
+}
+
+
+def _configured_full_scale() -> int | None:
+    """Full scale from acquisition.pixel_format in config-fx10.yaml — the same
+    file the snapshot tool captures with, so it matches the data on disk."""
+    try:
+        doc = yaml.safe_load(FX10_CONFIG.read_text(encoding="utf-8")) or {}
+        pixel_format = str((doc.get("acquisition") or {}).get("pixel_format", ""))
+        return _PIXEL_FULL_SCALE.get(pixel_format)
+    except Exception:
+        return None
+
+
+def _hdr_wavelengths(text: str, bands: int) -> list[float]:
+    """Wavelength axis from the .hdr `wavelength = { ... }` block; falls back
+    to the FX10e's nominal linear 400..1000 nm grid when absent."""
+    m = re.search(r"^wavelength\s*=\s*\{([^}]*)\}", text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+    if m:
+        try:
+            values = [float(v) for v in m.group(1).replace("\n", " ").split(",") if v.strip()]
+            if len(values) == bands:
+                return values
+        except ValueError:
+            pass
+    return list(np.linspace(400.0, 1000.0, bands))
+
+
+def _decode_envi(session_dir: Path, full_scale_hint: int | None = None) -> SnapshotResult:
+    """Reduce the snapshot segment (ENVI BIL cube: lines x bands x samples) to
+    per-band statistics over ALL frames and spatial samples, as % of the
+    sensor's full scale (reference: app/reference/reference.py).
+
+    full_scale_hint: ADC full scale derived from the configured pixel_format
+    (1023 for Mono10*, 4095 for Mono12*); used only when it is consistent with
+    the on-disk storage type, otherwise the data-type default applies."""
     hdrs = sorted(session_dir.glob("segment_*.hdr"))
     if not hdrs:
         return SnapshotResult(False, reason=f"No finalized segment (.hdr) in {session_dir}")
@@ -208,7 +255,10 @@ def _decode_envi(session_dir: Path, band_mode: str) -> SnapshotResult:
     if data_type == 1:
         dtype, full_scale = np.uint8, 255
     elif data_type == 12:
-        dtype, full_scale = np.dtype("<u2"), 4095  # Mono10/Mono12 in uint16; 12-bit scale
+        dtype = np.dtype("<u2")
+        # uint16 storage holds either 10- or 12-bit data; only the configured
+        # pixel_format can tell them apart. Fall back to 12-bit.
+        full_scale = full_scale_hint if full_scale_hint in (1023, 4095) else 4095
     else:
         return SnapshotResult(False, reason=f"Unsupported ENVI data type {data_type}")
 
@@ -217,30 +267,22 @@ def _decode_envi(session_dir: Path, band_mode: str) -> SnapshotResult:
         return SnapshotResult(False, reason=f"BIL size mismatch: {cube.size} px != {lines}x{bands}x{samples}")
     cube = cube.reshape(lines, bands, samples)  # BIL: one frame = one line record
 
-    if band_mode == "mean":
-        img = cube.mean(axis=1)
-    elif band_mode.startswith("band:"):
-        try:
-            band = int(band_mode[len("band:"):])
-        except ValueError:
-            return SnapshotResult(False, reason=f"Bad band mode {band_mode!r}")
-        if not 0 <= band < bands:
-            return SnapshotResult(False, reason=f"Band {band} out of range (0..{bands - 1})")
-        img = cube[:, band, :].astype(np.float64)
-    else:
-        return SnapshotResult(False, reason=f"Bad band mode {band_mode!r}")
-
-    img8 = np.clip(img / full_scale * 255.0, 0, 255).astype(np.uint8)
-    ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-    if not ok:
-        return SnapshotResult(False, reason="JPEG encoding failed")
-    hist, _ = np.histogram(img, bins=64, range=(0, full_scale))
+    # Per-band reductions over (frames, samples), normalized to 100%.
+    band_axis = (0, 2)
+    scale = 100.0 / full_scale
+    spectrum_pct = {
+        "mean": (cube.mean(axis=band_axis) * scale).tolist(),
+        "median": (np.median(cube, axis=band_axis) * scale).tolist(),
+        "max": (cube.max(axis=band_axis) * scale).tolist(),
+        "min": (cube.min(axis=band_axis) * scale).tolist(),
+        "p90": (np.percentile(cube, 90, axis=band_axis) * scale).tolist(),
+    }
     return SnapshotResult(
         ok=False,  # caller flips to True after filling metadata
-        jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
-        histogram=[int(v) for v in hist],
+        wavelengths_nm=_hdr_wavelengths(text, bands),
+        spectrum_pct={k: [round(float(v), 3) for v in vals] for k, vals in spectrum_pct.items()},
         clipped_pct=float((cube >= full_scale).mean() * 100.0),
-        mean_pct=float(img.mean() / full_scale * 100.0),
+        mean_pct=float(cube.mean() * scale),
         lines=lines,
         bands=bands,
         samples=samples,

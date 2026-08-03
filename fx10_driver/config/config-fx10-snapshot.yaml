@@ -85,8 +85,7 @@ network:
 
 # --- Output Settings ---
 output:
-    output_dir: /data/captures      # standalone-era default; the unified runtime overrides
-    # this to <Output Directory>/<timestamp>/bin/fx10/
+    output_dir: "/workspace/app/_runtime/snapshot" # fallback; the GUI always overrides via --out
     base_name: fx10e
     rotation:
         max_lines: 100000           # 0 = no rotation by line count
@@ -112,4 +111,4 @@ watchdog:
 
 # --- Statistics Interval Time ---
 logging:
-    stats_interval_s: 5
+    stats_interval_s: 1

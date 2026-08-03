@@ -20,8 +20,7 @@ cameras:
 #            by: "mac"
 #            value: "00:0c:df:06:5b:73"
 
-        # Used only when the selector needs discovery (mac / serial /
-        # user_defined_name); by=ip ignores this whole block.
+        # Used only when the selector needs discovery (mac / serial / user_defined_name); by=ip ignores this whole block.
         discovery:
             timeout_ms: 1000      # PvSystem detection timeout (Find blocks for the full window)
             retries: 3            # retry count when nothing is found
@@ -34,7 +33,7 @@ cameras:
 
         # Convenience shortcuts for common parameters.
         convenience:
-            exposure_us: 50000.0  # sets ExposureAuto to Off first, then writes ExposureTime
+            exposure_us: 150000.0 # sets ExposureAuto to Off first, then writes ExposureTime
             gain: 1.0             # GainSelector fallback chain: AnalogAll -> All -> skip
             pixel_format: "BayerRG12Packed" # GenICam enum entry, written verbatim
             roi:

@@ -23,13 +23,13 @@ acquisition:
     spatial_binning: 1              # [1 | 2 | 4 | 8] -> 1024/512/256/128 pixel width
     spectral_binning: 1             # [1 | 2 | 4 | 8] -> 448/224/112/56 bands
     pixel_format: Mono12Packed      # [Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8]
-    exposure_ms: 5.0                # float, µs [10..419000]
+    exposure_ms: 400.0              # float, ms [10..419000] / 1000
     frame_rate_hz: 50.0             # freerun rate; under external trigger = EXPECTED PPS
     status_line: false              # keep off: if enabled the last line of the ROI is overwritten with camera information
     trigger:
-        mode: freerun              # [freerun | external] disable trigger / enable trigger
+        mode: freerun               # [freerun | external] disable trigger / enable trigger
         activation: rising          # [rising | falling] specifies the activation mode of the trigger
-        delay_ms: 0.0               # float, µs [0..419000]
+        delay_ms: 0.0               # float, ms [10..419000] / 1000
         exposure_control: camera    # [camera | pulse_width] preset exposure / exposure = pulse
         selector_entry: FrameStart
         source_entry: Line0         # Line0 = ISO_TRIGGER (pin 8)
@@ -66,6 +66,7 @@ features:
     raw: [
         {name: OffsetX, type: int, value: 0},
         {name: OffsetY, type: int, value: 0},
+        {name: LineSource, type: enum, value: ExposureActive},
     ]
 
 
@@ -113,4 +114,5 @@ watchdog:
 
 
 # --- Statistics Interval Time ---
-2.
+logging:
+    stats_interval_s: 1
