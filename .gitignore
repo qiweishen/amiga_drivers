@@ -1,7 +1,7 @@
 *build/
 *install/
 *FetchContent/
-*data/
+*.bak
 *cmake-build-*/
 *.idea/
 *.vscode/
