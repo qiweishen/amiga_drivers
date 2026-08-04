@@ -1,5 +1,12 @@
 #pragma once
 
+// YAML-backed configuration for the GoX driver (config/config-gox.yaml).
+// Sections, names and parsing style mirror fx10_driver's app_config: lenient
+// if-present parsing (absent keys keep the struct defaults, unknown keys are
+// ignored), only invariants that would corrupt data or break bring-up throw.
+// Multi-camera: cameras[] carries one device/acquisition/features/network
+// block per camera; output/disk/ptp/logging are global.
+
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -13,9 +20,102 @@ namespace jai {
         using std::runtime_error::runtime_error;
     };
 
-    struct AcquisitionLimits {
-        uint64_t max_frames = 0; // 0 = unlimited
-        double max_duration_s = 0; // 0 = unlimited
+    // ---------------------------------------------------------------------------
+    struct ForceIpConfig {
+        bool enabled = false; // FORCEIP rescue for a wrong-subnet camera; requires device.mac
+        std::string ip; // temporary address to force (lost on power cycle)
+        std::string subnet_mask;
+        std::string gateway = "0.0.0.0";
+    };
+
+    struct DeviceConfig {
+        std::string mac; // discovery match (survives a bad IP config); wins over ip
+        std::string ip; // direct connect (fastest); used when mac is empty
+        ForceIpConfig force_ip;
+    };
+
+    struct RoiConfig {
+        uint32_t width = 0; // 0 = leave device value untouched
+        uint32_t height = 0; // 0 = leave device value untouched
+        uint32_t offset_x = 0;
+        uint32_t offset_y = 0;
+    };
+
+    struct TriggerConfig {
+        std::string mode = "freerun"; // freerun | external
+        std::string activation = "rising"; // rising | falling
+        std::string selector_entry = "FrameStart";
+        std::string source_entry = "Line1";
+    };
+
+    struct AcquisitionConfig {
+        std::optional<double> exposure_ms; // written to ExposureTime in µs (x1000)
+        std::optional<double> gain; // GainSelector chain: AnalogAll -> All -> skip
+        std::optional<double> frame_rate_hz; // freerun only
+        std::optional<std::string> pixel_format; // GenICam enum entry, verbatim
+        std::optional<RoiConfig> roi;
+        TriggerConfig trigger;
+    };
+
+    struct RawFeature {
+        std::string name;
+        std::string value; // scalar rendered as text; typed by the CAMERA's node type
+        bool value_is_string = false; // true when the YAML value was quoted
+    };
+
+    struct FeatureConfig {
+        std::vector<RawFeature> raw; // applied in order, after the acquisition block
+    };
+
+    struct NetworkConfig {
+        uint32_t channel = 0;
+        uint32_t buffer_count = 0; // 0 = auto (frame_rate x 0.5s, clamped [16, 256])
+        uint32_t packet_size = 0; // 0 = NegotiatePacketSize, fallback 1476
+        uint32_t socket_rx_buffer_mb = 16;
+        std::string local_ip; // bind stream to a specific NIC; empty = auto
+        uint32_t gev_scpd_ticks = 0; // inter-packet delay (bandwidth partitioning)
+        std::vector<RawFeature> receiver_tuning; // escape hatch on PvStream params
+    };
+
+    struct CameraConfig {
+        std::string id;
+        bool enabled = true;
+        DeviceConfig device;
+        AcquisitionConfig acquisition;
+        FeatureConfig features;
+        NetworkConfig network;
+    };
+
+    // ---------------------------------------------------------------------------
+    struct OutputConfig {
+        std::string output_dir = "/data/captures"; // overridden to <data>/bin/gox by the unified runtime
+        double segment_size_gib = 2.0;
+        uint32_t record_align = 4096; // power of two; 1 = no alignment
+        uint32_t queue_max_frames = 32; // queue capacity; pool allocates +2 chunks
+        std::string queue_on_full = "drop_newest"; // drop_newest | block
+        std::string on_buffer_error = "record_flagged"; // record_flagged | drop
+        uint32_t flush_interval_mb = 64; // sync_file_range cadence
+        uint64_t max_frames = 0; // stop after this many recorded frames (0 = unlimited)
+        double max_duration_s = 0; // stop the session after this many seconds (0 = unlimited)
+    };
+
+    struct DiskConfig {
+        double min_free_gb = 10.0; // orderly stop below this free space
+    };
+
+    struct WatchdogConfig {
+        double no_frame_warn_s = 5.0;
+        // -1 = auto (resolved from the camera's trigger mode: external -> 0 =
+        // never abort, since silence just means the pulses stopped; freerun -> 10)
+        double no_frame_abort_s = -1.0;
+
+        // Auto default resolved against a camera's trigger mode (fx10 rule).
+        double resolved_no_frame_abort_s(const std::string &trigger_mode) const {
+            if (no_frame_abort_s >= 0.0) {
+                return no_frame_abort_s;
+            }
+            return trigger_mode == "external" ? 0.0 : 10.0;
+        }
     };
 
     struct PtpConfig {
@@ -31,103 +131,14 @@ namespace jai {
         bool expect_tai_offset = true;
     };
 
-    struct RecordingConfig {
-        std::string output_dir = "/workspace/dataset/captures";
-        std::string session_name = "auto"; // auto = UTC timestamp + uuid prefix
-        double segment_size_gib = 2.0;
-        uint32_t record_align = 4096; // power of two; 1 = no alignment
-        uint32_t queue_max_frames = 32; // queue capacity; pool allocates +2 chunks
-        std::string queue_on_full = "drop_newest"; // drop_newest | block
-        std::string on_buffer_error = "record_flagged"; // record_flagged | drop
-        uint32_t flush_interval_mb = 64; // sync_file_range cadence
-        double min_free_gib = 10.0; // orderly stop below this
-    };
-
-    struct SelectorConfig {
-        std::string by; // mac | ip | serial | user_defined_name
-        std::string value;
-    };
-
-    struct ForceIpConfig {
-        bool enabled = false;
-        std::string ip;
-        std::string subnet_mask;
-        std::string gateway = "0.0.0.0";
-    };
-
-    struct DiscoveryConfig {
-        uint32_t timeout_ms = 4000;
-        uint32_t retries = 3;
-        uint32_t retry_interval_ms = 1000;
-        ForceIpConfig force_ip;
-    };
-
-    struct RoiConfig {
-        uint32_t width = 0; // 0 = leave device value untouched
-        uint32_t height = 0; // 0 = leave device value untouched
-        uint32_t offset_x = 0;
-        uint32_t offset_y = 0;
-    };
-
-    struct TriggerConfig {
-        bool enabled = false;
-        std::string selector = "FrameStart";
-        std::string source = "Line1";
-        std::string activation = "RisingEdge";
-    };
-
-    struct ConvenienceConfig {
-        std::optional<double> exposure_us;
-        std::optional<double> gain;
-        std::optional<double> frame_rate;
-        std::optional<std::string> pixel_format;
-        std::optional<RoiConfig> roi;
-        std::optional<TriggerConfig> trigger;
-    };
-
-    struct GenicamFeature {
-        std::string feature;
-        std::string value; // scalar rendered as text; typed by GenICam node type
-        bool value_is_string = false; // true when the JSON value was a string
-        std::string on_error; // fail | warn | skip; empty = apply.on_error_default
-    };
-
-    struct ApplyConfig {
-        bool verify_readback = true;
-        double float_verify_tolerance_rel = 1e-3;
-        std::string on_error_default = "fail"; // fail | warn | skip
-    };
-
-    struct StreamConfig {
-        uint32_t channel = 0;
-        uint32_t buffer_count = 0; // 0 = auto (frame_rate x 0.5s, clamped [16, 256])
-        uint32_t packet_size = 0; // 0 = NegotiatePacketSize, fallback 1476
-        uint32_t socket_rx_buffer_mib = 16;
-        std::string local_ip; // bind stream to a specific NIC; empty = auto
-        uint32_t gev_scpd_ticks = 0; // inter-packet delay (bandwidth partitioning)
-        std::vector<GenicamFeature> receiver_tuning; // escape hatch on PvStream params
-    };
-
-    struct CameraConfig {
-        std::string id;
-        bool enabled = true;
-        SelectorConfig selector;
-        DiscoveryConfig discovery;
-        ConvenienceConfig convenience;
-        std::vector<GenicamFeature> genicam_features;
-        ApplyConfig apply;
-        StreamConfig stream;
-        PtpConfig ptp; // global ptp deep-merged with per-camera override
-        RecordingConfig recording; // global recording deep-merged with override
-    };
-
+    // ---------------------------------------------------------------------------
     struct AppConfig {
-        int version = 1;
-        double stats_interval_s = 5.0; // periodic stats line interval, must be > 0
-        AcquisitionLimits acquisition;
-        PtpConfig ptp;
-        RecordingConfig recording;
         std::vector<CameraConfig> cameras;
+        OutputConfig output;
+        DiskConfig disk;
+        WatchdogConfig watchdog;
+        PtpConfig ptp;
+        double stats_interval_s = 5.0; // periodic stats line interval, must be > 0
     };
 
     // Parses and validates a YAML config file (unified loading path via

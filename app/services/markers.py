@@ -29,7 +29,7 @@ FX10_SHUTDOWN = "FX10 driver shutdown completely"
 FX10_SESSION_ISSUES = "FX10 driver ended with issues"  # full line appends " (standalone exit code N)"
 GOX_INITIALIZED = "GoX driver initialized"
 GOX_SHUTDOWN = "GoX driver shutdown completely"
-GOX_SESSION_ISSUES = "GoX driver ended with issues"  # full line appends " (standalone exit code N)"
+GOX_SESSION_ISSUES = "GoX driver ended with issues"  # full line appends " (<concrete reason>)"
 INS401_INITIALIZED = "INS401 driver initialized"
 INS401_SHUTDOWN = "INS401 driver shutdown completely"
 

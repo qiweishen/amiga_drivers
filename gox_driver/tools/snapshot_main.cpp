@@ -8,9 +8,10 @@
 // the GUI matches the last line prefixed "SNAPSHOT: "):
 //   SNAPSHOT: OK <camera_dir>
 //   SNAPSHOT: FAIL <code> <reason>
-// Exit codes: CaptureRunner's (0/1 ok, 2 config, 3 discovery/connect/apply,
-// 5 stream, 6 recorder/IO, 130 interrupted) plus 7 = clean exit but no frame
-// on disk (max_duration_s safety net fired before the first frame).
+// Exit codes (assigned HERE, fx10_snapshot-style — the driver core reports
+// concrete errors, not codes): 0 ok, 2 args/config, 3 startup, 5 capture
+// error, 7 = clean exit but no frame on disk (max_duration_s safety net
+// fired before the first frame), 130 interrupted.
 
 #include "capture_runner.hpp"
 #include "app_config.hpp"
@@ -36,13 +37,13 @@ namespace {
             "into <dir> (frame at <dir>/<camera_id>/seg_00001.raw).\n"
             "\n"
             "Required:\n"
-            "  --config <path>    YAML config (see config/config-snapshot.yaml)\n"
+            "  --config <path>    YAML config (see config/config-gox-snapshot.yaml)\n"
             "  --out <dir>        session directory, used verbatim\n"
             "Overrides (applied to cameras[0] after the config is loaded):\n"
-            "  --ip <addr>        selector = {by: ip, value: <addr>}\n"
-            "  --mac <addr>       selector = {by: mac, value: <addr>}\n"
-            "  --exposure-us <n>  convenience.exposure_us (microseconds, >= 0)\n"
-            "  --gain <db>        convenience.gain\n"
+            "  --ip <addr>        device.ip (clears device.mac so the IP wins)\n"
+            "  --mac <addr>       device.mac (discovery match; wins over ip)\n"
+            "  --exposure-us <n>  acquisition exposure (microseconds, >= 0)\n"
+            "  --gain <db>        acquisition.gain\n"
             "  -h, --help         show this help and exit\n"
             "\n"
             "Last stdout line: \"SNAPSHOT: OK <camera_dir>\" or \"SNAPSHOT: FAIL <code> <reason>\".\n",
@@ -140,53 +141,59 @@ int main(int argc, char **argv) {
         cfg.cameras[i].enabled = false;
     }
     if (!ip.empty()) {
-        cam.selector.by = "ip";
-        cam.selector.value = ip;
+        cam.device.ip = ip;
+        cam.device.mac.clear(); // mac wins over ip in connect(): clear it so --ip is authoritative
+        cam.device.force_ip.enabled = false; // force_ip requires a mac
     }
     if (!mac.empty()) {
-        cam.selector.by = "mac";
-        cam.selector.value = mac;
+        cam.device.mac = mac;
     }
     if (exposure_us) {
-        cam.convenience.exposure_us = *exposure_us;
+        cam.acquisition.exposure_ms = *exposure_us / 1000.0; // CLI stays in µs (GUI contract)
     }
     if (gain) {
-        cam.convenience.gain = *gain;
+        cam.acquisition.gain = *gain;
     }
 
     // Snapshot invariants — enforced even if the config file was edited:
     // exactly one frame, bounded wall time, no PTP (free-running device
     // timestamps are fine for a preview).
-    cfg.acquisition.max_frames = 1;
-    if (cfg.acquisition.max_duration_s <= 0.0 || cfg.acquisition.max_duration_s > 15.0) {
-        cfg.acquisition.max_duration_s = 15.0;
+    cfg.output.max_frames = 1;
+    if (cfg.output.max_duration_s <= 0.0 || cfg.output.max_duration_s > 15.0) {
+        cfg.output.max_duration_s = 15.0;
     }
     cfg.ptp.enabled = false;
-    cam.ptp.enabled = false; // per-camera copy was deep-merged before the override
+    cam.acquisition.trigger.mode = "freerun"; // a preview must not wait for trigger pulses
     cfg.stats_interval_s = 0; // a single frame needs no periodic stats line
 
     const std::string camera_dir = out_dir + "/" + cam.id; // capture before move
     // A fresh segment is exactly align_up(file header, record_align) bytes;
     // any recorded frame adds at least a frame header beyond that.
     const std::uintmax_t empty_segment_size =
-            jai::format::align_up(jai::format::kFileHeaderSize, cam.recording.record_align);
+            jai::format::align_up(jai::format::kFileHeaderSize, cfg.output.record_align);
 
     jai::StopController stop;
     jai::install_signal_handlers(&stop); // GUI cancel (SIGTERM) drains gracefully
 
     jai::CaptureRunner runner(std::move(cfg), &stop);
-    if (runner.init(out_dir)) {
-        runner.run_until_stop(); // exits on LimitReached (frame 1) / signal / error
+    const bool started = runner.init(out_dir);
+    if (started) {
+        runner.monitor_loop(); // exits on LimitReached (frame 1) / signal / error
     }
-    const int code = runner.shutdown();
+    const bool clean = runner.shutdown();
 
-    // A signal during the run loop drains cleanly and yields 0/1 — report it
-    // as an interruption, never as success.
+    // A signal during the run loop drains cleanly — report it as an
+    // interruption, never as success.
     if (stop.reason() == jai::StopReason::Signal) {
         return fail(130, "interrupted");
     }
-    if (code != 0 && code != 1) {
-        return fail(code, jai::stop_reason_name(stop.reason()));
+    if (!started) {
+        return fail(3, runner.last_error());
+    }
+    // Frame drops cannot happen with max_frames=1 + queue_on_full=block, so an
+    // unclean single-shot session is a genuine capture error.
+    if (!clean && stop.reason() == jai::StopReason::Error) {
+        return fail(5, runner.last_error());
     }
 
     // code 0/1: the max_duration_s safety net can stop a session with zero

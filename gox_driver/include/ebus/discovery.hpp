@@ -27,13 +27,12 @@ namespace jai::ebus {
         bool configuration_valid = true; // PvDeviceInfoGEV::IsConfigurationValid()
     };
 
-    // Full PvSystem::Find() with the configured detection timeout and retry
-    // schedule, then selector matching (by mac / serial / user_defined_name /
-    // ip; MAC compared after Common::StringUtil::NormalizeMac on both sides).
-    // Sends a FORCEIP rescue and re-runs the pass when the match sits on a
-    // wrong subnet and force_ip is enabled. Throws std::runtime_error on: no
-    // match after all retries (after logging every discovered device), more
-    // than one match, or an invalid subnet configuration that force_ip could
-    // not (or was not allowed to) repair.
-    DiscoveredDevice find_camera(const SelectorConfig &selector, const DiscoveryConfig &discovery);
+    // One PvSystem::Find() pass (fixed 4 s detection window, same constant as
+    // fx10's MAC resolve), then MAC matching (compared after
+    // Common::StringUtil::NormalizeMac on both sides). Sends a FORCEIP rescue
+    // and re-runs the pass when the match sits on a wrong subnet and force_ip
+    // is enabled. Throws std::runtime_error on: no match (after logging every
+    // discovered device), more than one match, or an invalid subnet
+    // configuration that force_ip could not (or was not allowed to) repair.
+    DiscoveredDevice find_camera(const std::string &mac, const ForceIpConfig &force_ip);
 } // namespace jai::ebus

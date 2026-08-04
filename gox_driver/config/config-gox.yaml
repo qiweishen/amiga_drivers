@@ -2,111 +2,104 @@
 # GoX Driver Configuration
 # =============================================================
 
-# JAI GoX RGB camera configuration. It supports multiple GoX RGB cameras.
+# JAI GoX RGB camera configuration.
+# It supports multiple GoX RGB cameras.
 # Referenced by config/config-main.yaml ("GOX Driver Config Path").
 
 
-# --- Device Settings ---
+# --- General Settings ---
 cameras:
-    -   id: "cam0"                # required, 1..63 chars, [A-Za-z0-9_-] only (used as directory name)
-        enabled: true             # false = skip this camera (at least one must be enabled)
+    -   id: "cam0"                      # required, 1..63 chars, [A-Za-z0-9_-] only (used as directory name)
+        enabled: true                   # false = skip this camera (at least one must be enabled)
 
-        # Required. by: [mac | ip | serial | user_defined_name]
-        # by=ip connects directly (fastest: no discovery pass); the other
-        # selectors run discovery first, which blocks for the full timeout_ms.
-        selector:
-            by: "ip"
-            value: "10.95.76.106"
-#            by: "mac"
-#            value: "00:0c:df:06:5b:73"
-
-        # Used only when the selector needs discovery (mac / serial / user_defined_name); by=ip ignores this whole block.
-        discovery:
-            timeout_ms: 1000      # PvSystem detection timeout (Find blocks for the full window)
-            retries: 3            # retry count when nothing is found
-            retry_interval_ms: 1000
-            force_ip:             # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle; discovery selectors only)
-                enabled: true
-                ip: "10.95.76.106"           # required when enabled
-                subnet_mask: "255.255.255.0" # required when enabled
+        device:
+            mac: ""                     # MAC selection (discovery match, survives a bad IP config); wins over ip
+            ip: "10.95.76.106"          # direct connect (fastest: no discovery pass); used when mac is empty
+            force_ip:                   # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
+                enabled: false
+                ip: ""                  # required when enabled
+                subnet_mask: ""         # required when enabled
                 gateway: "0.0.0.0"
 
-        # Convenience shortcuts for common parameters.
-        convenience:
-            exposure_us: 150000.0 # sets ExposureAuto to Off first, then writes ExposureTime
-            gain: 1.0             # GainSelector fallback chain: AnalogAll -> All -> skip
+        # --- Receiver Settings ---
+        acquisition:
+            exposure_ms: 150.0              # float, ms [1..115279] / 1000; ExposureAuto set to OFF automatically
+            gain: 1.0                       # GainSelector chain: AnalogAll -> All -> skip
             pixel_format: "BayerRG12Packed" # GenICam enum entry, written verbatim
+            frame_rate_hz: 5.0             # freerun rate; under external trigger = EXPECTED PPS
+            trigger:
+                mode: freerun               # [freerun | external] disable trigger / enable trigger
+                activation: rising          # [rising | falling] specifies the activation mode of the trigger
+                selector_entry: FrameStart
+                source_entry: Line1
             roi:
-                width: 0
+                width: 0                    # 0 = do not set (keep the camera's current value)
                 height: 0
                 offset_x: 0
                 offset_y: 0
-            trigger:
-                enabled: false
-                selector: "FrameStart"
-                source: "Line1"
-                activation: "RisingEdge"
 
-        # Ordered GenICam feature list: applied one by one in list order, AFTER
-        # convenience, so entries here can override the convenience results.
-        # A QUOTED value is applied as string/enum entry; no value (or ~) means
-        # a Command feature (executed, no value).
-        # on_error: [fail | warn | skip]; omitted = apply.on_error_default
-        genicam_features: [ ]
-        #   - { feature: "BlackLevel", value: 0, on_error: "warn" }
-        #   - { feature: "DeviceLinkThroughputLimitMode", value: "On" }
-        #   - { feature: "DeviceLinkThroughputLimit", value: 100000000 }
-        #   - { feature: "ChunkModeActive", value: false, on_error: "skip" }
+        # Escape hatch: [{name: Node, value: Entry}, ...] — applied in list
+        # order AFTER the acquisition block; any failure aborts startup.
+        # Verification is always on (fx10 semantics): int/float clamping by the
+        # camera only warns, bool/enum/string mismatches fail.
+        #     - { name: BlackLevel, value: 0 }
+        #     - { name: DeviceLinkThroughputLimitMode, value: "On" }
+        #     - { name: DeviceLinkThroughputLimit, value: 100000000 }
+        features:
+            raw: [
+                # {name: Width, value: 4128},
+                # {name: Height, value: 3008},
+            ]
 
-        apply:
-            verify_readback: true             # read back after write; a mismatch is handled per on_error
-            float_verify_tolerance_rel: 0.001 # relative tolerance for float read-back
-            on_error_default: "fail"          # [fail | warn | skip]
 
-        stream:
+        # --- Network Transfer Settings ---
+        network:
             channel: 0
-            buffer_count: 0       # 0 = auto: frame_rate x 0.5 s, clamped to [16, 256]; explicit value must be >= 4
-            packet_size: 0        # 0 = NegotiatePacketSize (fallback 1476); explicit value must be in [576, 16000]
-            socket_rx_buffer_mib: 16 # user-mode socket RX buffer (capped by the host's rmem_max)
-            local_ip: ""          # bind the stream to a specific NIC; empty = auto
-            gev_scpd_ticks: 0     # GevSCPD inter-packet delay (ns ticks), for multi-camera bandwidth sharing
-            receiver_tuning: [ ]  # escape hatch: write PvStream parameters by name (same format as genicam_features)
-
-        # Optional: ptp: {...} / recording: {...} — override the GLOBAL blocks
-        # key by key; write only the keys you want to change.
+            buffer_count: 0             # 0 = auto: frame_rate x 0.5 s, clamped to [16, 256]; explicit value must be >= 4
+            packet_size: 0              # 0 = NegotiatePacketSize (fallback 1476); explicit value must be in [576, 16000]
+            socket_rx_buffer_mb: 16     # user-mode socket RX buffer (capped by the host's rmem_max)
+            local_ip: ""                # bind the stream to a specific NIC; empty = auto
+            gev_scpd_ticks: 0           # GevSCPD inter-packet delay (ns ticks), for multi-camera bandwidth sharing
+            receiver_tuning: [ ]        # escape hatch: PvStream parameters (same format as features.raw)
 
 
+# =============================================================
+# NOT RECOMMEND TO CHANGE
+# =============================================================
 # --- PTP Settings ---
 ptp:
     enabled: false
-    feature_set: "auto"           # [auto | gev_ieee1588 | sfnc_ptp | explicit]
-    enable_feature: ""            # required only when feature_set = "explicit": enable feature name
-    status_feature: ""            # required only when feature_set = "explicit": status feature name
-    required_status: "Slave"      # expected PTP state (compared case-insensitively)
-    sync_timeout_s: 60.0          # timeout waiting to converge to required_status
-    poll_interval_ms: 500         # status poll interval, must be > 0
-    on_timeout: "abort"           # abort (startup fails) | warn_continue (degrade and keep capturing)
-    offset_report_interval_s: 60.0 # host/camera clock offset report period; 0 = only at session start/end
-    expect_tai_offset: true       # PTP runs on TAI: auto-detect the ~37 s system offset during cross-checks
+    feature_set: "auto"                 # [auto | gev_ieee1588 | sfnc_ptp | explicit]
+    enable_feature: ""                  # required only when feature_set = "explicit": enable feature name
+    status_feature: ""                  # required only when feature_set = "explicit": status feature name
+    required_status: "Slave"            # expected PTP state (compared case-insensitively)
+    sync_timeout_s: 60.0                # timeout waiting to converge to required_status
+    poll_interval_ms: 500               # status poll interval, must be > 0
+    on_timeout: "abort"                 # abort (startup fails) | warn_continue (degrade and keep capturing)
+    offset_report_interval_s: 60.0      # host/camera clock offset report period; 0 = only at session start/end
+    expect_tai_offset: true             # PTP runs on TAI: auto-detect the ~37 s system offset during cross-checks
 
 
-acquisition:
-    max_frames: 0                 # keep 0 in unified mode (reaching the limit stops the whole process)
-    max_duration_s: 0             # keep 0 in unified mode (same as above)
-
-
-
-
-recording:
+# --- Output Settings ---
+output:
     output_dir: /data/captures          # standalone-era default; the unified runtime overrides
-    session_name: "auto"                # overridden in unified mode to "gox"
     segment_size_gib: 2.0               # segment rotation threshold (GiB), must be > 0
     record_align: 4096                  # frame record start alignment (power of two); 1 = no alignment
     queue_max_frames: 32                # bounded queue capacity == ChunkPool size, must be >= 2
     queue_on_full: "drop_newest"        # drop_newest (default, drop + count) | block (never drop, may stall)
     on_buffer_error: "record_flagged"   # record_flagged (record incomplete frames with a flag) | drop
     flush_interval_mb: 64               # sync_file_range every N MB written to cap dirty pages, must be > 0
-    min_free_gib: 10.0                  # orderly stop below this free space (stops the whole process in unified mode)
+    max_frames: 0                       # keep 0 in unified mode (reaching the limit stops the whole process)
+    max_duration_s: 0                   # keep 0 in unified mode (same as above)
+
+
+# --- Some guards ---
+disk:
+    min_free_gb: 10                     # hard floor: orderly stop below this free space
+
+watchdog:
+    no_frame_warn_s: 5
+    no_frame_abort_s: -1                # -1 = auto (external trigger: never abort; freerun: 10 s)
 
 
 # --- Statistics Interval Time ---

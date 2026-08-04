@@ -72,9 +72,8 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
         if (stop_->stop_requested() && stop_->reason() == jai::StopReason::External) {
             Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleGox, "GoX bring-up interrupted by shutdown request");
         } else {
-            Common::Log::log_and_throw(
-                Common::Markers::kModuleGox, fmt::format("GoX startup failed (standalone exit code {})", runner_->exit_code()),
-                "", false);
+            Common::Log::log_and_throw(Common::Markers::kModuleGox, "GoX startup failed",
+                                       runner_->last_error(), false);
         }
         return false;
     }
@@ -87,7 +86,7 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
 void GoxDriverApp::run() {
     if (runner_) {
         // External terminate -> StopReason::External
-        runner_->run_until_stop([this] { return terminate_.load(std::memory_order_acquire); });
+        runner_->monitor_loop([this] { return terminate_.load(std::memory_order_acquire); });
     }
     terminate_.store(true, std::memory_order_release);
 }
@@ -103,11 +102,11 @@ void GoxDriverApp::shutdown() {
     if (!runner_) {
         return;
     }
-    const int code = runner_->shutdown();
-    if (code == 0) {
+    const bool clean = runner_->shutdown();
+    if (clean) {
         Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleGox, Common::Markers::kGoxShutdown);
     } else {
         Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleGox,
-                                 fmt::format("{} (standalone exit code {})", Common::Markers::kGoxSessionIssues, code));
+                                 fmt::format("{} ({})", Common::Markers::kGoxSessionIssues, runner_->last_error()));
     }
 }

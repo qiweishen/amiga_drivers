@@ -2,7 +2,6 @@
 
 #include <cctype>
 #include <set>
-#include <sstream>
 #include <yaml-cpp/yaml.h>
 
 #include "string_util.h"
@@ -22,127 +21,25 @@ namespace jai {
             throw ConfigError(msg);
         }
 
-        AcquisitionLimits parse_acquisition(const YAML::Node &n, AcquisitionLimits c) {
-            if (n["max_frames"]) {
-                c.max_frames = n["max_frames"].as<std::uint64_t>();
-            }
-            if (n["max_duration_s"]) {
-                c.max_duration_s = n["max_duration_s"].as<double>();
-            }
-            return c;
-        }
 
-        // Per-camera blocks start from the parsed GLOBAL struct as `c`, so a
-        // camera override only needs the keys it changes (the struct-level
-        // equivalent of the old JSON deep-merge; ptp/recording are flat).
-        PtpConfig parse_ptp(const YAML::Node &n, PtpConfig c, const std::string &path) {
-            if (n["enabled"]) {
-                c.enabled = n["enabled"].as<bool>();
-            }
-            if (n["feature_set"]) {
-                c.feature_set = read_enum(n["feature_set"], {"auto", "gev_ieee1588", "sfnc_ptp", "explicit"},
-                                          path + ".feature_set");
-            }
-            if (n["enable_feature"]) {
-                c.enable_feature = n["enable_feature"].as<std::string>();
-            }
-            if (n["status_feature"]) {
-                c.status_feature = n["status_feature"].as<std::string>();
-            }
-            if (n["required_status"]) {
-                c.required_status = n["required_status"].as<std::string>();
-            }
-            if (n["sync_timeout_s"]) {
-                c.sync_timeout_s = n["sync_timeout_s"].as<double>();
-            }
-            if (n["poll_interval_ms"]) {
-                c.poll_interval_ms = n["poll_interval_ms"].as<std::uint32_t>();
-                if (c.poll_interval_ms == 0) {
-                    throw ConfigError(path + ".poll_interval_ms must be > 0");
-                }
-            }
-            if (n["on_timeout"]) {
-                c.on_timeout = read_enum(n["on_timeout"], {"abort", "warn_continue"}, path + ".on_timeout");
-            }
-            if (n["offset_report_interval_s"]) {
-                c.offset_report_interval_s = n["offset_report_interval_s"].as<double>();
-            }
-            if (n["expect_tai_offset"]) {
-                c.expect_tai_offset = n["expect_tai_offset"].as<bool>();
-            }
-            if (c.feature_set == "explicit" && (c.enable_feature.empty() || c.status_feature.empty())) {
-                throw ConfigError(path + ": feature_set \"explicit\" requires enable_feature and status_feature");
-            }
-            return c;
-        }
-
-
-        RecordingConfig parse_recording(const YAML::Node &n, RecordingConfig c, const std::string &path) {
-            if (n["output_dir"]) {
-                c.output_dir = n["output_dir"].as<std::string>();
-            }
-            if (n["session_name"]) {
-                c.session_name = n["session_name"].as<std::string>();
-            }
-            if (n["segment_size_gib"]) {
-                c.segment_size_gib = n["segment_size_gib"].as<double>();
-                if (c.segment_size_gib <= 0) {
-                    throw ConfigError(path + ".segment_size_gib must be > 0");
-                }
-            }
-            if (n["record_align"]) {
-                c.record_align = n["record_align"].as<std::uint32_t>();
-                if (c.record_align == 0 || (c.record_align & (c.record_align - 1)) != 0) {
-                    throw ConfigError(path + ".record_align must be a power of two (1 disables alignment)");
-                }
-            }
-            if (n["queue_max_frames"]) {
-                c.queue_max_frames = n["queue_max_frames"].as<std::uint32_t>();
-                if (c.queue_max_frames < 2) {
-                    throw ConfigError(path + ".queue_max_frames must be >= 2");
-                }
-            }
-            if (n["queue_on_full"]) {
-                c.queue_on_full = read_enum(n["queue_on_full"], {"drop_newest", "block"}, path + ".queue_on_full");
-            }
-            if (n["on_buffer_error"]) {
-                c.on_buffer_error =
-                        read_enum(n["on_buffer_error"], {"record_flagged", "drop"}, path + ".on_buffer_error");
-            }
-            if (n["flush_interval_mb"]) {
-                c.flush_interval_mb = n["flush_interval_mb"].as<std::uint32_t>();
-                if (c.flush_interval_mb == 0) {
-                    throw ConfigError(path + ".flush_interval_mb must be > 0");
-                }
-            }
-            if (n["min_free_gib"]) {
-                c.min_free_gib = n["min_free_gib"].as<double>();
-            }
-            return c;
-        }
-
-
-        std::vector<GenicamFeature> parse_feature_list(const YAML::Node &n, const std::string &path) {
-            std::vector<GenicamFeature> out;
+        std::vector<RawFeature> parse_raw_features(const YAML::Node &n, const std::string &path) {
+            std::vector<RawFeature> out;
             for (const auto &item: n) {
-                GenicamFeature f;
-                if (item["feature"]) {
-                    f.feature = item["feature"].as<std::string>();
+                RawFeature f;
+                if (item["name"]) {
+                    f.name = item["name"].as<std::string>();
                 }
-                if (f.feature.empty()) {
-                    throw ConfigError(path + ": every entry requires a non-empty \"feature\"");
+                if (f.name.empty()) {
+                    throw ConfigError(path + ": every entry requires a non-empty \"name\"");
                 }
                 const YAML::Node v = item["value"];
                 if (!v || v.IsNull()) {
                     f.value = ""; // command features: value ignored
                 } else {
                     // A QUOTED scalar means "apply as string/enum entry"; a plain
-                    // scalar (true / 100 / 1.5) keeps the JSON-era typed semantics
+                    // scalar (true / 100 / 1.5) is applied by the camera node type
                     f.value = v.Scalar();
                     f.value_is_string = v.Tag() == "!";
-                }
-                if (item["on_error"]) {
-                    f.on_error = read_enum(item["on_error"], {"fail", "warn", "skip"}, path + ".on_error");
                 }
                 out.push_back(std::move(f));
             }
@@ -150,60 +47,7 @@ namespace jai {
         }
 
 
-        ApplyConfig parse_apply(const YAML::Node &n) {
-            ApplyConfig c;
-            if (n["verify_readback"]) {
-                c.verify_readback = n["verify_readback"].as<bool>();
-            }
-            if (n["float_verify_tolerance_rel"]) {
-                c.float_verify_tolerance_rel = n["float_verify_tolerance_rel"].as<double>();
-            }
-            if (n["on_error_default"]) {
-                c.on_error_default = read_enum(n["on_error_default"], {"fail", "warn", "skip"},
-                                               "apply.on_error_default");
-            }
-            return c;
-        }
-
-
-        StreamConfig parse_stream(const YAML::Node &n, const std::string &path) {
-            StreamConfig c;
-            if (n["channel"]) {
-                c.channel = n["channel"].as<std::uint32_t>();
-            }
-            if (n["buffer_count"]) {
-                c.buffer_count = n["buffer_count"].as<std::uint32_t>();
-                if (c.buffer_count != 0 && c.buffer_count < 4) {
-                    throw ConfigError(path + ".buffer_count must be 0 (auto) or >= 4");
-                }
-            }
-            if (n["packet_size"]) {
-                c.packet_size = n["packet_size"].as<std::uint32_t>();
-                if (c.packet_size != 0 && (c.packet_size < 576 || c.packet_size > 16000)) {
-                    throw ConfigError(path + ".packet_size must be 0 (auto) or in [576, 16000]");
-                }
-            }
-            if (n["socket_rx_buffer_mib"]) {
-                c.socket_rx_buffer_mib = n["socket_rx_buffer_mib"].as<std::uint32_t>();
-                if (c.socket_rx_buffer_mib == 0) {
-                    throw ConfigError(path + ".socket_rx_buffer_mib must be > 0");
-                }
-            }
-            if (n["local_ip"]) {
-                c.local_ip = n["local_ip"].as<std::string>();
-            }
-            if (n["gev_scpd_ticks"]) {
-                c.gev_scpd_ticks = n["gev_scpd_ticks"].as<std::uint32_t>();
-            }
-            if (n["receiver_tuning"]) {
-                c.receiver_tuning = parse_feature_list(n["receiver_tuning"], path + ".receiver_tuning");
-            }
-            return c;
-        }
-
-
-        CameraConfig parse_camera(const YAML::Node &n, const PtpConfig &global_ptp,
-                                  const RecordingConfig &global_recording, const std::string &path) {
+        CameraConfig parse_camera(const YAML::Node &n, const std::string &path) {
             CameraConfig c;
             if (n["id"]) {
                 c.id = n["id"].as<std::string>();
@@ -219,62 +63,59 @@ namespace jai {
             if (n["enabled"]) {
                 c.enabled = n["enabled"].as<bool>();
             }
-            const YAML::Node sel = n["selector"];
-            if (!sel || !sel["by"] || !sel["value"]) {
-                throw ConfigError(path + R"(.selector requires "by" and "value")");
-            }
-            c.selector.by = read_enum(sel["by"], {"mac", "ip", "serial", "user_defined_name"},
-                                      path + ".selector.by");
-            c.selector.value = sel["value"].as<std::string>();
-            if (c.selector.value.empty()) {
-                throw ConfigError(path + ".selector.value must not be empty");
-            }
-            if (c.selector.by == "mac" && Common::StringUtil::NormalizeMac(c.selector.value).empty()) {
-                throw ConfigError(path + ".selector.value is not a valid MAC address");
-            }
-            if (auto d = n["discovery"]) {
-                if (d["timeout_ms"]) {
-                    c.discovery.timeout_ms = d["timeout_ms"].as<std::uint32_t>();
+
+            if (auto d = n["device"]) {
+                if (d["mac"]) {
+                    c.device.mac = d["mac"].as<std::string>();
                 }
-                if (d["retries"]) {
-                    c.discovery.retries = d["retries"].as<std::uint32_t>();
+                if (d["ip"]) {
+                    c.device.ip = d["ip"].as<std::string>();
                 }
-                if (d["retry_interval_ms"]) {
-                    c.discovery.retry_interval_ms = d["retry_interval_ms"].as<std::uint32_t>();
-                }
-                if (auto fp = d["force_ip"]) {
-                    if (fp["enabled"]) {
-                        c.discovery.force_ip.enabled = fp["enabled"].as<bool>();
+                if (auto f = d["force_ip"]) {
+                    if (f["enabled"]) {
+                        c.device.force_ip.enabled = f["enabled"].as<bool>();
                     }
-                    if (fp["ip"]) {
-                        c.discovery.force_ip.ip = fp["ip"].as<std::string>();
+                    if (f["ip"]) {
+                        c.device.force_ip.ip = f["ip"].as<std::string>();
                     }
-                    if (fp["subnet_mask"]) {
-                        c.discovery.force_ip.subnet_mask = fp["subnet_mask"].as<std::string>();
+                    if (f["subnet_mask"]) {
+                        c.device.force_ip.subnet_mask = f["subnet_mask"].as<std::string>();
                     }
-                    if (fp["gateway"]) {
-                        c.discovery.force_ip.gateway = fp["gateway"].as<std::string>();
-                    }
-                    if (c.discovery.force_ip.enabled &&
-                        (c.discovery.force_ip.ip.empty() || c.discovery.force_ip.subnet_mask.empty())) {
-                        throw ConfigError(path + ".discovery.force_ip.enabled requires ip and subnet_mask");
+                    if (f["gateway"]) {
+                        c.device.force_ip.gateway = f["gateway"].as<std::string>();
                     }
                 }
             }
-            if (auto conv = n["convenience"]) {
-                if (conv["exposure_us"]) {
-                    c.convenience.exposure_us = conv["exposure_us"].as<double>();
+            if (c.device.mac.empty() && c.device.ip.empty()) {
+                throw ConfigError(path + ".device requires mac or ip");
+            }
+            if (!c.device.mac.empty() && Common::StringUtil::NormalizeMac(c.device.mac).empty()) {
+                throw ConfigError(path + ".device.mac is not a valid MAC address");
+            }
+            if (c.device.force_ip.enabled) {
+                // FORCEIP addresses the camera by MAC, before it has a usable IP
+                if (c.device.mac.empty()) {
+                    throw ConfigError(path + ".device.force_ip requires device.mac");
                 }
-                if (conv["gain"]) {
-                    c.convenience.gain = conv["gain"].as<double>();
+                if (c.device.force_ip.ip.empty() || c.device.force_ip.subnet_mask.empty()) {
+                    throw ConfigError(path + ".device.force_ip.enabled requires ip and subnet_mask");
                 }
-                if (conv["frame_rate"]) {
-                    c.convenience.frame_rate = conv["frame_rate"].as<double>();
+            }
+
+            if (auto a = n["acquisition"]) {
+                if (a["exposure_ms"]) {
+                    c.acquisition.exposure_ms = a["exposure_ms"].as<double>();
                 }
-                if (conv["pixel_format"]) {
-                    c.convenience.pixel_format = conv["pixel_format"].as<std::string>();
+                if (a["gain"]) {
+                    c.acquisition.gain = a["gain"].as<double>();
                 }
-                if (auto roi = conv["roi"]) {
+                if (a["frame_rate_hz"]) {
+                    c.acquisition.frame_rate_hz = a["frame_rate_hz"].as<double>();
+                }
+                if (a["pixel_format"]) {
+                    c.acquisition.pixel_format = a["pixel_format"].as<std::string>();
+                }
+                if (auto roi = a["roi"]) {
                     RoiConfig r;
                     if (roi["width"]) {
                         r.width = roi["width"].as<std::uint32_t>();
@@ -288,39 +129,66 @@ namespace jai {
                     if (roi["offset_y"]) {
                         r.offset_y = roi["offset_y"].as<std::uint32_t>();
                     }
-                    c.convenience.roi = r;
+                    c.acquisition.roi = r;
                 }
-                if (auto tr = conv["trigger"]) {
-                    TriggerConfig t;
-                    if (tr["enabled"]) {
-                        t.enabled = tr["enabled"].as<bool>();
+                if (auto t = a["trigger"]) {
+                    if (t["mode"]) {
+                        c.acquisition.trigger.mode = read_enum(t["mode"], {"freerun", "external"},
+                                                               path + ".acquisition.trigger.mode");
                     }
-                    if (tr["selector"]) {
-                        t.selector = tr["selector"].as<std::string>();
+                    if (t["activation"]) {
+                        c.acquisition.trigger.activation = read_enum(t["activation"], {"rising", "falling"},
+                                                                     path + ".acquisition.trigger.activation");
                     }
-                    if (tr["source"]) {
-                        t.source = tr["source"].as<std::string>();
+                    if (t["selector_entry"]) {
+                        c.acquisition.trigger.selector_entry = t["selector_entry"].as<std::string>();
                     }
-                    if (tr["activation"]) {
-                        t.activation = tr["activation"].as<std::string>();
+                    if (t["source_entry"]) {
+                        c.acquisition.trigger.source_entry = t["source_entry"].as<std::string>();
                     }
-                    c.convenience.trigger = t;
                 }
             }
-            if (n["genicam_features"]) {
-                c.genicam_features = parse_feature_list(n["genicam_features"], path + ".genicam_features");
+
+            if (auto f = n["features"]) {
+                if (auto raw = f["raw"]; raw && raw.IsSequence()) {
+                    c.features.raw = parse_raw_features(raw, path + ".features.raw");
+                }
             }
-            if (n["apply"]) {
-                c.apply = parse_apply(n["apply"]);
+
+            if (auto net = n["network"]) {
+                if (net["channel"]) {
+                    c.network.channel = net["channel"].as<std::uint32_t>();
+                }
+                if (net["buffer_count"]) {
+                    c.network.buffer_count = net["buffer_count"].as<std::uint32_t>();
+                    if (c.network.buffer_count != 0 && c.network.buffer_count < 4) {
+                        throw ConfigError(path + ".network.buffer_count must be 0 (auto) or >= 4");
+                    }
+                }
+                if (net["packet_size"]) {
+                    c.network.packet_size = net["packet_size"].as<std::uint32_t>();
+                    if (c.network.packet_size != 0 &&
+                        (c.network.packet_size < 576 || c.network.packet_size > 16000)) {
+                        throw ConfigError(path + ".network.packet_size must be 0 (auto) or in [576, 16000]");
+                    }
+                }
+                if (net["socket_rx_buffer_mb"]) {
+                    c.network.socket_rx_buffer_mb = net["socket_rx_buffer_mb"].as<std::uint32_t>();
+                    if (c.network.socket_rx_buffer_mb == 0) {
+                        throw ConfigError(path + ".network.socket_rx_buffer_mb must be > 0");
+                    }
+                }
+                if (net["local_ip"]) {
+                    c.network.local_ip = net["local_ip"].as<std::string>();
+                }
+                if (net["gev_scpd_ticks"]) {
+                    c.network.gev_scpd_ticks = net["gev_scpd_ticks"].as<std::uint32_t>();
+                }
+                if (net["receiver_tuning"]) {
+                    c.network.receiver_tuning =
+                            parse_raw_features(net["receiver_tuning"], path + ".network.receiver_tuning");
+                }
             }
-            if (n["stream"]) {
-                c.stream = parse_stream(n["stream"], path + ".stream");
-            }
-            // Per-camera ptp/recording override the parsed globals key-by-key
-            c.ptp = n["ptp"] ? parse_ptp(n["ptp"], global_ptp, path + ".ptp") : global_ptp;
-            c.recording = n["recording"]
-                              ? parse_recording(n["recording"], global_recording, path + ".recording")
-                              : global_recording;
             return c;
         }
 
@@ -332,19 +200,108 @@ namespace jai {
             }
 
             try {
-                // GLOBAL blocks MUST be parsed before any camera: each camera's
-                // ptp/recording copy is merged from the parsed globals, so a
-                // camera parsed first would snapshot the struct defaults and
-                // silently ignore the YAML's global values.
+                if (auto n = root["output"]) {
+                    if (n["output_dir"]) {
+                        cfg.output.output_dir = n["output_dir"].as<std::string>();
+                    }
+                    if (n["segment_size_gib"]) {
+                        cfg.output.segment_size_gib = n["segment_size_gib"].as<double>();
+                        if (cfg.output.segment_size_gib <= 0) {
+                            throw ConfigError("output.segment_size_gib must be > 0");
+                        }
+                    }
+                    if (n["record_align"]) {
+                        cfg.output.record_align = n["record_align"].as<std::uint32_t>();
+                        if (cfg.output.record_align == 0 ||
+                            (cfg.output.record_align & (cfg.output.record_align - 1)) != 0) {
+                            throw ConfigError("output.record_align must be a power of two (1 disables alignment)");
+                        }
+                    }
+                    if (n["queue_max_frames"]) {
+                        cfg.output.queue_max_frames = n["queue_max_frames"].as<std::uint32_t>();
+                        if (cfg.output.queue_max_frames < 2) {
+                            throw ConfigError("output.queue_max_frames must be >= 2");
+                        }
+                    }
+                    if (n["queue_on_full"]) {
+                        cfg.output.queue_on_full =
+                                read_enum(n["queue_on_full"], {"drop_newest", "block"}, "output.queue_on_full");
+                    }
+                    if (n["on_buffer_error"]) {
+                        cfg.output.on_buffer_error =
+                                read_enum(n["on_buffer_error"], {"record_flagged", "drop"}, "output.on_buffer_error");
+                    }
+                    if (n["flush_interval_mb"]) {
+                        cfg.output.flush_interval_mb = n["flush_interval_mb"].as<std::uint32_t>();
+                        if (cfg.output.flush_interval_mb == 0) {
+                            throw ConfigError("output.flush_interval_mb must be > 0");
+                        }
+                    }
+                    if (n["max_frames"]) {
+                        cfg.output.max_frames = n["max_frames"].as<std::uint64_t>();
+                    }
+                    if (n["max_duration_s"]) {
+                        cfg.output.max_duration_s = n["max_duration_s"].as<double>();
+                    }
+                }
+
+                if (auto n = root["disk"]) {
+                    if (n["min_free_gb"]) {
+                        cfg.disk.min_free_gb = n["min_free_gb"].as<double>();
+                    }
+                }
+
+                if (auto n = root["watchdog"]) {
+                    if (n["no_frame_warn_s"]) {
+                        cfg.watchdog.no_frame_warn_s = n["no_frame_warn_s"].as<double>();
+                    }
+                    if (n["no_frame_abort_s"]) {
+                        cfg.watchdog.no_frame_abort_s = n["no_frame_abort_s"].as<double>();
+                    }
+                }
+
                 if (auto n = root["ptp"]) {
-                    cfg.ptp = parse_ptp(n, cfg.ptp, "ptp");
+                    if (n["enabled"]) {
+                        cfg.ptp.enabled = n["enabled"].as<bool>();
+                    }
+                    if (n["feature_set"]) {
+                        cfg.ptp.feature_set = read_enum(n["feature_set"],
+                                                        {"auto", "gev_ieee1588", "sfnc_ptp", "explicit"},
+                                                        "ptp.feature_set");
+                    }
+                    if (n["enable_feature"]) {
+                        cfg.ptp.enable_feature = n["enable_feature"].as<std::string>();
+                    }
+                    if (n["status_feature"]) {
+                        cfg.ptp.status_feature = n["status_feature"].as<std::string>();
+                    }
+                    if (n["required_status"]) {
+                        cfg.ptp.required_status = n["required_status"].as<std::string>();
+                    }
+                    if (n["sync_timeout_s"]) {
+                        cfg.ptp.sync_timeout_s = n["sync_timeout_s"].as<double>();
+                    }
+                    if (n["poll_interval_ms"]) {
+                        cfg.ptp.poll_interval_ms = n["poll_interval_ms"].as<std::uint32_t>();
+                        if (cfg.ptp.poll_interval_ms == 0) {
+                            throw ConfigError("ptp.poll_interval_ms must be > 0");
+                        }
+                    }
+                    if (n["on_timeout"]) {
+                        cfg.ptp.on_timeout = read_enum(n["on_timeout"], {"abort", "warn_continue"}, "ptp.on_timeout");
+                    }
+                    if (n["offset_report_interval_s"]) {
+                        cfg.ptp.offset_report_interval_s = n["offset_report_interval_s"].as<double>();
+                    }
+                    if (n["expect_tai_offset"]) {
+                        cfg.ptp.expect_tai_offset = n["expect_tai_offset"].as<bool>();
+                    }
+                    if (cfg.ptp.feature_set == "explicit" &&
+                        (cfg.ptp.enable_feature.empty() || cfg.ptp.status_feature.empty())) {
+                        throw ConfigError("ptp: feature_set \"explicit\" requires enable_feature and status_feature");
+                    }
                 }
-                if (auto n = root["acquisition"]) {
-                    cfg.acquisition = parse_acquisition(n, cfg.acquisition);
-                }
-                if (auto n = root["recording"]) {
-                    cfg.recording = parse_recording(n, cfg.recording, "recording");
-                }
+
                 if (auto n = root["logging"]) {
                     if (n["stats_interval_s"]) {
                         cfg.stats_interval_s = n["stats_interval_s"].as<double>();
@@ -360,8 +317,7 @@ namespace jai {
                 }
                 std::size_t idx = 0;
                 for (const auto &cam: cameras) {
-                    cfg.cameras.push_back(
-                        parse_camera(cam, cfg.ptp, cfg.recording, "cameras[" + std::to_string(idx) + "]"));
+                    cfg.cameras.push_back(parse_camera(cam, "cameras[" + std::to_string(idx) + "]"));
                     ++idx;
                 }
                 std::set<std::string> ids;

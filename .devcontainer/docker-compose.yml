@@ -18,6 +18,11 @@ services:
             # AmigaDrivers carries file caps cap_net_raw,cap_sys_nice+ep (Start.bash / GUI setcap)
             - SYS_NICE
 
+        devices:
+            - "/dev/bus/usb/003/047:/dev/bus/usb/003/047"
+
+        privileged: true
+
         environment:
             PYTHONUNBUFFERED: 1
             # X11

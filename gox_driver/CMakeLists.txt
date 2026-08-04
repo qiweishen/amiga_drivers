@@ -114,7 +114,7 @@ add_executable(jai_discover tools/discover_main.cpp)
 target_link_libraries(jai_discover PRIVATE jai_ebus)
 
 # jai_snapshot - one-shot frame grab for the web GUI preview loop
-# (config/config-snapshot.yaml + CLI overrides; see tools/snapshot_main.cpp)
+# (config/config-gox-snapshot.yaml + CLI overrides; see tools/snapshot_main.cpp)
 add_executable(jai_snapshot tools/snapshot_main.cpp)
 target_link_libraries(jai_snapshot PRIVATE jai_ebus)
 

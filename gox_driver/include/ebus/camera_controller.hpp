@@ -20,18 +20,16 @@
 #include "ebus/discovery.hpp"
 
 namespace jai::ebus {
-    // Generic typed GenICam write. Dispatches on PvGenParameter::GetType()
-    // (Integer/Float/Boolean/Enum/String/Command) and, when
-    // apply.verify_readback is set, reads the value back and verifies it:
-    // Integer within GetIncrement() rounding, Float within
-    // float_verify_tolerance_rel (relative), everything else exact. Commands are
-    // executed, never verified. On failure the effective on_error policy
-    // (f.on_error, falling back to apply.on_error_default) decides: "fail"
-    // throws SdkError, "warn" logs a warning, "skip" logs at debug level.
-    // Returns true when the value was applied (and verified). `readback`, when
-    // non-null, receives the read-back value on success (for logging).
-    bool apply_genicam_feature(PvGenParameterArray *params, const GenicamFeature &f, const ApplyConfig &apply,
-                               const std::string &context, std::string *readback = nullptr);
+    // Generic typed GenICam write with fx10's verify-set semantics. Dispatches
+    // on PvGenParameter::GetType() (Integer/Float/Boolean/Enum/String/Command)
+    // and always reads the value back: Integer/Float clamping by the camera is
+    // the camera's business (WARN, fx10 setInt/setFloat), Boolean/Enum/String
+    // mismatches are failures, Commands are executed and never verified. A
+    // failure throws SdkError when `required`, otherwise it degrades to a WARN
+    // and returns false. `readback`, when non-null, receives the read-back
+    // value on success (for logging).
+    bool apply_genicam_feature(PvGenParameterArray *params, const RawFeature &f, const std::string &context,
+                               bool required = true, std::string *readback = nullptr);
 
     // By-name read/execute helpers shared with ptp_manager and stream_receiver.
     // All return false (without logging) when the parameter is missing or the
@@ -75,9 +73,9 @@ namespace jai::ebus {
         bool link_lost() const { return link_lost_.load(std::memory_order_relaxed); }
 
         // Ordered configuration per plan: autos off -> binning (hoisted from
-        // genicam_features) -> offsets zeroed -> Width -> Height -> OffsetX/Y ->
-        // PixelFormat -> exposure/gain/frame_rate/trigger convenience mappings ->
-        // remaining genicam_features in listed order -> GevGVSPExtendedIDMode
+        // features.raw) -> offsets zeroed -> Width -> Height -> OffsetX/Y ->
+        // PixelFormat -> exposure/gain/frame_rate/trigger acquisition mappings
+        // -> remaining features.raw in listed order -> GevGVSPExtendedIDMode
         // forced On when Off. Throws SdkError when a feature with policy
         // "fail" cannot be applied.
         void apply_config(const CameraConfig &cfg);
@@ -103,11 +101,9 @@ namespace jai::ebus {
         void OnLinkDisconnected(PvDevice *device) override;
 
     private:
-        // Applies name=value with an explicit policy. When required is false a
-        // missing parameter is a silent (debug-level) no-op returning false.
-        bool try_apply(const std::string &name, const std::string &value, bool value_is_string,
-                       const ApplyConfig &apply,
-                       const std::string &policy, bool required);
+        // Applies name=value. When required is false a missing parameter (or
+        // any failure) is a WARN-level no-op returning false.
+        bool try_apply(const std::string &name, const std::string &value, bool value_is_string, bool required);
 
         std::string camera_id_;
         StopController *stop_;

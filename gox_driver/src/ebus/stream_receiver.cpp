@@ -2,6 +2,7 @@
 
 #include <PvImage.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -24,13 +25,15 @@ namespace jai::ebus {
         constexpr uint32_t kFallbackPacketSize = 1476; // safe on any 1500-MTU path
     } // namespace
 
-    StreamReceiver::StreamReceiver(uint32_t camera_index, const CameraConfig &cfg, CameraController *controller,
-                                   StopController *stop, CameraStats *stats) : camera_index_(camera_index),
-                                                                               camera_id_(cfg.id),
-                                                                               cfg_(cfg),
-                                                                               controller_(controller),
-                                                                               stop_(stop),
-                                                                               stats_(stats) {
+    StreamReceiver::StreamReceiver(uint32_t camera_index, const CameraConfig &cfg, const OutputConfig &output,
+                                   CameraController *controller, StopController *stop,
+                                   CameraStats *stats) : camera_index_(camera_index),
+                                                         camera_id_(cfg.id),
+                                                         cfg_(cfg),
+                                                         output_(output),
+                                                         controller_(controller),
+                                                         stop_(stop),
+                                                         stats_(stats) {
     }
 
     StreamReceiver::~StreamReceiver() {
@@ -42,13 +45,13 @@ namespace jai::ebus {
     }
 
     void StreamReceiver::open() {
-        const StreamConfig &sc = cfg_.stream;
+        const NetworkConfig &sc = cfg_.network;
         stream_ = std::make_unique<PvStreamGEV>();
 
         // 1. Socket receive buffer — must be set before Open() (eBUS 6.5+
         // returns NETWORK_CONFIG_ERROR afterwards). The kernel silently clamps
         // the request to net.core.rmem_max; verified by read-back below.
-        rx_buffer_requested_ = sc.socket_rx_buffer_mib * 1024u * 1024u;
+        rx_buffer_requested_ = sc.socket_rx_buffer_mb * 1024u * 1024u;
         PvResult r = stream_->SetUserModeSocketRxBufferSize(rx_buffer_requested_);
         if (!r.IsOK()) {
             g_log.warn("[{}] SetUserModeSocketRxBufferSize({}) failed: {}", camera_id_, rx_buffer_requested_,
@@ -112,16 +115,15 @@ namespace jai::ebus {
 
         // 5. Optional inter-packet delay (bandwidth partitioning across cameras).
         if (sc.gev_scpd_ticks > 0) {
-            GenicamFeature f;
-            f.feature = "GevSCPD";
+            RawFeature f;
+            f.name = "GevSCPD";
             f.value = std::to_string(sc.gev_scpd_ticks);
-            f.on_error = "warn";
-            apply_genicam_feature(controller_->params(), f, cfg_.apply, "[" + camera_id_ + "] device");
+            apply_genicam_feature(controller_->params(), f, "[" + camera_id_ + "] device", /*required=*/false);
         }
 
         // 6. Receiver-side tuning escape hatch (PvStream GenICam parameters).
-        for (const GenicamFeature &f: sc.receiver_tuning) {
-            apply_genicam_feature(stream_->GetParameters(), f, cfg_.apply, "[" + camera_id_ + "] stream");
+        for (const RawFeature &f: sc.receiver_tuning) {
+            apply_genicam_feature(stream_->GetParameters(), f, "[" + camera_id_ + "] stream");
         }
     }
 
@@ -134,11 +136,11 @@ namespace jai::ebus {
             throw SdkError("device reports zero payload size");
         }
 
-        uint32_t count = cfg_.stream.buffer_count;
+        uint32_t count = cfg_.network.buffer_count;
         if (count == 0) {
             // Auto: absorb ~0.5 s at the configured frame rate, plus headroom.
-            if (cfg_.convenience.frame_rate && *cfg_.convenience.frame_rate > 0) {
-                const double n = std::ceil(*cfg_.convenience.frame_rate * 0.5) + 8.0;
+            if (cfg_.acquisition.frame_rate_hz && *cfg_.acquisition.frame_rate_hz > 0) {
+                const double n = std::ceil(*cfg_.acquisition.frame_rate_hz * 0.5) + 8.0;
                 count = static_cast<uint32_t>(std::clamp(n, 16.0, 256.0));
             } else {
                 count = 32;
@@ -189,7 +191,7 @@ namespace jai::ebus {
         if (!op_result.IsOK()) {
             // Degraded frame: TOO_MANY_RESENDS / RESENDS_FAILURE / IMAGE_ERROR
             // and friends. GetAcquiredSize() bytes are still valid.
-            if (cfg_.recording.on_buffer_error == "drop") {
+            if (output_.on_buffer_error == "drop") {
                 stats_->frames_error_dropped.fetch_add(1, std::memory_order_relaxed);
                 stream_->QueueBuffer(buffer);
                 return true;
@@ -265,7 +267,7 @@ namespace jai::ebus {
         // queue — the SDK pool must never wait on downstream I/O.
         stream_->QueueBuffer(buffer);
 
-        const bool block_policy = cfg_.recording.queue_on_full == "block";
+        const bool block_policy = output_.queue_on_full == "block";
         bool pushed;
         if (block_policy) {
             // Bounded waits instead of push_blocking(): a stop request (or a
@@ -311,8 +313,18 @@ namespace jai::ebus {
         return true;
     }
 
-    void StreamReceiver::run_acquisition(ChunkPool &pool, BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames) {
+    void StreamReceiver::run_acquisition(ChunkPool &pool, BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames,
+                                         const WatchdogConfig &watchdog, double no_frame_abort_s) {
         stats_->queue_capacity.store(queue.capacity(), std::memory_order_relaxed);
+
+        // fx10 watchdog: genuine retrieve timeouts are the "idle" state
+        // (expected under external trigger when pulses pause); track the
+        // silence and warn/abort on the configured thresholds.
+        using clock = std::chrono::steady_clock;
+        const auto warn_interval = std::chrono::duration_cast<clock::duration>(
+            std::chrono::duration<double>(watchdog.no_frame_warn_s));
+        auto last_frame = clock::now();
+        auto next_warn = last_frame + warn_interval;
 
         while (!stop_->stop_requested() && !local_stop_.load(std::memory_order_relaxed)) {
             PvBuffer *buffer = nullptr;
@@ -321,6 +333,19 @@ namespace jai::ebus {
             if (!r.IsOK()) {
                 if (r.GetCode() == PvResult::Code::TIMEOUT) {
                     stats_->retrieve_timeouts.fetch_add(1, std::memory_order_relaxed);
+                    const double quiet = std::chrono::duration<double>(clock::now() - last_frame).count();
+                    if (no_frame_abort_s > 0.0 && quiet > no_frame_abort_s) {
+                        g_log.error("[{}] Watchdog: no frames for {:.1f} s; stopping", camera_id_, quiet);
+                        stop_->request_stop(StopReason::Error);
+                        break;
+                    }
+                    if (watchdog.no_frame_warn_s > 0.0 && clock::now() >= next_warn) {
+                        g_log.warn(
+                            "[{}] No frames for {:.1f} s (external trigger idle, pulses stopped, or stream problem)",
+                            camera_id_, quiet);
+                        next_warn = clock::now() + std::chrono::duration_cast<clock::duration>(
+                                        std::chrono::duration<double>(std::max(watchdog.no_frame_warn_s, quiet)));
+                    }
                     continue;
                 }
                 if (r.GetCode() == PvResult::Code::ABORTED) {
@@ -330,6 +355,8 @@ namespace jai::ebus {
                 stop_->request_stop(StopReason::Error);
                 break;
             }
+            last_frame = clock::now();
+            next_warn = last_frame + warn_interval;
             if (!process_buffer(buffer, op_result, pool, queue, max_frames)) {
                 break;
             }

@@ -19,6 +19,7 @@ namespace jai::ebus {
         constexpr int64_t kNsPerSecond = 1000000000ll;
         constexpr int64_t kExpectedTaiUtcOffsetS = 37; // leap seconds as of 2026
 
+
         std::string lower(std::string s) {
             std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
                 return static_cast<char>(std::tolower(c));
@@ -26,18 +27,22 @@ namespace jai::ebus {
             return s;
         }
 
+
         bool iequals(const std::string &a, const std::string &b) {
             return lower(a) == lower(b);
         }
+
 
         bool contains_ci(const std::string &haystack, const std::string &needle) {
             return lower(haystack).find(lower(needle)) != std::string::npos;
         }
     } // namespace
 
+
     PtpManager::PtpManager(std::string camera_id, PvGenParameterArray *params, PtpConfig cfg)
         : camera_id_(std::move(camera_id)), params_(params), cfg_(std::move(cfg)) {
     }
+
 
     bool PtpManager::detect_features() {
         if (cfg_.feature_set == "explicit") {
@@ -104,8 +109,8 @@ namespace jai::ebus {
                 }
             }
             if (!enable_name.empty() && !status_name.empty()) {
-                g_log.warn("[{}] PTP features found by fuzzy scan: enable={} status={}", camera_id_,
-                           enable_name, status_name);
+                g_log.warn("[{}] PTP features found by fuzzy scan: enable={} status={}", camera_id_, enable_name,
+                           status_name);
                 report_.feature_set = "fuzzy";
                 report_.enable_feature = enable_name;
                 report_.status_feature = status_name;
@@ -115,20 +120,9 @@ namespace jai::ebus {
         return false;
     }
 
+
     bool PtpManager::enable() {
         report_ = PtpStatusReport{};
-
-        // Timestamp semantics: PvBuffer::GetTimestamp() is the raw 64-bit GVSP
-        // tick; only at 1 GHz is it directly nanoseconds.
-        if (read_int_feature(params_, "GevTimestampTickFrequency", report_.tick_frequency)) {
-            if (report_.tick_frequency != kNsPerSecond) {
-                g_log.warn(
-                    "[{}] GevTimestampTickFrequency is {} (not 1e9): device_ts_ns in the segment files is raw ticks",
-                    camera_id_, report_.tick_frequency);
-            }
-        } else {
-            g_log.trace("[{}] GevTimestampTickFrequency not readable", camera_id_);
-        }
 
         if (!cfg_.enabled) {
             g_log.info("[{}] PTP disabled by config; device timestamps are free-running", camera_id_);
@@ -136,14 +130,13 @@ namespace jai::ebus {
         }
 
         if (!detect_features()) {
-            const std::string msg =
-                    "no usable PTP feature pair found (feature_set=" + cfg_.feature_set +
-                    "); the camera may not support IEEE 1588";
+            const std::string msg = "No usable PTP feature pair found (feature_set=" + cfg_.feature_set +
+                                    "); the camera may not support IEEE 1588";
             if (cfg_.on_timeout == "abort") {
                 g_log.error("[{}] {}", camera_id_, msg);
                 return false;
             }
-            g_log.warn("[{}] {}; continuing unsynchronized (warn_continue)", camera_id_, msg);
+            g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
             return true;
         }
         report_.feature_found = true;
@@ -161,16 +154,16 @@ namespace jai::ebus {
             }
         }
         if (!r.IsOK()) {
-            const std::string msg = "enabling PTP via " + report_.enable_feature + " failed: " + pv_result_to_string(r);
+            const std::string msg = "Enabling PTP via " + report_.enable_feature + " failed: " + pv_result_to_string(r);
             if (cfg_.on_timeout == "abort") {
                 g_log.error("[{}] {}", camera_id_, msg);
                 return false;
             }
-            g_log.warn("[{}] {}; continuing unsynchronized (warn_continue)", camera_id_, msg);
+            g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
             return true;
         }
         report_.enabled = true;
-        g_log.info("[{}] PTP enabled via {} (chain {}); waiting for status \"{}\"", camera_id_, report_.enable_feature,
+        g_log.info("[{}] PTP enabled via {} (chain {}); Waiting for status \"{}\"", camera_id_, report_.enable_feature,
                    report_.feature_set, cfg_.required_status);
         return true;
     }
@@ -217,6 +210,20 @@ namespace jai::ebus {
             std::string status;
             if (read_status(status)) {
                 report_.status = status;
+                if (iequals(status, "Faulty")) {
+                    const std::string msg =
+                            "camera PTP state is *Faulty*: the 1588 stack hit an internal error. This is "
+                            "usually caused by incompatible master traffic (one-step Sync where the camera "
+                            "expects Sync+FollowUp, or an invalid sourcePortIdentity such as portNumber 0) "
+                            "— fix or remove the offending grandmaster, then toggle GevIEEE1588 off/on "
+                            "(or power-cycle) to reset the state machine";
+                    if (cfg_.on_timeout == "abort") {
+                        g_log.error("[{}] {}", camera_id_, msg);
+                        return false;
+                    }
+                    g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+                    return true;
+                }
                 if (iequals(status, "Master")) {
                     const std::string msg =
                             "camera became PTP *Master*: no grandmaster is winning the BMCA on this "
@@ -227,7 +234,7 @@ namespace jai::ebus {
                         g_log.error("[{}] {}", camera_id_, msg);
                         return false;
                     }
-                    g_log.warn("[{}] {}; continuing unsynchronized (warn_continue)", camera_id_, msg);
+                    g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
                     return true;
                 }
                 bool ok = iequals(status, cfg_.required_status);

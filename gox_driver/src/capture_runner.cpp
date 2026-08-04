@@ -1,8 +1,6 @@
 #include "capture_runner.hpp"
 
-#include <cerrno>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <sys/statvfs.h>
 #include <thread>
@@ -11,18 +9,11 @@
 #include "stats.hpp"
 #include "util.hpp"
 #include "ebus/camera_session.hpp"
+#include "driver_markers.h"
 
 namespace jai {
     namespace {
         Common::DriverLog g_log{"GoX"};
-
-        void make_dirs(const std::string &path) {
-            std::error_code ec;
-            std::filesystem::create_directories(path, ec);
-            if (ec) {
-                throw std::runtime_error("mkdir " + path + ": " + ec.message());
-            }
-        }
 
 
         uint64_t free_disk_bytes(const std::string &path) {
@@ -33,23 +24,6 @@ namespace jai {
             return static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize;
         }
 
-
-        int exit_code_for_phase(ebus::StartupPhase phase) {
-            switch (phase) {
-                case ebus::StartupPhase::Discovery:
-                case ebus::StartupPhase::Apply:
-                    return 3; // device found/connected/configured — control-plane failure
-                case ebus::StartupPhase::Ptp:
-                    return 4;
-                case ebus::StartupPhase::Stream:
-                    return 5;
-                case ebus::StartupPhase::Recorder:
-                    return 6; // I/O
-                case ebus::StartupPhase::None:
-                    break;
-            }
-            return 6;
-        }
 
         std::string basename_of(const std::string &path) {
             const size_t pos = path.find_last_of('/');
@@ -66,7 +40,7 @@ namespace jai {
         if (initialized_ && !shutdown_done_ && !stop_->stop_requested()) {
             // Reached only via stack unwinding: an exception escaped between
             // init() and shutdown() (e.g. out of the poll loop). Record the
-            // stop as an error so the exit code agrees with the fatal path.
+            // stop as an error so the reported outcome agrees with the fatal path.
             stop_->request_stop(StopReason::Error);
         }
         try {
@@ -80,57 +54,42 @@ namespace jai {
         gen_uuid_v4(session_uuid_);
         start_rt_ = now_realtime_ns();
         if (session_dir_override.empty()) {
-            session_name_ = cfg_.recording.session_name;
-            if (session_name_.empty() || session_name_ == "auto") {
-                session_name_ = compact_utc(start_rt_) + "_" + hex_prefix(session_uuid_, 3);
-            }
-            session_dir_ = cfg_.recording.output_dir + "/" + session_name_;
+            session_name_ = compact_utc(start_rt_) + "_" + hex_prefix(session_uuid_, 3);
+            session_dir_ = cfg_.output.output_dir + "/" + session_name_;
         } else {
             // Unified mode: the host application owns the output layout.
             session_dir_ = session_dir_override;
             session_name_ = basename_of(session_dir_override);
         }
-        try {
-            make_dirs(session_dir_);
-        } catch (const std::exception &e) {
-            g_log.error("Cannot create session directory: {}", e.what());
-            exit_code_ = 6;
+        std::error_code ec;
+        std::filesystem::create_directories(session_dir_, ec);
+        if (ec) {
+            Common::Log::log_and_throw(Common::Markers::kModuleGox, "GOX cannot create output directory", ec.message(),
+                                       false);
             return false;
         }
 
         for (size_t i = 0; i < cfg_.cameras.size(); ++i) {
             if (cfg_.cameras[i].enabled) {
-                sessions_.push_back(std::make_unique<ebus::CameraSession>(static_cast<uint32_t>(i), cfg_.cameras[i], cfg_.acquisition,
-                    session_uuid_, stop_));
+                sessions_.push_back(std::make_unique<ebus::CameraSession>(static_cast<uint32_t>(i), cfg_.cameras[i],
+                    cfg_, session_uuid_, stop_));
             }
         }
         for (auto &session: sessions_) {
             try {
                 session->start(session_dir_);
             } catch (const std::exception &e) {
-                // A stop that landed mid-bring-up (Ctrl+C during a PTP wait, or a
-                // running camera's writer failing) surfaces as a StartupError of
-                // whatever phase was active — report the true cause, not the phase.
+                // A stop that landed mid-bring-up (Ctrl+C during a PTP wait, or
+                // a running camera's writer failing) surfaces as an exception
+                // out of whatever step was active — report the concrete cause.
                 const bool interrupted = stop_->stop_requested() &&
                                          (stop_->reason() == StopReason::Signal || stop_->reason() ==
                                           StopReason::External);
-                const bool prior_error = stop_->stop_requested() && stop_->reason() == StopReason::Error;
-                const auto *startup = dynamic_cast<const ebus::StartupError *>(&e);
-                if (startup != nullptr) {
-                    g_log.error("Startup failed in phase {}: {}", ebus::startup_phase_name(startup->phase()), e.what());
-                } else {
-                    g_log.error("Startup failed: {}", e.what());
-                }
+                last_error_ = interrupted ? std::string("interrupted during bring-up: ") + e.what() : e.what();
+                g_log.error("Startup failed: {}", last_error_);
                 stop_->request_stop(StopReason::Error);
                 for (auto &s: sessions_) {
                     s->stop_and_join();
-                }
-                if (interrupted) {
-                    exit_code_ = 130;
-                } else if (prior_error || startup == nullptr) {
-                    exit_code_ = 6;
-                } else {
-                    exit_code_ = exit_code_for_phase(startup->phase());
                 }
                 return false;
             }
@@ -144,14 +103,12 @@ namespace jai {
     }
 
 
-    void CaptureRunner::run_until_stop(const std::function<bool()> &external_stop) {
+    void CaptureRunner::monitor_loop(const std::function<bool()> &external_stop) {
         if (!initialized_) {
             return;
         }
 
-        // max_duration_s measures CAPTURE time: the clock starts after bring-up
-        // (discovery/PTP convergence can eat tens of seconds and must not count
-        // against the configured duration).
+        // max_duration_s measures CAPTURE time
         capture_start_mono_ = now_monotonic_ns();
         const double stats_interval_s = cfg_.stats_interval_s;
         const double offset_interval_s = cfg_.ptp.offset_report_interval_s;
@@ -166,9 +123,9 @@ namespace jai {
             const uint64_t now_mono = now_monotonic_ns();
             const uint64_t uptime_s = (now_mono - capture_start_mono_) / 1000000000ull;
 
-            if (cfg_.acquisition.max_duration_s > 0 &&
-                static_cast<double>(now_mono - capture_start_mono_) >= cfg_.acquisition.max_duration_s * 1e9) {
-                g_log.info("max_duration_s ({}) reached", cfg_.acquisition.max_duration_s);
+            if (cfg_.output.max_duration_s > 0 &&
+                static_cast<double>(now_mono - capture_start_mono_) >= cfg_.output.max_duration_s * 1e9) {
+                g_log.info("max_duration_s ({}) reached", cfg_.output.max_duration_s);
                 stop_->request_stop(StopReason::LimitReached);
                 break;
             }
@@ -191,14 +148,15 @@ namespace jai {
     }
 
 
-    int CaptureRunner::shutdown() {
+    bool CaptureRunner::shutdown() {
         if (shutdown_done_) {
-            return exit_code_;
+            return clean_;
         }
         shutdown_done_ = true;
         if (!initialized_) {
-            // init() already tore down and set the exit code.
-            return exit_code_;
+            // init() already tore down, logged and kept the concrete error.
+            clean_ = false;
+            return clean_;
         }
 
         g_log.info("stopping (reason: {})", stop_reason_name(stop_->reason()));
@@ -215,10 +173,14 @@ namespace jai {
         }
 
         if (stop_->reason() == StopReason::Error) {
-            exit_code_ = 6;
-        } else {
-            exit_code_ = all_clean ? 0 : 1;
+            if (last_error_.empty()) {
+                last_error_ = "session stopped on an error (see the log above for the concrete cause)";
+            }
+            clean_ = false;
+        } else if (!all_clean) {
+            last_error_ = "frame drops / incomplete frames / stream errors detected (see the final statistics above)";
+            clean_ = false;
         }
-        return exit_code_;
+        return clean_;
     }
 } // namespace jai

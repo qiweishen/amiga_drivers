@@ -59,7 +59,7 @@ BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 
 MAIN_CONFIG = REPO_ROOT / "config" / "config-main.yaml"
-SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-snapshot.yaml"
+SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml"
 
 # --- GUI ---------------------------------------------------------------------
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
@@ -93,7 +93,7 @@ CONFIG_FILES: dict[str, ConfigFile] = {
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
-        ConfigFile("snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-snapshot.yaml"),
+        ConfigFile("snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml"),
     ]
 }
 

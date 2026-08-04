@@ -106,21 +106,19 @@ namespace jai::ebus {
     } // namespace
 
 
-    bool apply_genicam_feature(PvGenParameterArray *params, const GenicamFeature &f, const ApplyConfig &apply,
-                               const std::string &context, std::string *readback) {
-        const std::string policy = f.on_error.empty() ? apply.on_error_default : f.on_error;
+    bool apply_genicam_feature(PvGenParameterArray *params, const RawFeature &f, const std::string &context,
+                               bool required, std::string *readback) {
         std::string rb_text;
 
+        // fx10 semantics: a failed write (or a hard read-back mismatch) throws;
+        // `required = false` degrades every failure to a WARN + false so
+        // optional convenience features can be skipped.
         auto finish_fail = [&](const std::string &why) -> bool {
-            const std::string msg = context + ": \"" + f.feature + "\" = \"" + f.value + "\": " + why;
-            if (policy == "fail") {
+            const std::string msg = context + ": \"" + f.name + "\" = \"" + f.value + "\": " + why;
+            if (required) {
                 throw SdkError(msg);
             }
-            if (policy == "warn") {
-                g_log.warn("{}", msg);
-            } else {
-                g_log.debug("{} (skipped)", msg);
-            }
+            g_log.warn("{}", msg);
             return false;
         };
         auto finish_ok = [&]() -> bool {
@@ -133,7 +131,7 @@ namespace jai::ebus {
         if (params == nullptr) {
             return finish_fail("no parameter array");
         }
-        PvGenParameter *p = params->Get(PvString(f.feature.c_str()));
+        PvGenParameter *p = params->Get(PvString(f.name.c_str()));
         if (p == nullptr) {
             return finish_fail("parameter not found");
         }
@@ -174,22 +172,15 @@ namespace jai::ebus {
                 if (!r.IsOK()) {
                     return finish_fail("SetValue: " + pv_result_to_string(r));
                 }
-                if (apply.verify_readback) {
-                    int64_t rb = 0;
-                    r = gi->GetValue(rb);
-                    if (!r.IsOK()) {
-                        return finish_fail("readback: " + pv_result_to_string(r));
-                    }
-                    rb_text = std::to_string(rb);
-                    int64_t inc = 1;
-                    if (!gi->GetIncrement(inc).IsOK() || inc <= 0) {
-                        inc = 1; // increment not exposed: tolerate rounding by 1
-                    }
-                    if (std::llabs(static_cast<long long>(rb - v)) > inc) {
-                        return finish_fail(
-                            "readback mismatch: wrote " + std::to_string(v) + ", read " + std::to_string(rb) +
-                            " (increment " + std::to_string(inc) + ")");
-                    }
+                int64_t rb = 0;
+                r = gi->GetValue(rb);
+                if (!r.IsOK()) {
+                    return finish_fail("readback: " + pv_result_to_string(r));
+                }
+                rb_text = std::to_string(rb);
+                if (rb != v) {
+                    // fx10 setInt: the camera's rounding/clamping is its business
+                    g_log.warn("{}: \"{}\" = {} requested, camera clamped to {}", context, f.name, v, rb);
                 }
                 return finish_ok();
             }
@@ -206,18 +197,17 @@ namespace jai::ebus {
                 if (!r.IsOK()) {
                     return finish_fail("SetValue: " + pv_result_to_string(r));
                 }
-                if (apply.verify_readback) {
-                    double rb = 0;
-                    r = gf->GetValue(rb);
-                    if (!r.IsOK()) {
-                        return finish_fail("readback: " + pv_result_to_string(r));
-                    }
-                    rb_text = fmt_double(rb);
-                    const double tol = apply.float_verify_tolerance_rel;
-                    if (std::fabs(rb - v) > std::fabs(v) * tol + 1e-9) {
-                        return finish_fail("readback mismatch: wrote " + fmt_double(v) + ", read " + fmt_double(rb) +
-                                           " (rel tolerance " + fmt_double(tol) + ")");
-                    }
+                double rb = 0;
+                r = gf->GetValue(rb);
+                if (!r.IsOK()) {
+                    return finish_fail("readback: " + pv_result_to_string(r));
+                }
+                rb_text = fmt_double(rb);
+                const double tolerance = std::max(std::fabs(v) * 1e-3, 1e-9);
+                if (std::fabs(rb - v) > tolerance) {
+                    // fx10 setFloat: warn on clamp instead of failing
+                    g_log.warn("{}: \"{}\" = {} requested, camera clamped to {}", context, f.name, fmt_double(v),
+                               rb_text);
                 }
                 return finish_ok();
             }
@@ -234,16 +224,14 @@ namespace jai::ebus {
                 if (!r.IsOK()) {
                     return finish_fail("SetValue: " + pv_result_to_string(r));
                 }
-                if (apply.verify_readback) {
-                    bool rb = false;
-                    r = gb->GetValue(rb);
-                    if (!r.IsOK()) {
-                        return finish_fail("readback: " + pv_result_to_string(r));
-                    }
-                    rb_text = rb ? "true" : "false";
-                    if (rb != v) {
-                        return finish_fail("readback mismatch");
-                    }
+                bool rb = false;
+                r = gb->GetValue(rb);
+                if (!r.IsOK()) {
+                    return finish_fail("readback: " + pv_result_to_string(r));
+                }
+                rb_text = rb ? "true" : "false";
+                if (rb != v) {
+                    return finish_fail("read-back mismatch after boolean write");
                 }
                 return finish_ok();
             }
@@ -263,29 +251,27 @@ namespace jai::ebus {
                     }
                     return finish_fail(msg);
                 }
-                if (apply.verify_readback) {
-                    if (numeric) {
-                        int64_t rb = 0;
-                        r = ge->GetValue(rb);
-                        if (!r.IsOK()) {
-                            return finish_fail("readback: " + pv_result_to_string(r));
-                        }
-                        rb_text = std::to_string(rb);
-                        if (rb != iv) {
-                            return finish_fail(
-                                "readback mismatch: wrote " + std::to_string(iv) + ", read " + std::to_string(rb));
-                        }
-                    } else {
-                        PvString rb;
-                        r = ge->GetValue(rb);
-                        if (!r.IsOK()) {
-                            return finish_fail("readback: " + pv_result_to_string(r));
-                        }
-                        rb_text = to_std(rb);
-                        if (rb_text != f.value) {
-                            return finish_fail(
-                                "readback mismatch: wrote \"" + f.value + "\", read \"" + rb_text + "\"");
-                        }
+                if (numeric) {
+                    int64_t rb = 0;
+                    r = ge->GetValue(rb);
+                    if (!r.IsOK()) {
+                        return finish_fail("readback: " + pv_result_to_string(r));
+                    }
+                    rb_text = std::to_string(rb);
+                    if (rb != iv) {
+                        return finish_fail(
+                            "read-back mismatch: wrote " + std::to_string(iv) + ", camera reports " + rb_text);
+                    }
+                } else {
+                    PvString rb;
+                    r = ge->GetValue(rb);
+                    if (!r.IsOK()) {
+                        return finish_fail("readback: " + pv_result_to_string(r));
+                    }
+                    rb_text = to_std(rb);
+                    if (rb_text != f.value) {
+                        return finish_fail(
+                            "read-back mismatch: wrote '" + f.value + "', camera reports '" + rb_text + "'");
                     }
                 }
                 return finish_ok();
@@ -299,17 +285,15 @@ namespace jai::ebus {
                 if (!r.IsOK()) {
                     return finish_fail("SetValue: " + pv_result_to_string(r));
                 }
-                if (apply.verify_readback) {
-                    PvString rb;
-                    r = gs->GetValue(rb);
-                    if (!r.IsOK()) {
-                        return finish_fail("readback: " + pv_result_to_string(r));
-                    }
-                    rb_text = to_std(rb);
-                    if (rb_text != f.value) {
-                        return finish_fail(
-                            "readback mismatch: wrote \"" + f.value + "\", read \"" + rb_text + "\"");
-                    }
+                PvString rb;
+                r = gs->GetValue(rb);
+                if (!r.IsOK()) {
+                    return finish_fail("readback: " + pv_result_to_string(r));
+                }
+                rb_text = to_std(rb);
+                if (rb_text != f.value) {
+                    return finish_fail(
+                        "read-back mismatch: wrote '" + f.value + "', camera reports '" + rb_text + "'");
                 }
                 return finish_ok();
             }
@@ -317,7 +301,6 @@ namespace jai::ebus {
                 return finish_fail("unsupported parameter type");
         }
     }
-
 
     bool feature_exists(PvGenParameterArray *params, const std::string &name) {
         return params != nullptr && params->Get(PvString(name.c_str())) != nullptr;
@@ -393,8 +376,7 @@ namespace jai::ebus {
         g_log.info("[{}] Connecting to {} ...", camera_id_, target);
         CHECK_PV(device_->Connect(PvString(target.c_str()), PvAccessControl), "PvDeviceGEV::Connect");
 
-        // Direct dials skip discovery, so fill the identity gaps (recorder
-        // serial, log lines) from the standard GenICam device nodes.
+        // Direct dials skip discovery
         if (identity_.model.empty()) {
             read_feature_as_string(params(), "DeviceModelName", identity_.model);
         }
@@ -411,22 +393,9 @@ namespace jai::ebus {
             read_feature_as_string(params(), "DeviceUserID", identity_.user_name);
         }
 
-        // Communication tuning: 2000 ms answer timeout is safe across a switch hop; 3 retries on top of that
-        PvGenParameterArray *comm = device_->GetCommunicationParameters();
-        if (comm != nullptr) {
-            PvResult r = comm->SetIntegerValue(PvString("AnswerTimeout"), 2000);
-            if (!r.IsOK()) {
-                g_log.warn("[{}] Set AnswerTimeout failed: {}", camera_id_, pv_result_to_string(r));
-            }
-            r = comm->SetIntegerValue(PvString("CommandRetries"), 3);
-            if (!r.IsOK()) {
-                g_log.warn("[{}] Set CommandRetries failed: {}", camera_id_, pv_result_to_string(r));
-            }
-        }
-
         PvResult r = device_->RegisterEventSink(this);
         if (!r.IsOK()) {
-            g_log.warn("[{}] RegisterEventSink failed (link-loss detection degraded): {}", camera_id_,
+            g_log.warn("[{}] [eBUS] RegisterEventSink failed (link-loss detection degraded): {}", camera_id_,
                        pv_result_to_string(r));
         }
     }
@@ -463,19 +432,17 @@ namespace jai::ebus {
 
 
     bool CameraController::try_apply(const std::string &name, const std::string &value, bool value_is_string,
-                                     const ApplyConfig &apply,
-                                     const std::string &policy, bool required) {
+                                     bool required) {
         if (!required && !feature_exists(params(), name)) {
             g_log.warn("[{}] [eBUS] Optional feature {} not present; skipped", camera_id_, name);
             return false;
         }
-        GenicamFeature f;
-        f.feature = name;
+        RawFeature f;
+        f.name = name;
         f.value = value;
         f.value_is_string = value_is_string;
-        f.on_error = policy; // empty -> apply.on_error_default
         std::string readback;
-        const bool ok = apply_genicam_feature(params(), f, apply, "[" + camera_id_ + "] device", &readback);
+        const bool ok = apply_genicam_feature(params(), f, "[" + camera_id_ + "] device", required, &readback);
         if (ok) {
             g_log.trace("[{}] [eBUS] {} = {}{}", camera_id_, name, value,
                         readback.empty() ? "" : " (readback " + readback + ")");
@@ -484,52 +451,52 @@ namespace jai::ebus {
     }
 
     void CameraController::apply_config(const CameraConfig &cfg) {
-        const ApplyConfig &ap = cfg.apply;
         const std::string context = "[" + camera_id_ + "] device";
 
         // 1. Disable automatics first so the manual exposure/gain writes stick.
-        try_apply("ExposureAuto", "Off", true, ap, "warn", false);
-        try_apply("GainAuto", "Off", true, ap, "warn", false);
+        try_apply("ExposureAuto", "Off", true, false);
+        try_apply("GainAuto", "Off", true, false);
 
-        // 2. Binning entries from genicam_features are hoisted here because
+        // 2. Binning entries from features.raw are hoisted here because
         // binning changes the Width/Height limits, so it must precede the ROI
         // writes. Relative order is preserved; the entries are skipped in step 9.
-        std::vector<bool> hoisted(cfg.genicam_features.size(), false);
-        for (size_t i = 0; i < cfg.genicam_features.size(); ++i) {
-            if (cfg.genicam_features[i].feature.rfind("Binning", 0) == 0) {
+        std::vector<bool> hoisted(cfg.features.raw.size(), false);
+        for (size_t i = 0; i < cfg.features.raw.size(); ++i) {
+            if (cfg.features.raw[i].name.rfind("Binning", 0) == 0) {
                 hoisted[i] = true;
                 g_log.trace("[{}] [eBUS] Applying {} before ROI (binning changes size limits)", camera_id_,
-                            cfg.genicam_features[i].feature);
-                apply_genicam_feature(params(), cfg.genicam_features[i], ap, context);
+                            cfg.features.raw[i].name);
+                apply_genicam_feature(params(), cfg.features.raw[i], context);
             }
         }
 
         // 3. ROI in the safe order: zero offsets, then size, then final offsets.
-        if (cfg.convenience.roi) {
-            const RoiConfig &roi = *cfg.convenience.roi;
+        if (cfg.acquisition.roi) {
+            const RoiConfig &roi = *cfg.acquisition.roi;
             if (roi.width != 0 || roi.height != 0) {
-                try_apply("OffsetX", "0", false, ap, "warn", false);
-                try_apply("OffsetY", "0", false, ap, "warn", false);
+                try_apply("OffsetX", "0", false, false);
+                try_apply("OffsetY", "0", false, false);
                 if (roi.width != 0) {
-                    try_apply("Width", std::to_string(roi.width), false, ap, "", true);
+                    try_apply("Width", std::to_string(roi.width), false, true);
                 }
                 if (roi.height != 0) {
-                    try_apply("Height", std::to_string(roi.height), false, ap, "", true);
+                    try_apply("Height", std::to_string(roi.height), false, true);
                 }
             }
             if (roi.width != 0 || roi.height != 0 || roi.offset_x != 0 || roi.offset_y != 0) {
-                try_apply("OffsetX", std::to_string(roi.offset_x), false, ap, "", false);
-                try_apply("OffsetY", std::to_string(roi.offset_y), false, ap, "", false);
+                try_apply("OffsetX", std::to_string(roi.offset_x), false, false);
+                try_apply("OffsetY", std::to_string(roi.offset_y), false, false);
             }
         }
 
         // 4. PixelFormat (before anything payload-size dependent).
-        if (cfg.convenience.pixel_format) {
-            try_apply("PixelFormat", *cfg.convenience.pixel_format, true, ap, "", true);
+        if (cfg.acquisition.pixel_format) {
+            try_apply("PixelFormat", *cfg.acquisition.pixel_format, true, true);
         }
 
         // 5. Exposure: ExposureTime with ExposureTimeAbs fallback (older SFNC).
-        if (cfg.convenience.exposure_us) {
+        // The config value is ms (fx10 convention); the GenICam node is µs.
+        if (cfg.acquisition.exposure_ms) {
             std::string name;
             if (feature_exists(params(), "ExposureTime")) {
                 name = "ExposureTime";
@@ -537,33 +504,36 @@ namespace jai::ebus {
                 name = "ExposureTimeAbs";
             }
             if (name.empty()) {
-                g_log.warn("[{}] [eBUS] No ExposureTime/ExposureTimeAbs feature; exposure_us not applied", camera_id_);
+                g_log.warn("[{}] [eBUS] No ExposureTime/ExposureTimeAbs feature; exposure_ms not applied", camera_id_);
             } else {
-                try_apply(name, fmt_double(*cfg.convenience.exposure_us), false, ap, "", true);
+                try_apply(name, fmt_double(*cfg.acquisition.exposure_ms * 1000.0), false, true);
             }
         }
 
         // 6. Gain: GainSelector=AnalogAll, fallback All, fallback no selector.
-        if (cfg.convenience.gain) {
+        if (cfg.acquisition.gain) {
             if (feature_exists(params(), "GainSelector")) {
-                if (!try_apply("GainSelector", "AnalogAll", true, ap, "skip", false)) {
-                    if (!try_apply("GainSelector", "All", true, ap, "skip", false)) {
+                if (!try_apply("GainSelector", "AnalogAll", true, false)) {
+                    if (!try_apply("GainSelector", "All", true, false)) {
                         g_log.trace(
                             "[{}] [eBUS] GainSelector accepts neither AnalogAll nor All; using current selector position",
                             camera_id_);
                     }
                 }
             }
-            try_apply("Gain", fmt_double(*cfg.convenience.gain), false, ap, "", true);
+            try_apply("Gain", fmt_double(*cfg.acquisition.gain), false, true);
         }
 
-        // 7. Frame rate (skipped when the trigger drives frame timing).
-        const bool trigger_on = cfg.convenience.trigger && cfg.convenience.trigger->enabled;
-        if (cfg.convenience.frame_rate) {
-            if (trigger_on) {
-                g_log.trace("[{}] [eBUS] Trigger enabled; frame_rate ignored (frame timing follows the trigger)", camera_id_);
+        // 7. Frame rate (freerun only — under external trigger the pulse train
+        // drives frame timing, same as fx10).
+        const TriggerConfig &t = cfg.acquisition.trigger;
+        const bool external = t.mode == "external";
+        if (cfg.acquisition.frame_rate_hz) {
+            if (external) {
+                g_log.trace("[{}] [eBUS] External trigger; frame_rate_hz ignored (frame timing follows the trigger)",
+                            camera_id_);
             } else {
-                try_apply("AcquisitionFrameRateEnable", "true", false, ap, "warn", false);
+                try_apply("AcquisitionFrameRateEnable", "true", false, false);
                 std::string name;
                 if (feature_exists(params(), "AcquisitionFrameRate")) {
                     name = "AcquisitionFrameRate";
@@ -571,30 +541,32 @@ namespace jai::ebus {
                     name = "AcquisitionFrameRateAbs";
                 }
                 if (name.empty()) {
-                    g_log.warn("[{}] [eBUS] No AcquisitionFrameRate feature; frame_rate not applied", camera_id_);
+                    g_log.warn("[{}] [eBUS] No AcquisitionFrameRate feature; frame_rate_hz not applied", camera_id_);
                 } else {
-                    try_apply(name, fmt_double(*cfg.convenience.frame_rate), false, ap, "", true);
+                    try_apply(name, fmt_double(*cfg.acquisition.frame_rate_hz), false, true);
                 }
             }
         }
 
-        // 8. Trigger: selector -> mode -> source -> activation.
-        if (cfg.convenience.trigger) {
-            const TriggerConfig &t = *cfg.convenience.trigger;
-            try_apply("TriggerSelector", t.selector, true, ap, "", false);
-            try_apply("TriggerMode", t.enabled ? "On" : "Off", true, ap, "", true);
-            if (t.enabled) {
-                try_apply("TriggerSource", t.source, true, ap, "", true);
-                try_apply("TriggerActivation", t.activation, true, ap, "", false);
-            }
+        // 8. Trigger (fx10 shape): selector first so TriggerMode targets the
+        // right trigger; freerun always writes Off (clears a sticky mode left
+        // by a previous run).
+        try_apply("TriggerSelector", t.selector_entry, true, false);
+        if (external) {
+            try_apply("TriggerSource", t.source_entry, true, true);
+            try_apply("TriggerActivation", t.activation == "rising" ? "RisingEdge" : "FallingEdge",
+                      true, false);
+            try_apply("TriggerMode", "On", true, true);
+        } else {
+            try_apply("TriggerMode", "Off", true, true);
         }
 
         // 9. User feature list, strictly in order (binning already applied).
-        for (size_t i = 0; i < cfg.genicam_features.size(); ++i) {
+        for (size_t i = 0; i < cfg.features.raw.size(); ++i) {
             if (hoisted[i]) {
                 continue;
             }
-            apply_genicam_feature(params(), cfg.genicam_features[i], ap, context);
+            apply_genicam_feature(params(), cfg.features.raw[i], context);
         }
 
         // 10. 64-bit BlockIDs: 16-bit IDs wrap every 65536 frames and break the
@@ -603,7 +575,7 @@ namespace jai::ebus {
         if (read_enum_feature(params(), "GevGVSPExtendedIDMode", ext_mode)) {
             if (lower(ext_mode) == "off") {
                 g_log.warn("[{}] [eBUS] GevGVSPExtendedIDMode is Off; Switching to On (64-bit BlockIDs)", camera_id_);
-                try_apply("GevGVSPExtendedIDMode", "On", true, ap, "warn", false);
+                try_apply("GevGVSPExtendedIDMode", "On", true, false);
             }
         } else {
             g_log.trace("[{}] [eBUS] GevGVSPExtendedIDMode not present", camera_id_);

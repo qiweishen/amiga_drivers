@@ -33,7 +33,7 @@ namespace Common::Markers {
 	inline constexpr std::string_view kFx10SessionIssues = "FX10 driver ended with issues";
 	inline constexpr std::string_view kGoxInitialized = "GoX driver initialized";
 	inline constexpr std::string_view kGoxShutdown = "GoX driver shutdown completely";
-	// Prefix only; the full line appends " (standalone exit code N)"
+	// Prefix only; the full line appends " (<concrete reason>)"
 	inline constexpr std::string_view kGoxSessionIssues = "GoX driver ended with issues";
 	inline constexpr std::string_view kIns401Initialized = "INS401 driver initialized";
 	inline constexpr std::string_view kIns401Shutdown = "INS401 driver shutdown completely";

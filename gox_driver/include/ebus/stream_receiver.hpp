@@ -26,8 +26,8 @@
 namespace jai::ebus {
     class StreamReceiver {
     public:
-        StreamReceiver(uint32_t camera_index, const CameraConfig &cfg, CameraController *controller,
-                       StopController *stop, CameraStats *stats);
+        StreamReceiver(uint32_t camera_index, const CameraConfig &cfg, const OutputConfig &output,
+                       CameraController *controller, StopController *stop, CameraStats *stats);
 
         ~StreamReceiver();
 
@@ -56,8 +56,11 @@ namespace jai::ebus {
         // classify the operation result, copy to a pool chunk, requeue, push.
         // Returns when the stop flag is set (after a final <=500 ms drain pass)
         // or the stream aborts. max_frames > 0 caps recorded-OK frames and
-        // requests StopReason::LimitReached when hit.
-        void run_acquisition(ChunkPool &pool, BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames);
+        // requests StopReason::LimitReached when hit. The fx10-style watchdog
+        // warns after no_frame_warn_s of silence and aborts the session after
+        // no_frame_abort_s (0 = never, external-trigger default).
+        void run_acquisition(ChunkPool &pool, BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames,
+                             const WatchdogConfig &watchdog, double no_frame_abort_s);
 
         // Ordered teardown (idempotent): StreamDisable (errors ignored when the
         // link is down) -> AbortQueuedBuffers -> retrieve-all-aborted loop ->
@@ -91,6 +94,7 @@ namespace jai::ebus {
         uint32_t camera_index_;
         std::string camera_id_;
         const CameraConfig &cfg_;
+        const OutputConfig &output_; // global output block (queue/drop policies)
         CameraController *controller_;
         StopController *stop_;
         CameraStats *stats_;

@@ -24,26 +24,11 @@
 #include "ebus/stream_receiver.hpp"
 
 namespace jai::ebus {
-    // Which bring-up phase failed; App maps this to the documented exit codes
-    // (Discovery/Apply -> 3, Ptp -> 4, Stream -> 5, Recorder -> 6).
-    enum class StartupPhase { None, Discovery, Ptp, Apply, Stream, Recorder };
-
-    const char *startup_phase_name(StartupPhase phase);
-
-    class StartupError : public std::runtime_error {
-    public:
-        StartupError(StartupPhase phase, const std::string &what) : std::runtime_error(what), phase_(phase) {
-        }
-
-        StartupPhase phase() const { return phase_; }
-
-    private:
-        StartupPhase phase_;
-    };
-
     class CameraSession {
     public:
-        CameraSession(uint32_t camera_index, const CameraConfig &cfg, const AcquisitionLimits &limits,
+        // `app` must outlive the session (owned by CaptureRunner); it carries
+        // the global output/disk/ptp blocks shared by every camera.
+        CameraSession(uint32_t camera_index, const CameraConfig &cfg, const AppConfig &app,
                       const uint8_t session_uuid[16], StopController *stop);
 
         ~CameraSession();
@@ -52,10 +37,8 @@ namespace jai::ebus {
 
         CameraSession &operator=(const CameraSession &) = delete;
 
-        // Full bring-up: discovery -> connect (+ communication params, link
-        // sink) -> PTP enable + wait -> stream open/negotiate/destination ->
-        // GenICam apply -> snapshots -> buffers -> recorder -> StreamEnable ->
-        // AcquisitionStart -> threads. Throws StartupError (phase-tagged).
+        // bring_up_session_() + start_streaming_() (fx10 phase split). Throws
+        // on any failure with the concrete "[<id>] ..." error message.
         void start(const std::string &session_dir);
 
         // Ordered shutdown; the caller must already have requested a stop:
@@ -79,6 +62,14 @@ namespace jai::ebus {
         void refresh_ptp_offset();
 
     private:
+        // connect (mac discovery or direct ip) -> PTP enable + wait ->
+        // stream open/negotiate/destination -> GenICam apply -> PTP baseline
+        void bring_up_session_();
+
+        // buffers -> recorder + queue/pool -> StreamEnable -> AcquisitionStart
+        // -> acquisition + writer threads
+        void start_streaming_();
+
         void acq_thread_main();
 
         void writer_thread_main();
@@ -87,7 +78,7 @@ namespace jai::ebus {
 
         uint32_t camera_index_;
         CameraConfig cfg_; // own copy; receiver_ keeps a reference into it
-        AcquisitionLimits limits_;
+        const AppConfig &app_; // global output/disk/ptp blocks
         uint8_t session_uuid_[16];
         StopController *stop_;
 
