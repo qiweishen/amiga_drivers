@@ -4,12 +4,10 @@
 add_executable(DataConverter
         src/main.cpp
         src/lms4xxx_csv_converter.cpp
-        src/ins401_csv_converter.cpp
 )
 
 target_include_directories(DataConverter PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/../ins401_driver/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../lms4xxx_driver/include
 )
 

@@ -369,7 +369,8 @@ namespace fx10 {
         geometry.height = getInt("Height");
         geometry.payload_size = device_.GetPayloadSize();
         geometry.pixel_format = getEnum("PixelFormat");
-        g_log.info("Camera geometry: {} samples x {} bands, {} (payload {} B/line)", geometry.width, geometry.height,
+        g_log.info("[eBUS] Camera geometry: {} samples x {} bands, {} (payload {} B/line)", geometry.width,
+                   geometry.height,
                    geometry.pixel_format, geometry.payload_size);
         return geometry;
     }

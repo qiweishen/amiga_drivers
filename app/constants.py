@@ -88,7 +88,6 @@ CONFIG_FILES: dict[str, ConfigFile] = {
     c.id: c
     for c in [
         ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml"),
-        ConfigFile("ins401", "INS401", REPO_ROOT / "ins401_driver" / "config" / "config-ins401.yaml"),
         ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
@@ -99,11 +98,10 @@ CONFIG_FILES: dict[str, ConfigFile] = {
 
 
 # Sensors shown on the dashboard; lms4xxx expands into one card per instance.
-DRIVERS = ("ins401", "lms4xxx", "gox", "asterx", "fx10")
+DRIVERS = ("lms4xxx", "gox", "asterx", "fx10")
 ENABLE_KEYS = {
     "asterx": "Enable ASTERX",
     "lms4xxx": "Enable LMS4XXX",
     "gox": "Enable GOX",
     "fx10": "Enable FX10",
-    "ins401": "Enable INS401"
 }

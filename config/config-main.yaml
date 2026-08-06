@@ -12,7 +12,7 @@ General:
     # It will be overrided by GUI
     Enable ASTERX: false
     Enable FX10: true
-    Enable GOX: true
+    Enable GOX: false
     Enable LMS4XXX: false
 
     # Path to the configuration files for each driver
@@ -21,9 +21,6 @@ General:
     GOX Driver Config Path: ./gox_driver/config/config-gox.yaml
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
 
-    # INS401 will not be supported in future update
-    Enable INS401: false
-    INS401 Driver Config Path: ./ins401_driver/config/config-ins401.yaml
 
 
 # =============================================================

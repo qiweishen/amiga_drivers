@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(AmigaDrivers
         VERSION 0.1.0
-        DESCRIPTION "Amiga Drivers - INS401, LMS4xxx, JAI Go-X, Septentrio AsteRx and Specim FX10"
+        DESCRIPTION "Amiga Drivers - LMS4xxx, JAI Go-X, Septentrio AsteRx and Specim FX10"
         LANGUAGES CXX C
 )
 
@@ -34,7 +34,6 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 ################################################################################
 # Shared System Packages
 find_package(Threads REQUIRED)
-find_package(Eigen3 REQUIRED)
 
 
 ################################################################################
@@ -65,7 +64,6 @@ add_subdirectory(common)
 
 ################################################################################
 # Driver Subdirectories
-add_subdirectory(ins401_driver)
 add_subdirectory(lms4xxx_driver)
 add_subdirectory(gox_driver)
 add_subdirectory(asterx_driver)
@@ -106,7 +104,6 @@ target_link_libraries(AmigaDrivers PRIVATE
         asterx_lib
         fx10_lib
         gox_lib
-        ins401_lib
         lms4xxx_lib
 )
 

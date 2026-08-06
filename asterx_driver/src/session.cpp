@@ -53,7 +53,7 @@ namespace asterx {
     void Session::connect_rx_signals_() {
         connect(rx_.get(), &SSN::SsnRx::connected, this, [this]() {
             g_log.info("Connected");
-            g_log.trace("[session] TCP connected to {}:{}", cfg_.host, cfg_.ctrl_port);
+            g_log.trace("[TCP] TCP connected to {}:{}", cfg_.host, cfg_.ctrl_port);
             state_ = State::WaitingDescriptor;
             // Covers waiting for the first prompt/descriptor as well
             command_timer_.start(kCommandTimeoutMs);
@@ -63,7 +63,7 @@ namespace asterx {
         connect(rx_.get(), &SSN::SsnRx::newConnectionDescriptor, this,
                 [this](const QString &d) {
                     descriptor_ = d.toStdString();
-                    g_log.trace("[session] connection descriptor: {}", descriptor_);
+                    g_log.trace("[TCP] connection descriptor: {}", descriptor_);
                     if (state_ != State::WaitingDescriptor) {
                         return;
                     }
@@ -88,7 +88,7 @@ namespace asterx {
 
         connect(rx_.get(), &SSN::SsnRx::sbfCRCError, this, [this]() {
             ++crc_errors_;
-            g_log.warn("[session] SBF CRC error (total {})", crc_errors_);
+            g_log.warn("[TCP] SBF CRC error (total {})", crc_errors_);
         });
 
         connect(rx_.get(), &SSN::SsnRx::discardedBytes, this, [this](int n) {
@@ -137,7 +137,7 @@ namespace asterx {
             return;
         }
         const auto &cmd = cmds_[cmd_index_];
-        g_log.trace("[session] -> ({}/{}) {}", cmd_index_ + 1, cmds_.size(), redact_cmd(cmd.text));
+        g_log.trace("[TCP] -> ({}/{}) {}", cmd_index_ + 1, cmds_.size(), redact_cmd(cmd.text));
         command_timer_.start(kCommandTimeoutMs);
         rx_->sendASCIICommand(QString::fromStdString(cmd.text));
     }
@@ -145,7 +145,7 @@ namespace asterx {
 
     void Session::handle_command_reply_(const std::string &reply, bool error) {
         if (state_ != State::Configuring || cmd_index_ >= cmds_.size()) {
-            g_log.trace("[session] Stray command reply ignored: {}", OneLine(reply));
+            g_log.trace("[TCP] Stray command reply ignored: {}", OneLine(reply));
             return;
         }
         command_timer_.stop();
@@ -153,18 +153,18 @@ namespace asterx {
 
         if (error) {
             if (cmd.kind == CommandKind::ToleratedError) {
-                g_log.trace("[session] Tolerated error for '{}': {}", redact_cmd(cmd.text), OneLine(reply));
+                g_log.trace("[TCP] Tolerated error for '{}': {}", redact_cmd(cmd.text), OneLine(reply));
             } else {
                 handle_failure_("receiver rejected '" + redact_cmd(cmd.text) + "': " + OneLine(reply));
                 return;
             }
         } else {
-            g_log.trace("[session] <- {}", OneLine(reply));
+            g_log.trace("[TCP] <- {}", OneLine(reply));
             try {
                 switch (cmd.kind) {
                     case CommandKind::CheckCapabilities: {
                         const auto caps = parse_receiver_capabilities_reply(reply);
-                        g_log.trace("[session] Capabilities: main={} aux1={} meas={}ms pvt={}ms ins={}ms",
+                        g_log.trace("[TCP] Capabilities: main={} aux1={} meas={}ms pvt={}ms ins={}ms",
                                     caps.has_main,
                                     caps.has_aux1,
                                     caps.measurement_interval_ms,
@@ -249,7 +249,8 @@ namespace asterx {
         }
         // Live CSV side channel: noexcept, degrades itself on failure
         // The .sbf recording path above stays authoritative
-        live_.on_block(reinterpret_cast<const std::uint8_t *>(block.constData()), static_cast<std::size_t>(block.size()));
+        live_.on_block(reinterpret_cast<const std::uint8_t *>(block.constData()),
+                       static_cast<std::size_t>(block.size()));
         if (state_ == State::Recording) {
             watchdog_timer_.start(kWatchdogMs);
         }
@@ -298,7 +299,7 @@ namespace asterx {
         if (state_ == State::Stopping) {
             return;
         }
-        g_log.critical("Startup Failed: {} — check host, credentials and  receiver state, then relaunch", reason);
+        g_log.critical("Startup Failed: {} — check host, credentials and receiver state, then relaunch", reason);
         shutdown();
         emit fatalError();
     }
@@ -359,7 +360,7 @@ namespace asterx {
         g_log.info(
             "Acquisition stopped ({} blocks delivered)", s.blocks_written);
         g_log.info(
-            "[STATISTICS] Final Stats: blocks={}  bytes={}  files={}  crc_fail={}  len_fail={}  discarded={}  live_rows={}  live_parse_err={}",
+            "[Statistics] Final: blocks={}  bytes={}  files={}  crc_fail={}  len_fail={}  discarded={}  live_rows={}  live_parse_err={}",
             s.blocks_written, s.bytes_written, s.files_opened,
             crc_errors_, length_errors_, discarded_bytes_, lv.rows_written, lv.parse_errors);
     }

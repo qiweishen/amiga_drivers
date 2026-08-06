@@ -67,8 +67,10 @@ TEST_CASE("stats: periodic_line computes rates against the previous snapshot") {
     CAPTURE(line);
     CHECK(contains(line, "[cam0]"));
     CHECK(contains(line, "up=00:01:05"));
+    CHECK(contains(line, "[Statistics] [cam0]"));
+    CHECK(contains(line, "rate=51.0 Hz")); // (101 ok + 1 incomplete) / 2 s: sensor output rate
     CHECK(contains(line, "fps=50.0")); // 100 frames / 2 s against the zero snapshot
-    CHECK(contains(line, "disk=0.5MB/s")); // 1e6 bytes / 2 s
+    CHECK(contains(line, "disk=0.5 MB/s")); // 1e6 bytes / 2 s
     CHECK(contains(line, "ok=101"));
     CHECK(contains(line, "incomp=1"));
     CHECK(contains(line, "drop_q=0"));
@@ -82,13 +84,15 @@ TEST_CASE("stats: periodic_line computes rates against the previous snapshot") {
     const std::string line2 = rep.periodic_line(2.0, 67, 1ull << 30);
     CAPTURE(line2);
     CHECK(contains(line2, "up=00:01:07"));
+    CHECK(contains(line2, "rate=0.0 Hz")); // no new frames from the camera this interval
     CHECK(contains(line2, "fps=25.0")); // (150 - 100) / 2
-    CHECK(contains(line2, "disk=1.0MB/s")); // (3e6 - 1e6) / 2
+    CHECK(contains(line2, "disk=1.0 MB/s")); // (3e6 - 1e6) / 2
 
     // A zero interval must not divide by zero.
     const std::string line3 = rep.periodic_line(0.0, 67, 0);
+    CHECK(contains(line3, "rate=0.0 Hz"));
     CHECK(contains(line3, "fps=0.0"));
-    CHECK(contains(line3, "disk=0.0MB/s"));
+    CHECK(contains(line3, "disk=0.0 MB/s"));
 }
 
 TEST_CASE("stats: final_summary contains the session totals") {
@@ -109,7 +113,7 @@ TEST_CASE("stats: final_summary contains the session totals") {
     const std::string s = rep.final_summary(/*uptime_s=*/3661);
     CAPTURE(s);
     CHECK(contains(s, "[cam1]"));
-    CHECK(contains(s, "session summary"));
+    CHECK(contains(s, "[Statistics] [cam1] Final:"));
     CHECK(contains(s, "duration=01:01:01"));
     CHECK(contains(s, "frames_ok=1000"));
     CHECK(contains(s, "incomplete=2"));

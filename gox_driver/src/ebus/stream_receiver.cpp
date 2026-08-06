@@ -40,7 +40,7 @@ namespace jai::ebus {
         try {
             teardown();
         } catch (const std::exception &e) {
-            g_log.warn("[{}] stream teardown in destructor failed: {}", camera_id_, e.what());
+            g_log.warn("[{}] [eBUS] stream teardown in destructor failed: {}", camera_id_, e.what());
         }
     }
 
@@ -54,7 +54,7 @@ namespace jai::ebus {
         rx_buffer_requested_ = sc.socket_rx_buffer_mb * 1024u * 1024u;
         PvResult r = stream_->SetUserModeSocketRxBufferSize(rx_buffer_requested_);
         if (!r.IsOK()) {
-            g_log.warn("[{}] SetUserModeSocketRxBufferSize({}) failed: {}", camera_id_, rx_buffer_requested_,
+            g_log.warn("[{}] [eBUS] SetUserModeSocketRxBufferSize({}) failed: {}", camera_id_, rx_buffer_requested_,
                        pv_result_to_string(r));
         }
 
@@ -73,7 +73,7 @@ namespace jai::ebus {
         }
         if (rx_buffer_effective_ != 0 && rx_buffer_effective_ < rx_buffer_requested_) {
             g_log.warn(
-                "[{}] socket rx buffer truncated by the kernel: requested {}, effective {}; fix on the host: sysctl -w "
+                "[{}] [eBUS] socket rx buffer truncated by the kernel: requested {}, effective {}; fix on the host: sysctl -w "
                 "net.core.rmem_max={}",
                 camera_id_, human_bytes(rx_buffer_requested_), human_bytes(rx_buffer_effective_), rx_buffer_requested_);
         }
@@ -84,7 +84,7 @@ namespace jai::ebus {
         if (sc.packet_size == 0) {
             r = dev->NegotiatePacketSize(sc.channel);
             if (!r.IsOK()) {
-                g_log.warn("[{}] NegotiatePacketSize failed ({}); falling back to SetPacketSize({})", camera_id_,
+                g_log.warn("[{}] [eBUS] NegotiatePacketSize failed ({}); falling back to SetPacketSize({})", camera_id_,
                            pv_result_to_string(r),
                            kFallbackPacketSize);
                 CHECK_PV(dev->SetPacketSize(kFallbackPacketSize, sc.channel), "PvDeviceGEV::SetPacketSize(fallback)");
@@ -92,7 +92,7 @@ namespace jai::ebus {
         } else {
             r = dev->SetPacketSize(sc.packet_size, sc.channel);
             if (!r.IsOK()) {
-                g_log.warn("[{}] SetPacketSize({}) failed ({}); trying negotiation", camera_id_, sc.packet_size,
+                g_log.warn("[{}] [eBUS] SetPacketSize({}) failed ({}); trying negotiation", camera_id_, sc.packet_size,
                            pv_result_to_string(r));
                 r = dev->NegotiatePacketSize(sc.channel);
                 if (!r.IsOK()) {
@@ -105,7 +105,8 @@ namespace jai::ebus {
         if (read_int_feature(controller_->params(), "GevSCPSPacketSize", effective_ps)) {
             packet_size_ = static_cast<uint32_t>(effective_ps);
         }
-        g_log.info("[{}] stream open: device {} -> {}:{} channel {}, packet size {}", camera_id_, device_ip, local_ip_,
+        g_log.info("[{}] [eBUS] stream open: device {} -> {}:{} channel {}, packet size {}", camera_id_, device_ip,
+                   local_ip_,
                    local_port_,
                    sc.channel, packet_size_);
 
@@ -162,7 +163,7 @@ namespace jai::ebus {
                 throw SdkError("PvStreamGEV::QueueBuffer", qr);
             }
         }
-        g_log.info("[{}] {} GVSP buffers of {} queued ({} total)", camera_id_, count,
+        g_log.info("[{}] [eBUS] {} GVSP buffers of {} queued ({} total)", camera_id_, count,
                    human_bytes(expected_payload_size_),
                    human_bytes(count * expected_payload_size_));
     }
@@ -179,7 +180,7 @@ namespace jai::ebus {
             return false;
         }
         if (code == PvResult::Code::BUFFER_TOO_SMALL) {
-            g_log.error("[{}] buffer too small for the incoming payload — the device "
+            g_log.error("[{}] [eBUS] buffer too small for the incoming payload — the device "
                         "payload size changed after buffer allocation; fatal",
                         camera_id_);
             stream_->QueueBuffer(buffer);
@@ -294,7 +295,7 @@ namespace jai::ebus {
             stats_->frames_retrieved_ok.fetch_add(1, std::memory_order_relaxed);
             ++recorded_ok_;
             if (max_frames > 0 && recorded_ok_ >= max_frames) {
-                g_log.info("[{}] max_frames ({}) reached", camera_id_, max_frames);
+                g_log.info("[{}] [eBUS] max_frames ({}) reached", camera_id_, max_frames);
                 stop_->request_stop(StopReason::LimitReached);
             }
         }
@@ -305,7 +306,7 @@ namespace jai::ebus {
             const uint64_t now = now_monotonic_ns();
             if (now - last_behind_warn_mono_ns_ > 5000000000ull) {
                 last_behind_warn_mono_ns_ = now;
-                g_log.warn("[{}] writer falling behind: only {}/{} GVSP buffers queued", camera_id_,
+                g_log.warn("[{}] [eBUS] writer falling behind: only {}/{} GVSP buffers queued", camera_id_,
                            stream_->GetQueuedBufferCount(),
                            buffers_.size());
             }
@@ -335,13 +336,13 @@ namespace jai::ebus {
                     stats_->retrieve_timeouts.fetch_add(1, std::memory_order_relaxed);
                     const double quiet = std::chrono::duration<double>(clock::now() - last_frame).count();
                     if (no_frame_abort_s > 0.0 && quiet > no_frame_abort_s) {
-                        g_log.error("[{}] Watchdog: no frames for {:.1f} s; stopping", camera_id_, quiet);
+                        g_log.error("[{}] [eBUS] Watchdog: no frames for {:.1f} s; stopping", camera_id_, quiet);
                         stop_->request_stop(StopReason::Error);
                         break;
                     }
                     if (watchdog.no_frame_warn_s > 0.0 && clock::now() >= next_warn) {
                         g_log.warn(
-                            "[{}] No frames for {:.1f} s (external trigger idle, pulses stopped, or stream problem)",
+                            "[{}] [eBUS] No frames for {:.1f} s (external trigger idle, pulses stopped, or stream problem)",
                             camera_id_, quiet);
                         next_warn = clock::now() + std::chrono::duration_cast<clock::duration>(
                                         std::chrono::duration<double>(std::max(watchdog.no_frame_warn_s, quiet)));
@@ -351,7 +352,7 @@ namespace jai::ebus {
                 if (r.GetCode() == PvResult::Code::ABORTED) {
                     break; // stop flow
                 }
-                g_log.error("[{}] RetrieveBuffer failed: {}", camera_id_, pv_result_to_string(r));
+                g_log.error("[{}] [eBUS] RetrieveBuffer failed: {}", camera_id_, pv_result_to_string(r));
                 stop_->request_stop(StopReason::Error);
                 break;
             }
@@ -369,7 +370,7 @@ namespace jai::ebus {
         const uint64_t drain_deadline = now_monotonic_ns() + kDrainMaxTotalNs;
         while (true) {
             if (now_monotonic_ns() >= drain_deadline) {
-                g_log.warn("[{}] drain budget exhausted while frames were still arriving; "
+                g_log.warn("[{}] [eBUS] drain budget exhausted while frames were still arriving; "
                            "did AcquisitionStop reach the device?",
                            camera_id_);
                 break;
@@ -404,7 +405,7 @@ namespace jai::ebus {
                 PvResult op_result;
                 const PvResult r = stream_->RetrieveBuffer(&buffer, &op_result, kDrainTimeoutMs);
                 if (!r.IsOK()) {
-                    g_log.warn("[{}] retrieve of aborted buffer failed: {}", camera_id_, pv_result_to_string(r));
+                    g_log.warn("[{}] [eBUS] retrieve of aborted buffer failed: {}", camera_id_, pv_result_to_string(r));
                     break;
                 }
                 // op result ABORTED expected here; buffers are not requeued.
@@ -415,7 +416,7 @@ namespace jai::ebus {
             stream_->Close();
         }
         stream_.reset();
-        g_log.info("[{}] stream closed", camera_id_);
+        g_log.info("[{}] [eBUS] stream closed", camera_id_);
     }
 
     void StreamReceiver::poll_stream_stats() {
@@ -441,7 +442,7 @@ namespace jai::ebus {
         try {
             std::ofstream out(path, std::ios::trunc);
             if (!out) {
-                g_log.warn("[{}] cannot open stream parameter dump {}", camera_id_, path);
+                g_log.warn("[{}] [eBUS] cannot open stream parameter dump {}", camera_id_, path);
                 return;
             }
             out << "# PvStream parameter dump: " << camera_id_ << "\n";
@@ -463,10 +464,9 @@ namespace jai::ebus {
                 }
                 out << to_std(name) << " = " << value << "\n";
             }
-            g_log.info("[{}] stream statistics dumped: {}", camera_id_, path);
+            g_log.info("[{}] [eBUS] stream statistics dumped: {}", camera_id_, path);
         } catch (const std::exception &e) {
-            g_log.warn("[{}] stream parameter dump failed: {}", camera_id_, e.what());
+            g_log.warn("[{}] [eBUS] stream parameter dump failed: {}", camera_id_, e.what());
         }
     }
-
 } // namespace jai::ebus

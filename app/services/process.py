@@ -105,15 +105,15 @@ async def start() -> None:
     _cancel(_watcher_task)
     _cancel(_exit_poll_task)
 
-    # File caps for INS401 raw sockets / LMS SCHED_FIFO (mirrors Start.bash).
+    # File caps for LMS SCHED_FIFO (mirrors Start.bash).
     # Needs root: docker -> exec -u root; native -> sudo -n (may be refused —
     # then run Start.bash manually once, or run the GUI as root).
     res = await runtime.exec_(
-        ["setcap", "cap_net_raw,cap_sys_nice+ep", runtime.exec_path(BIN_AMIGA)],
+        ["setcap", "cap_sys_nice+ep", runtime.exec_path(BIN_AMIGA)],
         root=True, timeout=10,
     )
     if not res.ok:
-        BUFFER.append(parse_line(f"setcap failed (INS401 may abort): {res.stderr.strip()}",
+        BUFFER.append(parse_line(f"setcap failed (LMS realtime scheduling degraded): {res.stderr.strip()}",
                                  fallback_module="gui"))
 
     proc = await runtime.spawn([runtime.exec_path(BIN_AMIGA), runtime.exec_path(MAIN_CONFIG)])

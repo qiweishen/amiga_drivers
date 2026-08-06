@@ -12,91 +12,93 @@
 
 
 namespace LMS4xxx {
+    // Forward declarations (implementation details).
+    class FrameReceiver;
+    class CoLaBCodec;
+    class CommandBuilder;
+    class ScanDataParser;
 
-	// Forward declarations (implementation details).
-	class FrameReceiver;
-	class CoLaBCodec;
-	class CommandBuilder;
-	class ScanDataParser;
 
+    // Main driver class for the SICK LMS4xxx 2D LiDAR sensor.
+    class LMS4xxxDriver {
+    public:
+        explicit LMS4xxxDriver(const DriverConfig &config);
 
-	// Main driver class for the SICK LMS4xxx 2D LiDAR sensor.
-	class LMS4xxxDriver {
-	public:
-		explicit LMS4xxxDriver(const DriverConfig &config);
-		~LMS4xxxDriver();
+        ~LMS4xxxDriver();
 
-		// Non-copyable, non-movable (owns threads and I/O resources).
-		LMS4xxxDriver(const LMS4xxxDriver &) = delete;
-		LMS4xxxDriver &operator=(const LMS4xxxDriver &) = delete;
-		LMS4xxxDriver(LMS4xxxDriver &&) = delete;
-		LMS4xxxDriver &operator=(LMS4xxxDriver &&) = delete;
+        // Non-copyable, non-movable (owns threads and I/O resources).
+        LMS4xxxDriver(const LMS4xxxDriver &) = delete;
 
-		// Establish TCP connection to the sensor.
-		[[nodiscard]] std::error_code Connect();
+        LMS4xxxDriver &operator=(const LMS4xxxDriver &) = delete;
 
-		// Send configuration commands to the sensor.
-		[[nodiscard]] std::error_code Configure();
+        LMS4xxxDriver(LMS4xxxDriver &&) = delete;
 
-		// Enable continuous scan data streaming (sEN LMDscandata 1).
-		[[nodiscard]] std::error_code StartScanning();
+        LMS4xxxDriver &operator=(LMS4xxxDriver &&) = delete;
 
-		// Disable continuous scan data streaming (sEN LMDscandata 0).
-		std::error_code StopScanning();
+        // Establish TCP connection to the sensor.
+        [[nodiscard]] std::error_code Connect();
 
-		// Close the TCP connection and release resources.
-		void Disconnect();
+        // Send configuration commands to the sensor.
+        [[nodiscard]] std::error_code Configure();
 
-		// Register callback for scan data. Called from the parse thread.
-		void SetScanCallback(ScanDataCallback callback);
+        // Enable continuous scan data streaming (sEN LMDscandata 1).
+        [[nodiscard]] std::error_code StartScanning();
 
-		// Register callback for connection state changes.
-		void SetConnectionCallback(ConnectionStateCallback callback);
+        // Disable continuous scan data streaming (sEN LMDscandata 0).
+        std::error_code StopScanning();
 
-		// Register callback for errors (CRC, protocol, device errors).
-		void SetErrorCallback(ErrorCallback callback);
+        // Close the TCP connection and release resources.
+        void Disconnect();
 
-		// Current connection state.
-		[[nodiscard]] ConnectionState GetConnectionState() const;
+        // Register callback for scan data. Called from the parse thread.
+        void SetScanCallback(ScanDataCallback callback);
 
-		// True if connected to the sensor.
-		[[nodiscard]] bool IsConnected() const;
+        // Register callback for errors (CRC, protocol, device errors).
+        void SetErrorCallback(ErrorCallback callback);
 
-		// True if actively receiving scan data.
-		[[nodiscard]] bool IsScanning() const;
+        // Current connection state.
+        [[nodiscard]] ConnectionState GetConnectionState() const;
 
-		// Get a snapshot of the runtime statistics.
-		[[nodiscard]] DriverStatistics::Snapshot GetStatistics() const;
+        // True if connected to the sensor.
+        [[nodiscard]] bool IsConnected() const;
 
-		// Log current statistics at INFO level.
-		void LogStatistics() const;
+        // True if actively receiving scan data.
+        [[nodiscard]] bool IsScanning() const;
 
-		// Request a single scan frame (sRN LMDscandata). Blocks until response received or timeout.
-		[[nodiscard]] std::error_code PollSingleScan(ScanData &out);
+        // True after a fatal runtime fault: first-scan verification failure
+        // (scan content / NTP clock) or a receive-channel error. The owner must
+        // poll this and stop the run — the driver keeps its threads alive so
+        // the teardown stays on the owner's thread.
+        [[nodiscard]] bool HasFault() const;
 
-		// Start device measurement (sMN LMCstartmeas). Requires login.
-		[[nodiscard]] std::error_code StartMeasurement();
+        // Get a snapshot of the runtime statistics.
+        [[nodiscard]] DriverStatistics::Snapshot GetStatistics() const;
 
-		// Stop device measurement (sMN LMCstopmeas). Requires login.
-		[[nodiscard]] std::error_code StopMeasurement();
+        // Request a single scan frame (sRN LMDscandata). Blocks until response received or timeout.
+        [[nodiscard]] std::error_code PollSingleScan(ScanData &out);
 
-		// Enter standby mode (sMN LMCstandby). Shuts off laser, motor keeps running.
-		[[nodiscard]] std::error_code Standby();
+        // Start device measurement (sMN LMCstartmeas). Requires login.
+        [[nodiscard]] std::error_code StartMeasurement();
 
-		// Reboot the device (sMN mSCreboot).
-		[[nodiscard]] std::error_code RebootDevice();
+        // Stop device measurement (sMN LMCstopmeas). Requires login.
+        [[nodiscard]] std::error_code StopMeasurement();
 
-		// Update the scan configuration. Must call Configure() afterwards.
-		void SetScanConfig(const ScanConfig &config);
+        // Enter standby mode (sMN LMCstandby). Shuts off laser, motor keeps running.
+        [[nodiscard]] std::error_code Standby();
 
-		// Get the current driver configuration.
-		[[nodiscard]] const DriverConfig &GetConfig() const;
+        // Reboot the device (sMN mSCreboot).
+        [[nodiscard]] std::error_code RebootDevice();
 
-	private:
-		struct Impl;
-		std::unique_ptr<Impl> impl_;
-	};
+        // Update the scan configuration. Must call Configure() afterwards.
+        void SetScanConfig(const ScanConfig &config);
 
-}  // namespace LMS4xxx
+        // Get the current driver configuration.
+        [[nodiscard]] const DriverConfig &GetConfig() const;
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> impl_;
+    };
+} // namespace LMS4xxx
 
 #endif	// LMS4XXX_DRIVER_H

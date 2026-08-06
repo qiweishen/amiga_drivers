@@ -23,7 +23,6 @@ add_executable(fx10_tests
   test_config.cpp
   test_envi_header.cpp
   test_envi_recorder.cpp
-  test_sidecar.cpp
   test_wavelengths.cpp
 )
 target_link_libraries(fx10_tests PRIVATE fx10_core fx10_warnings GTest::gtest_main GTest::gmock

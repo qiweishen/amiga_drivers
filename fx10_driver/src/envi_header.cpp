@@ -49,12 +49,12 @@ namespace fx10 {
         }
         if (!info.wavelengths_nm.empty() && info.wavelengths_nm.size() != info.bands) {
             throw RecorderError("[Writer] ENVI header: wavelength count " +
-                                        std::to_string(info.wavelengths_nm.size()) +
-                                        " does not match bands " + std::to_string(info.bands));
+                                std::to_string(info.wavelengths_nm.size()) +
+                                " does not match bands " + std::to_string(info.bands));
         }
         if (!info.fwhm_nm.empty() && info.fwhm_nm.size() != info.bands) {
             throw RecorderError("[Writer] ENVI header: fwhm count " + std::to_string(info.fwhm_nm.size()) +
-                                        " does not match bands " + std::to_string(info.bands));
+                                " does not match bands " + std::to_string(info.bands));
         }
 
         std::ostringstream os;

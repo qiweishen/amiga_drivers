@@ -54,7 +54,7 @@ namespace jai {
         try {
             close();
         } catch (const std::exception &e) {
-            g_log.error("recorder({}): close failed in destructor: {}", opts_.camera_id, e.what());
+            g_log.error("[{}] [Writer] close failed in destructor: {}", opts_.camera_id, e.what());
         }
     }
 
@@ -95,7 +95,7 @@ namespace jai {
             if (errno == ENOSPC) {
                 throw_errno("fallocate " + seg_path);
             }
-            g_log.warn("recorder({}): fallocate unsupported on this filesystem ({}); continuing without preallocation",
+            g_log.warn("[{}] [Writer] fallocate unsupported on this filesystem ({}); continuing without preallocation",
                        opts_.camera_id, std::strerror(errno));
         }
 
@@ -144,7 +144,7 @@ namespace jai {
         if (stats_) {
             stats_->segments_created.fetch_add(1, std::memory_order_relaxed);
         }
-        g_log.debug("recorder({}): opened segment {}", opts_.camera_id, seg_path);
+        g_log.debug("[{}] [Writer] opened segment {}", opts_.camera_id, seg_path);
     }
 
     void Recorder::write_frame(const FrameMeta &meta, const uint8_t *data, size_t size) {
@@ -256,7 +256,6 @@ namespace jai {
             stats_->frames_written.fetch_add(1, std::memory_order_relaxed);
             stats_->bytes_written.fetch_add(record_bytes, std::memory_order_relaxed);
         }
-
     }
 
     void Recorder::write_iov_all(const struct iovec *iov, int iovcnt, size_t total) {

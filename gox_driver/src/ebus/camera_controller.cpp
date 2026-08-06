@@ -365,7 +365,7 @@ namespace jai::ebus {
         try {
             disconnect();
         } catch (const std::exception &e) {
-            g_log.warn("[{}] Disconnect during teardown failed: {}", camera_id_, e.what());
+            g_log.warn("[{}] [eBUS] Disconnect during teardown failed: {}", camera_id_, e.what());
         }
     }
 
@@ -373,7 +373,7 @@ namespace jai::ebus {
     void CameraController::connect(const std::string &target, DiscoveredDevice identity) {
         identity_ = std::move(identity);
         device_ = std::make_unique<PvDeviceGEV>();
-        g_log.info("[{}] Connecting to {} ...", camera_id_, target);
+        g_log.info("[{}] [eBUS] Connecting to {} ...", camera_id_, target);
         CHECK_PV(device_->Connect(PvString(target.c_str()), PvAccessControl), "PvDeviceGEV::Connect");
 
         // Direct dials skip discovery
@@ -442,7 +442,7 @@ namespace jai::ebus {
         f.value = value;
         f.value_is_string = value_is_string;
         std::string readback;
-        const bool ok = apply_genicam_feature(params(), f, "[" + camera_id_ + "] device", required, &readback);
+        const bool ok = apply_genicam_feature(params(), f, "[" + camera_id_ + "] [eBUS] device", required, &readback);
         if (ok) {
             g_log.trace("[{}] [eBUS] {} = {}{}", camera_id_, name, value,
                         readback.empty() ? "" : " (readback " + readback + ")");
@@ -451,7 +451,7 @@ namespace jai::ebus {
     }
 
     void CameraController::apply_config(const CameraConfig &cfg) {
-        const std::string context = "[" + camera_id_ + "] device";
+        const std::string context = "[" + camera_id_ + "] [eBUS] device";
 
         // 1. Disable automatics first so the manual exposure/gain writes stick.
         try_apply("ExposureAuto", "Off", true, false);
@@ -610,7 +610,7 @@ namespace jai::ebus {
             throw SdkError("AcquisitionStart command not found on device");
         }
         CHECK_PV(cmd->Execute(), "AcquisitionStart");
-        g_log.info("[{}] AcquisitionStart executed", camera_id_);
+        g_log.info("[{}] [eBUS] AcquisitionStart executed", camera_id_);
     }
 
 
@@ -630,9 +630,9 @@ namespace jai::ebus {
             if (!ignore_errors && !link_lost()) {
                 throw SdkError("AcquisitionStop", r);
             }
-            g_log.debug("[{}] AcquisitionStop ignored failure: {}", camera_id_, pv_result_to_string(r));
+            g_log.debug("[{}] [eBUS] AcquisitionStop ignored failure: {}", camera_id_, pv_result_to_string(r));
         } else {
-            g_log.info("[{}] AcquisitionStop executed", camera_id_);
+            g_log.info("[{}] [eBUS] AcquisitionStop executed", camera_id_);
         }
     }
 
@@ -640,7 +640,7 @@ namespace jai::ebus {
     void CameraController::OnLinkDisconnected(PvDevice *) {
         link_lost_.store(true, std::memory_order_relaxed);
         g_log.error(
-            "[{}] device link lost; stopping to preserve captured data (automatic reconnect is not implemented in v1)",
+            "[{}] [eBUS] device link lost; stopping to preserve captured data (automatic reconnect is not implemented in v1)",
             camera_id_);
         if (stop_ != nullptr) {
             stop_->request_stop(StopReason::Error);

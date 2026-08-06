@@ -21,7 +21,7 @@ namespace jai::ebus {
         try {
             stop_and_join();
         } catch (const std::exception &e) {
-            g_log.error("[{}] teardown in destructor failed: {}", cfg_.id, e.what());
+            g_log.error("[{}] [eBUS] teardown in destructor failed: {}", cfg_.id, e.what());
         }
     }
 
@@ -59,7 +59,8 @@ namespace jai::ebus {
         }
 
         // Stream open (rx buffer, negotiate, destination, SCPD, tuning).
-        receiver_ = std::make_unique<StreamReceiver>(camera_index_, cfg_, app_.output, controller_.get(), stop_, &stats_);
+        receiver_ = std::make_unique<StreamReceiver>(camera_index_, cfg_, app_.output, controller_.get(), stop_,
+                                                     &stats_);
         try {
             receiver_->open();
         } catch (const std::exception &e) {
@@ -104,10 +105,10 @@ namespace jai::ebus {
             queue_ = std::make_unique<BoundedQueue<FrameChunkPtr> >(app_.output.queue_max_frames);
         } catch (const std::bad_alloc &) {
             throw std::runtime_error("[" + cfg_.id + "] cannot allocate " +
-                                                     std::to_string(app_.output.queue_max_frames + 2) +
-                                                     " frame chunks of " + std::to_string(
-                                                         receiver_->expected_payload_size()) +
-                                                     " bytes each (out of memory; lower recording.queue_max_frames)");
+                                     std::to_string(app_.output.queue_max_frames + 2) +
+                                     " frame chunks of " + std::to_string(
+                                         receiver_->expected_payload_size()) +
+                                     " bytes each (out of memory; lower recording.queue_max_frames)");
         }
         stats_.queue_capacity.store(queue_->capacity(), std::memory_order_relaxed);
         recorder_ = std::make_unique<Recorder>(opts, &stats_);
@@ -127,7 +128,7 @@ namespace jai::ebus {
         started_ = true;
         acq_thread_ = std::thread(&CameraSession::acq_thread_main, this);
         writer_thread_ = std::thread(&CameraSession::writer_thread_main, this);
-        g_log.info("[{}] recording to {}", cfg_.id, camera_dir_);
+        g_log.info("[{}] [eBUS] recording to {}", cfg_.id, camera_dir_);
     }
 
     void CameraSession::acq_thread_main() {
@@ -136,7 +137,7 @@ namespace jai::ebus {
                     app_.watchdog.resolved_no_frame_abort_s(cfg_.acquisition.trigger.mode);
             receiver_->run_acquisition(*pool_, *queue_, app_.output.max_frames, app_.watchdog, no_frame_abort_s);
         } catch (const std::exception &e) {
-            g_log.error("[{}] acquisition thread failed: {}", cfg_.id, e.what());
+            g_log.error("[{}] [eBUS] acquisition thread failed: {}", cfg_.id, e.what());
             stop_->request_stop(StopReason::Error);
         }
         // EOS for the writer: close() lets pop() drain the remaining items.
@@ -153,7 +154,7 @@ namespace jai::ebus {
                     recorder_->write_frame(chunk->meta, chunk->data.get(),
                                            static_cast<size_t>(chunk->meta.payload_size));
                 } catch (const IoError &e) {
-                    g_log.error("[{}] write failed: {}", cfg_.id, e.what());
+                    g_log.error("[{}] [eBUS] write failed: {}", cfg_.id, e.what());
                     stop_->request_stop(StopReason::Error);
                     io_failed = true; // keep draining to unblock the producer
                 }
@@ -163,7 +164,7 @@ namespace jai::ebus {
         try {
             recorder_->close();
         } catch (const IoError &e) {
-            g_log.error("[{}] recorder close failed: {}", cfg_.id, e.what());
+            g_log.error("[{}] [eBUS] recorder close failed: {}", cfg_.id, e.what());
             stop_->request_stop(StopReason::Error);
         }
     }
@@ -173,7 +174,7 @@ namespace jai::ebus {
             try {
                 controller_->acquisition_stop(/*ignore_errors=*/true);
             } catch (const std::exception &e) {
-                g_log.debug("[{}] acquisition stop during teardown: {}", cfg_.id, e.what());
+                g_log.debug("[{}] [eBUS] acquisition stop during teardown: {}", cfg_.id, e.what());
             }
             receiver_->teardown();
         }
@@ -202,7 +203,7 @@ namespace jai::ebus {
         try {
             controller_->acquisition_stop(/*ignore_errors=*/true);
         } catch (const std::exception &e) {
-            g_log.debug("[{}] AcquisitionStop during shutdown: {}", cfg_.id, e.what());
+            g_log.debug("[{}] [eBUS] AcquisitionStop during shutdown: {}", cfg_.id, e.what());
         }
 
         // 2. acquisition thread drains RetrieveBuffer, closes the queue, exits
@@ -222,7 +223,7 @@ namespace jai::ebus {
 
         // 5. control channel down last
         controller_->disconnect();
-        g_log.info("[{}] session stopped", cfg_.id);
+        g_log.info("[{}] [eBUS] session stopped", cfg_.id);
     }
 
     bool CameraSession::clean() const {

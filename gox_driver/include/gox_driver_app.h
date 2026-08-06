@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "data_type.h"
 #include "driver_app.h"
@@ -36,6 +37,7 @@ private:
     // Declaration order matters: stop_ must outlive runner_ (the runner's CameraSessions hold a StopController*)
     std::unique_ptr<jai::StopController> stop_;
     std::unique_ptr<jai::CaptureRunner> runner_;
+    std::vector<std::string> camera_ids_; // enabled cameras, for the per-instance markers
 
     std::atomic<bool> shutdown_called_{false};
 };

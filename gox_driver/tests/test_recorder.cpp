@@ -4,11 +4,11 @@
 // shares no code with the Recorder, so the on-disk format itself is what is
 // being verified (as scripts/inspect_raw.py will see it).
 
-#include "../include/recorder.hpp"
+#include "recorder.hpp"
 
-#include "../include/format.hpp"
-#include "core/frame.hpp"
-#include "../include/stats.hpp"
+#include "format.hpp"
+#include "frame.hpp"
+#include "stats.hpp"
 
 #include <doctest/doctest.h>
 #include <nlohmann/json.hpp>

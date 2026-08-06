@@ -8,18 +8,16 @@
 #include "app_config.hpp"
 
 namespace {
-
-std::filesystem::path write_temp_config(const std::string& yaml) {
-    static int seq = 0;
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("asterx_app_config_test_" + std::to_string(++seq) + ".yaml");
-    std::ofstream out(path);
-    out << yaml;
-    out.close();
-    return path;
-}
-
-}  // namespace
+    std::filesystem::path write_temp_config(const std::string &yaml) {
+        static int seq = 0;
+        const auto path = std::filesystem::temp_directory_path() /
+                          ("asterx_app_config_test_" + std::to_string(++seq) + ".yaml");
+        std::ofstream out(path);
+        out << yaml;
+        out.close();
+        return path;
+    }
+} // namespace
 
 TEST(AppConfig, MissingLeverArmFails) {
     const auto path = write_temp_config(R"yaml(
@@ -36,8 +34,8 @@ receiver:
 
 TEST(AppConfig, LoadsManualOrientationConfig) {
     const auto path = write_temp_config(R"yaml(
-connection:
-  host: "192.0.2.10"
+device:
+  ip: "192.0.2.10"
   user: "admin"
   password: "secret"
 receiver:

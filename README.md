@@ -1,10 +1,10 @@
 # Amiga Drivers
 
-Unified data acquisition for five sensors — Septentrio **AsteRx** (GNSS/INS),
-JAI **Go-X** GigE cameras, Specim **FX10** hyperspectral line-scan camera,
-Aceinna **INS401** (INS/GNSS) and SICK **LMS4xxx** 2D LiDARs — running
-concurrently in one process with a shared logging, configuration and lifecycle
-framework.
+Unified data acquisition for four sensors — Septentrio **AsteRx** (GNSS/INS),
+JAI **Go-X** GigE cameras, Specim **FX10** hyperspectral line-scan camera and
+SICK **LMS4xxx** 2D LiDARs — running concurrently in one process with a shared
+logging, configuration and lifecycle framework. (A former fifth driver,
+Aceinna INS401, is retired and archived outside this repository.)
 
 ## Architecture
 
@@ -14,15 +14,15 @@ framework.
                       |  SignalHandler · spdlog (single instance) ·       |
                       |  session folder · config snapshot · terminate     |
                       |  propagation                                      |
-                      +--+----------+----------+-----------+----------+---+
-                         |          |          |           |          |
-                 AsterxDriverApp GoxApp    Fx10App     Ins401App  Lms4xxxApp (xN)
-                         |          |          |           |          |
-                  Qt thread +   eBUS SDK   eBUS SDK    AF_PACKET  TCP CoLa-B client
-                  SsnRx (TCP)   (GVSP)     (GVSP)      raw socket + SPSC ring buffer
-                         |          |          |        + NTRIP   + writer thread
-                     SBF files  jai-raw-seg ENVI BIL    6 bin/rtcm  scan_*.bin
-                                 segments   + sidecar   /nmea files
+                      +--+----------+----------+----------+---------------+
+                         |          |          |          |
+                 AsterxDriverApp GoxApp    Fx10App    Lms4xxxApp (xN)
+                         |          |          |          |
+                  Qt thread +   eBUS SDK   eBUS SDK   TCP CoLa-B client
+                  SsnRx (TCP)   (GVSP)     (GVSP)     + SPSC ring buffer
+                         |          |          |      + writer thread
+                     SBF files  jai-raw-seg ENVI BIL  scan_*.bin
+                                 segments   + trig log
 ```
 
 Every driver app implements the same duck-typed interface consumed by
@@ -39,7 +39,7 @@ to everyone (orderly join + shutdown).
 | `jai_discover` / `jai_snapshot` | GigE enumeration / one-shot frame grab (used by the web GUI) |
 | `fx10_probe` / `fx10_snapshot` | FX10 link/discovery smoke test / GUI waterfall preview grab |
 | `jai_fake_capture` | SDK-free synthetic-frame test of the gox storage chain |
-| `asterx_lib`, `fx10_lib`, `gox_lib`, `ins401_lib`, `lms4xxx_lib` | Per-driver static libraries |
+| `asterx_lib`, `fx10_lib`, `gox_lib`, `lms4xxx_lib` | Per-driver static libraries |
 | `amiga_common` | Shared infrastructure: logging, config loading, signal handling, SPSC ring buffer, GUI marker contract |
 
 ### Dependencies
@@ -47,15 +47,13 @@ to everyone (orderly join + shutdown).
 | Dependency | Provided by | Used by |
 |-----------|-------------|---------|
 | spdlog v1.17.0 (+fmt) | FetchContent, pinned in `3rd_party/FetchContent/` | all (single process-wide logger) |
-| yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + asterx/ins401/lms4xxx configs |
-| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | gox (strict JSONC config, session metadata) + fx10 (session.json) |
+| yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + asterx/lms4xxx configs |
+| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | gox (jai-raw-seg idx.jsonl, snapshot tools) + drivers.json |
 | doctest 2.4.11 | vendored `3rd_party/doctest/` | common + gox unit tests |
-| Boost (header-only) | system | lms4xxx (Asio TCP), ins401 (CRC) |
-| Eigen3 | system | ins401 (orientation math) |
+| Boost (header-only) | system | lms4xxx (Asio TCP) |
 | Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
 | eBUS SDK (Pleora) 6.5.1 | installed in the devcontainer (single SDK, root `cmake/FindeBUS.cmake`) | gox + fx10 (GigE Vision) |
 | GoogleTest v1.14 | FetchContent (asterx tests; apt fallback for fx10) | asterx + fx10 unit tests |
-| GeographicLib v2.7 | FetchContent (ins401 tests only, fetched on Debug configure) | ins401 CompareGravityAccuracy test |
 
 ## Building
 
@@ -80,7 +78,7 @@ GoogleTest) by default; Release builds skip them.
 ```
 
 `config/config-main.yaml` selects the drivers
-(`Enable ASTERX/FX10/GOX/INS401/LMS4XXX`), their per-driver config paths and
+(`Enable ASTERX/FX10/GOX/LMS4XXX`), their per-driver config paths and
 the `Output Directory`. Each run creates a session folder:
 
 ```
@@ -88,8 +86,7 @@ the `Output Directory`. Each run creates a session folder:
 ├── log_<ts>.log          # unified trace-level log (the GUI's primary feed)
 ├── config/               # snapshot of every enabled driver's config
 └── bin/<driver>/         # asterx: *.sbf · gox: jai-raw-seg segments
-                          # fx10: ENVI .bil/.hdr/.times + session.json sessions
-                          # ins401: gnss/ins/imu/diagnostic .bin + .rtcm3/.nmea
+                          # fx10: ENVI .bil/.hdr + sensor_trigger.log sessions
                           # lms4xxx: scan_<instance>_<ts>.bin
 ```
 
@@ -97,9 +94,62 @@ Shutdown: `Ctrl+C` or `SIGTERM` — the signal handler sets the shared terminate
 flag and every driver flushes and closes in order ("All drivers shut down" in
 the log marks a clean exit).
 
-Privileges: ins401 needs `CAP_NET_RAW` (raw Ethernet socket); lms4xxx requests
-`SCHED_FIFO`/CPU affinity and degrades with a warning without `CAP_SYS_NICE`.
-The web GUI applies `setcap` automatically before starting.
+Privileges: lms4xxx requests `SCHED_FIFO`/CPU affinity and degrades with a
+warning without `CAP_SYS_NICE`; the web GUI applies `setcap` automatically
+before starting.
+
+## Logging conventions
+
+Every line is `[HH:MM:SS] [level] [Module]: msg`. On top of that, the drivers
+(asterx / fx10 / gox / lms4xxx) follow three rules:
+
+**1. Module tags are two-layered.** Only `*_driver_app.cpp` logs under the
+App token (`AsteRxApp` / `FX10App` / `GoXApp` / `LMS4xxxApp` from
+`driver_markers.h`) — those are the lines the GUI health state machine reacts
+to (an App-level `error` marks the sensor FAILED). Every other file in a
+driver logs under the short internal module (`AsteRx` / `FX10` / `GoX` /
+`LMS4xxx`), which the GUI displays but never routes: a transient internal
+warning must not flip a sensor's health. Shared `common/` components use
+neutral modules (`DriversJson`) — never a driver's name.
+
+**2. Message prefixes identify the instance, then the subsystem.** Multi-
+instance drivers tag every line with the instance first: `[cam0] ...` (gox
+cameras), `[front_left_laser] ...` (lms instances). On App-level `error`
+lines this leading tag is load-bearing: the GUI routes the failure to that
+instance (no tag = all instances). Subsystem files add a fixed second-level
+prefix after the instance tag: `[Writer]` (segment/file writers), `[eBUS]`
+(Pleora SDK control/stream code), `[TCP]` (socket transport). Special-purpose
+sidecars keep their own tag in the same style (`[Live]` asterx CSV feed,
+`[TriggerLog]` fx10 SensorSync session). Example:
+`[LMS4xxx]: [front_left_laser] [Writer] Recording to ...`.
+
+**3. Statistics are uniform across drivers.** Periodic status lines start
+with `[Statistics]` (plus the instance tag where applicable), use
+double-space-separated `key={}` fields, and report the sensor's measured
+output rate as `rate=N.N Hz`; the shutdown totals line is
+`[Statistics] [inst] Final: ...`. Examples:
+
+```
+[FX10App]: [Statistics] frames=1520  rate=50.0 Hz  missed_triggers=0  temp=42.1 °C  disk_free=812.4 GB
+[GoX]: [Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ...
+[LMS4xxxApp]: [Statistics] [front_left_laser] up=00:00:30  rate=25.0 Hz  ntp=ok  frames=750  ...
+```
+
+**4. Throwing is an app-layer decision.** `Common::DriverLog` never throws by
+default; the explicit `g_log.error(true, ...)` overload (log, then
+`std::runtime_error` with the formatted message) is the only sanctioned throw
+in driver code and is reserved for `*_driver_app.cpp`. Lower layers propagate
+failures upward instead — `std::error_code` returns (lms4xxx) or
+driver-internal exception types (`RecorderError`, `TransportError`,
+`SdkError`, ...) that the app layer catches — and the app layer decides
+whether to abort. (`Common::Log::log_and_throw` remains, but only `main.cpp`
+and `common/` use it.)
+
+Lifecycle markers ("`GoX driver initialized`", "`LiDAR instance [x]
+initialized successfully`", ...) are verbatim GUI contract strings — see the
+next section. For lms4xxx the per-instance markers come from each instance
+app and the driver-level pair is aggregated by `main.cpp` once all instances
+are up / down.
 
 ## Web GUI
 
@@ -133,7 +183,6 @@ amiga_drivers/
 ├── asterx_driver/            # Qt/SsnRx session, SBF writer, GoogleTest tests
 ├── fx10_driver/              # fx10_core (SDK-free) + fx10_ebus (eBUS glue) + tools/ + tests/
 ├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + tools/ + tests/
-├── ins401_driver/            # receiver, NTRIP client, static initialization
 ├── lms4xxx_driver/           # TCP CoLa-B driver, scan parser, record writer
 ├── parse/                    # DataConverter: offline bin -> CSV
 ├── app/                      # NiceGUI web GUI (host-side, uv-managed .venv)
@@ -141,4 +190,4 @@ amiga_drivers/
 ```
 
 Per-driver details live in `asterx_driver/README.md`, `fx10_driver/README.md`
-and `gox_driver/README.md` (ins401/lms4xxx have no per-driver README yet).
+and `gox_driver/README.md` (lms4xxx has no per-driver README yet).

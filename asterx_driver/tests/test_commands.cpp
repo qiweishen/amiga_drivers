@@ -8,41 +8,39 @@
 #include "commands.hpp"
 
 namespace {
-
-bool stream_contains(const std::vector<asterx::SbfStream>& streams,
-                     const std::string& block) {
-    for (const auto& stream: streams) {
-        if (std::find(stream.blocks.begin(), stream.blocks.end(), block) != stream.blocks.end()) {
-            return true;
+    bool stream_contains(const std::vector<asterx::SbfStream> &streams,
+                         const std::string &block) {
+        for (const auto &stream: streams) {
+            if (std::find(stream.blocks.begin(), stream.blocks.end(), block) != stream.blocks.end()) {
+                return true;
+            }
         }
+        return false;
     }
-    return false;
-}
 
-std::size_t count_kind(const std::vector<asterx::Command>& cmds,
-                       asterx::CommandKind kind) {
-    return static_cast<std::size_t>(
-        std::count_if(cmds.begin(), cmds.end(),
-                      [kind](const asterx::Command& c) { return c.kind == kind; }));
-}
+    std::size_t count_kind(const std::vector<asterx::Command> &cmds,
+                           asterx::CommandKind kind) {
+        return static_cast<std::size_t>(
+            std::count_if(cmds.begin(), cmds.end(),
+                          [kind](const asterx::Command &c) { return c.kind == kind; }));
+    }
 
-std::size_t index_of(const std::vector<asterx::Command>& cmds,
-                     const std::string& text_prefix) {
-    for (std::size_t i = 0; i < cmds.size(); ++i) {
-        if (cmds[i].text.rfind(text_prefix, 0) == 0) {
-            return i;
+    std::size_t index_of(const std::vector<asterx::Command> &cmds,
+                         const std::string &text_prefix) {
+        for (std::size_t i = 0; i < cmds.size(); ++i) {
+            if (cmds[i].text.rfind(text_prefix, 0) == 0) {
+                return i;
+            }
         }
+        return cmds.size();
     }
-    return cmds.size();
-}
-
-}  // namespace
+} // namespace
 
 TEST(Commands, DefaultStreamsUseOnChangeAndRequiredBlocks) {
     asterx::ReceiverSettings settings;
 
     ASSERT_EQ(settings.streams.size(), 6u);
-    for (const auto& stream: settings.streams) {
+    for (const auto &stream: settings.streams) {
         EXPECT_EQ(stream.interval, "OnChange");
     }
 
@@ -164,7 +162,7 @@ TEST(Commands, CommandListFollowsConfigureSequence) {
     // connection descriptor.
     EXPECT_LT(index_of(cmds, "setDataInOut, IP12, , +SBF"), cmds.size());
     std::size_t sbf_streams = 0;
-    for (const auto& c : cmds) {
+    for (const auto &c: cmds) {
         if (c.text.rfind("setSBFOutput, Stream", 0) == 0 &&
             c.text.find(", IP12, ") != std::string::npos) {
             ++sbf_streams;
@@ -191,10 +189,10 @@ TEST(Commands, RedactsLoginForLogging) {
 
 TEST(Commands, ParsesReceiverCapabilities) {
     const std::string reply =
-        "$R: grc\r\n"
-        "  ReceiverCapabilities, Main+Aux1, GPSL1CA+GPSL5, COM1+IPS1,\r\n"
-        "      APME+INS, 5, 100, 5\r\n"
-        "COM1>";
+            "$R: grc\r\n"
+            "  ReceiverCapabilities, Main+Aux1, GPSL1CA+GPSL5, COM1+IPS1,\r\n"
+            "      APME+INS, 5, 100, 5\r\n"
+            "COM1>";
 
     const auto caps = asterx::parse_receiver_capabilities_reply(reply);
     EXPECT_TRUE(caps.has_main);
@@ -212,15 +210,15 @@ TEST(Commands, VerifiesImuOrientationReply) {
     settings.theta_z_deg = 1.5;
 
     const std::string ok =
-        "$R: gio\r\n"
-        "  IMUOrientation, manual, -90.000, 0.000, 1.500\r\n"
-        "COM1>";
+            "$R: gio\r\n"
+            "  IMUOrientation, manual, -90.000, 0.000, 1.500\r\n"
+            "COM1>";
     EXPECT_NO_THROW(asterx::verify_imu_orientation_reply(ok, settings));
 
     const std::string bad =
-        "$R: gio\r\n"
-        "  IMUOrientation, fixed, -90.000, 0.000, 1.500\r\n"
-        "COM1>";
+            "$R: gio\r\n"
+            "  IMUOrientation, fixed, -90.000, 0.000, 1.500\r\n"
+            "COM1>";
     EXPECT_THROW(asterx::verify_imu_orientation_reply(bad, settings),
                  asterx::ConfigError);
 }

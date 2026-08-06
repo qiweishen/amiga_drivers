@@ -43,7 +43,8 @@ namespace fx10 {
             dst[d] = static_cast<std::uint16_t>((b0 << 4) | (b1 & 0x0F));
             dst[d + 1] = static_cast<std::uint16_t>((b2 << 4) | (b1 >> 4));
         }
-        if (d < n_pixels) { // odd tail (defensive, see wireBytes)
+        if (d < n_pixels) {
+            // odd tail (defensive, see wireBytes)
             dst[d] = static_cast<std::uint16_t>((src[s] << 4) | (src[s + 1] & 0x0F));
         }
     }

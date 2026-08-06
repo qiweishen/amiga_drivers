@@ -13,27 +13,29 @@ import re
 
 # Module tokens: the "[Module]:" tag of every log line. Health transitions are
 # keyed on these App-level tokens only; per-driver internal modules (e.g.
-# "GoX", "INS Receiver") intentionally do not drive the state machine.
+# "GoX", "LMS4xxx") intentionally do not drive the state machine.
 MODULE_MAIN = "MainApp"
-MODULE_ASTERX = "AsterxApp"
+MODULE_ASTERX = "AsteRxApp"
 MODULE_FX10 = "FX10App"
 MODULE_GOX = "GoXApp"
-MODULE_INS401 = "INS401App"
 MODULE_LMS4XXX = "LMS4xxxApp"
 
 # Driver lifecycle markers (verbatim, matched by substring)
 ASTERX_INITIALIZED = "AsteRx driver initialized"
 ASTERX_SHUTDOWN = "AsteRx driver shutdown completely"
+ASTERX_SESSION_ISSUES = "AsteRx driver ended with issues"
 FX10_INITIALIZED = "FX10 driver initialized"
 FX10_SHUTDOWN = "FX10 driver shutdown completely"
 FX10_SESSION_ISSUES = "FX10 driver ended with issues"  # full line appends " (standalone exit code N)"
 GOX_INITIALIZED = "GoX driver initialized"
 GOX_SHUTDOWN = "GoX driver shutdown completely"
 GOX_SESSION_ISSUES = "GoX driver ended with issues"  # full line appends " (<concrete reason>)"
-INS401_INITIALIZED = "INS401 driver initialized"
-INS401_SHUTDOWN = "INS401 driver shutdown completely"
+LMS_INITIALIZED = "LMS4xxx driver initialized"
+LMS_SHUTDOWN = "LMS4xxx driver shutdown completely"
 
-# fmt templates ({} = LiDAR instance name)
+# fmt templates ({} = GoX camera / LiDAR instance name)
+GOX_INITIALIZED_INST_TPL = "GoX instance [{}] initialized successfully"
+GOX_SHUTDOWN_INST_TPL = "GoX instance [{}] driver shutdown completely"
 LMS_INITIALIZED_TPL = "LiDAR instance [{}] initialized successfully"
 LMS_SHUTDOWN_TPL = "LiDAR instance [{}] driver shutdown completely"
 
@@ -47,12 +49,10 @@ ALL_DRIVERS_SHUT_DOWN = "All drivers shut down"
 ASTERX_INIT_FAILED = "AsteRx driver initialization failed"
 FX10_INIT_FAILED = "FX10 driver initialization failed"
 GOX_INIT_FAILED = "GoX driver initialization failed"
-INS401_INIT_FAILED = "INS401 driver initialization failed"
 LMS4XXX_INIT_FAILED = "LMS4xxx driver initialization failed"
 ASTERX_RUN_EXCEPTION = "AsteRx run() exception"
 FX10_RUN_EXCEPTION = "FX10 run() exception"
 GOX_RUN_EXCEPTION = "GoX run() exception"
-INS401_RUN_EXCEPTION = "INS401 run() exception"
 LMS4XXX_RUN_EXCEPTION = "LMS4xxx run() exception"
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,6 @@ DRIVER_NAME_TO_SENSOR_KEY = {
     ASTERX_INIT_FAILED.removesuffix(INIT_FAILED_SUFFIX): "asterx",
     FX10_INIT_FAILED.removesuffix(INIT_FAILED_SUFFIX): "fx10",
     GOX_INIT_FAILED.removesuffix(INIT_FAILED_SUFFIX): "gox",
-    INS401_INIT_FAILED.removesuffix(INIT_FAILED_SUFFIX): "ins401",
     LMS4XXX_INIT_FAILED.removesuffix(INIT_FAILED_SUFFIX): "lms",
 }
 
@@ -96,7 +95,7 @@ REPLAY_MARKER_SUBSTRINGS = (
     "shutdown completely",
     "initialization failed",
     "run() exception",
-    "session ended with issues",  # gox + fx10 issues-shutdown (STOPPED on replay)
+    "driver ended with issues",  # asterx/gox/fx10 issues-shutdown (STOPPED on replay)
     ALL_DRIVERS_SHUT_DOWN,
     RECEIVED_SIGNAL_PREFIX,
     STARTING_DRIVERS,
@@ -108,12 +107,10 @@ for _full, _suffix in (
     (ASTERX_INIT_FAILED, INIT_FAILED_SUFFIX),
     (FX10_INIT_FAILED, INIT_FAILED_SUFFIX),
     (GOX_INIT_FAILED, INIT_FAILED_SUFFIX),
-    (INS401_INIT_FAILED, INIT_FAILED_SUFFIX),
     (LMS4XXX_INIT_FAILED, INIT_FAILED_SUFFIX),
     (ASTERX_RUN_EXCEPTION, RUN_EXCEPTION_SUFFIX),
     (FX10_RUN_EXCEPTION, RUN_EXCEPTION_SUFFIX),
     (GOX_RUN_EXCEPTION, RUN_EXCEPTION_SUFFIX),
-    (INS401_RUN_EXCEPTION, RUN_EXCEPTION_SUFFIX),
     (LMS4XXX_RUN_EXCEPTION, RUN_EXCEPTION_SUFFIX),
 ):
     assert _full.endswith(_suffix), f"marker {_full!r} does not end with {_suffix!r}"

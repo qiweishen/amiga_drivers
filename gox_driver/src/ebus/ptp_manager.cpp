@@ -50,7 +50,8 @@ namespace jai::ebus {
             report_.enable_feature = cfg_.enable_feature;
             report_.status_feature = cfg_.status_feature;
             if (!feature_exists(params_, cfg_.enable_feature) || !feature_exists(params_, cfg_.status_feature)) {
-                g_log.error("[{}] explicit PTP features not found on device: {} / {}", camera_id_, cfg_.enable_feature,
+                g_log.error("[{}] [eBUS] explicit PTP features not found on device: {} / {}", camera_id_,
+                            cfg_.enable_feature,
                             cfg_.status_feature);
                 return false;
             }
@@ -109,7 +110,7 @@ namespace jai::ebus {
                 }
             }
             if (!enable_name.empty() && !status_name.empty()) {
-                g_log.warn("[{}] PTP features found by fuzzy scan: enable={} status={}", camera_id_, enable_name,
+                g_log.warn("[{}] [eBUS] PTP features found by fuzzy scan: enable={} status={}", camera_id_, enable_name,
                            status_name);
                 report_.feature_set = "fuzzy";
                 report_.enable_feature = enable_name;
@@ -125,7 +126,7 @@ namespace jai::ebus {
         report_ = PtpStatusReport{};
 
         if (!cfg_.enabled) {
-            g_log.info("[{}] PTP disabled by config; device timestamps are free-running", camera_id_);
+            g_log.info("[{}] [eBUS] PTP disabled by config; device timestamps are free-running", camera_id_);
             return true;
         }
 
@@ -133,10 +134,10 @@ namespace jai::ebus {
             const std::string msg = "No usable PTP feature pair found (feature_set=" + cfg_.feature_set +
                                     "); the camera may not support IEEE 1588";
             if (cfg_.on_timeout == "abort") {
-                g_log.error("[{}] {}", camera_id_, msg);
+                g_log.error("[{}] [eBUS] {}", camera_id_, msg);
                 return false;
             }
-            g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+            g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
             return true;
         }
         report_.feature_found = true;
@@ -156,14 +157,15 @@ namespace jai::ebus {
         if (!r.IsOK()) {
             const std::string msg = "Enabling PTP via " + report_.enable_feature + " failed: " + pv_result_to_string(r);
             if (cfg_.on_timeout == "abort") {
-                g_log.error("[{}] {}", camera_id_, msg);
+                g_log.error("[{}] [eBUS] {}", camera_id_, msg);
                 return false;
             }
-            g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+            g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
             return true;
         }
         report_.enabled = true;
-        g_log.info("[{}] PTP enabled via {} (chain {}); Waiting for status \"{}\"", camera_id_, report_.enable_feature,
+        g_log.info("[{}] [eBUS] PTP enabled via {} (chain {}); Waiting for status \"{}\"", camera_id_,
+                   report_.enable_feature,
                    report_.feature_set, cfg_.required_status);
         return true;
     }
@@ -203,7 +205,7 @@ namespace jai::ebus {
 
         while (true) {
             if (stop != nullptr && stop->stop_requested()) {
-                g_log.warn("[{}] PTP wait interrupted by stop request", camera_id_);
+                g_log.warn("[{}] [eBUS] PTP wait interrupted by stop request", camera_id_);
                 return false;
             }
 
@@ -218,10 +220,10 @@ namespace jai::ebus {
                             "— fix or remove the offending grandmaster, then toggle GevIEEE1588 off/on "
                             "(or power-cycle) to reset the state machine";
                     if (cfg_.on_timeout == "abort") {
-                        g_log.error("[{}] {}", camera_id_, msg);
+                        g_log.error("[{}] [eBUS] {}", camera_id_, msg);
                         return false;
                     }
-                    g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+                    g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
                     return true;
                 }
                 if (iequals(status, "Master")) {
@@ -231,10 +233,10 @@ namespace jai::ebus {
                             "and that the switch does not filter PTP multicast (224.0.1.129 / "
                             "01-1B-19-00-00-00)";
                     if (cfg_.on_timeout == "abort") {
-                        g_log.error("[{}] {}", camera_id_, msg);
+                        g_log.error("[{}] [eBUS] {}", camera_id_, msg);
                         return false;
                     }
-                    g_log.warn("[{}] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+                    g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
                     return true;
                 }
                 bool ok = iequals(status, cfg_.required_status);
@@ -251,7 +253,7 @@ namespace jai::ebus {
                     read_dataset_extras();
                     std::string grandmaster;
                     read_feature_as_string(params_, "PtpGrandmasterClockID", grandmaster);
-                    g_log.info("[{}] PTP synchronized: status={}{} lock_wait={}ms{}", camera_id_, report_.status,
+                    g_log.info("[{}] [eBUS] PTP synchronized: status={}{} lock_wait={}ms{}", camera_id_, report_.status,
                                check_servo ? (" servo=" + report_.servo_status) : std::string(), report_.lock_wait_ms,
                                grandmaster.empty() ? std::string() : " grandmaster=" + grandmaster);
                     return true;
@@ -276,12 +278,13 @@ namespace jai::ebus {
                     "on the camera's L2 domain and the switch forwards PTP multicast";
         }
         if (cfg_.on_timeout == "abort") {
-            g_log.error("[{}] {}", camera_id_, msg);
+            g_log.error("[{}] [eBUS] {}", camera_id_, msg);
             return false;
         }
-        g_log.warn("[{}] {}; continuing with ptp_synced=false — device_ts_ns degrades to a free-running tick counter",
-                   camera_id_,
-                   msg);
+        g_log.warn(
+            "[{}] [eBUS] {}; continuing with ptp_synced=false — device_ts_ns degrades to a free-running tick counter",
+            camera_id_,
+            msg);
         return true;
     }
 
@@ -292,7 +295,7 @@ namespace jai::ebus {
         } else if (feature_exists(params_, "GevTimestampControlLatch")) {
             cmd = "GevTimestampControlLatch";
         } else {
-            g_log.debug("[{}] no timestamp latch command; cross-check skipped", camera_id_);
+            g_log.debug("[{}] [eBUS] no timestamp latch command; cross-check skipped", camera_id_);
             return;
         }
         std::string value_name;
@@ -301,7 +304,7 @@ namespace jai::ebus {
         } else if (feature_exists(params_, "GevTimestampValue")) {
             value_name = "GevTimestampValue";
         } else {
-            g_log.debug("[{}] no timestamp latch value feature; cross-check skipped", camera_id_);
+            g_log.debug("[{}] [eBUS] no timestamp latch value feature; cross-check skipped", camera_id_);
             return;
         }
 
@@ -309,13 +312,13 @@ namespace jai::ebus {
         // our best estimate of "host time when the camera latched".
         const uint64_t t0 = now_realtime_ns();
         if (!execute_command_feature(params_, cmd)) {
-            g_log.warn("[{}] {} failed; timestamp cross-check skipped", camera_id_, cmd);
+            g_log.warn("[{}] [eBUS] {} failed; timestamp cross-check skipped", camera_id_, cmd);
             return;
         }
         const uint64_t t1 = now_realtime_ns();
         int64_t ticks = 0;
         if (!read_int_feature(params_, value_name, ticks)) {
-            g_log.warn("[{}] {} not readable; timestamp cross-check skipped", camera_id_, value_name);
+            g_log.warn("[{}] [eBUS] {} not readable; timestamp cross-check skipped", camera_id_, value_name);
             return;
         }
         int64_t device_ns = ticks;
@@ -344,7 +347,7 @@ namespace jai::ebus {
             first_latch_offset_ns_ = adjusted;
         }
         g_log.info(
-            "[{}] timestamp cross-check: host-device offset {}ns (bracket {}ns{}){} — offset is only authoritative if "
+            "[{}] [eBUS] timestamp cross-check: host-device offset {}ns (bracket {}ns{}){} — offset is only authoritative if "
             "the host clock is PTP/NTP disciplined",
             camera_id_, adjusted, t1 - t0, report_.tai_offset_detected ? ", TAI-UTC 37s removed" : "", drift);
     }
@@ -358,7 +361,7 @@ namespace jai::ebus {
         }
         read_dataset_extras();
         if (report_.offset_valid) {
-            g_log.info("[{}] PtpOffsetFromMaster={}ns", camera_id_, report_.offset_from_master_ns);
+            g_log.info("[{}] [eBUS] PtpOffsetFromMaster={}ns", camera_id_, report_.offset_from_master_ns);
         }
         cross_check_timestamp();
     }

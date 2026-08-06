@@ -13,53 +13,59 @@
 
 
 namespace {
-	class FakeDriverApp final : public Common::IDriverApp {
-	public:
-		[[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override {
-			init_called = true;
-			if (external_stop && external_stop()) {
-				return false;
-			}
-			return init_result;
-		}
+    class FakeDriverApp final : public Common::IDriverApp {
+    public:
+        [[nodiscard]] bool init(const std::function<bool()> &external_stop = {}) override {
+            init_called = true;
+            if (external_stop && external_stop()) {
+                return false;
+            }
+            return init_result;
+        }
 
-		void run() override {
-			Common::ThreadUtil::WaitUntilTerminated(terminate_, std::chrono::milliseconds(1));
-			run_finished = true;
-		}
+        void run() override {
+            Common::ThreadUtil::WaitUntilTerminated(terminate_, std::chrono::milliseconds(1));
+            run_finished = true;
+        }
 
-		void shutdown() override { ++shutdown_calls; }
+        void shutdown() override { ++shutdown_calls; }
 
-		bool init_result = true;
-		bool init_called = false;
-		bool run_finished = false;
-		int shutdown_calls = 0;
-	};
-}  // namespace
+        bool init_result = true;
+        bool init_called = false;
+        bool run_finished = false;
+        int shutdown_calls = 0;
+    };
+} // namespace
 
 
-TEST_CASE("IDriverApp drives the unified-main lifecycle pattern") {
-	std::unique_ptr<Common::IDriverApp> app = std::make_unique<FakeDriverApp>();
-	auto *fake = static_cast<FakeDriverApp *>(app.get());
+TEST_CASE(
 
-	REQUIRE(app->init());
-	CHECK(fake->init_called);
-	CHECK_FALSE(app->TerminateFlag().load());
+    "IDriverApp drives the unified-main lifecycle pattern"
+) {
+    std::unique_ptr<Common::IDriverApp> app = std::make_unique<FakeDriverApp>();
+    auto *fake = static_cast<FakeDriverApp *>(app.get());
 
-	std::thread t([&app] { app->run(); });
-	app->TerminateFlag().store(true, std::memory_order_release);
-	t.join();
-	CHECK(fake->run_finished);
+    REQUIRE(app->init());
+    CHECK(fake->init_called);
+    CHECK_FALSE(app->TerminateFlag().load());
 
-	app->shutdown();
-	app->shutdown();  // idempotence is the derived class's contract; base allows repeats
-	CHECK(fake->shutdown_calls == 2);
+    std::thread t([&app] { app->run(); });
+    app->TerminateFlag().store(true, std::memory_order_release);
+    t.join();
+    CHECK(fake->run_finished);
+
+    app->shutdown();
+    app->shutdown(); // idempotence is the derived class's contract; base allows repeats
+    CHECK(fake->shutdown_calls == 2);
 }
 
 
-TEST_CASE("IDriverApp init honors the external_stop predicate") {
-	FakeDriverApp app;
-	CHECK_FALSE(app.init([] { return true; }));
-	CHECK(app.init([] { return false; }));
-	CHECK(app.init());	// default: no predicate
+TEST_CASE(
+
+    "IDriverApp init honors the external_stop predicate"
+) {
+    FakeDriverApp app;
+    CHECK_FALSE(app.init([] { return true; }));
+    CHECK(app.init([] { return false; }));
+    CHECK(app.init()); // default: no predicate
 }

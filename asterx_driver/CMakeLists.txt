@@ -17,7 +17,7 @@ endif ()
 ################################################################################
 # Required System Packages (Threads provided by top-level)
 # QtCore/QtNetwork are used by the driver; QtSerialPort only by ssnrx.
-find_package(Qt5 5.15 REQUIRED COMPONENTS Core Network SerialPort)
+find_package(Qt5 5.12 REQUIRED COMPONENTS Core Network SerialPort)
 
 
 ################################################################################
@@ -31,8 +31,6 @@ add_library(ssnrx STATIC
         "${SSNRX_DIR}/include/ssnrx.h"
 )
 set_target_properties(ssnrx PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
         AUTOMOC ON
         POSITION_INDEPENDENT_CODE ON
@@ -62,8 +60,6 @@ add_library(asterx_lib STATIC
         include/session.hpp
 )
 set_target_properties(asterx_lib PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
         AUTOMOC ON
         POSITION_INDEPENDENT_CODE ON

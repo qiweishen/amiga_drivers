@@ -161,20 +161,20 @@ TEST_CASE("config: device selection is validated (fx10 semantics)") {
     // All common MAC spellings are accepted verbatim (normalization happens at
     // discovery-match time).
     CHECK(parse_ok("cameras:\n  - id: c\n    device: {mac: \"00:0C:DF:12:34:56\"}\n")
-          .cameras[0].device.mac == "00:0C:DF:12:34:56");
+        .cameras[0].device.mac == "00:0C:DF:12:34:56");
     CHECK(parse_ok("cameras:\n  - id: c\n    device: {mac: \"000cdf123456\"}\n")
-          .cameras[0].device.mac == "000cdf123456");
+        .cameras[0].device.mac == "000cdf123456");
     CHECK(contains(error_of("cameras:\n  - id: c\n    device: {mac: \"00:0c:df:12:34\"}\n"),
         "not a valid MAC address"));
 
     // force_ip needs a MAC (FORCEIP addresses the camera by MAC) and both addresses.
     CHECK(contains(error_of(
-              "cameras:\n  - id: c\n    device:\n      ip: 10.0.0.2\n"
-              "      force_ip: {enabled: true, ip: 10.0.0.9, subnet_mask: 255.255.255.0}\n"),
+            "cameras:\n  - id: c\n    device:\n      ip: 10.0.0.2\n"
+            "      force_ip: {enabled: true, ip: 10.0.0.9, subnet_mask: 255.255.255.0}\n"),
         "requires device.mac"));
     CHECK(contains(error_of(
-              "cameras:\n  - id: c\n    device:\n      mac: \"00:0c:df:12:34:56\"\n"
-              "      force_ip: {enabled: true}\n"),
+            "cameras:\n  - id: c\n    device:\n      mac: \"00:0c:df:12:34:56\"\n"
+            "      force_ip: {enabled: true}\n"),
         "requires ip and subnet_mask"));
 }
 

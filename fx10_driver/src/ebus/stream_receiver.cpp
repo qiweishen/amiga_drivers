@@ -14,7 +14,6 @@
 
 #include "logger.h"
 #include "string_util.h"
-#include "time_util.h"
 #include "buffer_sizing.hpp"
 
 
@@ -145,7 +144,7 @@ namespace fx10 {
         if (target.empty()) {
             throw TransportError("[eBUS] No device target: set device.id, device.mac or device.ip");
         }
-        g_log.info("Connecting to {} ...", target);
+        g_log.info("[eBUS] Connecting to {} ...", target);
 
         PvResult result;
         device_ = PvDevice::CreateAndConnect(PvString(target.c_str()), &result);
@@ -163,7 +162,7 @@ namespace fx10 {
         }
         device_->RegisterEventSink(this);
         connection_target_ = target;
-        g_log.info("Connected");
+        g_log.info("[eBUS] Connected");
     }
 
 
@@ -301,7 +300,8 @@ namespace fx10 {
             if (!alloc.IsOK()) {
                 freeBuffers_();
                 throw TransportError(
-                    "[eBUS] Buffer allocation failed at " + std::to_string(i) + "/" + std::to_string(plan.count) + ": " + pv(
+                    "[eBUS] Buffer allocation failed at " + std::to_string(i) + "/" + std::to_string(plan.count) + ": "
+                    + pv(
                         alloc.GetCodeString()
                     )
                 );
@@ -347,7 +347,7 @@ namespace fx10 {
             throw;
         }
         streaming_.store(true);
-        g_log.info("Acquisition started");
+        g_log.info("[eBUS] Acquisition started");
     }
 
 
@@ -453,9 +453,6 @@ namespace fx10 {
             }
 
             // We hold a buffer from here: it MUST be re-queued on every path.
-            const auto realtime_ns = static_cast<std::int64_t>(Common::TimeUtil::RealtimeNowNs());
-            const auto monotonic_ns = static_cast<std::int64_t>(Common::TimeUtil::MonotonicNowNs());
-
             if (!op_result.IsOK()) {
                 ++counters_.op_errors;
                 g_log.warn("[eBUS] Buffer operation error: {}", pv(op_result.GetCodeString()));
@@ -510,9 +507,6 @@ namespace fx10 {
             frame.height = image != nullptr ? image->GetHeight() : 0;
             frame.bytes_per_pixel = expected_.bytes_per_pixel;
             frame.block_id = buffer->GetBlockID();
-            frame.device_timestamp_ticks = buffer->GetTimestamp();
-            frame.host_realtime_ns = realtime_ns;
-            frame.host_monotonic_ns = monotonic_ns;
 
             if (!preamble_checked_) {
                 preamble_checked_ = true;
@@ -627,7 +621,7 @@ namespace fx10 {
             g_log.warn("[eBUS] Stream queue not fully drained; buffer release deferred to disconnect()");
         }
         streaming_.store(false);
-        g_log.info("Acquisition stopped ({} frames delivered)", frames_delivered_.load());
+        g_log.info("[eBUS] Acquisition stopped ({} frames delivered)", frames_delivered_.load());
     }
 
 

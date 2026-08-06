@@ -10,6 +10,8 @@ namespace fx10 {
     // Non-owning view of one delivered GVSP frame. For the FX10 pushbroom camera one
     // frame is one spatial line: width = spatial samples, height = spectral bands
     // (rows are bands, row-major). Valid only for the duration of the sink call.
+    // Line timing is not carried here: it is recovered offline from the SensorSync
+    // trigger log (sensor_trigger.log in the session directory).
     struct FrameView {
         const std::uint8_t *data = nullptr;
         std::size_t size = 0; // payload bytes (== width * height * bytes_per_pixel)
@@ -17,9 +19,6 @@ namespace fx10 {
         std::uint32_t height = 0; // spectral bands (incl. status line if enabled)
         std::uint32_t bytes_per_pixel = 0; // Mono12/Mono10 -> 2, Mono8 -> 1
         std::uint64_t block_id = 0; // GVSP BlockID as reported by the SDK
-        std::uint64_t device_timestamp_ticks = 0; // GVSP timestamp; 0 if unavailable
-        std::int64_t host_realtime_ns = 0; // CLOCK_REALTIME at retrieve
-        std::int64_t host_monotonic_ns = 0; // CLOCK_MONOTONIC, same instant
     };
 
     // Frame consumer. Called on the acquisition thread; implementations must return

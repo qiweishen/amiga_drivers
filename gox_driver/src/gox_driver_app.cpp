@@ -15,6 +15,12 @@
 #include "utility.h"
 
 
+namespace {
+    // App-level module token: this file's error lines drive the GUI health machine
+    Common::DriverLog g_log{std::string(Common::Markers::kModuleGox)};
+} // namespace
+
+
 GoxDriverApp::GoxDriverApp(const Common::Config &config) : stop_(std::make_unique<jai::StopController>()) {
     // Actual config loading is deferred to init()
     std::filesystem::path exe_dir = Common::GetExecutableDir(); // exe_dir + "../../" -> project root
@@ -34,12 +40,18 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
     try {
         cfg = jai::load_config(config_path_);
     } catch (const jai::ConfigError &e) {
-        Common::Log::log_and_throw(Common::Markers::kModuleGox, "GoX config error", e.what(), false);
+        g_log.error("GoX config error: {}", e.what());
         return false;
     }
 
     // GenICam environment; must precede the first eBUS SDK call
     jai::ebus::bootstrap_env();
+
+    for (const auto &cam: cfg.cameras) {
+        if (cam.enabled) {
+            camera_ids_.push_back(cam.id);
+        }
+    }
 
     // Bring-up can block for minutes (discovery retries, PTP convergence), so a watcher
     // thread forwards an external terminate into the StopController
@@ -70,15 +82,17 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
     }
     if (!bring_up_ok) {
         if (stop_->stop_requested() && stop_->reason() == jai::StopReason::External) {
-            Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleGox, "GoX bring-up interrupted by shutdown request");
+            g_log.warn("GoX bring-up interrupted by shutdown request");
         } else {
-            Common::Log::log_and_throw(Common::Markers::kModuleGox, "GoX startup failed",
-                                       runner_->last_error(), false);
+            g_log.error("GoX startup failed: {}", runner_->last_error());
         }
         return false;
     }
 
-    Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleGox, Common::Markers::kGoxInitialized);
+    for (const auto &id: camera_ids_) {
+        g_log.info(fmt::runtime(Common::Markers::kGoxInitializedInstTpl), id);
+    }
+    g_log.info("{}", Common::Markers::kGoxInitialized);
     return true;
 }
 
@@ -104,9 +118,11 @@ void GoxDriverApp::shutdown() {
     }
     const bool clean = runner_->shutdown();
     if (clean) {
-        Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleGox, Common::Markers::kGoxShutdown);
+        for (const auto &id: camera_ids_) {
+            g_log.info(fmt::runtime(Common::Markers::kGoxShutdownInstTpl), id);
+        }
+        g_log.info("{}", Common::Markers::kGoxShutdown);
     } else {
-        Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleGox,
-                                 fmt::format("{} ({})", Common::Markers::kGoxSessionIssues, runner_->last_error()));
+        g_log.warn("{} ({})", Common::Markers::kGoxSessionIssues, runner_->last_error());
     }
 }

@@ -10,6 +10,7 @@
 #include "app_config.hpp"
 #include "envi_recorder.hpp"
 #include "pixel_format.hpp"
+#include "sensor_trigger_log.hpp"
 #include "logger.h"
 #include "wavelengths.hpp"
 #include "driver_markers.h"
@@ -21,7 +22,13 @@
 
 
 namespace {
-    Common::DriverLog g_log{"FX10"};
+    // App-level module token: this file's error lines drive the GUI health
+    // machine. All other fx10 files log under the internal "FX10" module.
+    Common::DriverLog g_log{std::string(Common::Markers::kModuleFx10)};
+
+    // No timing-log growth for this long = the Teensy USB link is down (the
+    // board emits a #H health line at least every 5 s while a session runs).
+    constexpr double kTriggerLogStallAbortS = 15.0;
 
     // Free space in GB at `dir` (must exist); -1 when unknowable
     double freeDiskGb(const std::filesystem::path &dir) {
@@ -39,6 +46,7 @@ struct Fx10DriverApp::Impl {
         fx10::StreamReceiver receiver;
         std::unique_ptr<fx10::CameraControl> control; // built after connect
         std::unique_ptr<fx10::EnviRecorder> recorder; // built in startStreaming_
+        std::unique_ptr<fx10::SensorTriggerLog> trigger_log; // opened in bringUpSession_
         fx10::RecorderInit recorder_init;
         fx10::CameraControl::Geometry geometry;
         std::uint32_t bytes_per_pixel = 2;
@@ -91,7 +99,7 @@ bool Fx10DriverApp::init(const std::function<bool()> &external_stop) {
     try {
         impl_->config = fx10::Config::loadFromFile(config_path_);
     } catch (const fx10::ConfigError &e) {
-        Common::Log::log_and_throw(Common::Markers::kModuleFx10, "FX10 config error", e.what(), false);
+        g_log.error("FX10 config error: {}", e.what());
         return false;
     }
 
@@ -100,8 +108,7 @@ bool Fx10DriverApp::init(const std::function<bool()> &external_stop) {
     std::error_code ec;
     std::filesystem::create_directories(impl_->config.recording.output_dir, ec);
     if (ec) {
-        Common::Log::log_and_throw(Common::Markers::kModuleFx10, "FX10 cannot create output directory", ec.message(),
-                                   false);
+        g_log.error("FX10 cannot create output directory: {}", ec.message());
         return false;
     }
 
@@ -110,19 +117,16 @@ bool Fx10DriverApp::init(const std::function<bool()> &external_stop) {
 
     switch (bringUpSession_()) {
         case BringUp::kStopped:
-            Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleFx10,
-                                     "FX10 bring-up interrupted by shutdown request");
+            g_log.warn("FX10 bring-up interrupted by shutdown request");
             return false;
         case BringUp::kFailed:
-            Common::Log::log_and_throw(
-                Common::Markers::kModuleFx10,
-                fmt::format("FX10 startup failed (standalone exit code {})", impl_->last_exit_code), "", false);
+            g_log.error("FX10 startup failed (standalone exit code {})", impl_->last_exit_code);
             return false;
         case BringUp::kOk:
             break;
     }
 
-    Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleFx10, Common::Markers::kFx10Initialized);
+    g_log.info("{}", Common::Markers::kFx10Initialized);
     init_ok_ = true;
     return true;
 }
@@ -144,6 +148,19 @@ Fx10DriverApp::BringUp Fx10DriverApp::bringUpSession_() {
     };
 
     try {
+        // Serial port first
+        if (cfg.sensor_trigger.enabled) {
+            if (cfg.acquisition.trigger.mode == fx10::TriggerMode::kFreerun) {
+                g_log.warn("sensor_trigger is enabled but acquisition.trigger.mode is freerun — the camera "
+                    "ignores the trigger pulses; the timing log still records exposure strobes");
+            }
+            if (cfg.recording.on_gap != fx10::GapPolicy::kPadZero) {
+                g_log.warn("sensor_trigger timing matches BIL line indices to trigger sequence numbers; "
+                    "output.on_gap: record breaks that alignment on any RX loss — use pad_zero");
+            }
+            s.trigger_log = std::make_unique<fx10::SensorTriggerLog>(cfg.sensor_trigger.port);
+            s.trigger_log->open();
+        }
         if (stopped()) {
             return BringUp::kStopped;
         }
@@ -183,8 +200,6 @@ Fx10DriverApp::BringUp Fx10DriverApp::bringUpSession_() {
         s.recorder_init.bands = static_cast<std::uint32_t>(s.geometry.height);
         s.recorder_init.bytes_per_pixel = s.bytes_per_pixel;
         s.recorder_init.data_type = s.bytes_per_pixel == 1 ? fx10::EnviDataType::kUint8 : fx10::EnviDataType::kUint16;
-        s.recorder_init.tick_frequency_hz =
-                static_cast<std::uint64_t>(s.control->tryGetIntByRole("timestamp_tick_frequency").value_or(0));
         s.recorder_init.wavelengths =
                 fx10::resolveWavelengths(cfg.recording.wavelengths, static_cast<int>(s.geometry.height));
         s.recorder_init.description =
@@ -197,7 +212,8 @@ Fx10DriverApp::BringUp Fx10DriverApp::bringUpSession_() {
                 "\nexposure_ms: " + std::to_string(cfg.acquisition.exposure_ms) +
                 "\ntrigger: " + (cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal
                                      ? "external (" + cfg.acquisition.trigger.source_entry + ")"
-                                     : "freerun " + std::to_string(cfg.acquisition.frame_rate_hz) + " Hz");
+                                     : "freerun " + std::to_string(cfg.acquisition.frame_rate_hz) + " Hz") +
+                (cfg.sensor_trigger.enabled ? "\nline timing: sensor_trigger.log (SensorSync-Logger)" : "");
 
         const double disk_free = freeDiskGb(cfg.recording.output_dir);
         if (disk_free >= 0.0 && disk_free < cfg.disk.min_free_gb) {
@@ -266,6 +282,27 @@ bool Fx10DriverApp::startStreaming_() {
         return false;
     }
 
+    // The camera is armed for external triggers — only now start the trigger
+    // pulses + timing log, so the log's first pulses have matching frames.
+    // The camera channel's pulse rate follows this config (freerun = channel
+    // off, the camera would ignore the pulses anyway); other channels keep
+    // their board defaults. The board echoes the effective rates in #TRIG.
+    if (s.trigger_log) {
+        const double pulse_hz = cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal
+                                    ? cfg.acquisition.frame_rate_hz
+                                    : 0.0;
+        try {
+            s.trigger_log->start(s.recorder->sessionDir() / "sensor_trigger.log",
+                                 {{cfg.sensor_trigger.trigger_channel, pulse_hz}});
+        } catch (const fx10::TriggerLogError &e) {
+            g_log.error("{}", e.what());
+            impl_->last_exit_code = 20;
+            impl_->stop_reason = "trigger-log-start-failed";
+            teardownSession_();
+            return false;
+        }
+    }
+
     // Counter1 auto-resets at AcquisitionStart on the FX10e, but a baseline
     // keeps this correct for cameras/configs where it does not
     s.missed_baseline = s.control->tryGetIntByRole("missed_trigger_count").value_or(-1);
@@ -282,6 +319,9 @@ void Fx10DriverApp::monitorLoop_() {
     const double stats_interval = cfg.logging.stats_interval_s;
     auto next_stats = t_start + std::chrono::duration_cast<clock::duration>(
                           std::chrono::duration<double>(stats_interval > 0 ? stats_interval : 3600.0));
+    // Measured line-rate basis: frames delivered since the previous stats line
+    std::uint64_t rate_prev_frames = 0;
+    auto rate_prev_time = t_start;
 
     while (true) {
         if (stopRequested_()) {
@@ -290,6 +330,23 @@ void Fx10DriverApp::monitorLoop_() {
         }
         if (s.receiver.failed() || (s.recorder && s.recorder->failed())) {
             break; // classified in teardownSession_
+        }
+        if (s.trigger_log && !s.trigger_log->ok()) {
+            g_log.error("Sensor trigger timing log write failed (disk full?) — frames without timing are "
+                "worthless, stopping");
+            impl_->stop_reason = "trigger-log-failure";
+            impl_->last_exit_code = 20;
+            break;
+        }
+        if (s.trigger_log && s.trigger_log->stalledSeconds() > kTriggerLogStallAbortS) {
+            // ok() only reflects log-FILE write errors; a lost USB link makes the
+            // client retry reopening silently while events are dropped on the floor.
+            g_log.error("Sensor trigger timing log has not grown for {:.0f} s (Teensy USB link lost?) — "
+                        "frames without timing are worthless, stopping",
+                        s.trigger_log->stalledSeconds());
+            impl_->stop_reason = "trigger-log-stalled";
+            impl_->last_exit_code = 20;
+            break;
         }
         const double elapsed = std::chrono::duration<double>(clock::now() - t_start).count();
         if (cfg.recording.max_duration_s > 0.0 && elapsed >= cfg.recording.max_duration_s) {
@@ -314,9 +371,21 @@ void Fx10DriverApp::monitorLoop_() {
             const double missed_delta = missed && s.missed_baseline >= 0
                                             ? static_cast<double>(*missed - s.missed_baseline)
                                             : std::numeric_limits<double>::quiet_NaN();
-            g_log.info("[Statistics] frames={}  missed_triggers={}  temp={:.4f} °C  disk_free={:.1f} GB",
-                       s.receiver.framesDelivered(), missed_delta,
-                       temperature.value_or(std::numeric_limits<double>::quiet_NaN()), free_gb);
+            // Sensor's actual line rate over the last interval — under external
+            // trigger this should track acquisition.frame_rate_hz (the commanded
+            // SensorSync pulse rate); a lower value means missed triggers or RX loss
+            const std::uint64_t frames_now = s.receiver.framesDelivered();
+            const auto rate_now = clock::now();
+            const double rate_dt = std::chrono::duration<double>(rate_now - rate_prev_time).count();
+            const double rate_hz = rate_dt > 0.0
+                                       ? static_cast<double>(frames_now - rate_prev_frames) / rate_dt
+                                       : 0.0;
+            rate_prev_frames = frames_now;
+            rate_prev_time = rate_now;
+            g_log.info(
+                "[Statistics] frames={}  rate={:.1f} Hz  missed_triggers={}  temp={:.4f} °C  disk_free={:.1f} GB",
+                frames_now, rate_hz, missed_delta,
+                temperature.value_or(std::numeric_limits<double>::quiet_NaN()), free_gb);
             if (free_gb >= 0.0 && free_gb < cfg.disk.min_free_gb) {
                 g_log.error("Disk free {:.1f} GB below hard floor {} GB — stopping cleanly", free_gb,
                             cfg.disk.min_free_gb);
@@ -338,7 +407,13 @@ void Fx10DriverApp::teardownSession_() {
     }
     auto &s = *impl_->session;
 
-    // Order matters: stop the stream first, then the final counter reads
+    // LIFO: stop the trigger pulses first (every recorded line's trigger/strobe
+    // events are already in the log), then the stream, then the counter reads
+    bool trigger_log_failed = false;
+    if (s.trigger_log) {
+        s.trigger_log->stop();
+        trigger_log_failed = !s.trigger_log->ok();
+    }
     s.receiver.stop();
 
     if (s.missed_baseline >= 0 && s.control) {
@@ -378,6 +453,13 @@ void Fx10DriverApp::teardownSession_() {
         exit_code = io_failure ? 20 : 10;
         impl_->stop_reason = "recorder-failure";
     }
+    if (trigger_log_failed) {
+        // A timing-log failure (disk full) outranks a concurrent link loss: the
+        // frames have no time source, so a reconnect must not resurrect the run.
+        exit_code = 20;
+        impl_->stop_reason = "trigger-log-failure";
+        impl_->retryable_link_loss = false;
+    }
 
     if (s.recorder) {
         s.recorder->stop(impl_->stop_reason);
@@ -385,7 +467,7 @@ void Fx10DriverApp::teardownSession_() {
             exit_code = 10;
         }
         const double free_gb = freeDiskGb(impl_->config.recording.output_dir);
-        g_log.info("[STATISTICS] Final Stats: frames={}  frames_missed_rx={}  missed_triggers={}  disk_free={:.1f} GB",
+        g_log.info("[Statistics] Final: frames={}  frames_missed_rx={}  missed_triggers={}  disk_free={:.1f} GB",
                    s.counters.frames_written, s.counters.frames_missed_rx, s.counters.missed_trigger_delta,
                    free_gb);
     }
@@ -444,10 +526,9 @@ void Fx10DriverApp::shutdown() {
         return; // the unified main already reported the init failure
     }
     if (impl_->last_exit_code == 0) {
-        Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleFx10, Common::Markers::kFx10Shutdown);
+        g_log.info("{}", Common::Markers::kFx10Shutdown);
     } else {
-        Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleFx10,
-                                 fmt::format("{} (standalone exit code {})", Common::Markers::kFx10SessionIssues,
-                                             impl_->last_exit_code));
+        g_log.warn("{} (standalone exit code {})", Common::Markers::kFx10SessionIssues,
+                   impl_->last_exit_code);
     }
 }

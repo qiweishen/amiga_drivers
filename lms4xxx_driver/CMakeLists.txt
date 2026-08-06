@@ -22,6 +22,7 @@ find_package(Boost REQUIRED)
 # Driver Library
 set(LIB_SOURCES
         src/lms4xxx_driver.cpp
+        src/lms4xxx_tcp_client.cpp
         src/lms4xxx_driver_app.cpp
         src/lms4xxx_scan_record_writer.cpp
         src/lms4xxx_tool.cpp
@@ -41,8 +42,6 @@ file(GLOB_RECURSE HEADERS
 add_library(lms4xxx_lib STATIC ${LIB_SOURCES} ${HEADERS})
 
 set_target_properties(lms4xxx_lib PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
 )
 

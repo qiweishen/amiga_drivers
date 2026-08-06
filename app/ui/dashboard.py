@@ -34,7 +34,7 @@ def dashboard_page() -> None:
             switches: dict[str, ui.switch] = {}
             for driver in DRIVERS:
                 switches[driver] = ui.switch(
-                    {"ins401": "INS401", "lms4xxx": "LMS4xxx", "gox": "GoX", "asterx": "AsteRx", "fx10": "FX10"}[driver],
+                    {"lms4xxx": "LMS4xxx", "gox": "GoX", "asterx": "AsteRx", "fx10": "FX10"}[driver],
                     on_change=lambda e, d=driver: _on_toggle(d, e.value),
                 )
 

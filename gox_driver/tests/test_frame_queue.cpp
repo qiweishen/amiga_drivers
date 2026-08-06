@@ -3,9 +3,9 @@
 // stress run. Worker threads only record results; assertions run on the test
 // thread after join() so a failing REQUIRE can never unwind a worker.
 
-#include "core/frame_queue.hpp"
+#include "frame_queue.hpp"
 
-#include "../include/frame.hpp"
+#include "frame.hpp"
 
 #include <doctest/doctest.h>
 

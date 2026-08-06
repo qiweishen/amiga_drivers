@@ -67,6 +67,18 @@ namespace fx10 {
         std::string multiband_string; // "y1 h1;y2 h2;..." written verbatim to the camera
     };
 
+    // Teensy SensorSync-Logger (submodule/sensor_trigger): fires the camera's
+    // hardware trigger pulses and records the raw timing log into the session
+    // directory (sensor_trigger.log) — the sole time source for recorded lines.
+    // The pulse rate is NOT configured on the board: every session start sends
+    // acquisition.frame_rate_hz for trigger_channel (board minimum 1 Hz), and
+    // freerun sends 0 = channel off; other channels keep their config.h rates.
+    struct SensorTriggerConfig {
+        bool enabled = false;
+        std::string port; // /dev/serial/by-id/... ; required when enabled
+        int trigger_channel = 0; // Teensy trig[N] wired to the camera's trigger input
+    };
+
     struct AcquisitionConfig {
         int spatial_binning = 1; // [1|2|4|8] -> 1024/512/256/128 pixel width
         int spectral_binning = 1; // [1|2|4|8] -> 448/224/112/56 bands
@@ -149,6 +161,7 @@ namespace fx10 {
         DeviceConfig device;
         NetworkConfig network;
         AcquisitionConfig acquisition;
+        SensorTriggerConfig sensor_trigger;
         RecordingConfig recording;
         DiskConfig disk;
         WatchdogConfig watchdog;

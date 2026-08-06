@@ -18,29 +18,33 @@
 
 
 namespace Common {
-	class IDriverApp {
-	public:
-		IDriverApp() = default;
-		virtual ~IDriverApp() = default;
+    class IDriverApp {
+    public:
+        IDriverApp() = default;
 
-		// Non-copyable, non-movable (owns threads and I/O resources)
-		IDriverApp(const IDriverApp &) = delete;
-		IDriverApp &operator=(const IDriverApp &) = delete;
-		IDriverApp(IDriverApp &&) = delete;
-		IDriverApp &operator=(IDriverApp &&) = delete;
+        virtual ~IDriverApp() = default;
 
-		[[nodiscard]] virtual bool init(const std::function<bool()> &external_stop = {}) = 0;
+        // Non-copyable, non-movable (owns threads and I/O resources)
+        IDriverApp(const IDriverApp &) = delete;
 
-		virtual void run() = 0;
+        IDriverApp &operator=(const IDriverApp &) = delete;
 
-		virtual void shutdown() = 0;
+        IDriverApp(IDriverApp &&) = delete;
 
-		// Shared termination flag (set by the unified main's signal handler)
-		[[nodiscard]] std::atomic<bool> &TerminateFlag() { return terminate_; }
+        IDriverApp &operator=(IDriverApp &&) = delete;
 
-	protected:
-		std::atomic<bool> terminate_{ false };
-	};
-}  // namespace Common
+        [[nodiscard]] virtual bool init(const std::function<bool()> &external_stop = {}) = 0;
+
+        virtual void run() = 0;
+
+        virtual void shutdown() = 0;
+
+        // Shared termination flag (set by the unified main's signal handler)
+        [[nodiscard]] std::atomic<bool> &TerminateFlag() { return terminate_; }
+
+    protected:
+        std::atomic<bool> terminate_{false};
+    };
+} // namespace Common
 
 #endif	// COMMON_DRIVER_APP_H

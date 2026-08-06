@@ -18,7 +18,6 @@
 #include "drivers_json.h"
 #include "fx10_driver_app.h"
 #include "gox_driver_app.h"
-#include "ins401_driver_app.h"
 #include "lms4xxx_driver_app.h"
 #include "lms4xxx_tool.h"
 #include "signal_handler.h"
@@ -45,7 +44,6 @@ namespace {
         // General
         const auto &general = root["General"];
         config.output_directory = general["Output Directory"].as<std::string>("./data");
-        config.enable_ins401 = general["Enable INS401"].as<bool>(true);
         config.enable_lms4xxx = general["Enable LMS4XXX"].as<bool>(true);
         config.enable_gox = general["Enable GOX"].as<bool>(false);
         config.enable_asterx = general["Enable ASTERX"].as<bool>(false);
@@ -60,9 +58,6 @@ namespace {
         config.lms4xxx_config_path = general["LMS4XXX Driver Config Path"].as<std::string>(
             "./lms4xxx_driver/config/config-lms4xxx.yaml");
 
-        // INS401 will not be supported in future update
-        config.ins401_config_path = general["INS401 Driver Config Path"].as<std::string>(
-            "./ins401_driver/config/config-ins401.yaml");
 
         // Logging System
         const auto &logging = root["Logging System"];
@@ -111,7 +106,6 @@ int main(int argc, char *argv[]) {
     drivers_json.AddDriver("fx10", main_config.enable_fx10, main_config.fx10_config_path);
     drivers_json.AddDriver("gox", main_config.enable_gox, main_config.gox_config_path);
     drivers_json.AddDriver("lms4xxx", main_config.enable_lms4xxx, main_config.lms4xxx_config_path);
-    drivers_json.AddDriver("ins401", main_config.enable_ins401, main_config.ins401_config_path);
     drivers_json.WriteRunning();
 
     // Determine which drivers to run (per-driver enable switches)
@@ -120,16 +114,13 @@ int main(int argc, char *argv[]) {
     const bool run_gox = main_config.enable_gox;
     const bool run_lms4xxx = main_config.enable_lms4xxx;
 
-    // INS401 will not be supported in future update
-    const bool run_ins401 = main_config.enable_ins401;
-
-    if (!run_asterx && !run_fx10 && !run_gox && !run_lms4xxx && !run_ins401) {
+    if (!run_asterx && !run_fx10 && !run_gox && !run_lms4xxx) {
         Common::Log::log_and_throw(kModule, "No drivers enabled in the main config");
     }
     Common::Log::log_message(spdlog::level::info, kModule,
                              std::string(Common::Markers::kStartingDrivers) + std::string(run_asterx ? " [AsteRx]" : "")
                              + std::string(run_gox ? " [GoX]" : "") + std::string(run_fx10 ? " [FX10]" : "") +
-                             std::string(run_lms4xxx ? " [LMS4xxx]" : "") + std::string(run_ins401 ? " [INS401]" : ""));
+                             std::string(run_lms4xxx ? " [LMS4xxx]" : ""));
 
     // Create driver apps behind the unified IDriverApp interface
     // LMS4xxx maps one app per LiDAR instance
@@ -201,7 +192,13 @@ int main(int argc, char *argv[]) {
     if (run_lms4xxx) {
         const std::string lms4xxx_config_path = resolve_path(main_config.lms4xxx_config_path);
         copy_config(lms4xxx_config_path, "lms4xxx", "yaml");
-        auto lms4xxx_configs = LMS4xxxTool::LoadConfigs(lms4xxx_config_path);
+        std::string lms4xxx_config_error;
+        auto lms4xxx_configs = LMS4xxxTool::LoadConfigs(lms4xxx_config_path, lms4xxx_config_error);
+        if (!lms4xxx_config_error.empty()) {
+            // Terminate program (same semantics as a gox/fx10 config error);
+            // LoadConfigs itself never throws — the abort decision lives here
+            Common::Log::log_and_throw(kModule, "LMS4xxx config error", lms4xxx_config_error);
+        }
         for (auto &cfg: lms4xxx_configs) {
             cfg.data_folder_path = main_config.data_folder_path;
             cfg.timestamp = main_config.timestamp;
@@ -215,19 +212,6 @@ int main(int argc, char *argv[]) {
                 }
             );
         }
-    }
-    if (run_ins401) {
-        // Currently we only support one INS401 equipment, and INS401 will not be supported in future update
-        copy_config(resolve_path(main_config.ins401_config_path), "ins401", "yaml");
-        drivers.push_back(
-            {
-                std::make_unique<Ins401DriverApp>(main_config),
-                "INS401",
-                Common::Markers::kIns401InitFailed,
-                Common::Markers::kIns401RunException,
-                {}
-            }
-        );
     }
 
     // Initialize drivers in creation order
@@ -244,6 +228,26 @@ int main(int argc, char *argv[]) {
             Common::Log::log_and_throw(kModule, d.init_failed);
         }
         ++initialized;
+    }
+
+    // LMS4xxx maps one app per LiDAR instance; the driver-level lifecycle
+    // markers are therefore aggregated here (per-instance markers come from
+    // each Lms4xxxDriverApp itself).
+    const auto lms_ready_count = [&drivers, &initialized] {
+        std::size_t n = 0;
+        for (std::size_t i = 0; i < initialized; ++i) {
+            if (drivers[i].name == "LMS4xxx") {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const std::size_t lms_total = static_cast<std::size_t>(
+            std::count_if(drivers.begin(), drivers.end(),
+                          [](const DriverSlot &d) { return d.name == "LMS4xxx"; }));
+    if (lms_total > 0 && lms_ready_count() == lms_total) {
+        Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleLms4xxx,
+                                 Common::Markers::kLmsInitialized);
     }
 
     // Run the successfully initialized drivers concurrently, one thread each
@@ -299,6 +303,11 @@ int main(int argc, char *argv[]) {
     }
     for (auto it = drivers.rbegin(); it != drivers.rend(); ++it) {
         it->app->shutdown();
+    }
+    if (lms_ready_count() > 0) {
+        // Every initialized LiDAR instance has now been shut down
+        Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleLms4xxx,
+                                 Common::Markers::kLmsShutdown);
     }
 
     if (int sig = g_signal_received.load(std::memory_order_relaxed); sig != 0) {

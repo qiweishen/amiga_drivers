@@ -7,27 +7,31 @@
 
 
 struct LiDARConfig {
-	// Instance identification
-	std::string position_name;
-	std::string hostname;
+    // Instance identification
+    std::string position_name;
+    std::string hostname;
 
-	// Driver config (loaded from JSON or constructed from YAML)
-	LMS4xxx::DriverConfig driver_config;
+    // Driver config (loaded from JSON or constructed from YAML)
+    LMS4xxx::DriverConfig driver_config;
 
-	// NTP time synchronization
-	bool enable_ntp = false;
-	std::string ntp_server_ip;
-	double sync_time = 1.0;	 // seconds
+    // NTP time synchronization
+    bool enable_ntp = false;
+    std::string ntp_server_ip;
+    double sync_time = 1.0; // seconds
+    double ntp_check_status_s = 5.0; // scanning-time NTP server probe period (s)
 
-	// Recording
-	std::size_t recording_queue_capacity = 512; // SPSC queue frames (parse thread → write thread)
-	std::size_t recording_write_buffer_size = 256 * 1024; // ofstream pubsetbuf size (256 KB)
-	std::size_t recording_max_file_bytes = 1ULL * 1024 * 1024 * 1024;  // 1 GB per file
+    // Recording
+    std::size_t recording_queue_capacity = 512; // SPSC queue frames (parse thread → write thread)
+    std::size_t recording_write_buffer_size = 256 * 1024; // ofstream pubsetbuf size (256 KB)
+    std::size_t recording_max_file_bytes = 1ULL * 1024 * 1024 * 1024; // 1 GB per file
 
-	// Paths (set by main.cpp)
-	std::string data_folder_path;
-	std::string timestamp;
-	std::string config_path;
+    // Logging
+    double stats_interval_s = 2.5; // per-instance status line period (0 = off)
+
+    // Paths (set by main.cpp)
+    std::string data_folder_path;
+    std::string timestamp;
+    std::string config_path;
 };
 
 #endif	// LMS4XXX_DATA_TYPE_H

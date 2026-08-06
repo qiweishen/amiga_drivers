@@ -26,7 +26,7 @@ class SensorState(enum.Enum):
 
 @dataclass
 class SensorStatus:
-    key: str  # "ins401" | "lms:<InstanceName>" | "gox" | "asterx"
+    key: str  # "lms:<InstanceName>" | "gox" | "asterx" | "fx10"
     label: str
     state: SensorState = SensorState.DISABLED
     last_error: str = ""

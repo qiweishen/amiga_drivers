@@ -19,8 +19,8 @@ namespace fx10 {
         Common::DriverLog g_log{"FX10"};
 
         // Ceiling on synthetic zero lines written for a single gap (pad_zero policy).
-        // A cable glitch that loses 100k frames must not fabricate 40+ GB of zeros; the
-        // remainder is carried as gap metadata on the next real record instead.
+        // A cable glitch that loses 100k frames must not fabricate 40+ GB of zeros;
+        // the remainder is only counted (frames_missed_rx) and warned in the log.
         constexpr std::uint64_t kMaxPadLinesPerGap = 10000;
 
         // An isolated wrong-size frame is a transient; a long run of them means the
@@ -43,11 +43,6 @@ namespace fx10 {
             ::close(fd);
             return ok;
         }
-
-
-        std::uint32_t clampToU32(std::uint64_t value) {
-            return value > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<std::uint32_t>(value);
-        }
     } // namespace
 
 
@@ -65,7 +60,7 @@ namespace fx10 {
             if (std::filesystem::create_directory(candidate, ec)) {
                 // Make the new directory entry durable in its parent.
                 if (!fsyncDirectory(output_dir)) {
-                    g_log.warn("cannot fsync output directory '{}'", output_dir.string());
+                    g_log.warn("[Writer] Cannot fsync output directory '{}'", output_dir.string());
                 }
                 return candidate;
             }
@@ -120,13 +115,8 @@ namespace fx10 {
             zero_line_.assign(line_bytes_, 0);
         }
 
-        // One wall-clock read feeds the ns counter, the ISO stamp and the directory
-        // name so the three can never disagree across a second boundary.
-        const std::uint64_t wall_ns = Common::TimeUtil::RealtimeNowNs();
-        session_start_realtime_ns_ = wall_ns;
-        session_start_monotonic_ns_ = Common::TimeUtil::MonotonicNowNs();
-
-        session_dir_ = createSessionDir(config_.output_dir, config_.base_name, Common::TimeUtil::CompactUtc(wall_ns));
+        session_dir_ = createSessionDir(config_.output_dir, config_.base_name,
+                                        Common::TimeUtil::CompactUtc(Common::TimeUtil::RealtimeNowNs()));
 
         try {
             openSegment_();
@@ -148,37 +138,14 @@ namespace fx10 {
         const std::uint32_t next_index = segment_index_ + 1;
         const std::string base = segmentBaseName(next_index);
         data_part_path_ = session_dir_ / (base + ".bil.part");
-        times_part_path_ = session_dir_ / (base + ".times.part");
 
         data_fd_ = ::open(data_part_path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         if (data_fd_ < 0) {
             const int err = errno;
             throw RecorderError("[Writer] Cannot create '" + data_part_path_.string() + "': " + std::strerror(err));
         }
-        times_fd_ = ::open(times_part_path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-        if (times_fd_ < 0) {
-            const int err = errno;
-            ::close(data_fd_);
-            data_fd_ = -1;
-            ::unlink(data_part_path_.c_str());
-            throw RecorderError("[Writer] Cannot create '" + times_part_path_.string() + "': " + std::strerror(err));
-        }
 
-        const SidecarHeader header = makeSidecarHeader(init_.tick_frequency_hz, session_start_realtime_ns_,
-                                                       session_start_monotonic_ns_, next_index);
-        if (!writeAll_(times_fd_, &header, sizeof(header))) {
-            const int err = errno;
-            ::close(data_fd_);
-            ::close(times_fd_);
-            data_fd_ = -1;
-            times_fd_ = -1;
-            ::unlink(data_part_path_.c_str());
-            ::unlink(times_part_path_.c_str());
-            throw RecorderError(
-                "[Writer] Cannot write sidecar header to '" + times_part_path_.string() + "': " + std::strerror(err));
-        }
-
-        segment_index_ = next_index; // committed only after every open/write succeeded
+        segment_index_ = next_index; // committed only after the open succeeded
         lines_this_segment_ = 0;
         data_bytes_this_segment_ = 0;
         segment_start_iso_ = Common::TimeUtil::Iso8601UtcSec(Common::TimeUtil::RealtimeNowNs());
@@ -193,8 +160,9 @@ namespace fx10 {
             if (frame.size != line_bytes_ || frame.width != init_.samples || frame.height != init_.bands || frame.
                 bytes_per_pixel != init_.bytes_per_pixel) {
                 ++counters_.size_mismatch_drops;
-                g_log.warn("[Writer] Dropping frame block_id={} with unexpected geometry {}x{}x{} ({} B, expected {} B)",
-                           frame.block_id, frame.width, frame.height, frame.bytes_per_pixel, frame.size, line_bytes_);
+                g_log.warn(
+                    "[Writer] Dropping frame block_id={} with unexpected geometry {}x{}x{} ({} B, expected {} B)",
+                    frame.block_id, frame.width, frame.height, frame.bytes_per_pixel, frame.size, line_bytes_);
                 if (++consecutive_size_mismatch_ > kMaxConsecutiveSizeMismatch) {
                     latchError_("aborting: " + std::to_string(consecutive_size_mismatch_) +
                                 " consecutive frames with wrong geometry (camera configuration drifted?)");
@@ -203,22 +171,7 @@ namespace fx10 {
             }
             consecutive_size_mismatch_ = 0;
 
-            SidecarRecord record{};
-            record.block_id = frame.block_id;
-            record.host_realtime_ns = static_cast<std::uint64_t>(frame.host_realtime_ns);
-            record.host_monotonic_ns = static_cast<std::uint64_t>(frame.host_monotonic_ns);
-            record.device_timestamp_ticks = frame.device_timestamp_ticks;
-            record.global_line_index = global_line_index_;
-            if (frame.device_timestamp_ticks != 0) {
-                record.flags |= kFlagDeviceTsValid;
-            }
-            if (pending_gap_ > 0) {
-                record.flags |= kFlagGapBefore;
-                record.gap_len = clampToU32(pending_gap_);
-                pending_gap_ = 0;
-            }
-
-            if (writeLine_(frame.data, record)) {
+            if (writeLine_(frame.data)) {
                 ++counters_.frames_written;
                 counters_.bytes_written += line_bytes_;
             }
@@ -241,30 +194,18 @@ namespace fx10 {
                        first_missing_block_id);
 
             if (config_.on_gap != GapPolicy::kPadZero) {
-                pending_gap_ += missing_count;
-                return;
+                return; // gap recorded in the counters + log only
             }
 
             const std::uint64_t to_pad = std::min(missing_count, kMaxPadLinesPerGap);
             if (to_pad < missing_count) {
-                g_log.warn("[Writer] Gap of {} exceeds pad cap {}; remainder recorded as metadata only",
+                // Beyond the cap the line index <-> trigger sequence alignment is lost
+                // for this segment; the offline matcher must fall back to the log warns.
+                g_log.warn("[Writer] Gap of {} exceeds pad cap {}; remainder NOT padded",
                            missing_count, kMaxPadLinesPerGap);
-                pending_gap_ += missing_count - to_pad;
             }
             for (std::uint64_t i = 0; i < to_pad && !failed_; ++i) {
-                SidecarRecord record{};
-                record.block_id = 0;
-                record.host_realtime_ns = Common::TimeUtil::RealtimeNowNs();
-                record.host_monotonic_ns = Common::TimeUtil::MonotonicNowNs();
-                record.global_line_index = global_line_index_;
-                record.flags = kFlagPaddedZero;
-                if (i == 0) {
-                    record.flags |= kFlagGapBefore;
-                    // Only the padded portion; any capped remainder is flagged on the next
-                    // real record, so sum(gap_len) over all records == total frames missed.
-                    record.gap_len = clampToU32(to_pad);
-                }
-                if (writeLine_(zero_line_.data(), record)) {
+                if (writeLine_(zero_line_.data())) {
                     ++counters_.gap_lines_padded;
                     counters_.bytes_written += line_bytes_;
                 }
@@ -277,17 +218,11 @@ namespace fx10 {
     }
 
 
-    bool EnviRecorder::writeLine_(const std::uint8_t *data, SidecarRecord record) {
+    bool EnviRecorder::writeLine_(const std::uint8_t *data) {
         if (!writeAll_(data_fd_, data, line_bytes_)) {
             const int err = errno;
             ++counters_.write_errors;
             latchError_("write failed on '" + data_part_path_.string() + "': " + std::strerror(err));
-            return false;
-        }
-        if (!writeAll_(times_fd_, &record, sizeof(record))) {
-            const int err = errno;
-            ++counters_.write_errors;
-            latchError_("write failed on '" + times_part_path_.string() + "': " + std::strerror(err));
             return false;
         }
         ++lines_this_segment_;
@@ -367,11 +302,8 @@ namespace fx10 {
 
     void EnviRecorder::removeEmptySegment_() {
         ::close(data_fd_);
-        ::close(times_fd_);
         data_fd_ = -1;
-        times_fd_ = -1;
         ::unlink(data_part_path_.c_str());
-        ::unlink(times_part_path_.c_str());
         --segment_index_; // the slot was never used
     }
 
@@ -384,18 +316,13 @@ namespace fx10 {
             return;
         }
 
-        // Cut both files back to the last complete line on the error path so .bil and .times stay 1:1, then make the data durable
+        // Cut the file back to the last complete line on the error path, then make
+        // the data durable
         bool io_ok = true;
         int io_err = 0;
         if (failed_) {
             if (::ftruncate(data_fd_, static_cast<off_t>(lines_this_segment_ * line_bytes_)) != 0) {
-                if (io_err == 0) io_err = errno;
-                io_ok = false;
-            }
-            if (::ftruncate(times_fd_, static_cast<off_t>(sizeof(SidecarHeader) +
-                                                          lines_this_segment_ * sizeof(SidecarRecord))) !=
-                0) {
-                if (io_err == 0) io_err = errno;
+                io_err = errno;
                 io_ok = false;
             }
         }
@@ -403,18 +330,12 @@ namespace fx10 {
             io_err = errno;
             io_ok = false;
         }
-        if (io_ok && ::fdatasync(times_fd_) != 0) {
-            io_err = errno;
-            io_ok = false;
-        }
         ::close(data_fd_);
-        ::close(times_fd_);
         data_fd_ = -1;
-        times_fd_ = -1;
 
         if (!io_ok) {
             ++counters_.write_errors;
-            g_log.error("[Writer] Segment {} finalize sync/truncate failed ({}); leaving .part files "
+            g_log.error("[Writer] Segment {} finalize sync/truncate failed ({}); leaving the .part file "
                         "(segment stays invalid)",
                         segment_index_, std::strerror(io_err));
             if (!failed_) {
@@ -427,16 +348,11 @@ namespace fx10 {
 
         const std::string base = segmentBaseName(segment_index_);
         const std::filesystem::path bil_path = session_dir_ / (base + ".bil");
-        const std::filesystem::path times_path = session_dir_ / (base + ".times");
         std::error_code ec;
         std::filesystem::rename(data_part_path_, bil_path, ec);
-        if (!ec) {
-            std::filesystem::rename(times_part_path_, times_path, ec);
-        }
         if (ec) {
             ++counters_.write_errors;
-            // A renamed .bil may remain next to a .times.part, but without a .hdr the
-            // segment is invalid regardless of file extensions.
+            // Without a .hdr the segment is invalid regardless of file extensions.
             g_log.error("[Writer] Finalize rename failed for segment {}: {}", segment_index_, ec.message());
             return;
         }

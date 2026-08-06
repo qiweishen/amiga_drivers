@@ -13,15 +13,18 @@
 #include "app_config.hpp"
 #include "envi_header.hpp"
 #include "frame.hpp"
-#include "timestamp_sidecar.hpp"
 #include "wavelengths.hpp"
 
 
 // ENVI BIL recorder. One GVSP frame (bands x samples, row-major) is exactly one
 // BIL line record, so the writer appends payloads verbatim. Per segment:
-//   segment_NNNN.bil.part + segment_NNNN.times.part   (streaming)
+//   segment_NNNN.bil.part                             (streaming)
 //   -> fdatasync -> rename -> segment_NNNN.hdr        (finalize; .hdr <=> valid)
 // (run status and the counter ledger go to the log at stop).
+// Line timing is NOT stored here: it lives in the SensorSync trigger log
+// (sensor_trigger.log in the same session directory) and is matched to BIL
+// line indices offline — which is why the pad_zero gap policy matters (it
+// keeps line index <-> trigger sequence alignment across RX losses).
 //
 // Threading: all methods are called from the single acquisition thread
 // (write-in-retrieve-loop topology); nothing here is thread-safe by design.
@@ -39,7 +42,6 @@ namespace fx10 {
         EnviDataType data_type = EnviDataType::kUint16;
         Wavelengths wavelengths; // resolved axis; nm may be empty (omit from .hdr)
         std::string description; // camera/app metadata for the .hdr description
-        std::uint64_t tick_frequency_hz = 0; // GevTimestampTickFrequency; 0 = unknown
     };
 
     // Create <output_dir>/<base_name>_<utc_stamp>/ ; on collision appends _1.._999.
@@ -89,12 +91,12 @@ namespace fx10 {
     private:
         void openSegment_(); // throws RecorderError
         void finalizeSegment_(); // never throws; truncates when failed_
-        void removeEmptySegment_(); // drop 0-line .part files silently
+        void removeEmptySegment_(); // drop a 0-line .part file silently
         void rotateIfNeeded_();
 
-        // True when the line (data + sidecar record) reached the file; rotation
-        // failures after a successful write do not affect the return value.
-        bool writeLine_(const std::uint8_t *data, SidecarRecord record);
+        // True when the line reached the file; rotation failures after a
+        // successful write do not affect the return value.
+        bool writeLine_(const std::uint8_t *data);
 
         bool writeAll_(int fd, const void *data, std::size_t size);
 
@@ -119,18 +121,13 @@ namespace fx10 {
 
         std::uint32_t segment_index_ = 0; // 1-based once a segment is open
         int data_fd_ = -1;
-        int times_fd_ = -1;
         std::filesystem::path data_part_path_;
-        std::filesystem::path times_part_path_;
         std::uint64_t lines_this_segment_ = 0;
         std::uint64_t data_bytes_this_segment_ = 0;
         std::string segment_start_iso_;
 
         std::uint64_t global_line_index_ = 0;
-        std::uint64_t pending_gap_ = 0; // reported on the next record's flags
         std::uint32_t consecutive_size_mismatch_ = 0;
-        std::uint64_t session_start_realtime_ns_ = 0;
-        std::uint64_t session_start_monotonic_ns_ = 0;
 
         WriteHook write_hook_;
     };

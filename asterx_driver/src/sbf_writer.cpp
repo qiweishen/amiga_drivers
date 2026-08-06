@@ -11,7 +11,7 @@
 namespace asterx {
     namespace {
         constexpr std::string_view kModule = "AsteRx";
-        Common::DriverLog g_log{ std::string(kModule) };
+        Common::DriverLog g_log{std::string(kModule)};
 
         Common::RotatingFileWriter::Options make_options(const SbfWriter::Config &cfg) {
             Common::RotatingFileWriter::Options opts;
@@ -35,7 +35,7 @@ namespace asterx {
         std::error_code ec;
         std::filesystem::create_directories(cfg_.output_dir, ec);
         if (ec) {
-            g_log.error("[Writer] Cannot create output directory '" + cfg_.output_dir.string() + "': " + ec.message());
+            g_log.error("[Writer] Cannot create output directory '{}': {}", cfg_.output_dir.string(), ec.message());
         }
     }
 
@@ -62,9 +62,9 @@ namespace asterx {
         const auto files_before = writer_.GetStats().files_opened;
         if (!writer_.Append(block.constData(), static_cast<std::size_t>(block.size()))) {
             if (!writer_.IsOpen()) {
-                g_log.error("[Writer] Cannot open SBF output file in '" + cfg_.output_dir.string() + "'");
+                g_log.error("[Writer] Cannot open SBF output file in '{}'", cfg_.output_dir.string());
             }
-            g_log.error("[Writer] Cannot write SBF block to '" + writer_.CurrentPath() + "'");
+            g_log.error("[Writer] Cannot write SBF block to '{}'", writer_.CurrentPath());
         }
         if (writer_.GetStats().files_opened != files_before) {
             g_log.info("[Writer] Recording to {}", writer_.CurrentPath());
@@ -74,6 +74,6 @@ namespace asterx {
 
     WriterStats SbfWriter::stats() const noexcept {
         const auto &s = writer_.GetStats();
-        return WriterStats{ s.bytes_written, s.records_written, s.files_opened };
+        return WriterStats{s.bytes_written, s.records_written, s.files_opened};
     }
 } // namespace asterx

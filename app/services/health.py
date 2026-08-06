@@ -33,7 +33,6 @@ class HealthMonitor:
         self.clean_stop = False
         self.stopping = False
         sensors: dict[str, SensorStatus] = {}
-        sensors["ins401"] = SensorStatus("ins401", "INS401")
         for name in lms_names or ["?"]:
             sensors[f"lms:{name}"] = SensorStatus(f"lms:{name}", f"LMS4xxx · {name}")
         sensors["gox"] = SensorStatus("gox", "GoX Cameras")
@@ -67,15 +66,7 @@ class HealthMonitor:
     def on_line(self, line: LogLine) -> None:
         msg, module = line.msg, line.module
 
-        if module == markers.MODULE_INS401:
-            if markers.INS401_INITIALIZED in msg:
-                self._set("ins401", SensorState.RUNNING)
-            elif markers.INS401_SHUTDOWN in msg:
-                self._set("ins401", SensorState.STOPPED)
-            elif line.level in ("error", "critical"):
-                self._set("ins401", SensorState.FAILED, msg)
-
-        elif module == markers.MODULE_LMS4XXX:
+        if module == markers.MODULE_LMS4XXX:
             if m := LMS_INIT_RE.search(msg):
                 self._set(f"lms:{m.group(1)}", SensorState.RUNNING)
             elif m := LMS_STOP_RE.search(msg):

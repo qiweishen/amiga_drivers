@@ -64,15 +64,14 @@ namespace jai {
         std::error_code ec;
         std::filesystem::create_directories(session_dir_, ec);
         if (ec) {
-            Common::Log::log_and_throw(Common::Markers::kModuleGox, "GOX cannot create output directory", ec.message(),
-                                       false);
+            g_log.error("Cannot create output directory: {}", ec.message());
             return false;
         }
 
         for (size_t i = 0; i < cfg_.cameras.size(); ++i) {
             if (cfg_.cameras[i].enabled) {
                 sessions_.push_back(std::make_unique<ebus::CameraSession>(static_cast<uint32_t>(i), cfg_.cameras[i],
-                    cfg_, session_uuid_, stop_));
+                                                                          cfg_, session_uuid_, stop_));
             }
         }
         for (auto &session: sessions_) {

@@ -58,5 +58,4 @@ namespace jai {
         }
         return s;
     }
-
 } // namespace jai

@@ -9,7 +9,10 @@ namespace jai {
         volatile sig_atomic_t g_signal_count = 0;
 
         void handle_stop_signal(int) {
-            if (++g_signal_count >= 2) {
+            // No compound assignment on volatile (deprecated since C++20); a
+            // plain read-modify-write is fine for sig_atomic_t in a handler
+            g_signal_count = g_signal_count + 1;
+            if (g_signal_count >= 2) {
                 // Second Ctrl+C / TERM: force quit. The on-disk format is
                 // crash-tolerant; inspect_raw.py rebuild-index recovers the tail.
                 _exit(130);

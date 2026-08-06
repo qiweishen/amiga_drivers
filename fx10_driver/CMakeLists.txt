@@ -40,9 +40,17 @@ add_library(fx10_core STATIC
         src/app_config.cpp
         src/envi_header.cpp
         src/envi_recorder.cpp
-        src/timestamp_sidecar.cpp
+        src/sensor_trigger_log.cpp
         src/wavelengths.cpp
 )
+# SensorSync-Logger host client (single self-contained .cpp, included by
+# src/sensor_trigger_log.cpp); lives in the sensor_trigger git submodule
+set(SENSOR_TRIGGER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../submodule/sensor_trigger")
+if (NOT EXISTS "${SENSOR_TRIGGER_DIR}/session_client.cpp")
+    message(FATAL_ERROR
+        "submodule/sensor_trigger is missing (needed by fx10_core). Run: git submodule update --init")
+endif ()
+target_include_directories(fx10_core PRIVATE "${SENSOR_TRIGGER_DIR}")
 # NOTE: gox_driver/include exposes the SAME relative paths (core/..., ebus/...).
 # Safe today because no TU sees both roots (main.cpp only includes the two
 # self-contained *_driver_app.h); never include "core/..." from a header that

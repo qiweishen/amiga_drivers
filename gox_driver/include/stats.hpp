@@ -41,8 +41,10 @@ namespace jai {
     };
 
     // One periodic status line, e.g.
-    // [cam0] up=00:01:05 fps=24.0 disk=119.8MB/s ok=1560 incomp=2 drop_q=0 drop_net=0 q=3/32 seg=4 free=812GiB
-    // fps/disk rates are computed against the previous snapshot.
+    // [Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ok=1560  incomp=2  drop_q=0  drop_net=0  q=3/32  seg=4  free=812GiB
+    // rate = the sensor's actual output rate (incl. degraded/dropped/lost
+    // frames), fps = frames actually written; rates are computed against the
+    // previous snapshot.
     class StatsReporter {
     public:
         StatsReporter(std::string camera_id, const CameraStats *stats);

@@ -6,11 +6,9 @@
 
 
 namespace LMS4xxx {
-
-	// Ring buffer type used between receive thread and parse thread.
-	// Capacity should be >= 1024 frames for zero-loss at 600 Hz.
-	using FrameRingBuffer = Common::RingBuffer<RawFrame>;
-
-}  // namespace LMS4xxx
+    // Ring buffer type used between receive thread and parse thread.
+    // Capacity should be >= 1024 frames for zero-loss at 600 Hz.
+    using FrameRingBuffer = Common::RingBuffer<RawFrame>;
+} // namespace LMS4xxx
 
 #endif	// LMS4XXX_SPSC_RING_BUFFER_H

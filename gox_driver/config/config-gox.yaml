@@ -14,7 +14,7 @@ cameras:
 
         device:
             mac: ""                     # MAC selection (discovery match, survives a bad IP config); wins over ip
-            ip: "10.95.76.106"          # direct connect (fastest: no discovery pass); used when mac is empty
+            ip: "10.95.1.101"           # direct connect (fastest: no discovery pass); used when mac is empty
             force_ip:                   # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
                 enabled: false
                 ip: ""                  # required when enabled
@@ -26,7 +26,7 @@ cameras:
             exposure_ms: 150.0              # float, ms [1..115279] / 1000; ExposureAuto set to OFF automatically
             gain: 1.0                       # GainSelector chain: AnalogAll -> All -> skip
             pixel_format: "BayerRG12Packed" # GenICam enum entry, written verbatim
-            frame_rate_hz: 5.0             # freerun rate; under external trigger = EXPECTED PPS
+            frame_rate_hz: 3.0             # freerun rate; under external trigger = EXPECTED PPS
             trigger:
                 mode: freerun               # [freerun | external] disable trigger / enable trigger
                 activation: rising          # [rising | falling] specifies the activation mode of the trigger
@@ -104,4 +104,4 @@ watchdog:
 
 # --- Statistics Interval Time ---
 logging:
-    stats_interval_s: 2.5
+    stats_interval_s: 1

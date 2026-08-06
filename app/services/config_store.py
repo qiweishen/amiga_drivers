@@ -78,7 +78,7 @@ def main_settings() -> dict:
     return {
         "output_dir": resolve_output_dir(output_dir),
         "output_dir_raw": output_dir,
-        "enables": {drv: bool(general.get(key, drv in ("ins401", "lms4xxx"))) for drv, key in ENABLE_KEYS.items()},
+        "enables": {drv: bool(general.get(key, drv == "lms4xxx")) for drv, key in ENABLE_KEYS.items()},
         "enable_logging": bool(logging_.get("Enable Logging", True)),
         "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
     }
@@ -117,11 +117,39 @@ def output_dir_problems(raw: str) -> list[str]:
     ]
 
 
+def _lms_snake_case(name: str) -> str:
+    """Verbatim mirror of Common::StringUtil::ToSnakeCase (string_util.h) — the
+    C++ side converts instance names with it, and every marker/error line
+    carries the converted form, so the sensor keys must match exactly."""
+    out: list[str] = []
+    for i, ch in enumerate(name):
+        if ch in (" ", "-"):
+            out.append("_")
+        elif ch.isupper():
+            if i > 0 and name[i - 1] not in (" ", "-", "_") and name[i - 1].islower():
+                out.append("_")
+            out.append(ch.lower())
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def lms_instance_names() -> list[str]:
-    """Instance names from the LMS yaml `Instances:` map (dashboard pre-seed)."""
+    """Enabled instance names from the LMS yaml `lidar:` list (dashboard
+    pre-seed). The C++ side uses each entry's `id` verbatim as the log tag,
+    so the sensor keys are the raw ids.
+
+    Falls back to the older `instances:`/`Instances:` map forms (snake_cased,
+    mirroring the C++ conversion of that era) so a stale field config still
+    seeds the dashboard."""
     try:
         doc = yaml.safe_load(CONFIG_FILES["lms4xxx"].path.read_text(encoding="utf-8")) or {}
-        return list((doc.get("Instances") or {}).keys())
+        lidars = doc.get("lidar")
+        if isinstance(lidars, list):
+            return [str(e["id"]) for e in lidars
+                    if isinstance(e, dict) and e.get("id") and e.get("enabled", True)]
+        raw = (doc.get("instances") or doc.get("Instances") or {}).keys()
+        return [_lms_snake_case(name) for name in raw]
     except Exception:
         return []
 

@@ -8,7 +8,7 @@
 
 # --- General Settings ---
 device:
-    ip: "10.95.76.111"    # receiver IP or hostname
+    ip: "10.95.2.102"    # receiver IP or hostname
     # Single TCP connection: ASCII commands AND the SBF stream share it.
     port: 28784    # plaintext command port (28783 = TLS, not implemented)
     user: "admin"
@@ -98,6 +98,7 @@ output:
     # Rotation doubles as the post-processing guarantee.
     rotate_bytes: 1073741824    # 1 GiB
     rotate_interval_s: 3600     # 1 hour
+
 
 # --- Statistics Interval Time ---
 stats_period_s: 2.5

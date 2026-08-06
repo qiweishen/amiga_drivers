@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "ins401_csv_converter.h"
 #include "lms4xxx_csv_converter.h"
 
 
@@ -36,18 +35,6 @@ namespace {
 		if (filename.rfind("scan_", 0) == 0) {
 			result.type = "LMS4xxx scan";
 			result.records = CsvConverter::ConvertLms4xxxBin(bin_path, csv_path);
-		} else if (filename.rfind("gnss_", 0) == 0) {
-			result.type = "INS401 GNSS";
-			result.records = CsvConverter::ConvertGnssBin(bin_path, csv_path);
-		} else if (filename.rfind("ins_", 0) == 0) {
-			result.type = "INS401 INS";
-			result.records = CsvConverter::ConvertInsBin(bin_path, csv_path);
-		} else if (filename.rfind("imu_", 0) == 0) {
-			result.type = "INS401 IMU";
-			result.records = CsvConverter::ConvertImuBin(bin_path, csv_path);
-		} else if (filename.rfind("diagnostic_", 0) == 0) {
-			result.type = "INS401 Diagnostic";
-			result.records = CsvConverter::ConvertDiagnosticBin(bin_path, csv_path);
 		} else {
 			spdlog::warn("Skipping unrecognized file: {}", bin_path);
 			result.type = "unknown";
@@ -70,11 +57,7 @@ int main(int argc, char *argv[]) {
 				   "    - A single .bin file\n"
 				   "\n"
 				   "  File name prefixes determine conversion type:\n"
-				   "    scan_*.bin       -> LMS4xxx scan data\n"
-				   "    gnss_*.bin       -> INS401 GNSS solution\n"
-				   "    ins_*.bin        -> INS401 INS solution\n"
-				   "    imu_*.bin        -> INS401 raw IMU\n"
-				   "    diagnostic_*.bin -> INS401 diagnostic\n",
+				   "    scan_*.bin       -> LMS4xxx scan data\n",
 				   argv[0]);
 		return 1;
 	}

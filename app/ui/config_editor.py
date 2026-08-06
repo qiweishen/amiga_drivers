@@ -9,7 +9,7 @@ from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
 from . import layout
 
-_EDIT_ORDER = ("main", "ins401", "lms4xxx", "gox", "asterx", "fx10", "snapshot")
+_EDIT_ORDER = ("main", "lms4xxx", "gox", "asterx", "fx10", "snapshot")
 
 
 @ui.page("/config")

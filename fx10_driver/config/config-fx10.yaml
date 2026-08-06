@@ -10,7 +10,7 @@
 device:
     id: ""                          # eBUS connection ID / device user ID; wins over mac/ip
     mac: ""                         # MAC selection (discovery match, survives a bad IP config); wins over ip
-    ip: "10.95.76.105"              # used when id and mac are empty
+    ip: "10.95.0.100"              # used when id and mac are empty
     force_ip:                       # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
         enabled: false
         ip: ""                      # required when enabled
@@ -27,7 +27,7 @@ acquisition:
     frame_rate_hz: 50.0             # freerun rate; under external trigger = EXPECTED PPS
     status_line: false              # keep off: if enabled the last line of the ROI is overwritten with camera information
     trigger:
-        mode: freerun               # [freerun | external] disable trigger / enable trigger
+        mode: external              # [freerun | external] disable trigger / enable trigger (external = SensorSync pulses on Line0)
         activation: rising          # [rising | falling] specifies the activation mode of the trigger
         delay_ms: 0.0               # float, ms [10..419000] / 1000
         exposure_control: camera    # [camera | pulse_width] preset exposure / exposure = pulse
@@ -36,6 +36,17 @@ acquisition:
     mroi:
         enabled: false              # requires spectral_binning: 1; AIE adds 3+3 margin rows/region
         multiband_string: ""        # e.g. "10 20;100 20;200 20" (start_row height; ...)
+
+
+# --- Sensor Trigger (Teensy SensorSync-Logger, submodule/sensor_trigger) ---
+# The camera channel's pulse rate is commanded at every session start:
+# external trigger -> acquisition.frame_rate_hz (board minimum 1 Hz),
+# freerun -> channel off. Other Teensy channels keep their config.h rates.
+sensor_trigger:
+    enabled: true
+    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16840200-if00"
+    trigger_channel: 0              # Teensy trig[N] wired to the camera trigger input (0 = FX10E)
+
 
 # =============================================================
 # DO NOT CHANGE
@@ -94,7 +105,7 @@ output:
     rotation:
         max_lines: 100000           # 0 = no rotation by line count
         max_megabytes: 0            # 0 = no rotation by size
-    on_gap: pad_zero                # record (gaps only in sidecar) | pad_zero (keep PPS alignment)
+    on_gap: pad_zero                # record (gaps counted in the log only) | pad_zero (keeps BIL line index aligned with the trigger sequence — required for sensor_trigger timing)
     wavelengths:
         source: grid                # file | list | grid
         file: ""                    # calibration-pack text file (floats, '#' comments)

@@ -16,7 +16,6 @@ _SENSOR_BADGE = {
 }
 
 _SENSOR_ICON = {
-    "ins401": "explore",
     "gox": "photo_camera",
     "asterx": "satellite_alt",
 }

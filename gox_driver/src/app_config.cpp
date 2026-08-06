@@ -7,8 +7,12 @@
 #include "string_util.h"
 #include "utility.h"
 
+
 namespace jai {
     namespace {
+        Common::DriverLog g_log{"GoX"};
+
+
         std::string read_enum(const YAML::Node &n, const std::vector<std::string> &allowed, const std::string &path) {
             const auto s = n.as<std::string>();
             if (std::find(allowed.begin(), allowed.end(), s) != allowed.end()) {
@@ -62,6 +66,9 @@ namespace jai {
             }
             if (n["enabled"]) {
                 c.enabled = n["enabled"].as<bool>();
+                if (!c.enabled) {
+                    g_log.trace("Camera instance [{}] skipped (disabled)", c.id);
+                }
             }
 
             if (auto d = n["device"]) {
@@ -189,6 +196,13 @@ namespace jai {
                             parse_raw_features(net["receiver_tuning"], path + ".network.receiver_tuning");
                 }
             }
+
+            if (!c.device.mac.empty()) {
+                g_log.trace("Loaded camera instance [{}] ({})",c.id, c.device.mac);
+            } else {
+                g_log.trace("Loaded camera instance [{}] ({})",c.id, c.device.ip);
+            }
+
             return c;
         }
 
@@ -333,6 +347,7 @@ namespace jai {
                 if (enabled_count == 0) {
                     throw ConfigError("Cameras: at least one camera must be enabled");
                 }
+                g_log.trace("Loaded {} cam instance(s)", enabled_count);
             } catch (const ConfigError &) {
                 throw;
             } catch (const std::exception &e) {

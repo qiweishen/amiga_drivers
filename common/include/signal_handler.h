@@ -1,7 +1,7 @@
 /// @file common/signal_handler.h
 /// @brief Shared POSIX signal handling utility for all Amiga drivers.
 ///
-/// Both the INS401 and LMS41xxx drivers implement nearly identical signal handling:
+/// The drivers implement nearly identical signal handling:
 /// SIGINT, SIGTERM, etc. → store to an atomic flag.
 ///
 /// This header provides a single shared implementation using a function-local

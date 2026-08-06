@@ -176,6 +176,18 @@ namespace fx10 {
                     }
                 }
 
+                if (auto n = root["sensor_trigger"]) {
+                    if (n["enabled"]) {
+                        c.sensor_trigger.enabled = n["enabled"].as<bool>();
+                    }
+                    if (n["port"]) {
+                        c.sensor_trigger.port = n["port"].as<std::string>();
+                    }
+                    if (n["trigger_channel"]) {
+                        c.sensor_trigger.trigger_channel = n["trigger_channel"].as<int>();
+                    }
+                }
+
                 if (auto n = root["features"]) {
                     if (auto m = n["map"]; m && m.IsMap()) {
                         for (const auto &item: m) {
@@ -327,6 +339,20 @@ namespace fx10 {
                 if (!(c.acquisition.frame_rate_hz > 0.0)) {
                     throw ConfigError("acquisition.frame_rate_hz must be > 0");
                 }
+                if (c.sensor_trigger.enabled && c.sensor_trigger.port.empty()) {
+                    throw ConfigError("sensor_trigger.port is required when sensor_trigger.enabled "
+                        "(a /dev/serial/by-id/... path survives USB re-enumeration)");
+                }
+                if (c.sensor_trigger.trigger_channel < 0) {
+                    throw ConfigError("sensor_trigger.trigger_channel must be >= 0 (Teensy trig[N] index)");
+                }
+                if (c.sensor_trigger.enabled && c.acquisition.trigger.mode == TriggerMode::kExternal &&
+                    c.acquisition.frame_rate_hz < 1.0) {
+                    // The board rejects sub-1-Hz trigger rates (#ERR,bad_freq) and would
+                    // silently keep pulsing at the previous rate instead.
+                    throw ConfigError("acquisition.frame_rate_hz must be >= 1 when the sensor_trigger drives "
+                        "the external trigger (SensorSync board minimum)");
+                }
                 if (c.recording.output_dir.empty()) {
                     throw ConfigError("recording.output_dir must not be empty");
                 }
@@ -433,7 +459,7 @@ namespace fx10 {
             "trigger_activation", "trigger_delay", "spectral_binning",
             "mroi_enable", "mroi_index", "mroi_y",
             "mroi_h", "status_line", "missed_trigger_count",
-            "missed_trigger_reset", "extended_id_mode", "timestamp_tick_frequency",
+            "missed_trigger_reset", "extended_id_mode",
             "device_temperature",
         };
         return kRoles;
@@ -462,7 +488,6 @@ namespace fx10 {
             {"missed_trigger_count", "Counter1_Value"},
             {"missed_trigger_reset", "Counter1_Reset"},
             {"extended_id_mode", ""}, // absent on FX10e: 16-bit BlockIDs
-            {"timestamp_tick_frequency", "GevTimestampTickFrequency"}, // 100 MHz
             {"device_temperature", "DeviceTemperature"},
         };
     }

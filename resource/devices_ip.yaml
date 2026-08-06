@@ -6,23 +6,22 @@ CoolShark Auto66:
 
 
 Septentrio AsteRx:
-    IP: 10.95.76.111
-    Ethernet Port: enp1s0f0
-    Subnetwork: 10.95.77.255
+    IP: 10.95.2.102
+    Ethernet Port: enp1s0f2
+    Subnetwork: 10.95.2.1
 
 
 # GVSP needs MTU 9000 + net.core.rmem_max (see fx10_driver/docs/BRINGUP.md)
 Specim FX10e:
-    IP: 10.95.76.105
-    Ethernet Port: eno1
-    Subnetwork: 10.95.76.255
+    IP: 10.95.0.100
+    Ethernet Port: enp1s0f0
+    Subnetwork: 10.95.0.1
 
 
-JAI Go-x:
-    Mac Address: 00:0c:df:06:5b:73
-    IP: 10.95.78.106
+JAI Go-X:
+    IP: 10.95.1.101
     Ethernet Port: enp1s0f1
-    Subnetwork: 10.95.78.78
+    Subnetwork: 10.95.1.1
 
 
 SICK LMS4xxx:
@@ -32,11 +31,3 @@ SICK LMS4xxx:
         IP: 10.95.76.103
     Ethernet Port: eno1
     Subnetwork: 10.95.76.255
-
-
-
-
-Acenna INS401:
-    Mac Address:
-    Ethernet Port: eno1
-    subnetwork: 10.95.76.255

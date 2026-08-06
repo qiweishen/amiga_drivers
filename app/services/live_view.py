@@ -6,9 +6,10 @@ appending to right now, restricted to committed bytes.
 - GoX: newest frame from the live jai-raw-seg segment — idx.jsonl tail gives
   the record offset, the payload sits at off + 96 (frame header), decode via
   gox_driver/scripts/unpack_raw.py (PFNC table + demosaic).
-- FX10: per-band spectral statistics over the BIL lines of the last second,
-  selected through the fixed-width .times sidecar (one 48-byte record per
-  line, written unbuffered — always fresh).
+- FX10: per-band spectral statistics over roughly the last second of BIL
+  lines — the tail of the open segment, sized from the configured frame rate
+  (the driver writes lines unbuffered, so the file is always fresh; precise
+  GNSS line times live in sensor_trigger.log and are not needed here).
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
-import struct
 import sys
 import time
 from dataclasses import dataclass, field
@@ -33,14 +33,7 @@ from .fx10_tools import _PIXEL_FULL_SCALE
 _GOX_FRAME_HEADER_BYTES = 96  # jai-raw-seg FrameHeader (frozen format)
 _IDX_TAIL_BYTES = 256 * 1024  # more than enough for the last idx.jsonl lines
 _WINDOW_S = 1.0  # "the last second before the click"
-
-# .times sidecar layout (fx10_driver/include/timestamp_sidecar.hpp)
-_SIDECAR_MAGIC = b"FX10TS01"
-_SIDECAR_HEADER_BYTES = 64
-_SIDECAR_RECORD = np.dtype([
-    ("bid", "<u8"), ("hrt", "<u8"), ("hmn", "<u8"), ("dts", "<u8"),
-    ("gli", "<u8"), ("flags", "<u4"), ("gap", "<u4"),
-])
+_FX10_STALE_S = 3.0  # .bil.part mtime older than this = the lines stopped
 
 
 @dataclass
@@ -65,7 +58,7 @@ class Fx10Live:
     frames: int = 0
     bands: int = 0
     samples: int = 0
-    age_s: float = 0.0  # click time minus the newest used line's host timestamp
+    age_s: float = 0.0  # click time minus the .bil.part mtime (newest line)
 
 
 # --- shared ------------------------------------------------------------------
@@ -175,10 +168,12 @@ def gox_latest_frame() -> GoxLive:
 
 # --- FX10 --------------------------------------------------------------------
 
-def _fx10_geometry() -> tuple[int, int, int, list[float]] | str:
-    """(samples, bands, full_scale, wavelengths) from config-fx10.yaml, or an
-    error string. The live segment has no .hdr until it is finalized, so the
-    config is the only geometry source."""
+def _fx10_geometry() -> tuple[int, int, int, list[float], float] | str:
+    """(samples, bands, full_scale, wavelengths, frame_rate_hz) from
+    config-fx10.yaml, or an error string. The live segment has no .hdr until it
+    is finalized, so the config is the only geometry source. frame_rate_hz is
+    the freerun rate / expected external pulse rate — it sizes the "last
+    second" tail window."""
     try:
         doc = yaml.safe_load(CONFIG_FILES["fx10"].path.read_text(encoding="utf-8")) or {}
     except Exception as e:
@@ -189,8 +184,9 @@ def _fx10_geometry() -> tuple[int, int, int, list[float]] | str:
     try:
         samples = 1024 // int(acq.get("spatial_binning", 1))
         bands = 448 // int(acq.get("spectral_binning", 1))
+        frame_rate_hz = float(acq.get("frame_rate_hz", 50.0))
     except (TypeError, ValueError, ZeroDivisionError):
-        return "Bad spatial/spectral_binning in config-fx10.yaml"
+        return "Bad spatial/spectral_binning or frame_rate_hz in config-fx10.yaml"
     full_scale = _PIXEL_FULL_SCALE.get(str(acq.get("pixel_format", "Mono12Packed")), 4095)
     wl_cfg = (doc.get("output") or {}).get("wavelengths") or {}
     values = wl_cfg.get("list") or []
@@ -200,13 +196,13 @@ def _fx10_geometry() -> tuple[int, int, int, list[float]] | str:
         grid = wl_cfg.get("grid") or {}
         wavelengths = list(np.linspace(float(grid.get("start_nm", 400.0)),
                                        float(grid.get("end_nm", 1000.0)), bands))
-    return samples, bands, full_scale, wavelengths
+    return samples, bands, full_scale, wavelengths, frame_rate_hz
 
 
 def fx10_spectrum() -> Fx10Live:
-    """Per-band statistics over the lines recorded in the last second of the
-    live FX10 session (same reductions and normalization as the FX10 Tools
-    snapshot preview)."""
+    """Per-band statistics over roughly the last second of recorded lines
+    (frame_rate_hz worth of lines at the tail of the open segment; same
+    reductions and normalization as the FX10 Tools snapshot preview)."""
     session, reason = _session_or_reason()
     if reason:
         return Fx10Live(False, reason=reason)
@@ -218,51 +214,36 @@ def fx10_spectrum() -> Fx10Live:
         return Fx10Live(False, reason=f"No FX10 session under {root} yet")
     # The OPEN segment carries a .part suffix (renamed on finalize); prefer it,
     # fall back to the newest finalized segment right after a rotation.
-    times_files = sorted(session_dirs[-1].glob("segment_*.times.part")) \
-        or sorted(session_dirs[-1].glob("segment_*.times"))
-    if not times_files:
+    bil_files = sorted(session_dirs[-1].glob("segment_*.bil.part")) \
+        or sorted(session_dirs[-1].glob("segment_*.bil"))
+    if not bil_files:
         return Fx10Live(False, reason="No open segment yet")
-    times = times_files[-1]
+    bil = bil_files[-1]
 
     geometry = _fx10_geometry()
     if isinstance(geometry, str):
         return Fx10Live(False, reason=geometry)
-    samples, bands, full_scale, wavelengths = geometry
+    samples, bands, full_scale, wavelengths, frame_rate_hz = geometry
     dtype = np.uint8 if full_scale == 255 else np.dtype("<u2")
     line_bytes = samples * bands * dtype.itemsize
 
-    raw = times.read_bytes()
-    if len(raw) < _SIDECAR_HEADER_BYTES:
-        return Fx10Live(False, reason="Sidecar header not on disk yet — retry")
-    magic, _version, record_size = struct.unpack_from("<8sII", raw, 0)
-    if magic != _SIDECAR_MAGIC or record_size != _SIDECAR_RECORD.itemsize:
-        return Fx10Live(False, reason=f"Unexpected sidecar layout in {times.name}")
-    n_records = (len(raw) - _SIDECAR_HEADER_BYTES) // _SIDECAR_RECORD.itemsize
-    if n_records == 0:
-        return Fx10Live(False, reason="No lines recorded in this segment yet")
-    records = np.frombuffer(raw, dtype=_SIDECAR_RECORD, count=n_records,
-                            offset=_SIDECAR_HEADER_BYTES)
-
-    bil = times.with_name(times.name.replace(".times", ".bil"))  # keeps a .part suffix
     try:
-        bil_lines = bil.stat().st_size // line_bytes
+        stat = bil.stat()
     except OSError as e:
         return Fx10Live(False, reason=f"Cannot stat {bil.name}: {e}")
-    usable = min(n_records, bil_lines)
-    if usable == 0:
+    total_lines = stat.st_size // line_bytes  # floor = complete lines only
+    if total_lines == 0:
         return Fx10Live(False, reason="No complete line on disk yet — retry")
 
-    # Lines whose host timestamp falls inside the last second (timestamps are
-    # monotonic per segment, so the selection is a contiguous tail).
-    cutoff_ns = int((time.time() - _WINDOW_S) * 1e9)
-    hrt = records["hrt"][:usable]
-    selected = np.nonzero(hrt >= cutoff_ns)[0]
-    if selected.size == 0:
-        age = time.time() - float(hrt[usable - 1]) / 1e9
+    # The writer appends unbuffered, so the mtime is the newest line's time.
+    age = max(0.0, time.time() - stat.st_mtime)
+    if age > _FX10_STALE_S:
         return Fx10Live(False, reason=f"No frames in the last {_WINDOW_S:.0f} s "
                                       f"(newest line is {age:.1f} s old — trigger pulses missing?)")
-    first = int(selected[0])
-    count = usable - first
+
+    window = max(1, round(frame_rate_hz * _WINDOW_S)) if frame_rate_hz > 0 else 1
+    count = min(total_lines, window)
+    first = total_lines - count
 
     with bil.open("rb") as f:
         f.seek(first * line_bytes)
@@ -289,5 +270,5 @@ def fx10_spectrum() -> Fx10Live:
         frames=count,
         bands=bands,
         samples=samples,
-        age_s=max(0.0, time.time() - float(hrt[first + count - 1]) / 1e9),
+        age_s=age,
     )

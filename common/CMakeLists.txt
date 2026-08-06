@@ -2,20 +2,16 @@
 # common - Shared infrastructure library for all Amiga drivers
 # Provides: logging, config loading, signal handling, SPSC ring buffer
 
-find_package(Boost REQUIRED)  # header-only usage (Asio for tcp_client)
 
 add_library(amiga_common STATIC
         src/activity_spinner.cpp
         src/drivers_json.cpp
         src/logger.cpp
         src/signal_handler.cpp
-        src/tcp_client.cpp
         src/utility.cpp
 )
 
 set_target_properties(amiga_common PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
 )
 
@@ -25,7 +21,6 @@ target_include_directories(amiga_common PUBLIC
 )
 
 target_link_libraries(amiga_common PUBLIC
-        Boost::boost
         spdlog::spdlog
         yaml-cpp::yaml-cpp
         nlohmann_json::nlohmann_json

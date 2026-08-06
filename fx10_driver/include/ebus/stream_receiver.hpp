@@ -98,6 +98,7 @@ namespace fx10 {
         void acquisitionLoop_(IFrameSink &sink);
 
         bool checkFirstFrame_(PvBuffer &buffer);
+
         void warnIfUnexpectedStatusLine_(const std::uint8_t *data); // canonical (unpacked) layout
 
         void latchFatal_(const std::string &message, FatalKind kind = FatalKind::kOther);

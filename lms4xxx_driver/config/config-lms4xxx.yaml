@@ -1,48 +1,80 @@
+# =============================================================
 # LMS4xxx Driver Configuration
-# Used by the unified main.cpp via LidarTool::LoadConfigs()
+# =============================================================
 
-# Per-instance sensor configuration
-Instances:
-    Front Left Laser:
-        Hostname: "10.95.76.101"
-        Port: 2111
-    Front Right Laser:
-        Hostname: "10.95.76.103"
-        Port: 2111
+# SICK LMS4xxx 2D LiDAR (CoLa B binary protocol over TCP).
+# Referenced by config/config-main.yaml ("LMS4XXX Driver Config Path").
 
-# Scan parameters (shared across instances)
-Scan Config:
-    Start Angle Deg: 55.0
-    Stop Angle Deg: 125.0
-    Angular Resolution Deg: 0.0833
-    Enable Distance: true
-    Enable RSSI: true
-    Enable Reflectance: false
-    Enable Angle Correction: true
-    Enable Quality: true
-    Output Rate: 1
 
-# Network tuning
-Network:
-    Receive Buffer Bytes: 4194304   # SO_RCVBUF size (4 MB)
-    Ring Buffer Frames: 1024        # SPSC ring buffer capacity (frames)
-    Receive Thread Priority: 99     # SCHED_FIFO priority (1-99)
-    Receive Thread CPU: -1          # CPU affinity (-1 = no pinning)
-    Connect Timeout Ms: 500
-    Response Timeout Ms: 200
-    TCP Keepalive: true
-    Keepalive Idle S: 10
-    Keepalive Interval S: 5
-    Keepalive Count: 3
+# --- LiDARs ---
+# One entry per LiDAR (gox-style list). The id is used VERBATIM as the log
+# tag and in the recording filename (scan_<id>_<ts>.bin); all other sections
+# are shared across instances.
+lidar:
+    -   id: "Front_Left_Laser"      # required, 1..63 chars, [A-Za-z0-9_-] only (used as directory name)
+        enabled: false              # false = skip this LiDAR (at least one must be enabled)
 
-# Time Synchronization
-Time Synchronization:
-    Enable NTP: true
-    NTP Server: "10.95.76.100"
-    Sync Time: 1
+        device:
+            ip: "10.95.76.101"
+            port: 2111                  # CoLa B binary protocol port
 
-# Scan data recording
-Recording:
-    Queue Capacity: 512          # SPSC queue frames (parse thread → write thread)
-    Write Buffer Size: 262144    # ofstream pubsetbuf size (256 KB)
-    Max File Bytes: 1073741824   # 1 GB per file (0 = no splitting)
+    -   id: "Front_Right_Laser"
+        enabled: true
+
+        device:
+            ip: "10.95.76.103"
+            port: 2111
+
+
+# --- Global Settings ---
+# =============================================================
+# NOT RECOMMEND TO CHANGE
+# =============================================================
+# --- Scan Settings ---
+scan:
+    start_angle_deg: 55.0
+    stop_angle_deg: 125.0
+    angular_resolution_deg: 0.0833  # 1/12 degree
+    enable_distance: true           # DIST1 channel
+    enable_rssi: true               # RSSI1 channel (signal strength)
+    enable_reflectance: false       # REFL1 channel (calibrated reflectance %)
+    enable_angle_correction: true   # ANGL1 channel (per-point angle correction)
+    enable_quality: true            # QLTY1 channel (8-bit quality bitfield)
+    output_rate: 1                  # output every Nth scan (1 = every scan)
+
+
+# --- Time Synchronization ---
+ntp:
+    enabled: true
+    server: "10.95.76.121"
+    sync_interval_s: 1              # [1, 3600]
+    check_status_s: 5               # scanning-time NTP server probe period, s [1, 3600]
+
+
+# =============================================================
+# NOT RECOMMEND TO CHANGE
+# =============================================================
+# --- Network Transfer Settings ---
+network:
+    recv_buffer_bytes: 4194304      # SO_RCVBUF size (4 MB)
+    ring_buffer_frames: 1024        # SPSC ring buffer capacity (frames)
+    receive_thread_priority: 99     # SCHED_FIFO priority (1-99)
+    receive_thread_cpu: -1          # CPU affinity (-1 = no pinning)
+    connect_timeout_ms: 500
+    response_timeout_ms: 200
+    tcp_keepalive: true
+    keepalive_idle_s: 10
+    keepalive_interval_s: 5
+    keepalive_count: 3
+
+
+# --- Output Settings ---
+output:
+    queue_max_frames: 512           # SPSC queue frames (parse thread -> write thread)
+    write_buffer_bytes: 262144      # ofstream buffer size (256 KB)
+    max_file_bytes: 1073741824      # 1 GB per file (0 = no splitting)
+
+
+# --- Statistics Interval Time ---
+logging:
+    stats_interval_s: 1            # per-instance status line period (0 = off)

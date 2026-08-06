@@ -34,6 +34,14 @@ acquisition:
         enabled: false              # requires spectral_binning: 1; AIE adds 3+3 margin rows/region
         multiband_string: ""        # e.g. "10 20;100 20;200 20" (start_row height; ...)
 
+
+# --- Sensor Trigger ---
+# Snapshots run freerun and never touch the SensorSync trigger box (which may
+# be held by a concurrent recording).
+sensor_trigger:
+    enabled: false
+
+
 # =============================================================
 # DO NOT CHANGE
 # =============================================================
@@ -90,7 +98,7 @@ output:
     rotation:
         max_lines: 100000           # 0 = no rotation by line count
         max_megabytes: 0            # 0 = no rotation by size
-    on_gap: pad_zero                # record (gaps only in sidecar) | pad_zero (keep PPS alignment)
+    on_gap: pad_zero                # record (gaps counted in the log only) | pad_zero (keep line alignment)
     wavelengths:
         source: grid                # file | list | grid
         file: ""                    # calibration-pack text file (floats, '#' comments)

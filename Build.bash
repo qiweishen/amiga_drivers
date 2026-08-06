@@ -12,4 +12,4 @@ mkdir build && cd build
 cmake ..
 make -j"$(nproc)"
 
-sudo setcap cap_net_raw,cap_sys_nice+ep ./bin/AmigaDrivers
+sudo setcap cap_sys_nice+ep ./bin/AmigaDrivers
