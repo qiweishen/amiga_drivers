@@ -105,6 +105,27 @@ namespace asterx {
                     receiver.streams.push_back(std::move(st));
                 }
             }
+
+            if (n["pin_streams"] && n["pin_streams"].IsSequence()) {
+                receiver.pin_streams.clear();
+                for (const auto &s: n["pin_streams"]) {
+                    NmeaPinStream st;
+                    st.stream_id = s["id"].as<int>();
+                    st.descriptor = s["descriptor"].as<std::string>();
+                    st.interval = s["interval"].as<std::string>();
+                    // message accepts a single sentence or a list
+                    if (const auto m = s["message"]) {
+                        if (m.IsSequence()) {
+                            for (const auto &e: m) {
+                                st.messages.push_back(e.as<std::string>());
+                            }
+                        } else {
+                            st.messages.push_back(m.as<std::string>());
+                        }
+                    }
+                    receiver.pin_streams.push_back(std::move(st));
+                }
+            }
         }
     } // namespace
 

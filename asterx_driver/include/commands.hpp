@@ -19,6 +19,18 @@ namespace asterx {
         std::string interval; // e.g. "OnChange"
     };
 
+    // One NMEA stream pushed to a fixed receiver port (a physical pin such as
+    // COM2) — unlike SbfStream, which targets our own dynamic connection.
+    // Used to feed NMEA sentences to external hardware (e.g. ZDA + PPS as a
+    // time-sync source). NMEA stream ids live in their own 1..10 space,
+    // independent of the SBF stream numbering.
+    struct NmeaPinStream {
+        int stream_id; // 1..10 — receiver-side NMEA Stream<id>
+        std::string descriptor; // fixed connection descriptor, e.g. "COM2"
+        std::vector<std::string> messages; // e.g. {"ZDA"}
+        std::string interval; // e.g. "OnChange"
+    };
+
     struct Vec3 {
         double x{0.0};
         double y{0.0};
@@ -61,6 +73,9 @@ namespace asterx {
         };
 
 
+        // NMEA sentence output on fixed receiver ports (empty = feature off).
+        std::vector<NmeaPinStream> pin_streams{};
+
         // IMU setup. OrientationMode is SensorDefault, manual, or fixed.
         std::string imu_startup_data_mode{"Boot"};
         std::string imu_orientation_mode{"SensorDefault"};
@@ -100,19 +115,30 @@ namespace asterx {
 
     [[nodiscard]] bool is_valid_sbf_interval(const std::string &interval);
 
+    [[nodiscard]] bool is_valid_nmea_message(const std::string &message);
+
+    // Fixed receiver ports a pin stream may target (setNMEAOutput Cd column) —
+    // as opposed to the dynamic descriptor of our own session.
+    [[nodiscard]] bool is_valid_pin_descriptor(const std::string &descriptor);
+
     // descriptor is the receiver-side connection descriptor of OUR OWN session
     // (e.g. "IP10"), as reported by SsnRx::getConnectionDescriptor(). SBF output
     // is targeted at it, so the stream dies with the connection.
     [[nodiscard]] std::string build_sbf_output_command(const SbfStream &stream,
                                                        const std::string &descriptor);
 
+    // Pin streams carry their fixed target port in the config, so unlike
+    // build_sbf_output_command no session descriptor is needed.
+    [[nodiscard]] std::string build_nmea_output_command(const NmeaPinStream &stream);
+
     [[nodiscard]] std::string build_ins_ant_lever_arm_command(Vec3 lever_arm_m);
 
     [[nodiscard]] std::string build_imu_orientation_command(const ReceiverSettings &settings);
 
-    // Full ordered configure sequence: login -> capabilities -> stream wipe ->
-    // SBF output enable -> tracking -> IMU/lever-arm/attitude (+ readbacks) ->
-    // setSBFOutput per stream. Re-run verbatim after every reconnect.
+    // Full ordered configure sequence: login -> capabilities -> stream wipe
+    // (SBF + NMEA) -> SBF output enable -> tracking -> IMU/lever-arm/attitude
+    // (+ readbacks) -> setSBFOutput per stream -> setNMEAOutput per pin
+    // stream. Re-run verbatim after every reconnect.
     [[nodiscard]] std::vector<Command> build_command_list(const ReceiverSettings &settings,
                                                           const std::string &descriptor);
 

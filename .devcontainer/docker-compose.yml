@@ -18,9 +18,6 @@ services:
             # AmigaDrivers carries file caps cap_net_raw,cap_sys_nice+ep (Start.bash / GUI setcap)
             - SYS_NICE
 
-        devices:
-            - "/dev/ttyACM0:/dev/ttyACM0"
-
         environment:
             PYTHONUNBUFFERED: 1
             # X11
@@ -44,6 +41,5 @@ services:
             - /mnt/wslg:/mnt/wslg
             # User runtime (audio, D-Bus, etc.)
             - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
-            - /dev/serial/by-id:/dev/serial/by-id:ro
 
         working_dir: /workspace

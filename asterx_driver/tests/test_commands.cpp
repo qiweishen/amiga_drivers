@@ -149,10 +149,10 @@ TEST(Commands, CommandListFollowsConfigureSequence) {
     EXPECT_EQ(cmds[0].text, "login, admin, secret");
     EXPECT_EQ(cmds[0].kind, asterx::CommandKind::Plain);
 
-    // Exactly one capabilities check, ten tolerated stream wipes, and one
-    // geometry readback of each kind.
+    // Exactly one capabilities check, twenty tolerated stream wipes (ten SBF
+    // + ten NMEA), and one geometry readback of each kind.
     EXPECT_EQ(count_kind(cmds, asterx::CommandKind::CheckCapabilities), 1u);
-    EXPECT_EQ(count_kind(cmds, asterx::CommandKind::ToleratedError), 10u);
+    EXPECT_EQ(count_kind(cmds, asterx::CommandKind::ToleratedError), 20u);
     EXPECT_EQ(count_kind(cmds, asterx::CommandKind::VerifyImuOrientation), 1u);
     EXPECT_EQ(count_kind(cmds, asterx::CommandKind::VerifyLeverArm), 1u);
     EXPECT_EQ(count_kind(cmds, asterx::CommandKind::VerifyGnssAttitude), 1u);
@@ -178,6 +178,91 @@ TEST(Commands, CommandListFollowsConfigureSequence) {
 
     // Stream setup comes after the geometry verification.
     EXPECT_LT(index_of(cmds, "getAttitudeOffset"), index_of(cmds, "setSBFOutput, Stream1, IP12"));
+}
+
+TEST(Commands, BuildsNmeaPinOutputCommand) {
+    asterx::NmeaPinStream stream;
+    stream.stream_id = 8;
+    stream.descriptor = "COM2";
+    stream.messages = {"ZDA"};
+    stream.interval = "OnChange";
+    EXPECT_EQ(asterx::build_nmea_output_command(stream),
+              "setNMEAOutput, Stream8, COM2, ZDA, OnChange");
+
+    stream.messages = {"GGA", "ZDA"};
+    stream.interval = "sec1";
+    EXPECT_EQ(asterx::build_nmea_output_command(stream),
+              "setNMEAOutput, Stream8, COM2, GGA+ZDA, sec1");
+}
+
+TEST(Commands, RejectsInvalidNmeaPinStream) {
+    const asterx::NmeaPinStream good{8, "COM2", {"ZDA"}, "OnChange"};
+    EXPECT_NO_THROW((void) asterx::build_nmea_output_command(good));
+
+    auto bad = good;
+    bad.stream_id = 11;
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+
+    bad = good;
+    bad.descriptor = "COM9"; // not a receiver port
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+    bad.descriptor = "";
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+
+    bad = good;
+    bad.messages = {"GSV"}; // common NMEA sentence, but not in the receiver's set
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+    bad.messages.clear();
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+
+    bad = good;
+    bad.interval = "sec3";
+    EXPECT_THROW((void) asterx::build_nmea_output_command(bad), asterx::ConfigError);
+}
+
+TEST(Commands, ValidationRejectsDuplicatePinStreamIds) {
+    asterx::ReceiverSettings settings;
+    settings.ant_lever_arm_configured = true;
+    settings.pin_streams = {
+        {8, "COM2", {"ZDA"}, "OnChange"},
+        {8, "COM1", {"GGA"}, "sec1"},
+    };
+    EXPECT_THROW(asterx::validate_receiver_settings(settings), asterx::ConfigError);
+
+    settings.pin_streams[1].stream_id = 9;
+    EXPECT_NO_THROW(asterx::validate_receiver_settings(settings));
+}
+
+TEST(Commands, CommandListConfiguresPinStreams) {
+    asterx::ReceiverSettings settings;
+    settings.ant_lever_arm_configured = true;
+    settings.pin_streams = {
+        {8, "COM2", {"ZDA"}, "OnChange"},
+        {9, "COM2", {"GGA"}, "sec1"},
+    };
+
+    const auto cmds = asterx::build_command_list(settings, "IP12");
+
+    // Stale NMEA streams are wiped like the SBF ones.
+    EXPECT_LT(index_of(cmds, "setNMEAOutput, Stream1, none, none, off"), cmds.size());
+
+    // The pin port is switched to NMEA output exactly once, before its streams.
+    const auto port_enable = index_of(cmds, "setDataInOut, COM2, , +NMEA");
+    ASSERT_LT(port_enable, cmds.size());
+    EXPECT_EQ(std::count_if(cmds.begin(), cmds.end(),
+                            [](const asterx::Command &c) {
+                                return c.text == "setDataInOut, COM2, , +NMEA";
+                            }),
+              1);
+
+    const auto zda = index_of(cmds, "setNMEAOutput, Stream8, COM2, ZDA, OnChange");
+    const auto gga = index_of(cmds, "setNMEAOutput, Stream9, COM2, GGA, sec1");
+    ASSERT_LT(zda, cmds.size());
+    ASSERT_LT(gga, cmds.size());
+    EXPECT_LT(port_enable, zda);
+
+    // Pin streams come after the SBF streams on our own connection.
+    EXPECT_LT(index_of(cmds, "setSBFOutput, Stream1, IP12"), port_enable);
 }
 
 TEST(Commands, RedactsLoginForLogging) {

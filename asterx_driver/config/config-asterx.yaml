@@ -52,6 +52,7 @@ receiver:
     #     OnChange
     #     msec5 msec10 msec20 msec40 msec50 msec100 msec200 msec500
     #     sec1 sec2 sec5 sec10 sec15 sec30 sec60 min2 min5 min10 min15 min30 min60
+    # Through IPx port, the IP port we used to connect receiver
     streams:
         -   id: 1
             blocks: [ "ExtSensorMeas" ]                                           # raw IMU
@@ -81,6 +82,17 @@ receiver:
             # msec100 caps both blocks at 10 Hz — plenty for the 0.5 s GUI tail and ~16 MB/h of CSV.
             blocks: [ "PVTGeodetic", "INSNavGeod" ]
             interval: "msec100"
+
+    # NMEA sentence output on fixed receiver ports ("pins", e.g. COM2) to feed external hardware
+    # Allowed descriptors:
+    #     COM1-COM4  USB1-USB2  IP10-IP17  NTR1-NTR3  IPS1-IPS5  IPR1-IPR5  DSK1
+    # Allowed messages:
+    #     GGA GLL GNS GST HDT RMC VTG ZDA HRP THS PASHR
+    pin_streams:
+        -   id: 8
+            descriptor: COM2
+            message: ZDA
+            interval: "OnChange"
 
 
 # =============================================================

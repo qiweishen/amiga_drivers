@@ -90,6 +90,61 @@ receiver:
     std::filesystem::remove(path);
 }
 
+TEST(AppConfig, LoadsPinStreams) {
+    const auto path = write_temp_config(R"yaml(
+receiver:
+  imu:
+    startup_data_mode: Boot
+    orientation_mode: SensorDefault
+    ant_lever_arm_m:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+  pin_streams:
+    - id: 8
+      descriptor: COM2
+      message: ZDA
+      interval: "OnChange"
+    - id: 9
+      descriptor: COM1
+      message: [ "GGA", "RMC" ]
+      interval: "sec1"
+)yaml");
+
+    const auto cfg = asterx::load_app_config(path.string());
+    ASSERT_EQ(cfg.receiver.pin_streams.size(), 2u);
+    EXPECT_EQ(cfg.receiver.pin_streams[0].stream_id, 8);
+    EXPECT_EQ(cfg.receiver.pin_streams[0].descriptor, "COM2");
+    ASSERT_EQ(cfg.receiver.pin_streams[0].messages.size(), 1u);
+    EXPECT_EQ(cfg.receiver.pin_streams[0].messages[0], "ZDA");
+    EXPECT_EQ(cfg.receiver.pin_streams[0].interval, "OnChange");
+    ASSERT_EQ(cfg.receiver.pin_streams[1].messages.size(), 2u);
+    EXPECT_EQ(cfg.receiver.pin_streams[1].messages[1], "RMC");
+    std::filesystem::remove(path);
+}
+
+TEST(AppConfig, InvalidPinStreamMessageFails) {
+    const auto path = write_temp_config(R"yaml(
+receiver:
+  imu:
+    startup_data_mode: Boot
+    orientation_mode: SensorDefault
+    ant_lever_arm_m:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+  pin_streams:
+    - id: 8
+      descriptor: COM2
+      message: GSV
+      interval: "OnChange"
+)yaml");
+
+    EXPECT_THROW((void) asterx::load_app_config(path.string()),
+                 asterx::ConfigLoadError);
+    std::filesystem::remove(path);
+}
+
 TEST(AppConfig, InvalidIntervalFails) {
     const auto path = write_temp_config(R"yaml(
 receiver:
