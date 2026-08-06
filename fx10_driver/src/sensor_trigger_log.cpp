@@ -1,6 +1,8 @@
 #include "sensor_trigger_log.hpp"
 
 #include <sys/stat.h>
+#include <cerrno>
+#include <cstring>
 #include <ctime>
 
 #include "logger.h"
@@ -13,6 +15,22 @@ namespace fx10 {
 
         // No log growth for this long at stop() time = the STOP command very likely never reached the board
         constexpr double kStopStallWarnS = 15.0;
+
+        // errno of the failed port open -> field-actionable hint
+        const char *OpenErrnoHint(int err) {
+            switch (err) {
+                case EACCES:
+                    return " — no permission on the tty (is this user in the dialout group?)";
+                case EBUSY:
+                    return " — another process holds the port exclusively (check with lsof)";
+                case ENOENT:
+                case ENODEV:
+                case ENXIO:
+                    return " — board unplugged or not enumerated (check ls /dev/serial/by-id/)";
+                default:
+                    return "";
+            }
+        }
     } // namespace
 
 
@@ -33,8 +51,9 @@ namespace fx10 {
 
     void SensorTriggerLog::open() {
         if (!impl_->session.open(port_.c_str())) {
-            throw TriggerLogError("[TriggerLog] Cannot open sensor trigger port '" + port_ +
-                                  "' (board unplugged, or another reader holds the port? check ls /dev/serial/by-id/)");
+            const int err = impl_->session.lastErrno();
+            throw TriggerLogError(fmt::format("[TriggerLog] Cannot open sensor trigger port '{}': {} (errno {}){}",
+                                              port_, std::strerror(err), err, OpenErrnoHint(err)));
         }
         g_log.info("[TriggerLog] Sensor trigger port '{}' open", port_);
     }
