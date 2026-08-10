@@ -83,8 +83,23 @@ def _poll_sync() -> None:
         _prev[key] = (now, total)
 
 
+# Self-throttle: a scan costing T seconds will not run again for 4*T, so the
+# recursive du can never consume more than ~25% of a worker thread no matter how
+# fast the timer ticks. Matters on the field rig, where the output directory can
+# be a slow shared mount holding thousands of segment files.
+_MAX_DUTY_CYCLE = 0.25
+_next_poll_at = 0.0
+
+
 async def poll() -> None:
+    global _next_poll_at
+    if time.monotonic() < _next_poll_at:
+        return
+    started = time.monotonic()
     await asyncio.to_thread(_poll_sync)
+    # bytes_per_s is computed from measured elapsed time, so a skipped tick
+    # costs freshness, never correctness.
+    _next_poll_at = time.monotonic() + (time.monotonic() - started) / _MAX_DUTY_CYCLE
 
 
 def human_bytes(n: float) -> str:

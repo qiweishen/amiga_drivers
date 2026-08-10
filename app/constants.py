@@ -65,6 +65,20 @@ SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yam
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
 GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 
+# --- refresh cadence ---------------------------------------------------------
+# End-to-end latency of a sensor state change is the sum of three stages:
+#   driver logs it  ->  spdlog flushes (<=200 ms, common/src/logger.cpp)
+#                   ->  LOG_POLL_S     (session_tailer reads the new bytes)
+#                   ->  UI_TICK_S      (the page renders it)
+# Ticks are cheap by construction: every page updates its elements in place
+# (nothing is rebuilt per tick) and NiceGUI drops setter calls that would not
+# change anything, so an idle tick sends nothing at all. Lowering these past the
+# stages above only re-renders identical values.
+LOG_POLL_S = 0.2  # session log tail
+UI_TICK_S = 0.25  # pages showing live sensor/session state (Overview, headers)
+TOOL_TICK_S = 0.5  # tool pages whose tick only mirrors process state
+
+
 RUNTIME_DIR = REPO_ROOT / "app" / "_runtime"
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"

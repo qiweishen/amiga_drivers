@@ -7,7 +7,7 @@ from datetime import datetime
 
 from nicegui import ui
 
-from ..constants import DRIVERS
+from ..constants import DRIVERS, UI_TICK_S
 from ..services import config_store, process
 from ..state import STATE, ProcState
 from . import components, layout
@@ -41,19 +41,43 @@ def dashboard_page() -> None:
         # --- sensor cards + disk --------------------------------------------
         ui.separator()
 
-        @ui.refreshable
-        def cards() -> None:
-            with ui.row().classes("gap-4 flex-wrap"):
-                for st in STATE.sensors.values():
-                    components.sensor_card(st)
-            components.disk_gauge()
-            if STATE.last_error:
-                with ui.row().classes("items-center gap-2 bg-red-50 text-red-900 px-3 py-2 rounded w-full"):
-                    ui.icon("error")
-                    ui.label(STATE.last_error).classes("text-sm break-all")
-                    ui.link("View logs", "/logs").classes("text-sm")
+        # Built once, updated in place on every tick. Only the card ROW is
+        # rebuilt, and only when the sensor set itself changes (a new session
+        # can bring different LMS instances) — a clear() per tick would destroy
+        # and recreate the "View logs" link below and drop clicks landing in
+        # the swap window (same rule as layout.py's banner).
+        cards_row = ui.row().classes("gap-4 flex-wrap")
+        update_disk = components.disk_gauge()
+        with ui.row().classes("items-center gap-2 bg-red-50 text-red-900 px-3 py-2 rounded w-full") as error_row:
+            ui.icon("error")
+            error_label = ui.label().classes("text-sm break-all")
+            ui.link("View logs", "/logs").classes("text-sm")
+        error_row.set_visibility(False)
 
-        cards()
+        card_updates: dict[str, object] = {}
+        sensor_keys: list[tuple] = [()]
+
+        def rebuild_cards() -> None:
+            cards_row.clear()
+            card_updates.clear()
+            with cards_row:
+                for st in STATE.sensors.values():
+                    card_updates[st.key] = components.sensor_card(st)
+
+        def refresh_cards() -> None:
+            keys = tuple(STATE.sensors)
+            if keys != sensor_keys[0]:
+                sensor_keys[0] = keys
+                rebuild_cards()
+            for key, update in card_updates.items():
+                st = STATE.sensors.get(key)
+                if st is not None:
+                    update(st)
+            update_disk()
+            error_label.set_text(STATE.last_error)
+            error_row.set_visibility(bool(STATE.last_error))
+
+        refresh_cards()
 
         def refresh() -> None:
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
@@ -71,7 +95,7 @@ def dashboard_page() -> None:
                 session_label.set_text("Waiting for the session directory…")
             else:
                 session_label.set_text("")
-            cards.refresh()
+            refresh_cards()
 
         def refresh_switches() -> None:
             try:
@@ -83,7 +107,12 @@ def dashboard_page() -> None:
                     sw.set_value(enables.get(driver, False))
 
         refresh_switches()
-        ui.timer(1.0, refresh)
+        # See constants.UI_TICK_S for how this composes with the log flush and
+        # tail stages. The tick is cheap because nothing is rebuilt and NiceGUI
+        # drops setter calls that would not change anything.
+        ui.timer(UI_TICK_S, refresh)
+        # Config file re-read + YAML parse: only needs to catch edits made
+        # outside this tab.
         ui.timer(5.0, refresh_switches)
 
 

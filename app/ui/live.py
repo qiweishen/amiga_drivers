@@ -9,6 +9,7 @@ import asyncio
 
 from nicegui import ui
 
+from ..constants import TOOL_TICK_S
 from ..services import live_view
 from ..state import STATE, ProcState
 from . import layout
@@ -46,12 +47,15 @@ def live_page() -> None:
 
         # ---------------------------------------------------------------- glue
         def refresh_guard() -> None:
+            # Pure state reads, and NiceGUI drops setter calls that change
+            # nothing — an idle tick sends nothing however often it runs.
             running = STATE.process_state == ProcState.RUNNING
-            guard_label.set_text("" if running else "Recording is not running — start it on the Overview page first")
+            guard_label.set_text(
+                "" if running else "Recording is not running — start it on the Overview page first")
             gox_btn.set_enabled(running and STATE.enables_at_start.get("gox", False))
             fx10_btn.set_enabled(running and STATE.enables_at_start.get("fx10", False))
 
-        ui.timer(1.0, refresh_guard)
+        ui.timer(TOOL_TICK_S, refresh_guard)
         refresh_guard()
 
         async def _fetch_gox() -> None:

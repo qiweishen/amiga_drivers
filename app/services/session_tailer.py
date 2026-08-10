@@ -13,6 +13,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+from ..constants import LOG_POLL_S
 from .log_buffer import LogLine, parse_line
 from .markers import REPLAY_MARKER_SUBSTRINGS
 
@@ -57,7 +58,7 @@ class SessionTailer:
     async def _run(self, log_path: Path, replay: bool) -> None:
         # The session dir appears before the log file — wait for the file.
         while not log_path.exists():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(LOG_POLL_S)
 
         offset = 0
         if replay:
@@ -84,7 +85,10 @@ class SessionTailer:
                 *lines, buf = buf.split(b"\n")
                 for line in lines:
                     self._emit(parse_line(line.decode(errors="replace")))
-            await asyncio.sleep(0.5)
+            # Reads only the bytes appended since the last pass (cost is O(new
+            # data), not O(file)), so a short period is cheap even on a slow
+            # output mount.
+            await asyncio.sleep(LOG_POLL_S)
 
     @staticmethod
     def _scan_existing(log_path: Path) -> tuple[list[str], list[str], int]:

@@ -176,7 +176,14 @@ uv run python tools/check_contracts.py
 ```
 
 `common_tests` additionally asserts the C++ log output matches the GUI's line
-regex.
+regex, and that an error line reaches the file without an explicit flush.
+
+**Latency**: a sensor state change surfaces in the browser after three stages —
+the driver's log flush (`err` and above immediately, the rest within 200 ms;
+`common/src/logger.cpp`), the tailer's `LOG_POLL_S`, and the page's
+`UI_TICK_S`/`TOOL_TICK_S` (`app/constants.py`). spdlog flushes nothing by
+default, so leaving that first stage out would strand the GUI a whole stdio
+buffer (~9 s at this project's log rate) behind reality.
 
 ## Repository layout
 

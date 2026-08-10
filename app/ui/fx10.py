@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import app, ui
 
+from ..constants import TOOL_TICK_S
 from ..services import fx10_tools
 from ..state import STATE
 from . import layout
@@ -71,6 +72,8 @@ def fx10_page() -> None:
             return app.storage.general.get("fx10_target_ip", _DEFAULT_IP)
 
         def refresh_guard() -> None:
+            # Pure state reads, and NiceGUI drops setter calls that change
+            # nothing — an idle tick sends nothing however often it runs.
             reason = fx10_tools.guard_reason()
             guard_label.set_text(reason or "")
             allowed = reason is None and STATE.env_ok and not STATE.snapshot_busy
@@ -80,7 +83,7 @@ def fx10_page() -> None:
                 f"Target camera: {_target_ip() or '(scan and select a camera first)'}"
             )
 
-        ui.timer(1.0, refresh_guard)
+        ui.timer(TOOL_TICK_S, refresh_guard)
         refresh_guard()
 
         async def _scan() -> None:

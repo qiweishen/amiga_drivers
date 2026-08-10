@@ -11,9 +11,14 @@ import time
 
 from nicegui import ui
 
+from ..constants import TOOL_TICK_S
 from ..services.asterx_live import LIVE, STALE_S
 from ..state import STATE, ProcState
 from . import layout
+
+# The IMU chart re-sends all 6 series (300 points each) on every update, so it
+# keeps a ~1 s pace of its own while the panels and map follow the page tick.
+_IMU_CHART_MIN_PERIOD_S = 1.0
 
 _FIX_TEXT = {0: "No PVT", 1: "Stand-Alone", 2: "DGNSS", 3: "Fixed pos",
              4: "RTK Fixed", 5: "RTK Float", 6: "SBAS", 7: "MB RTK Fixed",
@@ -234,9 +239,15 @@ def asterx_page() -> None:
 
         imu_seen = [-1]
 
+        imu_sent_at = [0.0]
+
         def _refresh_imu() -> None:
             if imu_seen[0] == LIVE.imu_version:
                 return
+            now = time.monotonic()
+            if now - imu_sent_at[0] < _IMU_CHART_MIN_PERIOD_S:
+                return  # new data, but the payload is too big to send every tick
+            imu_sent_at[0] = now
             imu_seen[0] = LIVE.imu_version
             rows = list(LIVE.imu)  # snapshot: the worker thread appends concurrently
             for i in range(6):
@@ -286,5 +297,7 @@ def asterx_page() -> None:
             _refresh_imu()
             _refresh_map()
 
-        ui.timer(1.0, _refresh)
+        # Panels/badge/map follow the state cadence; the IMU chart re-sends its
+        # full 6x300-point series, so it keeps its own ~1 s pace below.
+        ui.timer(TOOL_TICK_S, _refresh)
         _refresh()

@@ -152,6 +152,29 @@ TEST_CASE(
 
 TEST_CASE(
 
+    "error lines reach the file without an explicit flush"
+) {
+    // The web GUI tails this file from ANOTHER process, so it cannot flush it;
+    // and an abort() would take an unflushed buffer with it, losing exactly the
+    // crash tail. spdlog flushes nothing by default (flush_level_ = off), hence
+    // the flush_on(err) in Logger::init. Info/trace lines are covered by the
+    // background spdlog::flush_every() and are deliberately not asserted here.
+    const auto path = MakeLogPath("flush");
+    Common::Logger::init({path.string(), /*quiet=*/true}, "common_tests_flush");
+
+    Common::Log::log_message(spdlog::level::err, Common::Markers::kModuleMain, "reaches disk at once");
+
+    // NOTE: read WITHOUT ReadLines() — that helper flushes, which is the very
+    // thing this test must not do.
+    std::ifstream in(path);
+    std::string line;
+    REQUIRE(std::getline(in, line));
+    CHECK(line.find("reaches disk at once") != std::string::npos);
+}
+
+
+TEST_CASE(
+
     "marker templates render the exact GUI-matched strings"
 ) {
     CHECK(fmt::format(fmt::runtime(Common::Markers::kLmsInitializedInstTpl), "front")

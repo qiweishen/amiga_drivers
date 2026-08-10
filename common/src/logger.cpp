@@ -1,6 +1,7 @@
 #include "logger.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -36,7 +37,21 @@ namespace Common {
             // the default logger (console at info, file at trace)
             auto logger = std::make_shared<spdlog::logger>(logger_name, sinks.begin(), sinks.end());
             logger->set_level(spdlog::level::trace);
+
+            // Flush policy. spdlog flushes NOTHING by default (flush_level_ is
+            // level::off, which no message can reach), so the file sink's stdio
+            // buffer held ~4 KiB — at this project's ~450 B/s that is ~9 s of
+            // log stuck in memory. Two consequences, both bad: the web GUI tails
+            // this file for per-sensor health and so ran that far behind, and an
+            // abort() lost exactly the last lines a post-mortem needs.
+            //   - err and above flush on the calling thread: rare, and they are
+            //     the crash tail plus what drives the GUI health machine.
+            //   - everything else (statistics, trace) is flushed by spdlog's
+            //     background thread, so the real-time acquisition threads never
+            //     pay for a write() syscall of their own.
+            logger->flush_on(spdlog::level::err);
             spdlog::set_default_logger(logger);
+            spdlog::flush_every(std::chrono::milliseconds(200));
         }
     } // namespace Logger
 

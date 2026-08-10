@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 from nicegui import ui
 
+from ..constants import UI_TICK_S
 from ..state import STATE, ProcState
 from ..services import docker_runner, runtime
 
@@ -72,7 +73,9 @@ def frame(title: str):
                     ui.icon("info")
                     ui.label("Saved config changes are pending — they take effect on the next recording start")
 
-    ui.timer(1.0, refresh_header)
+    # Every page carries this header. The tick only assigns values NiceGUI
+    # discards when unchanged, so it costs nothing at this cadence.
+    ui.timer(UI_TICK_S, refresh_header)
     refresh_header()
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-4"):

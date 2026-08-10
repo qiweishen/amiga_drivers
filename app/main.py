@@ -40,7 +40,10 @@ def main() -> None:
     TAILER.subscribe(BUFFER.append)
 
     app.on_startup(_startup)
-    app.timer(5.0, storage.poll)
+    # Per-sensor byte totals were the dashboard's stalest field; 2 s keeps them
+    # in step with the rest of the card. storage.poll self-throttles when the
+    # scan is slow, so this rate is safe on a slow output mount.
+    app.timer(2.0, storage.poll)
     app.timer(10.0, _check_env)
 
     ui.run(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import app, ui
 
+from ..constants import TOOL_TICK_S
 from ..services import gox_tools, process
 from ..state import STATE
 from . import layout
@@ -76,6 +77,8 @@ def gox_page() -> None:
             return app.storage.general.get("gox_target_ip", "")
 
         def refresh_guard() -> None:
+            # Pure state reads, and NiceGUI drops setter calls that change
+            # nothing — an idle tick sends nothing however often it runs.
             reason = gox_tools.guard_reason()
             guard_label.set_text(reason or "")
             allowed = reason is None and STATE.env_ok and not STATE.snapshot_busy
@@ -85,7 +88,7 @@ def gox_page() -> None:
                 f"Target camera: {_target_ip() or '(scan and select a camera first)'}"
             )
 
-        ui.timer(1.0, refresh_guard)
+        ui.timer(TOOL_TICK_S, refresh_guard)
         refresh_guard()
 
         async def _scan() -> None:
