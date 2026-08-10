@@ -2,6 +2,7 @@
 
 #include <sys/types.h>  // ssize_t (used in WriteHook)
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -82,6 +83,11 @@ namespace fx10 {
         const std::string &errorMessage() const { return error_message_; }
         const std::filesystem::path &sessionDir() const { return session_dir_; }
         std::uint64_t linesWrittenTotal() const { return global_line_index_; }
+
+        // Thread-safe mirror of Counters::frames_written (the ledger itself is
+        // plain: single-writer, acquisition thread). The main thread polls this
+        // for the periodic [Statistics] line's write rate.
+        std::uint64_t framesWrittenTotal() const { return frames_written_.load(std::memory_order_relaxed); }
         std::uint32_t segmentIndex() const { return segment_index_; }
 
         // Test seam for injecting write failures (ENOSPC etc.). Signature of ::write.
@@ -128,6 +134,7 @@ namespace fx10 {
 
         std::uint64_t global_line_index_ = 0;
         std::uint32_t consecutive_size_mismatch_ = 0;
+        std::atomic<std::uint64_t> frames_written_{0}; // main-thread-readable copy of counters_.frames_written
 
         WriteHook write_hook_;
     };

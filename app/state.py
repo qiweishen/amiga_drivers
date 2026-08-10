@@ -32,6 +32,12 @@ class SensorStatus:
     last_error: str = ""
     bytes_total: int = 0  # current session raw-data size
     bytes_per_s: float = 0.0  # write rate between storage polls
+    # Frames actually written to disk per second, straight from the driver's
+    # periodic [Statistics] line (services/driver_stats.py). 0.0 with
+    # write_fps_at == 0.0 means "never reported"; staleness is judged by the
+    # service, not here.
+    write_fps: float = 0.0
+    write_fps_at: float = 0.0  # time.monotonic() of the last [Statistics] line
 
 
 @dataclass

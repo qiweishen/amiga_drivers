@@ -173,6 +173,9 @@ namespace fx10 {
 
             if (writeLine_(frame.data)) {
                 ++counters_.frames_written;
+                // Publish the ledger value rather than incrementing separately:
+                // the two can never drift apart.
+                frames_written_.store(counters_.frames_written, std::memory_order_relaxed);
                 counters_.bytes_written += line_bytes_;
             }
         } catch (const std::exception &e) {

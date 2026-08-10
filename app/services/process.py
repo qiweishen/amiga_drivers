@@ -20,6 +20,7 @@ from ..constants import BIN_AMIGA, MAIN_CONFIG, SESSION_DIR_RE
 from ..state import STATE, ProcState
 from . import config_store, runtime
 from .asterx_live import LIVE as ASTERX_LIVE
+from .driver_stats import STATS
 from .health import MONITOR
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
@@ -101,6 +102,7 @@ async def start() -> None:
     launch_stderr.clear()
     BUFFER.clear()
     MONITOR.reset(settings["enables"], config_store.lms_instance_names())
+    STATS.reset()  # MONITOR.reset rebuilt STATE.sensors; drop the stale per-camera map
 
     _cancel(_watcher_task)
     _cancel(_exit_poll_task)
@@ -217,6 +219,7 @@ async def reattach() -> None:
     STATE.attached = False
     STATE.enables_at_start = dict(settings["enables"])  # best effort (live file)
     MONITOR.reset(settings["enables"], config_store.lms_instance_names())
+    STATS.reset()
     if sessions and output_dir is not None:
         session = output_dir / sessions[-1]
         STATE.active_session = session

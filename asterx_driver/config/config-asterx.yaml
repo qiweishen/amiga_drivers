@@ -92,7 +92,7 @@ receiver:
         -   id: 8
             descriptor: COM2
             message: ZDA
-            interval: "OnChange"
+            interval: "sec1"
 
 
 # =============================================================

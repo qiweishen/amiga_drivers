@@ -9,6 +9,7 @@ from nicegui import app, ui
 
 from .constants import GUI_HOST, GUI_PORT, RUNTIME_DIR
 from .services import asterx_live, process, runtime, storage
+from .services.driver_stats import STATS
 from .services.health import MONITOR
 from .services.log_buffer import BUFFER
 from .services.session_tailer import TAILER
@@ -35,6 +36,7 @@ async def _check_env() -> None:
 
 def main() -> None:
     TAILER.subscribe(MONITOR.on_line)
+    TAILER.subscribe(STATS.on_line)
     TAILER.subscribe(BUFFER.append)
 
     app.on_startup(_startup)

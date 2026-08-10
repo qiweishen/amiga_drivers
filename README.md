@@ -125,15 +125,20 @@ sidecars keep their own tag in the same style (`[Live]` asterx CSV feed,
 
 **3. Statistics are uniform across drivers.** Periodic status lines start
 with `[Statistics]` (plus the instance tag where applicable), use
-double-space-separated `key={}` fields, and report the sensor's measured
-output rate as `rate=N.N Hz`; the shutdown totals line is
-`[Statistics] [inst] Final: ...`. Examples:
+double-space-separated `key={}` fields, and report two measured rates over the
+same window — `rate=N.N Hz`, the sensor's own output rate, and `fps=N.N`, the
+frames that actually reached disk (a gap between them *is* the loss). The
+shutdown totals line is `[Statistics] [inst] Final: ...`. Examples:
 
 ```
-[FX10App]: [Statistics] frames=1520  rate=50.0 Hz  missed_triggers=0  temp=42.1 °C  disk_free=812.4 GB
+[FX10App]: [Statistics] frames=1520  rate=50.0 Hz  fps=50.0  missed_triggers=0  temp=42.1 °C  disk_free=812.4 GB
 [GoX]: [Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ...
-[LMS4xxxApp]: [Statistics] [front_left_laser] up=00:00:30  rate=25.0 Hz  ntp=ok  frames=750  ...
+[LMS4xxxApp]: [Statistics] [front_left_laser] up=00:00:30  rate=25.0 Hz  fps=25.0  ntp=ok  frames=750  ...
 ```
+
+`fps=` is a GUI contract: `app/services/driver_stats.py` parses it into the
+dashboard's per-sensor cards, and `tools/check_contracts.py` fails if either
+side renames it (AsteRx records a byte stream, so it has no `fps=`).
 
 **4. Throwing is an app-layer decision.** `Common::DriverLog` never throws by
 default; the explicit `g_log.error(true, ...)` overload (log, then
@@ -159,10 +164,12 @@ Python env in `.venv/`) and drives the container binaries. It starts/stops
 and previews Go-X and FX10 snapshots.
 
 **Contract**: the GUI parses the log by line format
-(`[HH:MM:SS] [level] [Module]: msg`) and by verbatim lifecycle marker strings.
-Both are frozen in a single source of truth per side —
+(`[HH:MM:SS] [level] [Module]: msg`), by verbatim lifecycle marker strings, and
+by the `[Statistics]` line's `fps=` field (the per-sensor disk write rate shown
+live on the dashboard cards — `app/services/driver_stats.py`). The markers are
+frozen in a single source of truth per side —
 `common/include/driver_markers.h` (C++) mirrored by `app/services/markers.py`
-(Python). After editing either, run:
+(Python). After editing either, or any `[Statistics]` format string, run:
 
 ```bash
 uv run python tools/check_contracts.py

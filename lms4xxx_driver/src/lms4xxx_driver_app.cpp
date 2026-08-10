@@ -192,6 +192,7 @@ void Lms4xxxDriverApp::run() {
     impl_->scan_start = clock::now();
     auto last_stats = impl_->scan_start;
     std::uint64_t rate_prev_frames = 0;
+    std::uint64_t rate_prev_written = 0;
     auto rate_prev_time = impl_->scan_start;
 
     while (!terminate_.load(std::memory_order_acquire)) {
@@ -226,13 +227,21 @@ void Lms4xxxDriverApp::run() {
             const double scan_hz = dt > 0.0
                                        ? static_cast<double>(drv.frames_received - rate_prev_frames) / dt
                                        : 0.0;
+            // Scans that actually reached the .bin on disk over the same window;
+            // fps < rate means the writer queue is shedding frames.
+            const double write_fps = dt > 0.0
+                                         ? static_cast<double>(wr.frames_written - rate_prev_written) / dt
+                                         : 0.0;
             rate_prev_frames = drv.frames_received;
+            rate_prev_written = wr.frames_written;
             rate_prev_time = now;
             const auto uptime_s = static_cast<std::uint64_t>(std::chrono::duration<double>(now - impl_->scan_start).
                 count());
-            g_log.info("[Statistics] [{}] up={}  rate={:.1f} Hz  ntp={}  frames={}  parsed={}  drop_ring={}  gaps={}  "
-                       "crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  bytes={}",
-                       impl_->instance_name, HumanDuration(uptime_s), scan_hz, NtpStatusText(drv.ntp_status),
+            g_log.info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
+                       "drop_ring={}  gaps={}  crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  "
+                       "bytes={}",
+                       impl_->instance_name, HumanDuration(uptime_s), scan_hz, write_fps,
+                       NtpStatusText(drv.ntp_status),
                        drv.frames_received, drv.frames_parsed, drv.frames_dropped, drv.counter_gaps, drv.crc_errors,
                        drv.framing_errors, drv.parse_errors, wr.frames_written, wr.frames_dropped, wr.files_created,
                        HumanBytes(wr.bytes_written));

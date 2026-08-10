@@ -319,8 +319,9 @@ void Fx10DriverApp::monitorLoop_() {
     const double stats_interval = cfg.logging.stats_interval_s;
     auto next_stats = t_start + std::chrono::duration_cast<clock::duration>(
                           std::chrono::duration<double>(stats_interval > 0 ? stats_interval : 3600.0));
-    // Measured line-rate basis: frames delivered since the previous stats line
+    // Measured line-rate basis: frames delivered / written since the previous stats line
     std::uint64_t rate_prev_frames = 0;
+    std::uint64_t rate_prev_written = 0;
     auto rate_prev_time = t_start;
 
     while (true) {
@@ -375,16 +376,25 @@ void Fx10DriverApp::monitorLoop_() {
             // trigger this should track acquisition.frame_rate_hz (the commanded
             // SensorSync pulse rate); a lower value means missed triggers or RX loss
             const std::uint64_t frames_now = s.receiver.framesDelivered();
+            // Frames that actually reached the .bil on disk (excludes geometry
+            // drops and padding); fps < rate means the recorder is losing frames
+            // the transport delivered. Same window as rate.
+            const std::uint64_t written_now = s.recorder ? s.recorder->framesWrittenTotal() : 0;
             const auto rate_now = clock::now();
             const double rate_dt = std::chrono::duration<double>(rate_now - rate_prev_time).count();
             const double rate_hz = rate_dt > 0.0
                                        ? static_cast<double>(frames_now - rate_prev_frames) / rate_dt
                                        : 0.0;
+            const double write_fps = rate_dt > 0.0
+                                         ? static_cast<double>(written_now - rate_prev_written) / rate_dt
+                                         : 0.0;
             rate_prev_frames = frames_now;
+            rate_prev_written = written_now;
             rate_prev_time = rate_now;
             g_log.info(
-                "[Statistics] frames={}  rate={:.1f} Hz  missed_triggers={}  temp={:.4f} °C  disk_free={:.1f} GB",
-                frames_now, rate_hz, missed_delta,
+                "[Statistics] frames={}  rate={:.1f} Hz  fps={:.1f}  missed_triggers={}  temp={:.4f} °C  "
+                "disk_free={:.1f} GB",
+                frames_now, rate_hz, write_fps, missed_delta,
                 temperature.value_or(std::numeric_limits<double>::quiet_NaN()), free_gb);
             if (free_gb >= 0.0 && free_gb < cfg.disk.min_free_gb) {
                 g_log.error("Disk free {:.1f} GB below hard floor {} GB — stopping cleanly", free_gb,

@@ -23,7 +23,7 @@ acquisition:
     spatial_binning: 1              # [1 | 2 | 4 | 8] -> 1024/512/256/128 pixel width
     spectral_binning: 1             # [1 | 2 | 4 | 8] -> 448/224/112/56 bands
     pixel_format: Mono12Packed      # [Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8]
-    exposure_ms: 400.0              # float, ms [10..419000] / 1000
+    exposure_ms: 10.0               # float, ms [10..419000] / 1000
     frame_rate_hz: 50.0             # freerun rate; under external trigger = EXPECTED PPS
     status_line: false              # keep off: if enabled the last line of the ROI is overwritten with camera information
     trigger:

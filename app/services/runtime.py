@@ -20,34 +20,54 @@ from ..constants import CONTAINER, REPO_ROOT, to_container, to_host
 from .docker_runner import ExecResult
 from . import docker_runner
 
-_mode: str = "docker"  # resolved by detect_mode() before any use
+
+_mode: str = "docker"      # optimistic default; detect_mode() overwrites it
+_resolved: bool = False    # guards the cache — _mode alone can't say "unset"
+_lock = asyncio.Lock()
 
 
-async def detect_mode() -> str:
-    global _mode
-    forced = os.environ.get("AMIGA_GUI_MODE", "auto").lower()
-    if forced in ("docker", "native"):
-        _mode = forced
-        return _mode
-    # auto: does docker know our container at all (running or not)?
-    # A machine without the docker CLI raises FileNotFoundError from the
-    # spawn itself -> that machine is native by definition.
+async def _probe_docker() -> str:
+    """One-shot probe: does docker know our container, running or not?"""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "-f", "{{.State.Status}}", CONTAINER,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            # --type container: without it, a same-named image could match
+            "docker", "inspect", "--type", "container",
+            "-f", "{{.State.Status}}", CONTAINER,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-    except (FileNotFoundError, OSError):
-        _mode = "native"
-        return _mode
+    except OSError:
+        # No docker CLI, or it won't spawn -> native by definition.
+        return "native"
+
     try:
         code = await asyncio.wait_for(proc.wait(), timeout=5)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        code = 1
-    _mode = "docker" if code == 0 else "native"
-    return _mode
+        # Daemon hung. Give up and treat as native.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass           # exited on its own between timeout and kill
+        await proc.wait()  # reap, no zombie
+        return "native"
+
+    # Only the exit code is usable here — stdout goes to DEVNULL.
+    return "docker" if code == 0 else "native"
+
+
+async def detect_mode() -> str:
+    global _mode, _resolved
+    if _resolved:
+        return _mode
+
+    async with _lock:
+        if _resolved:  # another task resolved it while we waited
+            return _mode
+
+        forced = os.environ.get("AMIGA_GUI_MODE", "auto").strip().lower()
+        _mode = forced if forced in ("docker", "native") else await _probe_docker()
+        _resolved = True
+        return _mode
 
 
 def mode() -> str:

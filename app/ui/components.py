@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from ..services.driver_stats import STATS
 from ..services.storage import human_bytes
 from ..state import STATE, SensorState, SensorStatus
 
@@ -34,6 +35,17 @@ def sensor_card(st: SensorStatus, enabled_switch=None) -> None:
             ui.label(f"Data {human_bytes(st.bytes_total)}")
             rate = f"{human_bytes(st.bytes_per_s)}/s" if st.bytes_per_s > 0 else "—"
             ui.label(f"Rate {rate}")
+        # Frames actually written to disk, straight from the driver's own
+        # [Statistics] line. AsteRx streams bytes, not frames — no row for it.
+        if st.key != "asterx":
+            fps = STATS.write_fps(st.key)
+            with ui.row().classes("items-center justify-between w-full text-sm"):
+                ui.label("Written")
+                value = ui.label(f"{fps:.1f} fps" if fps is not None else "—")
+                if st.key == "gox" and fps is not None:
+                    breakdown = STATS.gox_breakdown()
+                    if len(breakdown) > 1:  # sum of the cameras: show who contributes
+                        value.tooltip(" · ".join(f"{cam} {v:.1f}" for cam, v in breakdown))
         if st.last_error:
             ui.label(st.last_error).classes("text-xs text-red-700 break-all")
         if enabled_switch is not None:
