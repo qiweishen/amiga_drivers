@@ -70,6 +70,8 @@ namespace {
             "  --mac <addr>       device.mac (clears device.id so the MAC wins)\n"
             "  --frames <k>       lines to capture (default 64)\n"
             "  --exposure-ms <e>  acquisition.exposure_ms\n"
+            "  --spatial-binning <n>   acquisition.spatial_binning  [1|2|4|8]\n"
+            "  --spectral-binning <n>  acquisition.spectral_binning [1|2|4|8] (mroi requires 1)\n"
             "  --fps <f>          freerun frame rate (default 50; capped at 1000/exposure_ms)\n"
             "  -h, --help         show this help and exit\n"
             "\n"
@@ -180,6 +182,8 @@ int main(int argc, char **argv) {
     std::string mac;
     std::uint64_t frames = 64;
     std::optional<double> exposure_ms;
+    std::optional<int> spatial_binning;
+    std::optional<int> spectral_binning;
     double fps = 50.0;
 
     for (int i = 1; i < argc; ++i) {
@@ -210,6 +214,13 @@ int main(int argc, char **argv) {
                 return fail(2, std::string("bad arguments: invalid --exposure-ms \"") + val + "\"");
             }
             exposure_ms = v;
+        } else if (arg == "--spatial-binning" || arg == "--spectral-binning") {
+            std::uint64_t v = 0;
+            if (!parseU64(val, v) || (v != 1 && v != 2 && v != 4 && v != 8)) {
+                return fail(2, "bad arguments: " + arg + " must be 1, 2, 4, or 8 (got \"" +
+                               std::string(val) + "\")");
+            }
+            (arg == "--spatial-binning" ? spatial_binning : spectral_binning) = static_cast<int>(v);
         } else if (arg == "--fps") {
             double v = 0;
             if (!parseDouble(val, v) || v <= 0) {
@@ -241,6 +252,18 @@ int main(int argc, char **argv) {
     cfg.acquisition.trigger.mode = fx10::TriggerMode::kFreerun;
     if (exposure_ms) {
         cfg.acquisition.exposure_ms = *exposure_ms;
+    }
+    if (spatial_binning) {
+        cfg.acquisition.spatial_binning = *spatial_binning;
+    }
+    if (spectral_binning) {
+        // Config validation ran at load time, so an override cannot be allowed
+        // to sneak past the FX10's own constraint.
+        if (*spectral_binning != 1 && cfg.acquisition.mroi.enabled) {
+            return fail(2, "--spectral-binning must be 1 while acquisition.mroi.enabled is true "
+                           "(FX10 constraint)");
+        }
+        cfg.acquisition.spectral_binning = *spectral_binning;
     }
     // The freerun period must fit inside the exposure or the camera rejects
     // the AcquisitionFrameRate write outright (GENERIC_ERROR on the FX10e),

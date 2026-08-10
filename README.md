@@ -159,9 +159,34 @@ are up / down.
 ## Web GUI
 
 `app/` is a NiceGUI control panel that runs on the host (`uv run amiga-gui`,
-Python env in `.venv/`) and drives the container binaries. It starts/stops
-`AmigaDrivers`, tails the session log, tracks per-sensor health, edits configs
-and previews Go-X and FX10 snapshots.
+port 8619, Python env in `.venv/`) and drives the container binaries.
+
+| Page | What it does |
+| --- | --- |
+| `/` **Overview** | Start/stop a recording; per-driver Enable switches (written to `config-main.yaml`, applied at the next start); one card per sensor — health state, bytes on disk, and the live written-frames rate — plus the output-disk gauge. |
+| `/config` **Config** | Raw-text editor for every driver config: comments survive, the YAML is validated, and the save is atomic and leaves a `.bak`. |
+| `/logs` **Logs** | The unified session log with level/module filters and follow mode. |
+| `/live` **Data Live** | On-demand preview of the RUNNING session: each click reads the last second straight out of the files the drivers are writing (newest GoX frame, FX10 spectrum). |
+| `/asterx` **AsteRx Live** | Live telemetry from the `live_*.csv` sidecars — map track, 6-axis IMU strip charts, and PVT / INS / receiver / attitude health panels. |
+| `/camera` **Camera Tools** | One shared device discovery for both camera drivers, then a GoX and an FX10 exposure workbench. |
+
+**Camera Tools** covers what the GoX and FX10 pages used to do separately. One
+Scan runs `jai_discover --json` and `fx10_snapshot --list` concurrently into a
+single table; picking a row targets that driver's workbench. Two rules shape
+the page:
+
+- *The GigE control channel is exclusive.* A driver that currently owns its
+  cameras is skipped by the scan and its snapshot button stays disabled;
+  conversely `process.preflight` refuses to start a recording while a snapshot
+  is in flight.
+- *Preview never writes the config.* Exposure, gain and the FX10
+  spatial/spectral binning are passed to the snapshot tools as CLI overrides,
+  so trying a setting cannot mutate what the next recording uses. **Apply to
+  config** is the explicit writeback: it edits the driver config as text so the
+  documentation in it survives, re-reads the value back before saving, and
+  takes effect at the next recording start. For GoX it writes the `cameras:`
+  entry that identifies the selected camera — by MAC when the entry is
+  MAC-bound (the driver ignores `device.ip` there), otherwise by IP.
 
 **Contract**: the GUI parses the log by line format
 (`[HH:MM:SS] [level] [Module]: msg`), by verbatim lifecycle marker strings, and

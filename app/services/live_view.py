@@ -202,7 +202,7 @@ def _fx10_geometry() -> tuple[int, int, int, list[float], float] | str:
 def fx10_spectrum() -> Fx10Live:
     """Per-band statistics over roughly the last second of recorded lines
     (frame_rate_hz worth of lines at the tail of the open segment; same
-    reductions and normalization as the FX10 Tools snapshot preview)."""
+    reductions and normalization as the Camera Tools snapshot preview)."""
     session, reason = _session_or_reason()
     if reason:
         return Fx10Live(False, reason=reason)

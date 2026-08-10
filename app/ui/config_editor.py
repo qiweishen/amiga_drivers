@@ -9,7 +9,8 @@ from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
 from . import layout
 
-_EDIT_ORDER = ("main", "lms4xxx", "gox", "asterx", "fx10", "snapshot")
+
+_EDIT_ORDER = ("main", "asterx", "fx10", "gox", "lms4xxx")
 
 
 @ui.page("/config")
@@ -34,12 +35,12 @@ def _editor_panel(config_id: str) -> None:
     loaded = config_store.read(config_id)
     state = {"mtime": loaded.mtime, "saved_text": loaded.text}
 
-    ui.label(str(cf.path)).classes("text-xs text-gray-500 font-mono")
+    ui.label(str(cf.path)).classes("text-xs text-gray-800 font-mono")
     editor = ui.codemirror(
         value=loaded.text,
         language="YAML",
         theme="basicDark",
-    ).classes("w-full h-[60vh] text-xs")
+    ).classes("w-full h-[60vh] text-s")
     dirty_label = ui.label("").classes("text-xs text-amber-700")
 
     def _mark_dirty() -> None:

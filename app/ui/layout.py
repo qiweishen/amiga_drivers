@@ -10,6 +10,7 @@ from ..constants import UI_TICK_S
 from ..state import STATE, ProcState
 from ..services import docker_runner, runtime
 
+
 _PROC_BADGE = {
     ProcState.IDLE: ("Idle", "grey"),
     ProcState.STARTING: ("Starting…", "orange"),
@@ -23,10 +24,9 @@ _NAV = [
     ("/", "Overview"),
     ("/config", "Config"),
     ("/logs", "Logs"),
-    ("/live", "Data Live"),
     ("/asterx", "AsteRx Live"),
-    ("/gox", "GoX Tools"),
-    ("/fx10", "FX10 Tools"),
+    ("/live", "Data Live"),
+    ("/camera", "Camera Tools"),
 ]
 
 

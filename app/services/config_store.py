@@ -154,6 +154,191 @@ def lms_instance_names() -> list[str]:
         return []
 
 
+# --- acquisition parameter writeback (Camera Tools "Apply") -------------------
+# The Camera Tools page tunes exposure/gain/binning against a live camera and
+# writes the winning values back here. Edits stay TEXT-level so the extensive
+# inline documentation in these files survives; the result is re-parsed and the
+# value read back before it is saved.
+
+class ApplyError(Exception):
+    """The config file does not have the shape the writeback expects."""
+
+
+def _scalar_re(key: str) -> re.Pattern:
+    # "    exposure_ms: 150.0              # float, ms [1..115279]"
+    return re.compile(
+        rf"^(?P<head>\s*{re.escape(key)}\s*:\s*)(?P<value>[^#\n]*?)(?P<pad>\s*)(?P<comment>#.*)?$"
+    )
+
+
+def _block_bounds(lines: list[str], key: str) -> tuple[int, int]:
+    """Line range [start, end) of the body of a top-level `key:` block.
+
+    Bounding every edit matters: config-fx10.yaml carries `spatial_binning` and
+    `spectral_binning` a second time in the GenICam node-name map, where a
+    replacement would rewrite a node NAME and break the driver at startup.
+    """
+    head = re.compile(rf"^{re.escape(key)}\s*:\s*(#.*)?$")
+    start = next((i + 1 for i, ln in enumerate(lines) if head.match(ln)), None)
+    if start is None:
+        raise ApplyError(f"no top-level '{key}:' block")
+    for j in range(start, len(lines)):
+        if lines[j].strip() and not lines[j][0].isspace():
+            return start, j
+    return start, len(lines)
+
+
+def _replace_scalar(lines: list[str], key: str, value: str, *,
+                    start: int = 0, end: int | None = None) -> int:
+    """Replace `key`'s value in lines[start:end], keeping indent and the inline
+    comment. Returns the line index. Raises ApplyError when absent."""
+    pattern = _scalar_re(key)
+    for i in range(start, len(lines) if end is None else end):
+        m = pattern.match(lines[i])
+        if m:
+            # Keep the comment column stable when the new value is not wider.
+            pad = m.group("pad") or ""
+            if m.group("comment"):
+                shift = len(m.group("value")) - len(value)
+                pad = " " * max(1, len(pad) + shift)
+            lines[i] = m.group("head") + value + (pad + m.group("comment") if m.group("comment") else "")
+            return i
+    raise ApplyError(f"no '{key}:' line found in the expected section")
+
+
+def _fmt(value: float | int) -> str:
+    """YAML scalar in the style these files already use (floats stay floats, so
+    the C++ `as<double>()` reader keeps seeing a float).
+
+    repr() is the shortest form that re-parses to the SAME double — a fixed
+    precision here would round the value and then fail _verify_and_save's
+    read-back with what looks like a corruption error.
+    """
+    if isinstance(value, int):
+        return str(value)
+    text = repr(float(value))
+    if "e" in text and "." not in text:
+        # 1e-05 has no dot, and YAML 1.1 resolves that as a STRING, not a float.
+        mantissa, _, exponent = text.partition("e")
+        text = f"{mantissa}.0e{exponent}"
+    return text
+
+
+def _verify_and_save(config_id: str, lines: list[str], checks: list[tuple[list[str], object]]) -> None:
+    """Re-parse the edited text and confirm every (key path, value) round-trips
+    before writing. A silently wrong acquisition parameter would corrupt every
+    dataset recorded with it."""
+    text = "\n".join(lines) + "\n"  # splitlines() dropped the file's terminator
+    try:
+        doc = yaml.safe_load(text) or {}
+    except Exception as e:
+        raise ApplyError(f"the edit did not produce valid YAML: {e}") from e
+    for path, expected in checks:
+        node = doc
+        for part in path:
+            node = node[int(part)] if isinstance(node, list) else node.get(part)
+            if node is None:
+                raise ApplyError(f"cannot read back {'.'.join(map(str, path))} after the edit")
+        if isinstance(expected, float):
+            ok = isinstance(node, (int, float)) and abs(float(node) - expected) < 1e-9
+        else:
+            ok = node == expected
+        if not ok:
+            raise ApplyError(f"{'.'.join(map(str, path))} read back as {node!r}, expected {expected!r}")
+    save(config_id, text, expected_mtime=None)
+
+
+def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float) -> str:
+    """Write exposure/gain into the config-gox.yaml camera entry that identifies
+    the selected camera. Returns a human-readable summary of what changed.
+
+    A camera may be configured by ip OR by mac (mac wins in the driver), so both
+    are matched — writing the wrong camera's block would silently mistune it.
+    """
+    cf = CONFIG_FILES["gox"]
+    lines = cf.path.read_text(encoding="utf-8").splitlines()
+    doc = yaml.safe_load("\n".join(lines)) or {}
+    cameras = doc.get("cameras")
+    if not isinstance(cameras, list) or not cameras:
+        raise ApplyError("config-gox.yaml has no 'cameras:' list")
+
+    def _mac(value: str) -> str:
+        return re.sub(r"[^0-9a-f]", "", str(value).lower())
+
+    def _rank(camera: dict) -> int:
+        """2 = exact MAC, 1 = IP, 0 = no match.
+
+        A mac-bound entry is decided by MAC ALONE: the driver ignores device.ip
+        whenever device.mac is set (gox_driver/src/ebus/camera_session.cpp), so
+        an entry whose MAC differs is a hard non-match however its stale ip
+        reads. Ranking (rather than first-hit) also keeps an exact MAC match
+        from being preempted by an earlier entry that only matches by IP.
+        """
+        device = camera.get("device") or {}
+        entry_mac = _mac(device.get("mac", ""))
+        if target_mac and entry_mac:
+            return 2 if entry_mac == _mac(target_mac) else 0
+        return 1 if target_ip and str(device.get("ip", "")) == target_ip else 0
+
+    ranked = [(_rank(c), -i) for i, c in enumerate(cameras) if isinstance(c, dict)]
+    best = max(ranked, default=(0, 0))
+    index = -best[1] if best[0] else None
+    if index is None:
+        known = ", ".join(
+            f"{(c.get('device') or {}).get('ip') or '-'}/{(c.get('device') or {}).get('mac') or '-'}"
+            for c in cameras if isinstance(c, dict)
+        )
+        raise ApplyError(
+            f"no camera matching {target_ip or '?'} / {target_mac or '?'} in config-gox.yaml "
+            f"(configured ip/mac: {known})"
+        )
+
+    # Text bounds of that camera entry: from its "- id:" line to the next one.
+    starts = [i for i, ln in enumerate(lines) if re.match(r"^\s*-\s+id\s*:", ln)]
+    if len(starts) != len(cameras):
+        raise ApplyError("cannot map the 'cameras:' entries to their lines (unexpected layout)")
+    start = starts[index]
+    end = starts[index + 1] if index + 1 < len(starts) else len(lines)
+
+    _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
+    _replace_scalar(lines, "gain", _fmt(float(gain)), start=start, end=end)
+    _verify_and_save("gox", lines, [
+        (["cameras", index, "acquisition", "exposure_ms"], float(exposure_ms)),
+        (["cameras", index, "acquisition", "gain"], float(gain)),
+    ])
+    camera_id = str(cameras[index].get("id", f"#{index}"))
+    return f"{camera_id} ({target_ip}): exposure_ms={_fmt(float(exposure_ms))}, gain={_fmt(float(gain))}"
+
+
+def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_binning: int) -> str:
+    """Write exposure/binning into config-fx10.yaml's acquisition block."""
+    cf = CONFIG_FILES["fx10"]
+    lines = cf.path.read_text(encoding="utf-8").splitlines()
+    doc = yaml.safe_load("\n".join(lines)) or {}
+    acquisition = doc.get("acquisition")
+    if not isinstance(acquisition, dict):
+        raise ApplyError("config-fx10.yaml has no 'acquisition:' block")
+    for value, name in ((spatial_binning, "spatial_binning"), (spectral_binning, "spectral_binning")):
+        if value not in (1, 2, 4, 8):
+            raise ApplyError(f"{name} must be 1, 2, 4, or 8")
+    # The camera cannot do both; the C++ loader rejects the combination, which
+    # would leave a config that no longer starts.
+    if spectral_binning != 1 and (acquisition.get("mroi") or {}).get("enabled"):
+        raise ApplyError("acquisition.mroi is enabled, which requires spectral_binning: 1 (FX10 constraint)")
+
+    start, end = _block_bounds(lines, "acquisition")
+    _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
+    _replace_scalar(lines, "spatial_binning", str(spatial_binning), start=start, end=end)
+    _replace_scalar(lines, "spectral_binning", str(spectral_binning), start=start, end=end)
+    _verify_and_save("fx10", lines, [
+        (["acquisition", "exposure_ms"], float(exposure_ms)),
+        (["acquisition", "spatial_binning"], spatial_binning),
+        (["acquisition", "spectral_binning"], spectral_binning),
+    ])
+    return (f"exposure_ms={_fmt(float(exposure_ms))}, spatial_binning={spatial_binning}, "
+            f"spectral_binning={spectral_binning}")
+
+
 def set_enable(driver: str, value: bool) -> None:
     """Line-anchored text edit of an Enable flag in config-main.yaml — the file
     is permissive YAML but we edit as text so comments survive."""

@@ -42,7 +42,7 @@ namespace {
             "Overrides (applied to cameras[0] after the config is loaded):\n"
             "  --ip <addr>        device.ip (clears device.mac so the IP wins)\n"
             "  --mac <addr>       device.mac (discovery match; wins over ip)\n"
-            "  --exposure-us <n>  acquisition exposure (microseconds, >= 0)\n"
+            "  --exposure-ms <n>  acquisition exposure (milliseconds, >= 0)\n"
             "  --gain <db>        acquisition.gain\n"
             "  -h, --help         show this help and exit\n"
             "\n"
@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
     std::string out_dir;
     std::string ip;
     std::string mac;
-    std::optional<double> exposure_us;
+    std::optional<double> exposure_ms;
     std::optional<double> gain;
 
     for (int i = 1; i < argc; ++i) {
@@ -101,12 +101,12 @@ int main(int argc, char **argv) {
             ip = val;
         } else if (arg == "--mac") {
             mac = val;
-        } else if (arg == "--exposure-us") {
+        } else if (arg == "--exposure-ms") {
             double v = 0;
             if (!parse_double(val, v) || v < 0) {
-                return fail(2, std::string("bad arguments: invalid --exposure-us \"") + val + "\"");
+                return fail(2, std::string("bad arguments: invalid --exposure-ms \"") + val + "\"");
             }
-            exposure_us = v;
+            exposure_ms = v;
         } else if (arg == "--gain") {
             double v = 0;
             if (!parse_double(val, v)) {
@@ -148,8 +148,8 @@ int main(int argc, char **argv) {
     if (!mac.empty()) {
         cam.device.mac = mac;
     }
-    if (exposure_us) {
-        cam.acquisition.exposure_ms = *exposure_us / 1000.0; // CLI stays in µs (GUI contract)
+    if (exposure_ms) {
+        cam.acquisition.exposure_ms = exposure_ms;
     }
     if (gain) {
         cam.acquisition.gain = *gain;

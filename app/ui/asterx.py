@@ -1,6 +1,6 @@
 """AsteRx live telemetry page: map track + IMU strip charts + health panels.
 
-Read-only view over asterx_live.LIVE — unlike /gox there is no hardware
+Read-only view over asterx_live.LIVE — unlike /camera there is no hardware
 mutex here, so the guard is informational (a status line), never blocking.
 """
 

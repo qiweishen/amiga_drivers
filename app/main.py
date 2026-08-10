@@ -16,7 +16,7 @@ from .services.session_tailer import TAILER
 from .state import STATE
 
 # Pages register themselves via @ui.page on import.
-from .ui import asterx, config_editor, dashboard, fx10, gox, live, logs  # noqa: F401
+from .ui import asterx, camera, config_editor, dashboard, live, logs  # noqa: F401
 
 
 async def _startup() -> None:

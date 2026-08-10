@@ -114,10 +114,16 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
     return DiscoverResult(devices=devices, raw_output=raw)
 
 
-async def snapshot(ip: str, exposure_ms: float) -> SnapshotResult:
+async def snapshot(ip: str, exposure_ms: float,
+                   spatial_binning: int | None = None,
+                   spectral_binning: int | None = None) -> SnapshotResult:
     """One spectral preview: capture ~1 second of frames and reduce them to
     per-band statistics. Caller must have checked guard_reason() and must
-    serialize calls (STATE.snapshot_busy)."""
+    serialize calls (STATE.snapshot_busy).
+
+    The binning overrides let the page preview a setting WITHOUT writing it to
+    config-fx10.yaml (which is also the live recording config) — persisting is
+    the explicit job of the Apply button. None = keep the config's value."""
     t0 = time.monotonic()
     # All frames of ONE second at the achievable rate (the tool caps its fps
     # the same way, so this is exactly the frames it can deliver in 1 s).
@@ -128,14 +134,19 @@ async def snapshot(ip: str, exposure_ms: float) -> SnapshotResult:
     if out_host.exists():  # same-second collision on rapid consecutive shots
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = FX10_SNAPSHOT_DIR / sid
-    proc = await runtime.popen([
+    argv = [
         runtime.exec_path(BIN_FX10_SNAPSHOT),
         "--config", runtime.exec_path(FX10_CONFIG),
         "--out", runtime.exec_path(out_host),
         "--ip", ip,
         "--frames", str(frames),
         "--exposure-ms", str(exposure_ms),
-    ])
+    ]
+    if spatial_binning is not None:
+        argv += ["--spatial-binning", str(spatial_binning)]
+    if spectral_binning is not None:
+        argv += ["--spectral-binning", str(spectral_binning)]
+    proc = await runtime.popen(argv)
     try:
         out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except asyncio.TimeoutError:

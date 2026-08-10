@@ -113,7 +113,7 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
     return DiscoverResult(devices=devices, raw_output=raw)
 
 
-async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
+async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
     """One full preview shot. Caller must have checked guard_reason() and must
     serialize calls (STATE.snapshot_busy)."""
     t0 = time.monotonic()
@@ -127,7 +127,7 @@ async def snapshot(ip: str, exposure_us: float, gain: float) -> SnapshotResult:
         "--config", runtime.exec_path(SNAPSHOT_CONFIG),
         "--out", runtime.exec_path(out_host),
         "--ip", ip,
-        "--exposure-us", str(exposure_us),
+        "--exposure-ms", str(exposure_ms),
         "--gain", str(gain),
     ])
     try:

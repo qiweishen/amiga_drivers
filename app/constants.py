@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Docker ------------------------------------------------------------------
@@ -102,20 +103,19 @@ CONFIG_FILES: dict[str, ConfigFile] = {
     c.id: c
     for c in [
         ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml"),
-        ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml"),
-        ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
-        ConfigFile("snapshot", "GoX snapshot (jai_snapshot)", REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml"),
+        ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
+        ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml")
     ]
 }
 
 
 # Sensors shown on the dashboard; lms4xxx expands into one card per instance.
-DRIVERS = ("lms4xxx", "gox", "asterx", "fx10")
+DRIVERS = ("asterx", "fx10", "gox", "lms4xxx")
 ENABLE_KEYS = {
     "asterx": "Enable ASTERX",
-    "lms4xxx": "Enable LMS4XXX",
-    "gox": "Enable GOX",
     "fx10": "Enable FX10",
+    "gox": "Enable GOX",
+    "lms4xxx": "Enable LMS4XXX"
 }
