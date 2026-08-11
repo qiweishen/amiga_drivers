@@ -7,7 +7,7 @@ from pathlib import Path
 
 from nicegui import app, ui
 
-from .constants import GUI_HOST, GUI_PORT, RUNTIME_DIR
+from .constants import GUI_HOST, GUI_PORT, PALETTE, RUNTIME_DIR
 from .services import asterx_live, process, runtime, storage
 from .services.driver_stats import STATS
 from .services.health import MONITOR
@@ -46,7 +46,7 @@ def main() -> None:
     app.timer(2.0, storage.poll)
     app.timer(2.0, _check_env)
 
-    ui.colors(primary="#01a7d7")
+    app.colors(**PALETTE)
     ui.run(
         host=GUI_HOST,
         port=GUI_PORT,

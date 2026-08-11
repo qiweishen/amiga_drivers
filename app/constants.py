@@ -66,6 +66,27 @@ SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yam
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
 GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 
+# --- theme -------------------------------------------------------------------
+# Quasar brand colors, applied application-wide in main() via app.colors().
+# THE place to retheme the console: every element asks for a brand NAME
+# ("primary", "positive", "negative", "warning") rather than a literal hue, so
+# editing a value here moves everything that means it.
+#
+# Two things are deliberately NOT reachable from here:
+#   - the neutral "grey" / "blue-grey" badges (idle, disabled, stopped) —
+#     Quasar has no brand slot for a neutral;
+#   - Tailwind utility classes (text-gray-600, bg-red-50, text-amber-700, ...)
+#     used for subtle text and panel backgrounds; those are per-class edits.
+PALETTE = {
+    "primary": "#01a7d7",    # header bar, default buttons, progress bars
+    "secondary": "#26a69a",
+    "accent": "#9c27b0",
+    "positive": "#21ba45",   # sensor RUNNING / recording healthy
+    "negative": "#c10015",   # FAILED, Stop recording, disk below the hard floor
+    "warning": "#f2c037",    # INITIALIZING / STOPPING, disk warning floor
+    "info": "#31ccec",
+}
+
 # --- refresh cadence ---------------------------------------------------------
 # End-to-end latency of a sensor state change is the sum of three stages:
 #   driver logs it  ->  spdlog flushes (<=200 ms, common/src/logger.cpp)

@@ -19,12 +19,14 @@ from ..services.storage import human_bytes
 from ..state import STATE, SensorState, SensorStatus
 
 
+# Brand names (constants.PALETTE), not literal hues, so retheming reaches these.
+# grey/blue-grey stay literal: Quasar has no brand slot for a neutral.
 _SENSOR_BADGE = {
     SensorState.DISABLED: ("Disabled", "grey"),
-    SensorState.WAITING: ("Initializing", "orange"),
-    SensorState.RUNNING: ("Running", "green"),
-    SensorState.STOPPED: ("Stopped", "blue-grey"),
-    SensorState.FAILED: ("Failed", "red"),
+    SensorState.WAITING: ("Initializing", "warning"),
+    SensorState.RUNNING: ("Running", "positive"),
+    SensorState.STOPPED: ("Stopped", "grey"),
+    SensorState.FAILED: ("Failed", "negative"),
 }
 
 _SENSOR_ICON = {
@@ -106,7 +108,7 @@ def disk_gauge() -> Callable[[], None]:
         used_frac = s.disk_used / s.disk_total
         free_label.set_text(f"{human_bytes(s.disk_free)} free of {human_bytes(s.disk_total)}")
         bar.set_value(round(used_frac, 3))
-        bar.props(f'color="{"red" if used_frac > 0.9 else "amber" if used_frac > 0.75 else "primary"}"')
+        bar.props(f'color="{"negative" if used_frac > 0.9 else "warning" if used_frac > 0.75 else "primary"}"')
 
     update()
     return update

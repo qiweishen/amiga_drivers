@@ -55,13 +55,13 @@ def camera_page() -> None:
 
         # ======================================================== GoX section
         ui.separator()
-        ui.label("GoX camera single-shot preview").classes("text-lg font-bold")
+        ui.label("GoX camera preview").classes("text-lg font-bold")
         gox_guard = ui.label("").classes("text-sm text-red-700")
         gox_target_label = ui.label().classes("text-sm text-gray-700")
         with ui.row().classes("items-center gap-8 w-full"):
             with ui.column().classes("flex-1 min-w-0"):
                 ui.label("Exposure (ms)")
-                ui.label("Camera limit: 0.001 ... 332.738 ms on the GOX-12405C-PGE").classes("text-xs text-gray-500")
+                ui.label("Camera limit: 0.001 - 332.738 ms on the GOX-12405C-PGE").classes("text-xs text-gray-500")
                 # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
                 gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
                                          value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
@@ -93,7 +93,7 @@ def camera_page() -> None:
 
         # ======================================================= FX10 section
         ui.separator()
-        ui.label("FX10 camera one-second spectral preview").classes("text-lg font-bold")
+        ui.label("FX10 camera preview").classes("text-lg font-bold")
         fx10_guard = ui.label("").classes("text-sm text-red-700")
         fx10_target_label = ui.label().classes("text-sm text-gray-700")
         with ui.row().classes("items-center gap-8 w-full"):
@@ -114,10 +114,6 @@ def camera_page() -> None:
                 ui.label("448 / 224 / 112 / 56 bands").classes("text-xs text-gray-500")
                 fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 1)).props(
                     "outlined dense")
-        ui.label("Preview always runs in freerun — the PPS/external trigger path is not "
-                 "exercised; unlicensed machines watermark the pixels. Binning is passed to the "
-                 "tool as an override, so the preview shows it without changing the config.").classes(
-            "text-sm text-gray-600")
         with ui.row().classes("items-center gap-4"):
             fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
             fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props("outline")

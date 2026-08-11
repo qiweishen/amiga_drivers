@@ -11,13 +11,15 @@ from ..state import STATE, ProcState
 from ..services import docker_runner, runtime
 
 
+# Brand names (constants.PALETTE), not literal hues, so retheming reaches these.
+# "grey" stays literal: Quasar has no brand slot for a neutral.
 _PROC_BADGE = {
     ProcState.IDLE: ("Idle", "grey"),
-    ProcState.STARTING: ("Starting", "orange"),
-    ProcState.RUNNING: ("Recording", "green"),
-    ProcState.STOPPING: ("Stopping", "orange"),
+    ProcState.STARTING: ("Starting", "warning"),
+    ProcState.RUNNING: ("Recording", "positive"),
+    ProcState.STOPPING: ("Stopping", "warning"),
     ProcState.EXITED: ("Stopped", "grey"),
-    ProcState.FAILED: ("Crashed", "red")
+    ProcState.FAILED: ("Crashed", "negative")
 }
 
 _NAV = [
