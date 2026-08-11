@@ -29,7 +29,7 @@ def dashboard_page() -> None:
 
         # --- enable switches -------------------------------------------------
         ui.separator()
-        ui.label("Sensor enables (written to config-main.yaml, applied at start)").classes("font-bold")
+        ui.label("Sensor enables (written to config-main.yaml)").classes("font-bold")
         with ui.row().classes("gap-6"):
             switches: dict[str, ui.switch] = {}
             for driver in DRIVERS:
@@ -92,7 +92,7 @@ def dashboard_page() -> None:
                     else f"Last session {STATE.active_session.name}"
                 )
             elif STATE.process_state is ProcState.STARTING:
-                session_label.set_text("Waiting for the session directory…")
+                session_label.set_text("Waiting for the session directory ...")
             else:
                 session_label.set_text("")
             refresh_cards()

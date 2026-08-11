@@ -23,6 +23,7 @@ from typing import Callable
 
 from .log_buffer import BUFFER, parse_line
 
+
 POLL_S = 0.5
 REPLAY_TAIL_BYTES = 256 * 1024  # reattach: only the recent tail matters
 IMU_STRIDE = 20  # 200 Hz -> 10 Hz chart feed

@@ -13,20 +13,20 @@ from ..services import docker_runner, runtime
 
 _PROC_BADGE = {
     ProcState.IDLE: ("Idle", "grey"),
-    ProcState.STARTING: ("Starting…", "orange"),
+    ProcState.STARTING: ("Starting", "orange"),
     ProcState.RUNNING: ("Recording", "green"),
-    ProcState.STOPPING: ("Stopping…", "orange"),
-    ProcState.EXITED: ("Stopped", "blue-grey"),
-    ProcState.FAILED: ("Crashed", "red"),
+    ProcState.STOPPING: ("Stopping", "orange"),
+    ProcState.EXITED: ("Stopped", "grey"),
+    ProcState.FAILED: ("Crashed", "red")
 }
 
 _NAV = [
     ("/", "Overview"),
     ("/config", "Config"),
-    ("/logs", "Logs"),
     ("/asterx", "AsteRx Live"),
     ("/live", "Data Live"),
     ("/camera", "Camera Tools"),
+    ("/logs", "Logs")
 ]
 
 
@@ -38,7 +38,7 @@ def frame(title: str):
             for path, label in _NAV:
                 ui.link(label, path).classes("text-white no-underline hover:underline")
         with ui.row().classes("items-center gap-2"):
-            mode_badge = ui.badge("").props('color="blue-grey" outline').classes("px-2 py-1 text-xs")
+            mode_badge = ui.badge("").props('color="white" outline').classes("px-2 py-1 text-xs")
             badge = ui.badge("").props("floating=false").classes("px-3 py-1 text-sm")
 
     banner_row = ui.row().classes("w-full")

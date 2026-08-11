@@ -25,6 +25,7 @@ from .health import MONITOR
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
 
+
 PROCESS_NAME = "AmigaDrivers"
 _SESSION_RE = re.compile(SESSION_DIR_RE)
 

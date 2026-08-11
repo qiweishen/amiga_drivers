@@ -44,8 +44,9 @@ def main() -> None:
     # in step with the rest of the card. storage.poll self-throttles when the
     # scan is slow, so this rate is safe on a slow output mount.
     app.timer(2.0, storage.poll)
-    app.timer(10.0, _check_env)
+    app.timer(2.0, _check_env)
 
+    ui.colors(primary="#01a7d7")
     ui.run(
         host=GUI_HOST,
         port=GUI_PORT,

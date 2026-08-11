@@ -26,7 +26,7 @@ def live_page() -> None:
             gox_btn = ui.button("Fetch frame", icon="photo_camera", on_click=lambda: _fetch_gox())
             gox_busy = ui.spinner(size="sm").classes("hidden")
             gox_meta = ui.label("").classes("text-sm text-gray-600")
-        gox_image = ui.interactive_image().classes("max-w-[70%] border rounded")
+        gox_image = ui.interactive_image().classes("max-w-[70%]")
 
         # ------------------------------------------------------------ FX10
         ui.separator()

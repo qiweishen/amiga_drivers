@@ -18,6 +18,7 @@ from ..services.driver_stats import STATS
 from ..services.storage import human_bytes
 from ..state import STATE, SensorState, SensorStatus
 
+
 _SENSOR_BADGE = {
     SensorState.DISABLED: ("Disabled", "grey"),
     SensorState.WAITING: ("Initializing", "orange"),

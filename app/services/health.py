@@ -13,6 +13,7 @@ from ..state import STATE, SensorState, SensorStatus
 from . import markers
 from .log_buffer import LogLine
 
+
 LMS_INIT_RE = markers.LMS_INIT_RE
 LMS_STOP_RE = markers.LMS_STOP_RE
 LMS_MSG_INSTANCE_RE = re.compile(r"^\[(.+?)\] ")

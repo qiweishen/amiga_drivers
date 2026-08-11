@@ -7,6 +7,7 @@ from nicegui import ui
 from ..services.log_buffer import BUFFER, LEVELS, LogLine
 from . import layout
 
+
 _DEFAULT_LEVELS = {"info", "warning", "error", "critical"}
 
 
