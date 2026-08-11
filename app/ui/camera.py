@@ -65,7 +65,7 @@ def camera_page() -> None:
                 # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
                 gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
                                          value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
-                ui.number(min=0.001, max=1_000_000, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
+                ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
             with ui.column().classes("flex-1 min-w-0"):
                 ui.label("Gain (dB)")
                 ui.label("Camera limit: 1.0 ... 126.0 dB on the GOX-12405C-PGE").classes("text-xs text-gray-500")
@@ -297,7 +297,7 @@ def camera_page() -> None:
             gox_chart.options["xAxis"]["data"] = list(range(len(result.histogram)))
             gox_chart.update()
             gox_meta.set_text(
-                f"{result.decode_name} · exposure {gox_exposure.value:.0f}ms · gain {gox_gain.value:.1f}dB · "
+                f"{result.decode_name} · exposure {gox_exposure.value:g}ms · gain {gox_gain.value:.1f}dB · "
                 f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · "
                 f"{result.elapsed_s:.1f}s"
             )
