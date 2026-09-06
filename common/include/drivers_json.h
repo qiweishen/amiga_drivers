@@ -1,31 +1,20 @@
-/// @file drivers_json.h
-/// @brief Run-level summary for the whole AmigaDrivers process, written to
-/// <data_folder>/drivers.json. One small file per run instead of per-driver
-/// session metadata: when the run started/ended, how it ended, and which
-/// drivers ran with which config.
-
-#ifndef COMMON_DRIVERS_JSON_H
-#define COMMON_DRIVERS_JSON_H
+#pragma once
 
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <string>
 
 
-namespace Common {
-    // Written once at startup (status "running") and atomically replaced at
-    // shutdown (temp file + fsync + rename), so the file is complete and
-    // parseable at any moment — even after kill -9 it still documents the run.
-    // All writes are best-effort: failures log a warning and never throw (a
-    // metadata file must not take down data capture). Not thread-safe: call
-    // from the main thread only.
+namespace common {
     class DriversJson {
     public:
         // path: usually "<data_folder>/drivers.json"
         explicit DriversJson(std::string path);
 
+        void SetMeta(const std::string &operator_name, const std::string &field_name);
+
         // Run header; call before WriteRunning()
-        void SetRun(const std::string &timestamp, const std::string &output_directory, bool logging_enabled);
+        void SetRun(const std::string &timestamp, const std::string &output_directory);
 
         // Build identity of the whole AmigaDrivers process (project version +
         // git SHA baked at configure time); call before WriteRunning()
@@ -33,21 +22,20 @@ namespace Common {
 
         // One entry per driver: {"enabled": ..., "config": <path as configured>}
         void AddDriver(const std::string &name, bool enabled, const std::string &config_path);
+        void AddDriverResult(const std::string &name, bool failed, const nlohmann::ordered_json &statistics);
 
         // Writes the document with run.status = "running"
-        void WriteRunning();
+        bool WriteRunning();
 
         // Sets run.status / run.ended / run.duration_s and writes the final
         // document. status: "completed" | "interrupted (signal N)" | ...
-        void Finalize(const std::string &status);
+        bool Finalize(const std::string &status);
 
     private:
-        void Write_();
+        bool Write_();
 
         std::string path_;
         nlohmann::ordered_json doc_;
         std::chrono::steady_clock::time_point start_;
     };
-} // namespace Common
-
-#endif	// COMMON_DRIVERS_JSON_H
+} // namespace common

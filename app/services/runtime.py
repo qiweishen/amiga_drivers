@@ -4,7 +4,7 @@ process exec, pgrep/pkill, path namespace, environment health — lives here.
 
 Mode selection (once, at GUI startup):
   AMIGA_GUI_MODE=docker|native forces a backend;
-  auto (default): if the docker CLI can see the amiga-sensor-dev container
+  auto (default): if the docker CLI can see the amiga-drivers-dev container
   (running or stopped) -> docker, otherwise -> native.
 So a dev machine with the devcontainer keeps working unchanged, and a rig
 without Docker (or without the container) transparently runs natively.

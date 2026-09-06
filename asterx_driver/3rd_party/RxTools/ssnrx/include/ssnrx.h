@@ -467,7 +467,7 @@ private:
      */
     int parseASCIICommandReply(int startIndex, bool* outNotEnoughData);
 
-    static const int sMaxASCIICommandReplySize = 4096; ///< the maximum size of an ASCII command reply
+    static const int sMaxASCIICommandReplySize = 262144; ///< the maximum size of an ASCII command reply (raised from 4096: lstConfigFile / lstAntennaInfo listings)
 
     ///////////////////
     // Formatted Information Blocks
@@ -492,7 +492,7 @@ private:
      */
     int parseFormattedInformationBlock(int startIndex, bool* outNotEnoughData);
 
-    static const int sMaxFormattedInformationBlockSize = 4096; ///< the maximum size of an formatted information block
+    static const int sMaxFormattedInformationBlockSize = 65536; ///< the maximum size of an formatted information block (raised from 4096: lstConfigFile listings)
 
 
     ///////////////////

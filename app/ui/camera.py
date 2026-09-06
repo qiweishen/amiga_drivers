@@ -1,25 +1,32 @@
-"""Camera Tools: one discovery table for both camera drivers, then a per-driver
-exposure workbench (preview + Apply to the recording config).
+"""Camera Tools: one discovery table for both camera drivers, a Set IP action
+for field re-addressing, then a per-driver exposure workbench (preview +
+Apply to the recording config).
 
 Discovery is shared because the two backends answer the same question about the
-same GigE segment — `jai_discover --json` for the GoX cameras and
-`fx10_snapshot --list` for the FX10 — so one Scan fills one table and selecting
-a row targets that camera's own section.
+same GigE segment: one `ebus_discover --json` scan (common/) fills one table,
+rows are classified by vendor (JAI -> GoX, Specim -> FX10), and selecting a row
+targets that camera's own section. The scan is a broadcast the cameras answer
+without a control channel, so it runs even while a recording is on; a row whose
+driver owns the camera is marked "in use" and its camera-touching actions
+(snapshot, Set IP) stay disabled.
 
-Both sections tune AGAINST A LIVE CAMERA without touching any config: the
-snapshot tools take the values as CLI overrides. "Apply to config" is the
-separate, explicit step that writes the winning values into the driver's
-recording config (comment-preserving, see services/config_store.py).
+Set IP runs `ebus_set_ip`: a FORCEIP (immediate, transient) followed by the
+persistent-IP GenICam nodes (kept across power cycles), then optionally rewrites
+`device.ip` in the driver's config. Both sections tune AGAINST A LIVE CAMERA
+without touching any config: the snapshot tools take the values as CLI
+overrides. "Apply to config" is the separate, explicit step that writes the
+winning values into the driver's recording config (comment-preserving, see
+services/config_store.py).
 """
 
 from __future__ import annotations
 
-import asyncio
+import ipaddress
 
 from nicegui import app, ui
 
 from ..constants import TOOL_TICK_S
-from ..services import config_store, fx10_tools, gox_tools
+from ..services import config_store, ebus_tools, fx10_tools, gox_tools
 from ..state import STATE, ProcState
 from . import layout
 
@@ -27,16 +34,59 @@ _COLUMNS = [
     {"name": "kind", "label": "Driver", "field": "kind", "align": "left"},
     {"name": "name", "label": "Model / device", "field": "name", "align": "left"},
     {"name": "ip", "label": "IP", "field": "ip", "align": "left"},
+    {"name": "subnet", "label": "Subnet mask", "field": "subnet", "align": "left"},
     {"name": "mac", "label": "MAC", "field": "mac", "align": "left"},
+    {"name": "ipcfg", "label": "IP config", "field": "ipcfg", "align": "left"},
     {"name": "detail", "label": "Details", "field": "detail", "align": "left"},
 ]
 
 _FX10_DEFAULT_IP = "10.95.0.100"
 _BINNING = [1, 2, 4, 8]
+_CONFIG_KINDS = {"GoX": "gox", "FX10": "fx10"}  # kinds that have a driver config to point at the camera
 
 
 def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _check_ip_inputs(ip: str, mask: str, gateway: str, host_subnets: list[str], allow_foreign: bool) -> str:
+    """Client-side mirror of ebus_set_ip's validation (common/include/ebus/ipv4.hpp),
+    so a typo is refused before the camera is touched. Returns "" when fine."""
+    try:
+        new_ip = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return f"\"{ip}\" is not an IPv4 address"
+    try:
+        network = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+    except ValueError:
+        return f"\"{mask}\" is not a contiguous IPv4 subnet mask"
+    if not 8 <= network.prefixlen <= 30:
+        return f"subnet mask {mask} must be between /8 and /30"
+    if new_ip in (network.network_address, network.broadcast_address) or new_ip.is_loopback \
+            or new_ip.is_multicast or new_ip.is_reserved or new_ip.is_unspecified:
+        return f"{ip}/{network.prefixlen} is not a usable host address"
+    try:
+        gw = ipaddress.IPv4Address(gateway or "0.0.0.0")
+    except ValueError:
+        return f"\"{gateway}\" is not an IPv4 gateway address"
+    if not gw.is_unspecified and (gw not in network or gw == new_ip
+                                  or gw in (network.network_address, network.broadcast_address)):
+        return f"gateway {gateway} is not another host on {network.with_prefixlen}"
+    reachable = False
+    for entry in host_subnets:
+        try:
+            host = ipaddress.IPv4Interface(entry)
+        except ValueError:
+            continue
+        if host.ip == new_ip:
+            return f"{ip} is the address of the host adapter itself"
+        if new_ip in host.network and host.ip in network:
+            reachable = True
+    if not reachable and not allow_foreign:
+        return (f"{ip}/{network.prefixlen} is not on the host NIC's subnet ({', '.join(host_subnets) or 'no IPv4'}): "
+                "the camera would become unreachable. Pick an address in that subnet, or tick "
+                "'Allow an address outside the host subnet' under Advanced")
+    return ""
 
 
 @ui.page("/camera")
@@ -44,14 +94,15 @@ def camera_page() -> None:
     with layout.frame("Camera Tools"):
         # =================================================== device discovery
         ui.label("Device discovery (GoX and FX10)").classes("text-lg font-bold")
-        ui.label("The device whose recording driver is running is skipped, "
-                 "as it is owned by the acquisition process.").classes("text-sm text-gray-700 whitespace-pre-line")
+        ui.label("One scan lists every GigE Vision camera on the host's adapters. A camera owned by "
+                 "the running recording is marked \"in use\"; its snapshot and Set IP stay disabled."
+                 ).classes("text-sm text-gray-700 whitespace-pre-line")
         with ui.row().classes("items-center gap-4"):
             scan_btn = ui.button("Scan cameras", icon="search", on_click=lambda: _scan())
+            set_ip_btn = ui.button("Set IP…", icon="lan", on_click=lambda: _set_ip_dialog()).props("outline")
+            set_ip_busy = ui.spinner(size="sm").classes("hidden")
             scan_status = ui.label("").classes("text-sm text-gray-600")
         table = ui.table(columns=_COLUMNS, rows=[], row_key="key", selection="single").classes("w-full")
-        fallback_pre = ui.element("pre").classes(
-            "w-full text-xs font-mono bg-gray-100 p-2 rounded hidden whitespace-pre-wrap")
 
         # ======================================================== GoX section
         ui.separator()
@@ -67,12 +118,13 @@ def camera_page() -> None:
                                          value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
                 ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
             with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Gain (dB)")
-                ui.label("Camera limit: 1.0 ... 126.0 dB on the GOX-12405C-PGE").classes("text-xs text-gray-500")
-                # Camera limit: ExposureTime is 1.0..126.0 dB on the GOX-12405C-PGE
+                ui.label("Gain (magnification)")
+                # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
+                # (about 0..42 dB) - manual p.148, dB conversion table p.181.
+                ui.label("Camera limit: x1.0 ... x126.0 (about 0 ... 42 dB)").classes("text-xs text-gray-500")
                 gox_gain = ui.slider(min=1.0, max=126.0, step=0.1,
                                      value=min(126.0, app.storage.general.get("gox_gain", 1.0)))
-                ui.number(min=1.0, max=126.0, step=0.1, suffix="dB").bind_value(gox_gain).classes("w-full")
+                ui.number(min=1.0, max=126.0, step=0.1, prefix="x").bind_value(gox_gain).classes("w-full")
         with ui.row().classes("items-center gap-4"):
             gox_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _gox_snap())
             gox_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _gox_apply()).props("outline")
@@ -111,8 +163,10 @@ def camera_page() -> None:
                     "outlined dense")
             with ui.column().classes("flex-1 min-w-0"):
                 ui.label("Spectral binning")
-                ui.label("448 / 224 / 112 / 56 bands").classes("text-xs text-gray-500")
-                fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 1)).props(
+                ui.label("448 / 224 / 112 / 56 bands · 2 = factory").classes("text-xs text-gray-500")
+                # Default 2, like the driver: the factory offset / black-level /
+                # bad-pixel calibration was performed at 2x spectral binning.
+                fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 2)).props(
                     "outlined dense")
         with ui.row().classes("items-center gap-4"):
             fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
@@ -139,12 +193,14 @@ def camera_page() -> None:
             with raw_pre:
                 ui.html(f"<span>{_escape(text)}</span>")
 
+        def _selected_row() -> dict:
+            sel = table.selected
+            return sel[0] if sel else {}
+
         def _selected(kind: str) -> dict:
             """The selected table row when it belongs to `kind`, else {}."""
-            sel = table.selected
-            if sel and sel[0].get("kind") == kind:
-                return sel[0]
-            return {}
+            row = _selected_row()
+            return row if row.get("kind") == kind else {}
 
         def _gox_target() -> tuple[str, str]:
             row = _selected("GoX")
@@ -168,8 +224,12 @@ def camera_page() -> None:
             busy = STATE.snapshot_busy
             gox_ip, _gox_mac = _gox_target()
             fx10_ip = _fx10_target()
-            # Discovery needs at least one driver to be free.
-            scan_btn.set_enabled(STATE.env_ok and not busy and not (gox_reason and fx10_reason))
+            row = _selected_row()
+            # Discovery is a broadcast: it never needs the control channel.
+            scan_btn.set_enabled(STATE.env_ok and not busy)
+            # Set IP touches the camera: gated like a snapshot, per the row's driver.
+            set_ip_btn.set_enabled(bool(row) and STATE.env_ok and not busy
+                                   and ebus_tools.guard_reason_for(row.get("kind", "")) is None)
             gox_snap_btn.set_enabled(gox_reason is None and STATE.env_ok and not busy and bool(gox_ip))
             fx10_snap_btn.set_enabled(fx10_reason is None and STATE.env_ok and not busy and bool(fx10_ip))
             # Apply only edits a file — it never touches the camera, so it stays
@@ -186,63 +246,28 @@ def camera_page() -> None:
         # ------------------------------------------------------ discovery glue
         async def _scan() -> None:
             scan_status.set_text("Scanning ...")
-            fallback_pre.classes(add="hidden")
-            gox_reason = gox_tools.guard_reason()
-            fx10_reason = fx10_tools.guard_reason()
-
-            async def _skip(reason: str):
-                return reason
-
-            gox_res, fx10_res = await asyncio.gather(
-                _skip(gox_reason) if gox_reason else gox_tools.discover(),
-                _skip(fx10_reason) if fx10_reason else fx10_tools.discover(),
-            )
+            res = await ebus_tools.discover()
 
             rows: list[dict] = []
-            notes: list[str] = []
-            raw_parts: list[str] = []
-
-            if isinstance(gox_res, str):
-                notes.append("GoX skipped (driver owns the cameras)")
-            else:
-                raw_parts.append("--- jai_discover ---\n" + gox_res.raw_output)
-                if gox_res.error:
-                    notes.append(gox_res.error)
-                if not gox_res.json_supported:
-                    fallback_pre.classes(remove="hidden")
-                    fallback_pre.clear()
-                    with fallback_pre:
-                        ui.html(f"<span>{_escape(gox_res.raw_output)}</span>")
-                    notes.append("old jai_discover binary (no --json): rebuild and retry; raw output below")
-                rows += [
-                    {
-                        "key": f"GoX:{d.mac or d.ip}", "kind": "GoX", "name": d.model,
-                        "ip": d.ip, "mac": d.mac,
-                        "detail": f"{d.serial} · {d.user_name}"
-                                  + (
-                                      "" if d.config_valid else " · INVALID-SUBNET (unreachable: fix camera/NIC subnet)"),
-                    }
-                    for d in gox_res.devices
-                ]
-
-            if isinstance(fx10_res, str):
-                notes.append("FX10 skipped (driver owns the camera)")
-            else:
-                raw_parts.append("--- fx10_snapshot --list ---\n" + fx10_res.raw_output)
-                if fx10_res.error:
-                    notes.append(fx10_res.error)
-                rows += [
-                    {
-                        "key": f"FX10:{d.mac or d.ip}", "kind": "FX10", "name": d.display_id,
-                        "ip": d.ip, "mac": d.mac, "detail": d.connection_id,
-                    }
-                    for d in fx10_res.devices
-                ]
+            for d in res.devices:
+                in_use = ebus_tools.guard_reason_for(d.kind) is not None
+                ipcfg = ("valid" if d.config_valid else "INVALID-SUBNET") + " · " + d.ip_config_text
+                if in_use:
+                    ipcfg += " · in use"
+                rows.append({
+                    "key": f"{d.kind}:{d.mac or d.ip}", "kind": d.kind,
+                    "name": d.model or d.user_name or d.mac,
+                    "ip": d.ip, "subnet": d.subnet_mask, "mac": d.mac, "ipcfg": ipcfg,
+                    "detail": " · ".join(x for x in (d.serial, d.user_name, d.vendor) if x),
+                    # carried for the Set IP dialog, not shown as columns
+                    "host_subnets": d.host_subnets, "host_masks": d.host_masks,
+                    "persistent_available": d.persistent_available,
+                })
 
             table.update_rows(rows)
-            _show_raw("\n\n".join(raw_parts))
+            _show_raw("--- ebus_discover ---\n" + res.raw_output)
             found = f"Found {len(rows)} camera(s)"
-            scan_status.set_text(found + (" — " + "; ".join(notes) if notes else ""))
+            scan_status.set_text(found + (" — " + res.error if res.error else ""))
 
             # Re-select the remembered camera of whichever driver has one listed.
             remembered = {app.storage.general.get("gox_target_ip", ""),
@@ -254,15 +279,115 @@ def camera_page() -> None:
             refresh_guard()
 
         def _on_select() -> None:
-            row = table.selected[0] if table.selected else {}
+            row = _selected_row()
             if row.get("kind") == "GoX":
                 app.storage.general["gox_target_ip"] = row.get("ip", "")
                 app.storage.general["gox_target_mac"] = row.get("mac", "")
             elif row.get("kind") == "FX10":
                 app.storage.general["fx10_target_ip"] = row.get("ip", "")
+                app.storage.general["fx10_target_mac"] = row.get("mac", "")
             refresh_guard()
 
         table.on("selection", lambda _: _on_select())
+
+        # --------------------------------------------------------- Set IP glue
+        async def _set_ip_dialog() -> None:
+            row = _selected_row()
+            if not row:
+                ui.notify("Scan and select a camera first", type="warning")
+                return
+            reason = ebus_tools.guard_reason_for(row.get("kind", ""))
+            if reason or STATE.snapshot_busy:
+                ui.notify(reason or "Another camera tool is still running", type="warning")
+                return
+            kind = row.get("kind", "")
+            host_subnets: list[str] = row.get("host_subnets") or []
+            host_masks: list[str] = row.get("host_masks") or []
+            default_mask = host_masks[0] if host_masks else (row.get("subnet") or "255.255.255.0")
+
+            with ui.dialog() as dialog, ui.card().classes("w-[36rem]"):
+                ui.label(f"Set IP — {row.get('name', '')} ({kind})").classes("text-lg font-bold")
+                ui.label(f"MAC {row.get('mac', '')} · now {row.get('ip', '')}/{row.get('subnet', '')} · "
+                         f"{row.get('ipcfg', '')}").classes("text-sm text-gray-700")
+                ui.label("Host NIC: " + (", ".join(host_subnets) or "no IPv4 address")).classes("text-sm text-gray-700")
+                ui.label("Persistent IP: " + ("supported by this camera" if row.get("persistent_available")
+                                              else "NOT advertised — the change may stay transient")
+                         ).classes("text-sm text-gray-700")
+                ip_in = ui.input("New IP", value=row.get("ip", "")).classes("w-full")
+                mask_in = ui.input("Subnet mask", value=default_mask).classes("w-full")
+                with ui.expansion("Advanced").classes("w-full"):
+                    gw_in = ui.input("Gateway", value="0.0.0.0").classes("w-full")
+                    allow_cb = ui.checkbox("Allow an address outside the host subnet (camera becomes "
+                                           "unreachable until the host is re-addressed)", value=False)
+                writeback_cb = None
+                if kind in _CONFIG_KINDS:
+                    writeback_cb = ui.checkbox(
+                        f"Also update device.ip in config-{_CONFIG_KINDS[kind]}.yaml", value=True)
+                ui.label("Two steps: FORCEIP (immediate, lost on power cycle), then the persistent-IP nodes "
+                         "(kept across power cycles). Never run this on a camera that is recording."
+                         ).classes("text-xs text-gray-500")
+                with ui.row():
+                    ui.button("Set IP", color="negative", on_click=lambda: dialog.submit(True))
+                    ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
+            if not await dialog:
+                return
+
+            new_ip = str(ip_in.value or "").strip()
+            mask = str(mask_in.value or "").strip()
+            gateway = str(gw_in.value or "0.0.0.0").strip() or "0.0.0.0"
+            allow_foreign = bool(allow_cb.value)
+            problem = _check_ip_inputs(new_ip, mask, gateway, host_subnets, allow_foreign)
+            if problem:
+                ui.notify(problem, type="negative", multi_line=True)
+                return
+            if new_ip == row.get("ip") and mask == row.get("subnet"):
+                ui.notify("That is already the camera's address", type="info")
+                return
+            await _run_set_ip(row, new_ip, mask, gateway, allow_foreign,
+                              bool(writeback_cb.value) if writeback_cb is not None else False)
+
+        async def _run_set_ip(row: dict, new_ip: str, mask: str, gateway: str, allow_foreign: bool,
+                              writeback: bool) -> None:
+            if STATE.snapshot_busy:
+                return
+            kind = row.get("kind", "")
+            STATE.snapshot_busy = True  # same single-flight guard as a snapshot; preflight refuses to start
+            set_ip_busy.classes(remove="hidden")
+            refresh_guard()
+            try:
+                result = await ebus_tools.set_ip(row.get("mac", ""), new_ip, mask, gateway, allow_foreign)
+            finally:
+                STATE.snapshot_busy = False
+                set_ip_busy.classes(add="hidden")
+                refresh_guard()
+            _show_raw(result.raw_output)
+
+            if result.ok:
+                ui.notify(result.message, type="positive", multi_line=True)
+                if writeback:
+                    try:
+                        summary = config_store.apply_device_ip(kind, row.get("ip", ""), row.get("mac", ""), new_ip)
+                    except Exception as e:
+                        ui.notify(f"Camera re-addressed, but the config write failed: {e}",
+                                  type="negative", multi_line=True)
+                    else:
+                        _after_apply(summary)
+            elif result.transient_only:
+                # The config follows the persistent state only: a transient address
+                # would leave it pointing at nothing after the next power cycle.
+                ui.notify(f"Address changed but NOT persisted — a power cycle restores {row.get('ip', '')}; "
+                          f"the driver config was left unchanged. {result.message}",
+                          type="warning", multi_line=True)
+            else:
+                ui.notify(f"Set IP failed: {result.message}", type="negative", multi_line=True)
+                return
+
+            # Remember the new address so the rescan re-selects this camera.
+            if kind == "GoX":
+                app.storage.general["gox_target_ip"] = new_ip
+            elif kind == "FX10":
+                app.storage.general["fx10_target_ip"] = new_ip
+            await _scan()
 
         # ------------------------------------------------------------ GoX glue
         async def _gox_snap() -> None:
@@ -297,7 +422,7 @@ def camera_page() -> None:
             gox_chart.options["xAxis"]["data"] = list(range(len(result.histogram)))
             gox_chart.update()
             gox_meta.set_text(
-                f"{result.decode_name} · exposure {gox_exposure.value:g}ms · gain {gox_gain.value:.1f}dB · "
+                f"{result.decode_name} · exposure {gox_exposure.value:g}ms · gain x{gox_gain.value:.1f} · "
                 f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · "
                 f"{result.elapsed_s:.1f}s"
             )
@@ -347,9 +472,11 @@ def camera_page() -> None:
                 ui.notify(f"Snapshot failed: {result.reason}", type="negative", multi_line=True)
                 fx10_meta.set_text(f"Failed ({result.elapsed_s:.1f}s): {result.reason}")
                 return
+            axis = result.wavelengths_nm or list(range(result.bands))
+            fx10_chart.options["xAxis"]["name"] = "Wavelength (nm)" if result.wavelengths_nm else "Image row (uncalibrated)"
             fx10_chart.options["series"] = [
                 {"name": name, "type": "line", "showSymbol": False, "animation": False,
-                 "data": [[wl, v] for wl, v in zip(result.wavelengths_nm, values)]}
+                 "data": [[x, v] for x, v in zip(axis, values)]}
                 for name, values in result.spectrum_pct.items()
             ]
             fx10_chart.update()

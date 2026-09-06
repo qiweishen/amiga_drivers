@@ -1,19 +1,20 @@
-#include "sensor_trigger_log.hpp"
+#include "sensor_trigger_log.h"
 
 #include <sys/stat.h>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
-#include <ctime>
 
+#include "log_growth_tracker.h"
 #include "logger.h"
 #include "session_client.cpp"
 
 
 namespace fx10 {
     namespace {
-        Common::DriverLog g_log{"FX10"};
+        common::DriverLog g_log{"FX10"};
 
-        // No log growth for this long at stop() time = the STOP command very likely never reached the board
+        // No log growth for this long at Stop() time = the STOP command very likely never reached the board
         constexpr double kStopStallWarnS = 15.0;
 
         // errno of the failed port open -> field-actionable hint
@@ -36,6 +37,7 @@ namespace fx10 {
 
     struct SensorTriggerLog::Impl {
         SensorSyncSession session;
+        LogGrowthTracker growth; // see log_growth_tracker.hpp for why size, not mtime
     };
 
 
@@ -45,21 +47,21 @@ namespace fx10 {
 
 
     SensorTriggerLog::~SensorTriggerLog() {
-        stop();
+        Stop();
     }
 
 
-    void SensorTriggerLog::open() {
+    void SensorTriggerLog::Open() {
         if (!impl_->session.open(port_.c_str())) {
             const int err = impl_->session.lastErrno();
             throw TriggerLogError(fmt::format("[TriggerLog] Cannot open sensor trigger port '{}': {} (errno {}){}",
                                               port_, std::strerror(err), err, OpenErrnoHint(err)));
         }
-        g_log.info("[TriggerLog] Sensor trigger port '{}' open", port_);
+        g_log.Info("[TriggerLog] Sensor trigger port '{}' open", port_);
     }
 
 
-    void SensorTriggerLog::start(const std::filesystem::path &log_path,
+    void SensorTriggerLog::Start(const std::filesystem::path &log_path,
                                  const std::vector<std::pair<int, double> > &channel_freqs_hz) {
         if (started_) {
             throw TriggerLogError("[TriggerLog] Trigger log session already running");
@@ -69,49 +71,54 @@ namespace fx10 {
                                   log_path.string() + "' or to command the board)");
         }
         log_path_ = log_path;
+        // Seed the stall baseline unconditionally, so a transient stat failure
+        // cannot leave last_growth at the steady_clock epoch (an instant stall).
+        struct stat st{};
+        impl_->growth.Reset(::stat(log_path.c_str(), &st) == 0 ? static_cast<std::int64_t>(st.st_size) : -1,
+                            std::chrono::steady_clock::now());
         started_ = true;
         std::string rates;
         for (const auto &[ch, hz]: channel_freqs_hz) {
             rates += fmt::format("{}trig[{}]={}", rates.empty() ? "" : ", ", ch,
                                  hz > 0.0 ? fmt::format("{:g} Hz", hz) : "off");
         }
-        g_log.info("[TriggerLog] Trigger pulses running ({}); timing log recording to {}",
+        g_log.Info("[TriggerLog] Trigger pulses running ({}); timing log recording to {}",
                    rates.empty() ? "config.h default rates" : rates, log_path_.string());
     }
 
 
-    void SensorTriggerLog::stop() {
+    void SensorTriggerLog::Stop() {
         if (!started_) {
             return;
         }
-        const double stalled = stalledSeconds();
+        const double stalled = StalledSeconds();
         started_ = false;
         impl_->session.stop(); // sends STOP, drains the tail (~300 ms), closes the file
         if (!impl_->session.ok()) {
-            g_log.warn("[TriggerLog] Timing log '{}' had a write error — its tail is incomplete", log_path_.string());
+            g_log.Warn("[TriggerLog] Timing session '{}' failed integrity checks (I/O, protocol, event loss or missing STOP acknowledgement)", log_path_.string());
         } else if (stalled > kStopStallWarnS) {
-            g_log.warn("[TriggerLog] Link was stalled for {:.0f} s at stop — the STOP command may not have "
+            g_log.Warn("[TriggerLog] Link was stalled for {:.0f} s at stop — the STOP command may not have "
                        "reached the board (it keeps pulsing until the next session start)", stalled);
         } else {
-            g_log.info("[TriggerLog] Trigger pulses stopped; timing log closed");
+            g_log.Info("[TriggerLog] Trigger pulses stopped; timing log closed");
         }
     }
 
 
-    bool SensorTriggerLog::ok() const {
+    bool SensorTriggerLog::Ok() const {
         return impl_->session.ok();
     }
 
 
-    double SensorTriggerLog::stalledSeconds() const {
+    double SensorTriggerLog::StalledSeconds() const {
         if (!started_) {
             return -1.0;
         }
         struct stat st{};
         if (::stat(log_path_.c_str(), &st) != 0) {
-            return -1.0; // start() created the file; unreadable = fs trouble, not a stall
+            return -1.0; // Start() created the file; unreadable = fs trouble, not a stall
         }
-        const auto now = ::time(nullptr);
-        return now > st.st_mtime ? static_cast<double>(now - st.st_mtime) : 0.0;
+        // impl_ is a pointer: mutating through it is fine in a const member
+        return impl_->growth.Update(static_cast<std::int64_t>(st.st_size), std::chrono::steady_clock::now());
     }
 } // namespace fx10

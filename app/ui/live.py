@@ -88,9 +88,11 @@ def live_page() -> None:
                 ui.notify(result.reason, type="warning", multi_line=True)
                 fx10_meta.set_text(result.reason)
                 return
+            axis = result.wavelengths_nm or list(range(result.bands))
+            chart.options["xAxis"]["name"] = "Wavelength (nm)" if result.wavelengths_nm else "Image row (uncalibrated)"
             chart.options["series"] = [
                 {"name": name, "type": "line", "showSymbol": False, "animation": False,
-                 "data": [[wl, v] for wl, v in zip(result.wavelengths_nm, values)]}
+                 "data": [[x, v] for x, v in zip(axis, values)]}
                 for name, values in result.spectrum_pct.items()
             ]
             chart.update()

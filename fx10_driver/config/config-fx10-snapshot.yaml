@@ -1,122 +1,61 @@
 # =============================================================
-# FX10e Driver Configuration --- For Snapshot
+# FX10e Driver Configuration - Snapshot
 # =============================================================
+# Short freerun grab for fx10_snapshot (GUI preview / exposure tuning).
+# The tool forces: trigger freerun, frame_rate_hz from --fps, one segment under --out,
+# on_gap record, no frame/duration limit, statistics off; the sensor trigger is never used.
+# Placeholders overridden by the GUI: device.ip (--ip), exposure_ms (--exposure-ms),
+# spatial_binning / spectral_binning (--spatial-binning / --spectral-binning).
+# Unknown keys are errors; omitted keys keep the driver defaults.
 
-# Specim FX10e hyperspectral camera configuration.
 
-# *************************************************************
-# For Snapshot
-# *************************************************************
-
-# --- General Settings ---
+# --- Device ---
 device:
-    id: ""                          # eBUS connection ID / device user ID; wins over mac/ip
-    mac: ""                         # MAC selection (discovery match); wins over ip; GUI overrides via --ip/--mac
-    ip: "10.95.76.105"              # used when id and mac are empty
-    force_ip:                       # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
-        enabled: false
-        ip: ""                      # required when enabled
-        subnet_mask: ""             # required when enabled
-        gateway: "0.0.0.0"
+    mac: ""                             # --mac
+    ip: "10.95.76.105"                  # --ip
 
 
-# --- Receiver Settings ---
+# --- Acquisition ---
 acquisition:
-    spatial_binning: 1              # [1 | 2 | 4 | 8] -> 1024/512/256/128 pixel width
-    spectral_binning: 1             # [1 | 2 | 4 | 8] -> 448/224/112/56 bands
-    pixel_format: Mono12Packed      # [Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8]
-    exposure_ms: 5.0                # float, µs [10..419000]
-    frame_rate_hz: 50.0             # freerun rate; under external trigger = EXPECTED PPS
-    status_line: false              # keep off: if enabled the last line of the ROI is overwritten with camera information
-    trigger:
-        mode: freerun              # [freerun | external] disable trigger / enable trigger
+    spatial_binning: 1                  # 1 | 2 | 4 | 8
+    spectral_binning: 2                 # 1 | 2 | 4 | 8; mroi needs 1
+    pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
+    exposure_ms: 5.0                    # > 0
+    status_line: false
+    image_enhancement: true
     mroi:
-        enabled: false              # requires spectral_binning: 1; AIE adds 3+3 margin rows/region
-        multiband_string: ""        # e.g. "10 20;100 20;200 20" (start_row height; ...)
-
-
-# --- Sensor Trigger ---
-# Snapshots run freerun and never touch the SensorSync trigger box (which may
-# be held by a concurrent recording).
-sensor_trigger:
-    enabled: false
+        enabled: false
+        multiband_string: ""
 
 
 # =============================================================
-# DO NOT CHANGE
+# ADVANCED: do not change without a reason
 # =============================================================
+# --- Features ---
 features:
-    # All node names below are VERIFIED by using eBUS Player (eBUS SDK version 6.5.1)
-    map:
-        spectral_binning: BinningVertical
-        spatial_binning: BinningHorizontal
-        pixel_format: PixelFormat
-        exposure_time: ExposureTime
-        frame_rate: AcquisitionFrameRate
-        frame_rate_enable: EnAcquisitionFrameRate
-        status_line: EnStatusLine
-        trigger_selector: TriggerSelector
-        trigger_mode: TriggerMode
-        trigger_activation: TriggerActivation
-        trigger_delay: TriggerDelay
-        trigger_source: TriggerSource
-        mroi_enable: MROI_Enable
-        mroi_index: MROI_Index
-        mroi_y: MROI_Y
-        mroi_h: MROI_H
-        missed_trigger_count: Counter1_Value    # Counter1 EventSource=MissedTrigger,
-        missed_trigger_reset: Counter1_Reset    # auto-reset at AcquisitionStart
-        device_temperature: DeviceTemperature   # selector: ProcPCB | FPGA
-    # Escape hatch: [{name: Node, type: enum, value: Entry}, ...]
-    raw: [
-        {name: OffsetX, type: int, value: 0},
-        {name: OffsetY, type: int, value: 0},
-    ]
+    raw: []                             # no strobe wiring for a snapshot
 
 
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Network Transfer Settings ---
+# --- Output (ENVI BIL) ---
+output:
+    flush_interval_mb: 64               # 0..4096
+    wavelengths:
+        source: none                    # uncalibrated DN; file/list requires a matching calibration profile
+        file: ""
+        list: []
+        grid: { start_nm: 400.0, end_nm: 1000.0 }
+        fwhm_list: []
+
+
+# --- Network ---
 network:
-    packet_size: 0                  # 0 = negotiate (jumbo if NIC/switch allow; set MTU 9000)
-    socket_rx_buffer_mb: 32         # user-mode socket RX buffer (no kernel filter driver in Docker)
-    buffer_count: auto              # auto (or 0) = ceil(fps * stall_budget_s) + 16; else an integer
-    stall_budget_s: 2.0             # disk-stall absorption target for auto sizing
-    max_buffer_memory_mb: 512
-    retrieve_timeout_ms: 1000
+    packet_size: 0                      # 0 = negotiate
+    socket_rx_buffer_mb: 32             # 1..1024
+    buffer_count: auto                  # auto (= 0) | >= 1
+    stall_budget_s: 2.0                 # >= 0
+    max_buffer_memory_mb: 512           # >= 1
+    retrieve_timeout_ms: 1000           # 1..10000
     reconnect:
         enabled: true
         max_attempts: 5
         backoff_ms: 2000
-
-
-# --- Output Settings ---
-output:
-    output_dir: "/workspace/app/_runtime/snapshot" # fallback; the GUI always overrides via --out
-    base_name: fx10e
-    rotation:
-        max_lines: 100000           # 0 = no rotation by line count
-        max_megabytes: 0            # 0 = no rotation by size
-    on_gap: pad_zero                # record (gaps counted in the log only) | pad_zero (keep line alignment)
-    wavelengths:
-        source: grid                # file | list | grid
-        file: ""                    # calibration-pack text file (floats, '#' comments)
-        list: [ ]
-        grid: { start_nm: 400.0, end_nm: 1000.0 }
-        fwhm_list: [ ]              # optional; empty = omit fwhm from the .hdr
-
-
-# --- Some guards ---
-disk:
-    min_free_gb: 2                  # hard floor: clean stop + finalize when reached
-    warn_free_gb: 5
-
-watchdog:
-    no_frame_warn_s: 5
-    no_frame_abort_s: -1            # -1 = auto (external trigger: never abort; freerun: 10 s)
-
-
-# --- Statistics Interval Time ---
-logging:
-    stats_interval_s: 1

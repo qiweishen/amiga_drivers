@@ -117,23 +117,6 @@ def output_dir_problems(raw: str) -> list[str]:
     ]
 
 
-def _lms_snake_case(name: str) -> str:
-    """Verbatim mirror of Common::StringUtil::ToSnakeCase (string_util.h) — the
-    C++ side converts instance names with it, and every marker/error line
-    carries the converted form, so the sensor keys must match exactly."""
-    out: list[str] = []
-    for i, ch in enumerate(name):
-        if ch in (" ", "-"):
-            out.append("_")
-        elif ch.isupper():
-            if i > 0 and name[i - 1] not in (" ", "-", "_") and name[i - 1].islower():
-                out.append("_")
-            out.append(ch.lower())
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
 def lms_instance_names() -> list[str]:
     """Enabled instance names from the LMS yaml `lidar:` list (dashboard
     pre-seed). The C++ side uses each entry's `id` verbatim as the log tag,
@@ -148,8 +131,7 @@ def lms_instance_names() -> list[str]:
         if isinstance(lidars, list):
             return [str(e["id"]) for e in lidars
                     if isinstance(e, dict) and e.get("id") and e.get("enabled", True)]
-        raw = (doc.get("instances") or doc.get("Instances") or {}).keys()
-        return [_lms_snake_case(name) for name in raw]
+        return []
     except Exception:
         return []
 
@@ -248,15 +230,13 @@ def _verify_and_save(config_id: str, lines: list[str], checks: list[tuple[list[s
     save(config_id, text, expected_mtime=None)
 
 
-def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float) -> str:
-    """Write exposure/gain into the config-gox.yaml camera entry that identifies
-    the selected camera. Returns a human-readable summary of what changed.
+def _gox_camera_entry(lines: list[str], target_ip: str, target_mac: str) -> tuple[int, int, int, dict]:
+    """The config-gox.yaml `cameras:` entry that identifies the selected camera:
+    (index, start line, end line, parsed entry).
 
     A camera may be configured by ip OR by mac (mac wins in the driver), so both
     are matched — writing the wrong camera's block would silently mistune it.
     """
-    cf = CONFIG_FILES["gox"]
-    lines = cf.path.read_text(encoding="utf-8").splitlines()
     doc = yaml.safe_load("\n".join(lines)) or {}
     cameras = doc.get("cameras")
     if not isinstance(cameras, list) or not cameras:
@@ -299,6 +279,48 @@ def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, g
         raise ApplyError("cannot map the 'cameras:' entries to their lines (unexpected layout)")
     start = starts[index]
     end = starts[index + 1] if index + 1 < len(starts) else len(lines)
+    return index, start, end, cameras[index]
+
+
+def _sub_block_bounds(lines: list[str], key: str, start: int, end: int) -> tuple[int, int]:
+    """Line range [s, e) of the body of a nested `key:` block inside lines[start:end],
+    ended by the first non-blank line indented no deeper than the key itself."""
+    head = re.compile(rf"^(?P<indent>\s*){re.escape(key)}\s*:\s*(#.*)?$")
+    for i in range(start, end):
+        m = head.match(lines[i])
+        if not m:
+            continue
+        indent = len(m.group("indent"))
+        for j in range(i + 1, end):
+            stripped = lines[j].strip()
+            if stripped and not stripped.startswith("#") and len(lines[j]) - len(lines[j].lstrip()) <= indent:
+                return i + 1, j
+        return i + 1, end
+    raise ApplyError(f"no '{key}:' block in the expected section")
+
+
+def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float) -> str:
+    """Write exposure/gain into the config-gox.yaml camera entry that identifies
+    the selected camera. Returns a human-readable summary of what changed."""
+    cf = CONFIG_FILES["gox"]
+    lines = cf.path.read_text(encoding="utf-8").splitlines()
+    index, start, end, camera = _gox_camera_entry(lines, target_ip, target_mac)
+
+    # The driver rejects a freerun exposure that does not fit in the frame period
+    # (gox_driver/src/app_config.cpp): the camera would clamp it, and a clamped
+    # value is baked into every recorded frame. Refuse here rather than write a
+    # config that no longer starts.
+    acquisition = camera.get("acquisition") or {}
+    trigger = acquisition.get("trigger") or {}
+    frame_rate = acquisition.get("frame_rate_hz")
+    if trigger.get("mode", "freerun") == "freerun" and isinstance(frame_rate, (int, float)) and frame_rate > 0:
+        period_ms = 1000.0 / float(frame_rate)
+        if float(exposure_ms) >= period_ms:
+            raise ApplyError(
+                f"exposure {float(exposure_ms):g} ms does not fit in the frame period "
+                f"({period_ms:.1f} ms at {frame_rate:g} Hz). Lower the exposure, or lower "
+                f"acquisition.frame_rate_hz in config-gox.yaml first."
+            )
 
     _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
     _replace_scalar(lines, "gain", _fmt(float(gain)), start=start, end=end)
@@ -306,8 +328,82 @@ def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, g
         (["cameras", index, "acquisition", "exposure_ms"], float(exposure_ms)),
         (["cameras", index, "acquisition", "gain"], float(gain)),
     ])
-    camera_id = str(cameras[index].get("id", f"#{index}"))
+    camera_id = str(camera.get("id", f"#{index}"))
     return f"{camera_id} ({target_ip}): exposure_ms={_fmt(float(exposure_ms))}, gain={_fmt(float(gain))}"
+
+
+def _gox_entry_for_readdress(lines: list[str], target_ip: str, target_mac: str,
+                             new_ip: str) -> tuple[int, int, int, dict, bool]:
+    """Which config-gox.yaml entry a re-addressed camera belongs to. Strict
+    match (MAC, else the camera's PRE-change address) first; but the reason an
+    operator uses Set IP is usually that the camera sits at a foreign / LLA
+    address that was never in the config, so when the strict match fails fall
+    back to the entries not MAC-bound to another camera: one that already
+    reads `new_ip` (nothing to do), else the single candidate. Anything
+    ambiguous is refused rather than guessed. Last element: already at new_ip."""
+    try:
+        return (*_gox_camera_entry(lines, target_ip, target_mac), False)
+    except ApplyError as strict:
+        doc = yaml.safe_load("\n".join(lines)) or {}
+        cameras = doc.get("cameras") or []
+
+        def _mac(value) -> str:
+            return re.sub(r"[^0-9a-f]", "", str(value or "").lower())
+
+        candidates = [
+            (i, c) for i, c in enumerate(cameras)
+            if isinstance(c, dict)
+            and (not _mac((c.get("device") or {}).get("mac")) or _mac((c.get("device") or {}).get("mac")) == _mac(target_mac))
+        ]
+        if any(str((c.get("device") or {}).get("ip", "")) == new_ip for _, c in candidates):
+            return (*_gox_camera_entry(lines, new_ip, ""), True)
+        enabled = [(i, c) for i, c in candidates if c.get("enabled", True)]
+        pick = candidates if len(candidates) == 1 else (enabled if len(enabled) == 1 else [])
+        if not pick:
+            raise ApplyError(f"{strict}; cannot decide which entry to point at {new_ip} — "
+                             "edit config-gox.yaml by hand") from None
+        index, camera = pick[0]
+        starts = [k for k, ln in enumerate(lines) if re.match(r"^\s*-\s+id\s*:", ln)]
+        if len(starts) != len(cameras):
+            raise ApplyError("cannot map the 'cameras:' entries to their lines (unexpected layout)")
+        end = starts[index + 1] if index + 1 < len(starts) else len(lines)
+        return index, starts[index], end, camera, False
+
+
+def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> str:
+    """After Camera Tools > Set IP re-addressed a camera, point the driver config
+    at the new address: `device.ip` of the matching config-gox.yaml camera
+    entry, or of config-fx10.yaml's top-level `device:` block. Matched by MAC
+    or by the camera's address BEFORE the change; when that address is foreign
+    to the config (the field case), the single entry not MAC-bound to another
+    camera is used, and an entry already at `new_ip` is left untouched. Edited
+    inside the `device:` sub-block only, read back before saving. Returns a
+    summary."""
+    quoted = f'"{new_ip}"'  # both templates quote the address
+    if kind == "GoX":
+        cf = CONFIG_FILES["gox"]
+        lines = cf.path.read_text(encoding="utf-8").splitlines()
+        index, start, end, camera, already = _gox_entry_for_readdress(lines, target_ip, target_mac, new_ip)
+        camera_id = camera.get("id", f"#{index}")
+        if already:
+            return f"config-gox.yaml · {camera_id}: device.ip already {new_ip} (unchanged)"
+        dev_start, dev_end = _sub_block_bounds(lines, "device", start, end)
+        _replace_scalar(lines, "ip", quoted, start=dev_start, end=dev_end)
+        _verify_and_save("gox", lines, [(["cameras", index, "device", "ip"], new_ip)])
+        return f"config-gox.yaml · {camera_id}: device.ip={new_ip}"
+    if kind == "FX10":
+        cf = CONFIG_FILES["fx10"]
+        lines = cf.path.read_text(encoding="utf-8").splitlines()
+        doc = yaml.safe_load("\n".join(lines)) or {}
+        device = doc.get("device") or {}
+        entry_mac = re.sub(r"[^0-9a-f]", "", str(device.get("mac", "")).lower())
+        if entry_mac and target_mac and entry_mac != re.sub(r"[^0-9a-f]", "", target_mac.lower()):
+            raise ApplyError(f"config-fx10.yaml is bound to MAC {device.get('mac')}, not to {target_mac}")
+        start, end = _block_bounds(lines, "device")
+        _replace_scalar(lines, "ip", quoted, start=start, end=end)
+        _verify_and_save("fx10", lines, [(["device", "ip"], new_ip)])
+        return f"config-fx10.yaml · device.ip={new_ip}"
+    raise ApplyError(f"no driver config for a {kind} device")
 
 
 def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_binning: int) -> str:
@@ -322,9 +418,11 @@ def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_bi
         if value not in (1, 2, 4, 8):
             raise ApplyError(f"{name} must be 1, 2, 4, or 8")
     # The camera cannot do both; the C++ loader rejects the combination, which
-    # would leave a config that no longer starts.
-    if spectral_binning != 1 and (acquisition.get("mroi") or {}).get("enabled"):
-        raise ApplyError("acquisition.mroi is enabled, which requires spectral_binning: 1 (FX10 constraint)")
+    # would leave a config that no longer starts. MROI needs 1 x 1 binning on
+    # BOTH axes (FX10 manual p.9, p.26), not just the spectral one.
+    if (acquisition.get("mroi") or {}).get("enabled") and (spectral_binning != 1 or spatial_binning != 1):
+        raise ApplyError("acquisition.mroi is enabled, which requires 1 x 1 binning: spatial_binning and "
+                         "spectral_binning must both be 1 (FX10 constraint)")
 
     start, end = _block_bounds(lines, "acquisition")
     _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)

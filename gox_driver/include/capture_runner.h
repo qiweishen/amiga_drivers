@@ -1,0 +1,74 @@
+#pragma once
+
+// Capture orchestration driven by the AmigaDrivers wrapper (GoxDriverApp).
+// Owns the session directory, the per-camera CameraSessions, and the
+// periodic stats/limits/PTP loop. The injected StopController is driven
+// from an external terminate flag via MonitorLoop()'s predicate.
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "app_config.h"
+#include "signal_stop.h"
+
+
+namespace gox::ebus {
+    class CameraSession;
+}
+
+namespace gox {
+    class CaptureRunner {
+    public:
+        // stop must outlive the runner (CameraSessions keep the raw pointer).
+        CaptureRunner(AppConfig cfg, StopController *stop);
+
+        ~CaptureRunner();
+
+        CaptureRunner(const CaptureRunner &) = delete;
+
+        CaptureRunner &operator=(const CaptureRunner &) = delete;
+
+        // Session dir (owned by the host: <data_folder>/gox) + camera bring-up. Never throws
+        // for control flow: on failure the started sessions are torn down and the error is
+        // logged and kept in LastError().
+        [[nodiscard]] bool Init(const std::string &session_dir);
+
+        // Blocks in the 200 ms stop-condition poll loop (max_duration_s,
+        // periodic stats, PTP refresh) — fx10's monitorLoop_. external_stop
+        // (optional) is polled every iteration; true requests
+        // StopReason::kExternal. Returns immediately if Init() failed.
+        void MonitorLoop(const std::function<bool()> &external_stop = {});
+
+        // stop_and_join all sessions. Idempotent. Returns true when the
+        // session ended cleanly (no error stop and zero drops/gaps); the
+        // concrete cause of an unclean end is logged and kept in LastError().
+        bool Shutdown();
+
+        // Concrete message of the last failure ("" when everything is clean).
+        const std::string &LastError() const { return last_error_; }
+
+        // Longest silence, in microseconds, among the cameras whose silence is
+        // meaningful right now; nullopt when none of them qualifies (nothing is
+        // acquiring, or every camera runs on an external trigger). The WORST
+        // camera decides: one dead camera already makes the session incomplete,
+        // while a legitimately idle one excludes itself by returning nullopt.
+        std::optional<std::uint64_t> MicrosSinceLastData() const;
+
+    private:
+        AppConfig cfg_;
+        StopController *stop_;
+        std::string session_dir_;
+        uint8_t session_uuid_[16] = {};
+        uint64_t start_rt_ = 0;
+        uint64_t capture_start_mono_ = 0;
+        std::vector<std::unique_ptr<ebus::CameraSession> > sessions_;
+        std::string last_error_;
+        bool initialized_ = false;
+        bool shutdown_done_ = false;
+        bool clean_ = true;
+    };
+} // namespace gox

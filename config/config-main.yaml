@@ -5,16 +5,24 @@
 
 # --- General Settings ---
 General:
+    # Metadata
+    Operator: <Dev>
+    # Field info
+    Field: <Test>
+
     # Root output data directory for all output
-    Output Directory: ./recordings
+    Output Directory: ./data
 
     # Per-driver enable switches
     # It will be overrided by GUI
-    Enable ASTERX: false
-    Enable FX10: true
-    Enable GOX: false
-    Enable LMS4XXX: false
+    Enable ASTERX: true
+    Enable FX10: false
+    Enable GOX: true
+    Enable LMS4XXX: true
 
+    # =============================================================
+    # ADVANCED: do not change without a reason
+    # =============================================================
     # Path to the configuration files for each driver
     ASTERX Driver Config Path: ./asterx_driver/config/config-asterx.yaml
     FX10 Driver Config Path: ./fx10_driver/config/config-fx10.yaml
@@ -22,13 +30,17 @@ General:
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
 
 
+# --- Rig-wide guards ---
+# One policy for every enabled driver, enforced by the unified main.
+Guards:
+    # GiB available to an unprivileged writer, i.e. what the GUI's disk gauge shows
+    Disk Min Free GiB: 5        # hard floor: stop the whole run cleanly (0 = off)
+    Disk Warn Free GiB: 20      # soft floor: warn once per crossing (0 = off)
 
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Logging System ---
-# Logging is managed centrally
-Logging System:
-    # Enable/disable system-wide logging for debugging and diagnostics
-    # Disable will stop GUI
-    Enable Logging: true
+    # A sensor that stops delivering data.
+    #Drivers that expect to be idle (external trigger with no pulses, warm-up) are exempt while they say so.
+    No Data Warn S: 15           # warn after this much silence (0 = off)
+    # Keep this ABOVE the AsteRx driver's own 30 s SBF watchdog, which triggers a
+    # RECONNECT: at 30 s the two race and a recoverable link blip would end the
+    # whole run instead of being repaired.
+    No Data Abort S: 60         # stop the whole run after this much silence (0 = off)

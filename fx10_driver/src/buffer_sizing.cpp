@@ -1,4 +1,4 @@
-#include "buffer_sizing.hpp"
+#include "buffer_sizing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,7 @@ namespace fx10 {
     } // namespace
 
 
-    BufferPoolPlan planBufferPool(const NetworkConfig &network, double expected_fps,
+    BufferPoolPlan PlanBufferPool(const NetworkConfig &network, double expected_fps,
                                   std::uint64_t payload_size, std::uint32_t stream_queue_max) {
         BufferPoolPlan plan;
         if (payload_size == 0) {
@@ -43,7 +43,9 @@ namespace fx10 {
         plan.count = static_cast<std::uint32_t>(count);
         plan.bytes = count * payload_size;
         const double fps = expected_fps > 0.0 ? expected_fps : 1.0;
-        const std::uint64_t usable = count > kAutoMargin ? count - kAutoMargin : count;
+        // The margin only exists in the auto-sized pool; never let the estimate go non-monotonic
+        const bool auto_sized = network.buffer_count <= 0;
+        const std::uint64_t usable = auto_sized ? std::max<std::uint64_t>(count, kAutoMargin + 1) - kAutoMargin : count;
         plan.achievable_stall_s = static_cast<double>(usable) / fps;
         return plan;
     }

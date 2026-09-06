@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -9,7 +10,7 @@
 #include "time_util.h"
 
 
-namespace Common {
+namespace common {
     namespace {
         DriverLog g_log{"DriversJson"};
 
@@ -42,6 +43,10 @@ namespace Common {
                     ::close(fd);
                     throw std::runtime_error("write " + tmp + ": " + std::strerror(saved));
                 }
+                if (n == 0) {
+                    ::close(fd);
+                    throw std::runtime_error("write " + tmp + ": no progress");
+                }
                 p += n;
                 left -= static_cast<std::size_t>(n);
             }
@@ -54,6 +59,13 @@ namespace Common {
             if (::rename(tmp.c_str(), path.c_str()) != 0) {
                 throw std::runtime_error("rename " + tmp + " -> " + path + ": " + std::strerror(errno));
             }
+            auto parent = std::filesystem::path(path).parent_path();
+            if (parent.empty()) parent = ".";
+            const int dir_fd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (dir_fd < 0) throw std::runtime_error("cannot open manifest directory for sync");
+            const bool synced = ::fsync(dir_fd) == 0;
+            ::close(dir_fd);
+            if (!synced) throw std::runtime_error("cannot sync manifest directory");
         }
     } // namespace
 
@@ -64,13 +76,26 @@ namespace Common {
             {"status", "running"}
         };
         doc_["drivers"] = nlohmann::ordered_json::object();
+        doc_["time_policy"] = {
+            {"reference", "unverified; see enabled driver configs and device readbacks"},
+            {"association", "not established by this manifest; requires per-sample identity and a validated clock mapping"},
+            {"association_verified", false},
+            {"fallback", "none"},
+            {"other_clock_fields", "retain native values; units, epoch and lock state must be verified before association"},
+            {"host_run_fields", "operational metadata only; not acquisition timestamps"}
+        };
     }
 
 
-    void DriversJson::SetRun(const std::string &timestamp, const std::string &output_directory, bool logging_enabled) {
+    void DriversJson::SetMeta(const std::string &operator_name, const std::string &field_name) {
+        doc_["meta"]["operator"] = operator_name;
+        doc_["meta"]["field"] = field_name;
+    }
+
+
+    void DriversJson::SetRun(const std::string &timestamp, const std::string &output_directory) {
         doc_["run"]["timestamp"] = timestamp;
         doc_["run"]["output_directory"] = output_directory;
-        doc_["run"]["logging_enabled"] = logging_enabled;
     }
 
 
@@ -85,26 +110,33 @@ namespace Common {
     }
 
 
-    void DriversJson::WriteRunning() {
+    void DriversJson::AddDriverResult(const std::string &name, bool failed, const nlohmann::ordered_json &statistics) {
+        doc_["driver_results"].push_back({{"name", name}, {"failed", failed}, {"statistics", statistics}});
+    }
+
+    bool DriversJson::WriteRunning() {
         doc_["run"]["status"] = "running";
-        Write_();
+        return Write_();
     }
 
 
-    void DriversJson::Finalize(const std::string &status) {
+    bool DriversJson::Finalize(const std::string &status) {
         doc_["run"]["status"] = status;
+        doc_["run"]["recording_failed"] = status.rfind("failed", 0) == 0;
         doc_["run"]["ended"] = TimeUtil::Iso8601UtcSec(NowRealtimeNs());
         doc_["run"]["duration_s"] =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
-        Write_();
+        return Write_();
     }
 
 
-    void DriversJson::Write_() {
+    bool DriversJson::Write_() {
         try {
             WriteJsonAtomic(path_, doc_);
+            return true;
         } catch (const std::exception &e) {
-            g_log.warn("cannot write {}: {}", path_, e.what());
+            g_log.Warn("cannot write {}: {}", path_, e.what());
+            return false;
         }
     }
-} // namespace Common
+} // namespace common

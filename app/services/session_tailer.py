@@ -31,6 +31,7 @@ def is_marker(raw: str) -> bool:
 class SessionTailer:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        self.ready = False
         self._subscribers: list[Callable[[LogLine], None]] = []
 
     def subscribe(self, cb: Callable[[LogLine], None]) -> None:
@@ -44,6 +45,7 @@ class SessionTailer:
                 pass
 
     def stop(self) -> None:
+        self.ready = False
         if self._task is not None:
             self._task.cancel()
             self._task = None
@@ -76,7 +78,9 @@ class SessionTailer:
                 with open(log_path, "rb") as f:
                     f.seek(offset)
                     chunk = f.read()
+                self.ready = True
             except OSError:
+                self.ready = False
                 await asyncio.sleep(1.0)
                 continue
             if chunk:

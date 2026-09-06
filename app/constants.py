@@ -10,7 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Docker ------------------------------------------------------------------
-CONTAINER = "amiga-sensor-dev"
+CONTAINER = "amiga-drivers-dev"
 COMPOSE_FILE = REPO_ROOT / ".devcontainer" / "docker-compose.yml"
 
 # Host path <-> container path. Order matters: longest host prefix first.
@@ -55,7 +55,8 @@ def mapped_on_both_sides(host_path: Path | str) -> bool:
 # services.runtime.exec_path) -------------------------------------------------
 BUILD_BIN = REPO_ROOT / "build" / "bin"
 BIN_AMIGA = BUILD_BIN / "AmigaDrivers"
-BIN_DISCOVER = BUILD_BIN / "jai_discover"
+BIN_EBUS_DISCOVER = BUILD_BIN / "ebus_discover"  # common/: GigE enumeration for both camera drivers
+BIN_EBUS_SET_IP = BUILD_BIN / "ebus_set_ip"  # common/: FORCEIP + persistent IP write
 BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 

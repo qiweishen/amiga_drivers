@@ -1,18 +1,13 @@
-/// @file time_util.h
-/// @brief Shared clock and time-formatting helpers (header-only).
-
-#ifndef COMMON_TIME_UTIL_H
-#define COMMON_TIME_UTIL_H
+#pragma once
 
 #include <chrono>
 #include <cinttypes>
-#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <string>
 
 
-namespace Common::TimeUtil {
+namespace common::TimeUtil {
     // Wall clock (CLOCK_REALTIME), nanoseconds since the Unix epoch (UTC)
     inline std::uint64_t RealtimeNowNs() {
         timespec ts{};
@@ -38,22 +33,7 @@ namespace Common::TimeUtil {
         return RealtimeNowNs() / 1000ull;
     }
 
-    // "2026-07-17T11:54:00.123Z" from a CLOCK_REALTIME timestamp
-    inline std::string Iso8601Utc(std::uint64_t realtime_ns) {
-        const auto secs = static_cast<time_t>(realtime_ns / 1000000000ull);
-        const auto ms = static_cast<unsigned>((realtime_ns % 1000000000ull) / 1000000ull);
-        tm tm_utc{};
-        gmtime_r(&secs, &tm_utc);
-        char buf[80]; // generous: silences -Wformat-truncation for absurd tm_year values
-        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1,
-                 tm_utc.tm_mday,
-                 tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec, ms);
-        return buf;
-    }
-
-    // "2026-07-17T11:54:00Z" (second precision) from a CLOCK_REALTIME timestamp.
-    // The FX10 ENVI .hdr freezes this exact format — do not add
-    // milliseconds here; use Iso8601Utc for that.
+    // "2026-07-17T11:54:00Z" from a CLOCK_REALTIME timestamp; the FX10 ENVI .hdr freezes this exact format
     inline std::string Iso8601UtcSec(std::uint64_t realtime_ns) {
         const auto secs = static_cast<time_t>(realtime_ns / 1000000000ull);
         tm tm_utc{};
@@ -81,24 +61,6 @@ namespace Common::TimeUtil {
         return CompactUtc(RealtimeNowNs());
     }
 
-    // Human-readable byte size, e.g. "1.21 GiB"
-    inline std::string HumanBytes(std::uint64_t bytes) {
-        static const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
-        double v = static_cast<double>(bytes);
-        int u = 0;
-        while (v >= 1024.0 && u < 4) {
-            v /= 1024.0;
-            ++u;
-        }
-        char buf[32];
-        if (u == 0) {
-            snprintf(buf, sizeof(buf), "%" PRIu64 " B", bytes);
-        } else {
-            snprintf(buf, sizeof(buf), "%.2f %s", v, units[u]);
-        }
-        return buf;
-    }
-
     // "HH:MM:SS" from a duration in seconds
     inline std::string HumanDuration(std::uint64_t seconds) {
         char buf[32];
@@ -106,6 +68,4 @@ namespace Common::TimeUtil {
                  seconds % 60);
         return buf;
     }
-} // namespace Common::TimeUtil
-
-#endif	// COMMON_TIME_UTIL_H
+} // namespace common::TimeUtil

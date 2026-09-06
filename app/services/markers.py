@@ -50,6 +50,13 @@ ASTERX_INIT_FAILED = "AsteRx driver initialization failed"
 FX10_INIT_FAILED = "FX10 driver initialization failed"
 GOX_INIT_FAILED = "GoX driver initialization failed"
 LMS4XXX_INIT_FAILED = "LMS4xxx driver initialization failed"
+# Appended to a driver name by Main's no-data watchdog, e.g.
+# "FX10 driver stopped: no data (silent for 31.0 s, ...)". Same
+# "<DriverName><suffix>" shape as the markers above, so DRIVER_NAME_TO_SENSOR_KEY
+# routes it to that sensor's card. The disk guard has no such marker: it is not
+# any one sensor's fault, and the dashboard already shows free space.
+GUARD_NO_DATA_SUFFIX = " driver stopped: no data"
+
 ASTERX_RUN_EXCEPTION = "AsteRx run() exception"
 FX10_RUN_EXCEPTION = "FX10 run() exception"
 GOX_RUN_EXCEPTION = "GoX run() exception"
@@ -95,6 +102,7 @@ REPLAY_MARKER_SUBSTRINGS = (
     "shutdown completely",
     "initialization failed",
     "run() exception",
+    GUARD_NO_DATA_SUFFIX.strip(),  # Main's no-data watchdog stopped the run
     "driver ended with issues",  # asterx/gox/fx10 issues-shutdown (STOPPED on replay)
     ALL_DRIVERS_SHUT_DOWN,
     RECEIVED_SIGNAL_PREFIX,

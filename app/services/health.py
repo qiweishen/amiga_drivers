@@ -82,7 +82,9 @@ class HealthMonitor:
         elif module == markers.MODULE_GOX:
             if markers.GOX_INITIALIZED in msg:
                 self._set("gox", SensorState.RUNNING)
-            elif markers.GOX_SHUTDOWN in msg or markers.GOX_SESSION_ISSUES in msg:
+            elif markers.GOX_SESSION_ISSUES in msg:
+                self._set("gox", SensorState.FAILED, msg)
+            elif markers.GOX_SHUTDOWN in msg:
                 self._set("gox", SensorState.STOPPED)
             elif line.level in ("error", "critical"):
                 self._set("gox", SensorState.FAILED, msg)
@@ -98,7 +100,9 @@ class HealthMonitor:
         elif module == markers.MODULE_FX10:
             if markers.FX10_INITIALIZED in msg:
                 self._set("fx10", SensorState.RUNNING)
-            elif markers.FX10_SHUTDOWN in msg or markers.FX10_SESSION_ISSUES in msg:
+            elif markers.FX10_SESSION_ISSUES in msg:
+                self._set("fx10", SensorState.FAILED, msg)
+            elif markers.FX10_SHUTDOWN in msg:
                 self._set("fx10", SensorState.STOPPED)
             elif line.level in ("error", "critical"):
                 self._set("fx10", SensorState.FAILED, msg)
@@ -111,7 +115,11 @@ class HealthMonitor:
                 for key, st in STATE.sensors.items():
                     if st.state not in (SensorState.FAILED, SensorState.DISABLED):
                         st.state = SensorState.STOPPED
-            elif markers.INIT_FAILED_SUFFIX in msg or markers.RUN_EXCEPTION_SUFFIX in msg:
+            elif (
+                markers.INIT_FAILED_SUFFIX in msg
+                or markers.RUN_EXCEPTION_SUFFIX in msg
+                or markers.GUARD_NO_DATA_SUFFIX in msg
+            ):
                 STATE.last_error = msg
                 for name, prefix in MAIN_FAIL_MAP.items():
                     if msg.startswith(name):

@@ -1,4 +1,4 @@
-#include "format.hpp"
+#include "format.h"
 
 #include <cstring>
 
@@ -6,7 +6,7 @@
 #include <nmmintrin.h>
 #endif
 
-namespace jai::format {
+namespace gox::format {
     namespace {
         // Table-based CRC-32C, slice-by-1. Fast enough for headers; the hardware
         // path below covers bulk payload checksumming.
@@ -24,7 +24,7 @@ namespace jai::format {
             }
         };
 
-        uint32_t crc32c_sw(const uint8_t *p, size_t len, uint32_t crc) {
+        uint32_t Crc32cSw(const uint8_t *p, size_t len, uint32_t crc) {
             static const Crc32cTable table;
             while (len--) {
                 crc = table.t[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
@@ -49,22 +49,22 @@ namespace jai::format {
             return crc32;
         }
 
-        bool have_sse42() {
+        bool HaveSse42() {
             static const bool ok = __builtin_cpu_supports("sse4.2");
             return ok;
         }
 #endif
     } // namespace
 
-    uint32_t crc32c(const void *data, size_t len, uint32_t seed) {
+    uint32_t Crc32c(const void *data, size_t len, uint32_t seed) {
         const uint8_t *p = static_cast<const uint8_t *>(data);
         uint32_t crc = ~seed;
 #if defined(__x86_64__)
-        if (have_sse42()) {
+        if (HaveSse42()) {
             return ~crc32c_hw(p, len, crc);
         }
 #endif
-        return ~crc32c_sw(p, len, crc);
+        return ~Crc32cSw(p, len, crc);
     }
 
     FileHeader make_file_header(uint32_t segment_index, uint64_t created_realtime_ns, const uint8_t session_uuid[16],
@@ -84,19 +84,19 @@ namespace jai::format {
         h.frame_header_size = kFrameHeaderSize;
         h.record_align = record_align;
         h.segment_flags = segment_flags;
-        h.header_crc32c = crc32c(&h, offsetof(FileHeader, header_crc32c));
+        h.header_crc32c = Crc32c(&h, offsetof(FileHeader, header_crc32c));
         return h;
     }
 
-    void seal_frame_header(FrameHeader &header) {
-        header.header_crc32c = crc32c(&header, offsetof(FrameHeader, header_crc32c));
+    void SealFrameHeader(FrameHeader &header) {
+        header.header_crc32c = Crc32c(&header, offsetof(FrameHeader, header_crc32c));
     }
 
-    bool verify_frame_header(const FrameHeader &header) {
-        return header.header_crc32c == crc32c(&header, offsetof(FrameHeader, header_crc32c));
+    bool VerifyFrameHeader(const FrameHeader &header) {
+        return header.header_crc32c == Crc32c(&header, offsetof(FrameHeader, header_crc32c));
     }
 
-    bool verify_file_header(const FileHeader &header) {
-        return header.header_crc32c == crc32c(&header, offsetof(FileHeader, header_crc32c));
+    bool VerifyFileHeader(const FileHeader &header) {
+        return header.header_crc32c == Crc32c(&header, offsetof(FileHeader, header_crc32c));
     }
-} // namespace jai::format
+} // namespace gox::format

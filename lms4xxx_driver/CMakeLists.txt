@@ -1,19 +1,9 @@
 ################################################################################
-# LMS4xxx Driver
-# Direct TCP/CoLa B protocol driver for SICK LMS4xxx 2D LiDAR sensors.
-# This is a subdirectory of the top-level AmigaDrivers project.
-# Shared dependencies (spdlog, yaml-cpp) are provided by amiga_common.
-
-# Build options
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    option(LMS4XXX_BUILD_EXAMPLES "Build example programs" ON)
-else()
-    option(LMS4XXX_BUILD_EXAMPLES "Build example programs" OFF)
-endif()
-
+# LMS4xxx Driver (SICK LMS4xxx 2D LiDAR, CoLa B over TCP)
+# spdlog/yaml-cpp come via amiga_common, HDF5 via cmake/Dependencies.cmake.
 
 ################################################################################
-# Required System Packages (Threads provided by top-level)
+# System packages
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 
@@ -21,24 +11,26 @@ find_package(Boost REQUIRED)
 ################################################################################
 # Driver Library
 set(LIB_SOURCES
-        src/lms4xxx_driver.cpp
-        src/lms4xxx_tcp_client.cpp
+        src/driver.cpp
+        src/tcp_client.cpp
         src/lms4xxx_driver_app.cpp
-        src/lms4xxx_scan_record_writer.cpp
-        src/lms4xxx_tool.cpp
-        src/lms4xxx_frame_receiver.cpp
-        src/lms4xxx_cola_b.cpp
-        src/lms4xxx_command_builder.cpp
-        src/lms4xxx_scan_data_parser.cpp
+        src/scan_record.cpp
+        src/scan_h5_file.cpp
+        src/scan_record_writer.cpp
+        src/app_config.cpp
+        src/ntp_probe.cpp
+        src/scan_verify.cpp
+        src/frame_receiver.cpp
+        src/cola_b.cpp
+        src/command_builder.cpp
+        src/scan_data_parser.cpp
 )
 
-# Header files
 file(GLOB_RECURSE HEADERS
         ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
 )
 
-# Create static library
 add_library(lms4xxx_lib STATIC ${LIB_SOURCES} ${HEADERS})
 
 set_target_properties(lms4xxx_lib PROPERTIES
@@ -51,13 +43,20 @@ target_include_directories(lms4xxx_lib PUBLIC
 )
 
 target_link_libraries(lms4xxx_lib PUBLIC
-        # System libraries
         Threads::Threads
-        # Boost (Asio for TCP networking)
-        Boost::boost
-        # Shared common library provides spdlog, yaml-cpp, RingBuffer
+        Boost::boost # Asio
         amiga_common
 )
+
+# PRIVATE: no public header includes hdf5.h
+target_link_libraries(lms4xxx_lib PRIVATE hdf5-static)
+
+
+################################################################################
+# Tests
+if (AMIGA_BUILD_TESTS)
+    add_subdirectory(tests)
+endif ()
 
 
 ################################################################################
@@ -67,6 +66,6 @@ message(STATUS "----------------------------------------")
 message(STATUS "   LMS4xxx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Build Examples:   ${LMS4XXX_BUILD_EXAMPLES}")
+message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

@@ -1,10 +1,12 @@
-"""FX10 helpers: eBUS device discovery (fx10_snapshot --list) and the snapshot
-pipeline (fx10_snapshot in the container -> ENVI BIL decode on the host ->
-per-band spectral statistics over ~1 s of frames, normalized to 100%)."""
+"""FX10 helpers: the snapshot pipeline (fx10_snapshot in the container ->
+ENVI BIL decode on the host -> per-band spectral statistics over ~1 s of
+frames, normalized to 100%). Device discovery is driver-neutral:
+services/ebus_tools.py."""
 
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import re
 import shutil
@@ -13,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 from ..constants import (
     BIN_FX10_SNAPSHOT,
@@ -39,21 +40,6 @@ def _timeout_s(frames: int, exposure_ms: float) -> float:
 
 
 @dataclass
-class Device:
-    display_id: str
-    connection_id: str
-    ip: str
-    mac: str
-
-
-@dataclass
-class DiscoverResult:
-    devices: list[Device] = field(default_factory=list)
-    raw_output: str = ""
-    error: str = ""
-
-
-@dataclass
 class SnapshotResult:
     ok: bool
     reason: str = ""  # FAIL reason / pipeline error
@@ -71,7 +57,9 @@ class SnapshotResult:
 
 
 def guard_reason() -> str | None:
-    """Why snapshot/discover must NOT run right now (GigE control is exclusive).
+    """Why a camera-touching tool (snapshot, Set IP) must NOT run right now
+    (GigE control is exclusive). Discovery itself is fine: it is a broadcast
+    the camera answers without a control channel.
 
     Uses the Enable-FX10 value captured at process start — the live file value
     can be toggled mid-run and must not unlock the camera the driver owns.
@@ -80,38 +68,6 @@ def guard_reason() -> str | None:
         if STATE.enables_at_start.get("fx10", False):
             return "Recording is running with FX10 enabled — the driver owns the camera; stop recording first"
     return None
-
-
-async def discover(timeout_ms: int = 1500) -> DiscoverResult:
-    snapshot_bin = runtime.exec_path(BIN_FX10_SNAPSHOT)
-    res = await runtime.exec_(
-        [snapshot_bin, "--list", "--timeout-ms", str(timeout_ms)], timeout=timeout_ms / 1000 + 15
-    )
-    raw = (res.stdout + ("\n" + res.stderr if res.stderr.strip() else "")).strip()
-    # The implicit spdlog stdout logger may precede the JSON: parse the LAST
-    # line that looks like a JSON object.
-    line = next((ln for ln in reversed(res.stdout.splitlines()) if ln.lstrip().startswith("{")), None)
-    if line is None:
-        return DiscoverResult(
-            raw_output=raw,
-            error=f"fx10_snapshot --list produced no JSON (exit {res.code}): {res.stderr.strip()}",
-        )
-    try:
-        doc = json.loads(line)
-    except json.JSONDecodeError as e:
-        return DiscoverResult(raw_output=raw, error=f"Cannot parse the --list output: {e}")
-    if "error" in doc:
-        return DiscoverResult(raw_output=raw, error=f"fx10_snapshot --list failed: {doc['error']}")
-    devices = [
-        Device(
-            display_id=d.get("display_id", ""),
-            connection_id=d.get("connection_id", ""),
-            ip=d.get("ip", ""),
-            mac=d.get("mac", ""),
-        )
-        for d in doc.get("devices", [])
-    ]
-    return DiscoverResult(devices=devices, raw_output=raw)
 
 
 async def snapshot(ip: str, exposure_ms: float,
@@ -184,9 +140,8 @@ async def snapshot(ip: str, exposure_ms: float,
         return SnapshotResult(False, reason=str(e), raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 
-    # Decode on the host (venv has numpy): ENVI BIL -> per-band statistics,
-    # normalized against the configured pixel format's ADC full scale.
-    result = await asyncio.to_thread(_decode_envi, session_dir, _configured_full_scale())
+    # Decode using the metadata saved with this capture, even if settings changed later.
+    result = await asyncio.to_thread(_decode_envi, session_dir)
     result.raw_output = raw_output
     result.elapsed_s = time.monotonic() - t0
     if result.reason:
@@ -203,54 +158,29 @@ def _hdr_int(text: str, key: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-# ADC full scale implied by each supported pixel format (10-bit formats are
-# stored in the same canonical uint16 as 12-bit ones, so the ENVI data type
-# alone cannot distinguish them).
-_PIXEL_FULL_SCALE = {
-    "Mono8": 255,
-    "Mono10": 1023,
-    "Mono10Packed": 1023,
-    "Mono12": 4095,
-    "Mono12Packed": 4095,
-}
-
-
-def _configured_full_scale() -> int | None:
-    """Full scale from acquisition.pixel_format in config-fx10.yaml — the same
-    file the snapshot tool captures with, so it matches the data on disk."""
-    try:
-        doc = yaml.safe_load(FX10_CONFIG.read_text(encoding="utf-8")) or {}
-        pixel_format = str((doc.get("acquisition") or {}).get("pixel_format", ""))
-        return _PIXEL_FULL_SCALE.get(pixel_format)
-    except Exception:
-        return None
-
-
 def _hdr_wavelengths(text: str, bands: int) -> list[float]:
-    """Wavelength axis from the .hdr `wavelength = { ... }` block; falls back
-    to the FX10e's nominal linear 400..1000 nm grid when absent."""
+    """Only return an explicit finite header axis. Missing calibration stays missing."""
     m = re.search(r"^wavelength\s*=\s*\{([^}]*)\}", text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
     if m:
         try:
             values = [float(v) for v in m.group(1).replace("\n", " ").split(",") if v.strip()]
-            if len(values) == bands:
+            if len(values) == bands and all(np.isfinite(v) and v > 0 for v in values):
                 return values
         except ValueError:
             pass
-    return list(np.linspace(400.0, 1000.0, bands))
+    return []
 
 
-def _decode_envi(session_dir: Path, full_scale_hint: int | None = None) -> SnapshotResult:
+def _decode_envi(session_dir: Path) -> SnapshotResult:
     """Reduce the snapshot segment (ENVI BIL cube: lines x bands x samples) to
-    per-band statistics over ALL frames and spatial samples, as % of the
-    sensor's full scale (reference: app/reference/reference.py).
-
-    full_scale_hint: ADC full scale derived from the configured pixel_format
-    (1023 for Mono10*, 4095 for Mono12*); used only when it is consistent with
-    the on-disk storage type, otherwise the data-type default applies."""
+    statistics over genuine, non-anomalous frames and spatial samples.
+    Bit depth comes only from immutable capture metadata. This bounded preview
+    refuses oversized inputs instead of partially interpreting a snapshot."""
     hdrs = sorted(session_dir.glob("segment_*.hdr"))
     if not hdrs:
         return SnapshotResult(False, reason=f"No finalized segment (.hdr) in {session_dir}")
+    if len(hdrs) != 1:
+        return SnapshotResult(False, reason="Snapshot unexpectedly contains multiple segments")
     hdr = hdrs[0]
     bil = hdr.with_suffix(".bil")
     if not bil.is_file():
@@ -263,20 +193,43 @@ def _decode_envi(session_dir: Path, full_scale_hint: int | None = None) -> Snaps
     data_type = _hdr_int(text, "data type")
     if None in (samples, bands, lines, data_type) or 0 in (samples, bands, lines):
         return SnapshotResult(False, reason=f"Bad ENVI header {hdr.name}: samples/bands/lines/data type missing")
-    if data_type == 1:
-        dtype, full_scale = np.uint8, 255
-    elif data_type == 12:
-        dtype = np.dtype("<u2")
-        # uint16 storage holds either 10- or 12-bit data; only the configured
-        # pixel_format can tell them apart. Fall back to 12-bit.
-        full_scale = full_scale_hint if full_scale_hint in (1023, 4095) else 4095
-    else:
-        return SnapshotResult(False, reason=f"Unsupported ENVI data type {data_type}")
-
-    cube = np.fromfile(bil, dtype=dtype)
+    try:
+        capture = json.loads((session_dir / "capture.json").read_text(encoding="utf-8"))
+        full_scale = int(capture["full_scale"])
+        bpp = int(capture["bytes_per_pixel"])
+        if (capture.get("format") != "fx10-capture-v1" or capture.get("byte_order") != "little"
+                or _hdr_int(text, "byte order") != 0 or _hdr_int(text, "header offset") != 0
+                or int(capture["samples"]) != samples or int(capture["bands"]) != bands
+                or (data_type, bpp, full_scale) not in ((1, 1, 255), (12, 2, 1023), (12, 2, 4095))):
+            raise ValueError("Capture metadata and ENVI layout disagree")
+        line_bytes = samples * bands * bpp
+        if lines > 4096 or lines * line_bytes > 256 * 1024 * 1024:
+            raise ValueError("Snapshot exceeds preview memory budget")
+        if bil.stat().st_size != lines * line_bytes:
+            raise ValueError("BIL byte length disagrees with the finalized header")
+        valid_lines = []
+        with hdr.with_suffix(".lines.csv").open(encoding="ascii", newline="") as index:
+            if not index.readline().startswith("# fx10-line-index-v1;"):
+                raise ValueError("Missing versioned line identity index")
+            for row in csv.DictReader(index):
+                if row["event"] != "frame" or row["block_id_anomaly"] != "0":
+                    continue
+                n = int(row["segment_line"])
+                if not 0 <= n < lines or int(row["byte_offset"]) != n * line_bytes:
+                    raise ValueError("Invalid line index offset")
+                if valid_lines and n <= valid_lines[-1]:
+                    raise ValueError("Duplicate or reversed line index offset")
+                valid_lines.append(n)
+        if not valid_lines:
+            raise ValueError("No non-anomalous camera frames in the line index")
+        dtype = np.dtype("u1") if bpp == 1 else np.dtype("<u2")
+        cube = np.fromfile(bil, dtype=dtype, count=lines * bands * samples)
+    except (OSError, ValueError, KeyError, TypeError, csv.Error) as e:
+        return SnapshotResult(False, reason=f"Cannot decode recorded capture: {e}")
     if cube.size != lines * bands * samples:
         return SnapshotResult(False, reason=f"BIL size mismatch: {cube.size} px != {lines}x{bands}x{samples}")
     cube = cube.reshape(lines, bands, samples)  # BIL: one frame = one line record
+    cube = cube[valid_lines]
 
     # Per-band reductions over (frames, samples), normalized to 100%.
     band_axis = (0, 2)
@@ -294,7 +247,7 @@ def _decode_envi(session_dir: Path, full_scale_hint: int | None = None) -> Snaps
         spectrum_pct={k: [round(float(v), 3) for v in vals] for k, vals in spectrum_pct.items()},
         clipped_pct=float((cube >= full_scale).mean() * 100.0),
         mean_pct=float(cube.mean() * scale),
-        lines=lines,
+        lines=len(valid_lines),
         bands=bands,
         samples=samples,
     )

@@ -26,7 +26,7 @@ JAI Go-X:
 
 SICK LMS4xxx:
     Front Left Laser:
-        IP: 10.95.76.111
+        IP: 10.95.76.101
     Front Right Laser:
         IP: 10.95.76.103
     Ethernet Port: eno1

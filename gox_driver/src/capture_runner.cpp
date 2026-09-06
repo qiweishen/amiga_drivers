@@ -1,34 +1,25 @@
-#include "capture_runner.hpp"
+#include "capture_runner.h"
 
 #include <chrono>
 #include <filesystem>
-#include <sys/statvfs.h>
 #include <thread>
 
 #include "logger.h"
-#include "stats.hpp"
-#include "util.hpp"
-#include "ebus/camera_session.hpp"
-#include "driver_markers.h"
+#include "time_util.h"
+#include "stats.h"
+#include "util.h"
+#include "ebus/camera_session.h"
 
-namespace jai {
+namespace gox {
     namespace {
-        Common::DriverLog g_log{"GoX"};
+        common::DriverLog g_log{"GoX"};
 
 
-        uint64_t free_disk_bytes(const std::string &path) {
-            struct statvfs vfs{};
-            if (::statvfs(path.c_str(), &vfs) != 0) {
-                return 0;
-            }
-            return static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize;
-        }
+        // One tick for every read that has to reach the camera over GVCP: the
+        // PTP health guard and the device telemetry row.
+        constexpr double kDevicePollIntervalS = 5.0;
 
 
-        std::string basename_of(const std::string &path) {
-            const size_t pos = path.find_last_of('/');
-            return pos == std::string::npos ? path : path.substr(pos + 1);
-        }
     } // namespace
 
 
@@ -37,63 +28,66 @@ namespace jai {
 
 
     CaptureRunner::~CaptureRunner() {
-        if (initialized_ && !shutdown_done_ && !stop_->stop_requested()) {
+        if (initialized_ && !shutdown_done_ && !stop_->StopRequested()) {
             // Reached only via stack unwinding: an exception escaped between
-            // init() and shutdown() (e.g. out of the poll loop). Record the
+            // Init() and Shutdown() (e.g. out of the poll loop). Record the
             // stop as an error so the reported outcome agrees with the fatal path.
-            stop_->request_stop(StopReason::Error);
+            stop_->RequestStop(StopReason::kError);
         }
         try {
-            shutdown();
+            Shutdown();
         } catch (...) {
             // Never throw out of a destructor (may run during unwinding).
         }
     }
 
-    bool CaptureRunner::init(const std::string &session_dir_override) {
-        gen_uuid_v4(session_uuid_);
-        start_rt_ = now_realtime_ns();
-        if (session_dir_override.empty()) {
-            session_name_ = compact_utc(start_rt_) + "_" + hex_prefix(session_uuid_, 3);
-            session_dir_ = cfg_.output.output_dir + "/" + session_name_;
-        } else {
-            // Unified mode: the host application owns the output layout.
-            session_dir_ = session_dir_override;
-            session_name_ = basename_of(session_dir_override);
-        }
+    bool CaptureRunner::Init(const std::string &session_dir) {
+        GenUuidV4(session_uuid_);
+        start_rt_ = common::TimeUtil::RealtimeNowNs();
+        session_dir_ = session_dir;
         std::error_code ec;
         std::filesystem::create_directories(session_dir_, ec);
         if (ec) {
-            g_log.error("Cannot create output directory: {}", ec.message());
+            g_log.Error("Cannot create output directory: {}", ec.message());
             return false;
         }
 
-        for (size_t i = 0; i < cfg_.cameras.size(); ++i) {
-            if (cfg_.cameras[i].enabled) {
-                sessions_.push_back(std::make_unique<ebus::CameraSession>(static_cast<uint32_t>(i), cfg_.cameras[i],
-                                                                          cfg_, session_uuid_, stop_));
+        for (const CameraConfig &cam: cfg_.cameras) {
+            if (cam.enabled) {
+                sessions_.push_back(std::make_unique<ebus::CameraSession>(cam, cfg_, session_uuid_, stop_));
             }
         }
         for (auto &session: sessions_) {
             try {
-                session->start(session_dir_);
+                session->Start(session_dir_);
             } catch (const std::exception &e) {
                 // A stop that landed mid-bring-up (Ctrl+C during a PTP wait, or
                 // a running camera's writer failing) surfaces as an exception
                 // out of whatever step was active — report the concrete cause.
-                const bool interrupted = stop_->stop_requested() &&
-                                         (stop_->reason() == StopReason::Signal || stop_->reason() ==
-                                          StopReason::External);
+                const bool interrupted = stop_->StopRequested() &&
+                                         (stop_->Reason() == StopReason::kSignal || stop_->Reason() ==
+                                          StopReason::kExternal);
                 last_error_ = interrupted ? std::string("interrupted during bring-up: ") + e.what() : e.what();
-                g_log.error("Startup failed: {}", last_error_);
-                stop_->request_stop(StopReason::Error);
+                g_log.Error("Startup failed: {}", last_error_);
+                if (!interrupted) {
+                    stop_->RequestStop(StopReason::kError);
+                }
                 for (auto &s: sessions_) {
-                    s->stop_and_join();
+                    s->StopAndJoin();
                 }
                 return false;
             }
-            if (stop_->stop_requested()) {
-                break; // e.g. Ctrl+C during a PTP wait
+            if (stop_->StopRequested()) {
+                // e.g. Ctrl+C during a PTP wait. The remaining cameras were never
+                // brought up, so this is not a successful start: reporting it as
+                // one would emit the "initialized" markers for cameras that are
+                // not running and leave the GUI showing a healthy driver.
+                last_error_ = "interrupted during bring-up (" + std::string(StopReasonName(stop_->Reason())) + ")";
+                g_log.Warn("Startup interrupted: {}", last_error_);
+                for (auto &s: sessions_) {
+                    s->StopAndJoin();
+                }
+                return false;
             }
         }
 
@@ -102,76 +96,107 @@ namespace jai {
     }
 
 
-    void CaptureRunner::monitor_loop(const std::function<bool()> &external_stop) {
+    void CaptureRunner::MonitorLoop(const std::function<bool()> &external_stop) {
         if (!initialized_) {
             return;
         }
 
         // max_duration_s measures CAPTURE time
-        capture_start_mono_ = now_monotonic_ns();
+        capture_start_mono_ = common::TimeUtil::MonotonicNowNs();
         const double stats_interval_s = cfg_.stats_interval_s;
         const double offset_interval_s = cfg_.ptp.offset_report_interval_s;
         uint64_t last_stats_mono = capture_start_mono_;
         uint64_t last_offset_mono = capture_start_mono_;
-        while (!stop_->stop_requested()) {
+        uint64_t last_device_poll_mono = capture_start_mono_;
+        while (!stop_->StopRequested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (external_stop && external_stop()) {
-                stop_->request_stop(StopReason::External);
+                stop_->RequestStop(StopReason::kExternal);
                 break;
             }
-            const uint64_t now_mono = now_monotonic_ns();
+            const uint64_t now_mono = common::TimeUtil::MonotonicNowNs();
             const uint64_t uptime_s = (now_mono - capture_start_mono_) / 1000000000ull;
 
             if (cfg_.output.max_duration_s > 0 &&
                 static_cast<double>(now_mono - capture_start_mono_) >= cfg_.output.max_duration_s * 1e9) {
-                g_log.info("max_duration_s ({}) reached", cfg_.output.max_duration_s);
-                stop_->request_stop(StopReason::LimitReached);
+                g_log.Info("max_duration_s ({}) reached", cfg_.output.max_duration_s);
+                stop_->RequestStop(StopReason::kLimitReached);
                 break;
             }
             if (stats_interval_s > 0 && static_cast<double>(now_mono - last_stats_mono) >= stats_interval_s * 1e9) {
                 const double actual = static_cast<double>(now_mono - last_stats_mono) / 1e9;
                 last_stats_mono = now_mono;
-                const uint64_t free_bytes = free_disk_bytes(session_dir_);
                 for (auto &s: sessions_) {
-                    s->poll_stream_stats();
-                    g_log.info("{}", s->reporter().periodic_line(actual, uptime_s, free_bytes));
+                    s->PollStreamStats();
+                    g_log.Info("{}", s->Reporter().PeriodicLine(actual, uptime_s));
                 }
             }
             if (offset_interval_s > 0 && static_cast<double>(now_mono - last_offset_mono) >= offset_interval_s * 1e9) {
                 last_offset_mono = now_mono;
                 for (auto &s: sessions_) {
-                    s->refresh_ptp_offset();
+                    s->RefreshPtpOffset();
+                }
+            }
+            // Device poll. Two jobs on one tick, guard first so the telemetry
+            // row carries the status the guard just read:
+            //  1. PTP guard - the camera must stay in "slave" with a usable
+            //     clock accuracy, otherwise the device timestamps stop being
+            //     traceable to the grandmaster and the recording is no longer
+            //     what it claims.
+            //  2. telemetry.jsonl - temperatures, Counter0, PAUSE frames.
+            // The ptp.enabled gate sits on the guard call, not on the tick: the
+            // shipped configuration has PTP off, and telemetry must still run.
+            if (static_cast<double>(now_mono - last_device_poll_mono) >= kDevicePollIntervalS * 1e9) {
+                last_device_poll_mono = now_mono;
+                for (auto &s: sessions_) {
+                    if (cfg_.ptp.enabled && !s->CheckPtpHealth()) {
+                        last_error_ = "[" + s->id() + "] PTP synchronization lost during capture";
+                        stop_->RequestStop(StopReason::kError);
+                        break;
+                    }
+                    s->PollDeviceTelemetry();
                 }
             }
         }
     }
 
 
-    bool CaptureRunner::shutdown() {
+    std::optional<std::uint64_t> CaptureRunner::MicrosSinceLastData() const {
+        std::optional<std::uint64_t> worst;
+        for (const auto &s: sessions_) {
+            const auto silent_us = s->MicrosSinceLastData();
+            if (silent_us && (!worst || *silent_us > *worst)) {
+                worst = silent_us;
+            }
+        }
+        return worst;
+    }
+
+    bool CaptureRunner::Shutdown() {
         if (shutdown_done_) {
             return clean_;
         }
         shutdown_done_ = true;
         if (!initialized_) {
-            // init() already tore down, logged and kept the concrete error.
+            // Init() already tore down, logged and kept the concrete error.
             clean_ = false;
             return clean_;
         }
 
-        g_log.info("stopping (reason: {})", stop_reason_name(stop_->reason()));
+        g_log.Info("stopping (reason: {})", StopReasonName(stop_->Reason()));
         for (auto &s: sessions_) {
-            s->stop_and_join();
+            s->StopAndJoin();
         }
         const uint64_t uptime_s = capture_start_mono_ != 0
-                                      ? (now_monotonic_ns() - capture_start_mono_) / 1000000000ull
+                                      ? (common::TimeUtil::MonotonicNowNs() - capture_start_mono_) / 1000000000ull
                                       : 0;
         bool all_clean = true;
         for (auto &s: sessions_) {
-            g_log.info("{}", s->reporter().final_summary(uptime_s));
-            all_clean = all_clean && s->clean();
+            g_log.Info("{}", s->Reporter().FinalSummary(uptime_s));
+            all_clean = all_clean && s->Clean();
         }
 
-        if (stop_->reason() == StopReason::Error) {
+        if (stop_->Reason() == StopReason::kError) {
             if (last_error_.empty()) {
                 last_error_ = "session stopped on an error (see the log above for the concrete cause)";
             }
@@ -182,4 +207,4 @@ namespace jai {
         }
         return clean_;
     }
-} // namespace jai
+} // namespace gox

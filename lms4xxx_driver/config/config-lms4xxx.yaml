@@ -2,79 +2,75 @@
 # LMS4xxx Driver Configuration
 # =============================================================
 
-# SICK LMS4xxx 2D LiDAR (CoLa B binary protocol over TCP).
+# SICK LMS4xxx 2D LiDAR (CoLa B over TCP), one lidar[] entry per device.
 # Referenced by config/config-main.yaml ("LMS4XXX Driver Config Path").
 
 
 # --- LiDARs ---
-# One entry per LiDAR (gox-style list). The id is used VERBATIM as the log
-# tag and in the recording filename (scan_<id>_<ts>.bin); all other sections
-# are shared across instances.
 lidar:
-    -   id: "Front_Left_Laser"      # required, 1..63 chars, [A-Za-z0-9_-] only (used as directory name)
-        enabled: false              # false = skip this LiDAR (at least one must be enabled)
-
+    -   id: Front_Left_Laser            # 1..63 chars [A-Za-z0-9_-]; log tag and file name
+        enabled: false                  # at least one must be enabled
         device:
-            ip: "10.95.76.101"
-            port: 2111                  # CoLa B binary protocol port
-
-    -   id: "Front_Right_Laser"
-        enabled: true
-
+            ip: "10.95.76.101"          # IPv4, unique among enabled entries
+            port: 2111                  # 1..65535; CoLa B
+    -   id: Front_Right_Laser
+        enabled: false
         device:
             ip: "10.95.76.103"
             port: 2111
+    -   id: Front_Center_Laser
+        enabled: true
+        device:
+            ip: "10.95.76.102"
+            port: 2111
 
 
-# --- Global Settings ---
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Scan Settings ---
+# --- Scan ---
 scan:
-    start_angle_deg: 55.0
-    stop_angle_deg: 125.0
-    angular_resolution_deg: 0.0833  # 1/12 degree
-    enable_distance: true           # DIST1 channel
-    enable_rssi: true               # RSSI1 channel (signal strength)
-    enable_reflectance: false       # REFL1 channel (calibrated reflectance %)
-    enable_angle_correction: true   # ANGL1 channel (per-point angle correction)
-    enable_quality: true            # QLTY1 channel (8-bit quality bitfield)
-    output_rate: 1                  # output every Nth scan (1 = every scan)
+    remission: rssi                     # rssi | refl (p.85); everything else is fixed by the driver (docs/DEVICE_CONFIG.md)
 
 
-# --- Time Synchronization ---
+# =============================================================
+# ADVANCED: do not change without a reason
+# =============================================================
+# --- NTP (device clock) ---
 ntp:
-    enabled: true
-    server: "10.95.76.121"
-    sync_interval_s: 1              # [1, 3600]
-    check_status_s: 5               # scanning-time NTP server probe period, s [1, 3600]
+    enabled: false
+    server: "10.95.2.102"               # IPv4; required when enabled
+    sync_interval_s: 1                  # 1..3600
+    check_status_s: 5                   # 1..3600; server probe period while scanning
 
 
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Network Transfer Settings ---
-network:
-    recv_buffer_bytes: 4194304      # SO_RCVBUF size (4 MB)
-    ring_buffer_frames: 1024        # SPSC ring buffer capacity (frames)
-    receive_thread_priority: 99     # SCHED_FIFO priority (1-99)
-    receive_thread_cpu: -1          # CPU affinity (-1 = no pinning)
-    connect_timeout_ms: 500
-    response_timeout_ms: 200
-    tcp_keepalive: true
-    keepalive_idle_s: 10
-    keepalive_interval_s: 5
-    keepalive_count: 3
+# --- Telemetry ---
+telemetry:
+    interval_s: 10                      # 0..3600; 0 = off; stored in the .h5 /telemetry group
 
 
-# --- Output Settings ---
+# --- Output (HDF5) ---
 output:
-    queue_max_frames: 512           # SPSC queue frames (parse thread -> write thread)
-    write_buffer_bytes: 262144      # ofstream buffer size (256 KB)
-    max_file_bytes: 1073741824      # 1 GB per file (0 = no splitting)
+    queue_max_frames: 512               # 2..1048576
+    max_file_bytes: 1073741824          # 0 = no splitting | >= 1048576
+    chunk_frames: 64                    # 1..4096
+    flush_interval_ms: 1000             # 1..60000
+    compression_level: 0                # 0..9; 0 = off
+    swmr: false                         # HDF5 single-writer/multiple-reader (local POSIX FS only)
 
 
-# --- Statistics Interval Time ---
+# --- Network ---
+network:
+    recv_buffer_bytes: 4194304          # 65536..268435456 (SO_RCVBUF)
+    ring_buffer_frames: 1024            # 16..1048576
+    receive_thread_priority: 99         # 1..99 (SCHED_FIFO)
+    receive_thread_cpu: -1              # -1 = no pinning | 0..ncpu-1
+    connect_timeout_ms: 500             # 100..60000
+    response_timeout_ms: 200            # 100..60000; variable access while scanning
+    config_timeout_ms: 2000             # 100..60000; per SOPAS round trip during Configure()
+    tcp_keepalive: true
+    keepalive_idle_s: 10                # 1..7200
+    keepalive_interval_s: 5             # 1..7200
+    keepalive_count: 3                  # 1..100
+
+
+# --- Logging ---
 logging:
-    stats_interval_s: 1            # per-instance status line period (0 = off)
+    stats_interval_s: 2.5               # 0..3600; 0 = off

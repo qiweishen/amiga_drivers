@@ -1,4 +1,4 @@
-#include "pixel_format.hpp"
+#include "pixel_format.h"
 
 
 namespace fx10 {
@@ -13,7 +13,7 @@ namespace fx10 {
     } // namespace
 
 
-    const PixelFormatInfo *pixelFormatInfo(const std::string &name) {
+    const PixelFormatInfo *GetPixelFormatInfo(const std::string &name) {
         for (const auto &info: kFormats) {
             if (name == info.name) {
                 return &info;
@@ -23,7 +23,7 @@ namespace fx10 {
     }
 
 
-    std::size_t wireBytes(const PixelFormatInfo &info, std::size_t pixels) {
+    std::size_t WireBytes(const PixelFormatInfo &info, std::size_t pixels) {
         if (!info.packed) {
             return pixels * info.storage_bpp;
         }
@@ -33,7 +33,7 @@ namespace fx10 {
     }
 
 
-    void unpackMono12Packed(const std::uint8_t *src, std::size_t n_pixels, std::uint16_t *dst) {
+    void UnpackMono12Packed(const std::uint8_t *src, std::size_t n_pixels, std::uint16_t *dst) {
         std::size_t s = 0;
         std::size_t d = 0;
         for (; d + 2 <= n_pixels; d += 2, s += 3) {
@@ -50,7 +50,7 @@ namespace fx10 {
     }
 
 
-    void unpackMono10Packed(const std::uint8_t *src, std::size_t n_pixels, std::uint16_t *dst) {
+    void UnpackMono10Packed(const std::uint8_t *src, std::size_t n_pixels, std::uint16_t *dst) {
         std::size_t s = 0;
         std::size_t d = 0;
         for (; d + 2 <= n_pixels; d += 2, s += 3) {

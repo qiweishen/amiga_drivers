@@ -141,16 +141,23 @@ def expected_bytes(pf_code, width, height):
 
 
 def decode(pf_code, width, height, payload):
-    """payload bytes -> numpy array. Raises ValueError on unknown/short input."""
+    """Decode only a complete, tightly packed image; ambiguous layout is an error."""
     entry = PFNC.get(pf_code)
     if entry is None:
         raise ValueError("unsupported PixelFormat 0x%08X (extend the PFNC table)" % pf_code)
     name, layout, pattern = entry
+    if width <= 0 or height <= 0:
+        raise ValueError("image dimensions must be positive")
+    group = 4 if layout == "pfnc10p" else 2 if layout in ("gvsp12p", "gvsp10p", "pfnc12p") else 1
+    if width % group:
+        raise ValueError("packed row width is not a complete packing group; row layout must be supplied explicitly")
     n = width * height
     need = NEED_BYTES[layout](n)
     if len(payload) < need:
         raise ValueError("payload too short for %s %dx%d: %d < %d bytes (INCOMPLETE frame? "
                          "use --skip-incomplete)" % (name, width, height, len(payload), need))
+    if len(payload) != need:
+        raise ValueError("payload has padding/chunks or an unknown layout; refusing to discard bytes or guess stride")
     buf = payload[:need]
     if layout == "u8":
         arr = np.frombuffer(buf, np.uint8)

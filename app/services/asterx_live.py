@@ -1,12 +1,15 @@
 """Tail the asterx driver's live_*.csv files into in-memory telemetry.
 
-Data flow: C++ Session::on_sbf_block_ -> <session>/bin/asterx/live_*.csv
+Data flow: C++ Session::on_sbf_block_ -> <session>/raw/asterx/live_*.csv
 (append-only, one file per session, survives reconnects) -> this tailer
 (0.5 s poll, offset + partial-line buffer, header-mapped columns) ->
 deques/snapshots read by the /asterx page timer.
 
+Only two blocks feed the GUI: INSNavGeod (position for the map, heading/
+pitch/roll for the FRD attitude triad) and ReceiverStatus (health).
+
 CSV contract (C++ side): values are already in physical units (deg, m, m/s,
-deg/s, degC, s); float do-not-use is written as the literal 'nan'; integer
+degC, s); float do-not-use is written as the literal 'nan'; integer
 do-not-use keeps its sentinel (255 / 65535 / 4294967295). No unit conversion
 happens here.
 """
@@ -16,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -26,35 +28,12 @@ from .log_buffer import BUFFER, parse_line
 
 POLL_S = 0.5
 REPLAY_TAIL_BYTES = 256 * 1024  # reattach: only the recent tail matters
-IMU_STRIDE = 20  # 200 Hz -> 10 Hz chart feed
-IMU_POINTS = 300  # 10 Hz x 300 = 30 s window
 TRACK_MAX = 2000  # decimate-by-2 on overflow
 TRACK_MIN_STEP_DEG = 5e-6  # ~0.55 m — dedupe stationary points
 STALE_S = 3.0  # page greys a snapshot older than this
 
-U8_DNU = 255  # nr_sv sentinel
 U32_DNU = 4294967295  # tow_ms sentinel
-
-_IMU_COLS = ("acc_x_mps2", "acc_y_mps2", "acc_z_mps2",
-             "gyro_x_degps", "gyro_y_degps", "gyro_z_degps")
-
-
-@dataclass
-class PvtSnapshot:
-    tow_ms: int | None  # None = DNU (4294967295)
-    mode: int
-    error: int
-    nr_sv: int | None  # None = DNU (255)
-    lat_deg: float
-    lon_deg: float
-    height_m: float
-    h_acc_m: float  # nan = DNU
-    v_acc_m: float
-    vn_mps: float
-    ve_mps: float
-    vu_mps: float
-    cog_deg: float
-    mono: float  # time.monotonic() at ingest, for staleness
+U8_DNU = 255  # cpu_load_pct sentinel (p.373)
 
 
 @dataclass
@@ -71,7 +50,7 @@ class InsSnapshot:
     heading_deg: float  # nan = attitude sub-block absent
     pitch_deg: float
     roll_deg: float
-    mono: float
+    mono: float  # time.monotonic() at ingest, for staleness
 
 
 @dataclass
@@ -81,18 +60,8 @@ class RxStatusSnapshot:
     up_time_s: int | None
     rx_status: int
     rx_error: int
+    ext_error: int
     temp_c: float
-    mono: float
-
-
-@dataclass
-class AttSnapshot:
-    tow_ms: int | None
-    nr_sv: int | None  # None = DNU (255)
-    error: int
-    heading_deg: float  # nan = DNU
-    pitch_deg: float
-    roll_deg: float
     mono: float
 
 
@@ -135,26 +104,17 @@ class AsterxLive:
         self._task: asyncio.Task | None = None
         self.session_dir: Path | None = None
         # --- telemetry (page-facing) ---
-        self.imu: deque[tuple[float, ...]] = deque(maxlen=IMU_POINTS)  # (t_s, ax,ay,az,gx,gy,gz)
-        self.imu_temp_c: float | None = None
-        self.imu_mono: float | None = None  # last ExtSensorMeas row, for staleness
-        self.track: list[tuple[float, float]] = []  # [(lat_deg, lon_deg)]
-        self.pvt: PvtSnapshot | None = None
+        self.track: list[tuple[float, float]] = []  # [(lat_deg, lon_deg)], INS positions
         self.ins: InsSnapshot | None = None
         self.rx: RxStatusSnapshot | None = None
-        self.att: AttSnapshot | None = None
-        self.imu_version = 0
         self.track_version = 0
         self.snap_version = 0
         # --- internal ---
         self._gen = 0  # session generation; stale worker polls become no-ops
-        self._stride = 0
-        self._last_t = 0.0
-        self._ins_seen = False
         self._tails = self._make_tails()
 
     def start(self, session: Path, *, replay: bool) -> None:
-        """(Re)start tailing `<session>/bin/asterx`. `replay=True` (reattach)
+        """(Re)start tailing `<session>/raw/asterx`. `replay=True` (reattach)
         seeks to the recent tail of pre-existing files instead of re-reading
         them; `replay=False` follows a fresh session from the top."""
         self.stop()
@@ -165,7 +125,7 @@ class AsterxLive:
         # of letting it inject stale rows into the freshly reset telemetry
         self._gen += 1
         self._task = asyncio.get_running_loop().create_task(
-            self._run(session / "bin" / "asterx", replay, self._gen))
+            self._run(session / "raw" / "asterx", replay, self._gen))
 
     def stop(self) -> None:
         if self._task is not None:
@@ -239,15 +199,6 @@ class AsterxLive:
 
     def _make_tails(self) -> list[_FileTail]:
         return [
-            _FileTail("live_pvtgeodetic.csv",
-                      ("tow_ms", "host_unix_ns", "mode", "error", "nr_sv",
-                       "lat_deg", "lon_deg", "height_m", "vn_mps", "ve_mps",
-                       "vu_mps", "cog_deg", "h_acc_m", "v_acc_m"),
-                      self._ingest_pvt),
-            _FileTail("live_extsensormeas.csv",
-                      ("tow_ms", "host_unix_ns", "acc_x_mps2", "acc_y_mps2",
-                       "acc_z_mps2", "gyro_x_degps", "gyro_y_degps", "gyro_z_degps"),
-                      self._ingest_imu),
             _FileTail("live_insnavgeod.csv",
                       ("tow_ms", "host_unix_ns", "gnss_mode", "error", "info",
                        "gnss_age_s", "lat_deg", "lon_deg", "height_m",
@@ -255,28 +206,17 @@ class AsterxLive:
                       self._ingest_ins),
             _FileTail("live_receiverstatus.csv",
                       ("tow_ms", "host_unix_ns", "cpu_load_pct", "up_time_s",
-                       "rx_status", "rx_error", "temp_c"),
+                       "rx_status", "rx_error", "ext_error", "temp_c"),
                       self._ingest_rx),
-            _FileTail("live_atteuler.csv",
-                      ("tow_ms", "host_unix_ns", "nr_sv", "error",
-                       "heading_deg", "pitch_deg", "roll_deg"),
-                      self._ingest_att),
         ]
 
     def _reset_data(self) -> None:
         """Session switch: drop telemetry; bump versions (not reset) so page
         dirty-checks notice the now-empty data."""
-        self.imu.clear()
-        self.imu_temp_c = None
-        self.imu_mono = None
         self.track = []
-        self.pvt = self.ins = self.rx = self.att = None
-        self.imu_version += 1
+        self.ins = self.rx = None
         self.track_version += 1
         self.snap_version += 1
-        self._stride = 0
-        self._last_t = 0.0
-        self._ins_seen = False
         self._tails = self._make_tails()
 
     # ------------------------------------------------------------------ ingest
@@ -294,53 +234,10 @@ class AsterxLive:
             self.track = self.track[::2]
         self.track_version += 1
 
-    def _ingest_pvt(self, colmap: dict[str, int], fields: list[str]) -> None:
-        lat = _f(colmap, fields, "lat_deg")
-        lon = _f(colmap, fields, "lon_deg")
-        if not self._ins_seen:  # single-source track: INS owns it once seen
-            self._track_append(lat, lon)
-        self.pvt = PvtSnapshot(
-            tow_ms=_i(colmap, fields, "tow_ms", dnu=U32_DNU),
-            mode=_i(colmap, fields, "mode") or 0,
-            error=_i(colmap, fields, "error") or 0,
-            nr_sv=_i(colmap, fields, "nr_sv", dnu=U8_DNU),
-            lat_deg=lat,
-            lon_deg=lon,
-            height_m=_f(colmap, fields, "height_m"),
-            h_acc_m=_f(colmap, fields, "h_acc_m"),
-            v_acc_m=_f(colmap, fields, "v_acc_m"),
-            vn_mps=_f(colmap, fields, "vn_mps"),
-            ve_mps=_f(colmap, fields, "ve_mps"),
-            vu_mps=_f(colmap, fields, "vu_mps"),
-            cog_deg=_f(colmap, fields, "cog_deg"),
-            mono=time.monotonic(),
-        )
-        self.snap_version += 1
-
-    def _ingest_imu(self, colmap: dict[str, int], fields: list[str]) -> None:
-        self.imu_mono = time.monotonic()
-        temp = _f(colmap, fields, "temp_c")
-        if math.isfinite(temp):
-            self.imu_temp_c = temp
-        vals = tuple(_f(colmap, fields, n) for n in _IMU_COLS)
-        if not all(map(math.isfinite, vals)):
-            return  # acc-only / gyro-only blocks: temperature update only
-        self._stride += 1
-        if self._stride % IMU_STRIDE:
-            return
-        tow = _i(colmap, fields, "tow_ms", dnu=U32_DNU)
-        # Boot-mode frames carry DNU tow: extrapolate to keep the x axis monotonic.
-        t = tow / 1000.0 if tow is not None else self._last_t + 0.005 * IMU_STRIDE
-        self._last_t = t
-        self.imu.append((t, *vals))
-        self.imu_version += 1
-
     def _ingest_ins(self, colmap: dict[str, int], fields: list[str]) -> None:
         lat = _f(colmap, fields, "lat_deg")
         lon = _f(colmap, fields, "lon_deg")
-        if math.isfinite(lat) and math.isfinite(lon):
-            self._ins_seen = True  # the track is INS-only from now on (no dual-source jitter)
-            self._track_append(lat, lon)
+        self._track_append(lat, lon)
         self.ins = InsSnapshot(
             tow_ms=_i(colmap, fields, "tow_ms", dnu=U32_DNU),
             gnss_mode=_i(colmap, fields, "gnss_mode") or 0,
@@ -361,23 +258,12 @@ class AsterxLive:
     def _ingest_rx(self, colmap: dict[str, int], fields: list[str]) -> None:
         self.rx = RxStatusSnapshot(
             tow_ms=_i(colmap, fields, "tow_ms", dnu=U32_DNU),
-            cpu_load_pct=_i(colmap, fields, "cpu_load_pct"),
+            cpu_load_pct=_i(colmap, fields, "cpu_load_pct", dnu=U8_DNU),
             up_time_s=_i(colmap, fields, "up_time_s"),
             rx_status=_i(colmap, fields, "rx_status") or 0,
             rx_error=_i(colmap, fields, "rx_error") or 0,
+            ext_error=_i(colmap, fields, "ext_error") or 0,
             temp_c=_f(colmap, fields, "temp_c"),
-            mono=time.monotonic(),
-        )
-        self.snap_version += 1
-
-    def _ingest_att(self, colmap: dict[str, int], fields: list[str]) -> None:
-        self.att = AttSnapshot(
-            tow_ms=_i(colmap, fields, "tow_ms", dnu=U32_DNU),
-            nr_sv=_i(colmap, fields, "nr_sv", dnu=U8_DNU),
-            error=_i(colmap, fields, "error") or 0,
-            heading_deg=_f(colmap, fields, "heading_deg"),
-            pitch_deg=_f(colmap, fields, "pitch_deg"),
-            roll_deg=_f(colmap, fields, "roll_deg"),
             mono=time.monotonic(),
         )
         self.snap_version += 1

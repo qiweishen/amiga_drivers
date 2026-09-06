@@ -2,106 +2,74 @@
 # GoX Driver Configuration
 # =============================================================
 
-# JAI GoX RGB camera configuration.
-# It supports multiple GoX RGB cameras.
+# JAI GO-X RGB cameras, one cameras[] entry per camera.
 # Referenced by config/config-main.yaml ("GOX Driver Config Path").
 
 
-# --- General Settings ---
+
+# --- Cameras ---
 cameras:
-    -   id: "cam0"                      # required, 1..63 chars, [A-Za-z0-9_-] only (used as directory name)
-        enabled: true                   # false = skip this camera (at least one must be enabled)
-
+    -   id: cam0                        # 1..63 chars [A-Za-z0-9_-]; used as directory name
+        enabled: true                   # at least one camera must be enabled
         device:
-            mac: ""                     # MAC selection (discovery match, survives a bad IP config); wins over ip
-            ip: "10.95.1.101"           # direct connect (fastest: no discovery pass); used when mac is empty
-            force_ip:                   # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
-                enabled: false
-                ip: ""                  # required when enabled
-                subnet_mask: ""         # required when enabled
-                gateway: "0.0.0.0"
+            mac: ""                     # discovery match; wins over ip
+            ip: "10.95.1.101"           # direct connect; used when mac is empty
 
-        # --- Receiver Settings ---
         acquisition:
-            exposure_ms: 150.0              # float, ms [1..115279] / 1000; ExposureAuto set to OFF automatically
-            gain: 1.0                       # GainSelector chain: AnalogAll -> All -> skip
-            pixel_format: "BayerRG12Packed" # GenICam enum entry, written verbatim
-            frame_rate_hz: 3.0             # freerun rate; under external trigger = EXPECTED PPS
+            exposure_ms: 150.0          # > 0; freerun: < 1000 / frame_rate_hz
+            gain: 1.0                   # 1.0..126.0 (magnification, not dB, p.148)
+            pixel_format: BayerRG12Packed   # GenICam entry, verbatim; 12-bit formats also set SensorDigitizationBits
+            frame_rate_hz: 3.0          # >= 0.125; freerun only
+            blemish_correction: false   # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
-                mode: freerun               # [freerun | external] disable trigger / enable trigger
-                activation: rising          # [rising | falling] specifies the activation mode of the trigger
+                mode: freerun           # freerun | external
+                activation: rising      # rising | falling
                 selector_entry: FrameStart
-                source_entry: Line1
+                source_entry: 24        # 7..19 | 24 | 36 | 37 or an entry name; 24 = Line5 Opt In (p.141)
             roi:
-                width: 0                    # 0 = do not set (keep the camera's current value)
-                height: 0
-                offset_x: 0
-                offset_y: 0
+                width: 0                # 0 = keep | >= 96, step 8
+                height: 0               # 0 = keep | >= 8, step 2
+                offset_x: 0             # step 8
+                offset_y: 0             # step 2
 
-        # Escape hatch: [{name: Node, value: Entry}, ...] — applied in list
-        # order AFTER the acquisition block; any failure aborts startup.
-        # Verification is always on (fx10 semantics): int/float clamping by the
-        # camera only warns, bool/enum/string mismatches fail.
-        #     - { name: BlackLevel, value: 0 }
-        #     - { name: DeviceLinkThroughputLimitMode, value: "On" }
-        #     - { name: DeviceLinkThroughputLimit, value: 100000000 }
         features:
-            raw: [
-                # {name: Width, value: 4128},
-                # {name: Height, value: 3008},
-            ]
+            raw: []                     # [{ name: Node, value: Entry }, ...]; applied after acquisition; quote enum/string values
 
-
-        # --- Network Transfer Settings ---
+        # =============================================================
+        # ADVANCED: do not change without a reason
+        # =============================================================
         network:
-            channel: 0
-            buffer_count: 0             # 0 = auto: frame_rate x 0.5 s, clamped to [16, 256]; explicit value must be >= 4
-            packet_size: 0              # 0 = NegotiatePacketSize (fallback 1476); explicit value must be in [576, 16000]
-            socket_rx_buffer_mb: 16     # user-mode socket RX buffer (capped by the host's rmem_max)
-            local_ip: ""                # bind the stream to a specific NIC; empty = auto
-            gev_scpd_ticks: 0           # GevSCPD inter-packet delay (ns ticks), for multi-camera bandwidth sharing
-            receiver_tuning: [ ]        # escape hatch: PvStream parameters (same format as features.raw)
+            buffer_count: 0             # 0 = auto | >= 4 (one buffer = one frame, ~18.6 MB)
+            packet_size: 0              # 0 = negotiate | 1476..12036 (p.130)
+            socket_rx_buffer_mb: 16     # 1..1024
+            local_ip: ""                # bind to this NIC; "" = auto
+            throughput_safety_margin_pct: 0     # 0 = factory 92 | 10..100 (p.128); ~100/N for N cameras on one NIC
+            receiver_tuning: []         # PvStream parameters, same format as features.raw
 
 
 # =============================================================
-# NOT RECOMMEND TO CHANGE
+# ADVANCED: do not change without a reason
 # =============================================================
-# --- PTP Settings ---
+# --- PTP ---
 ptp:
-    enabled: false
-    feature_set: "auto"                 # [auto | gev_ieee1588 | sfnc_ptp | explicit]
-    enable_feature: ""                  # required only when feature_set = "explicit": enable feature name
-    status_feature: ""                  # required only when feature_set = "explicit": status feature name
-    required_status: "Slave"            # expected PTP state (compared case-insensitively)
-    sync_timeout_s: 60.0                # timeout waiting to converge to required_status
-    poll_interval_ms: 500               # status poll interval, must be > 0
-    on_timeout: "abort"                 # abort (startup fails) | warn_continue (degrade and keep capturing)
-    offset_report_interval_s: 60.0      # host/camera clock offset report period; 0 = only at session start/end
-    expect_tai_offset: true             # PTP runs on TAI: auto-detect the ~37 s system offset during cross-checks
+    enabled: true
+    sync_timeout_s: 10.0                # > 0
+    on_timeout: abort                   # abort | warn_continue
+    offset_report_interval_s: 10.0      # >= 0; 0 = only at session start/end
 
 
-# --- Output Settings ---
+# --- Output (jai-raw-seg) ---
 output:
-    output_dir: /data/captures          # standalone-era default; the unified runtime overrides
-    segment_size_gib: 2.0               # segment rotation threshold (GiB), must be > 0
-    record_align: 4096                  # frame record start alignment (power of two); 1 = no alignment
-    queue_max_frames: 32                # bounded queue capacity == ChunkPool size, must be >= 2
-    queue_on_full: "drop_newest"        # drop_newest (default, drop + count) | block (never drop, may stall)
-    on_buffer_error: "record_flagged"   # record_flagged (record incomplete frames with a flag) | drop
-    flush_interval_mb: 64               # sync_file_range every N MB written to cap dirty pages, must be > 0
-    max_frames: 0                       # keep 0 in unified mode (reaching the limit stops the whole process)
-    max_duration_s: 0                   # keep 0 in unified mode (same as above)
+    segment_size_mb: 2048               # > 0
+    record_align: 4096                  # power of two; 1 = none
+    queue_max_frames: 0                 # 0 = auto (~2 s) | >= 2
+    queue_on_full: drop_newest          # drop_newest | block
+    on_buffer_error: record_flagged     # record_flagged | drop
+    flush_interval_mb: 64               # > 0
+    max_frames: 0                       # >= 0; 0 = unlimited
+    max_duration_s: 0                   # >= 0; 0 = unlimited
 
 
-# --- Some guards ---
-disk:
-    min_free_gb: 10                     # hard floor: orderly stop below this free space
-
-watchdog:
-    no_frame_warn_s: 5
-    no_frame_abort_s: -1                # -1 = auto (external trigger: never abort; freerun: 10 s)
-
-
-# --- Statistics Interval Time ---
+# --- Logging ---
 logging:
-    stats_interval_s: 1
+    stats_interval_s: 2.5               # > 0

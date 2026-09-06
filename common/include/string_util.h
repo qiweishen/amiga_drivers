@@ -1,10 +1,4 @@
-/// @file string_util.h
-/// @brief Shared string helpers (header-only). Two split flavors exist on
-/// purpose: Split() keeps raw parts including empties (wire/CSV parsing),
-/// SplitTrim() trims each part (human-typed command replies).
-
-#ifndef COMMON_STRING_UTIL_H
-#define COMMON_STRING_UTIL_H
+#pragma once
 
 #include <algorithm>
 #include <cctype>
@@ -14,7 +8,7 @@
 #include <vector>
 
 
-namespace Common::StringUtil {
+namespace common::StringUtil {
     inline std::string Trim(std::string s) {
         const auto not_space = [](unsigned char c) { return !std::isspace(c); };
         s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
@@ -78,27 +72,6 @@ namespace Common::StringUtil {
         return out;
     }
 
-    // "Front Left" / "front-left" / "FrontLeft" -> "front_left"
-    inline std::string ToSnakeCase(std::string_view name) {
-        std::string result;
-        result.reserve(name.size());
-        for (std::size_t i = 0; i < name.size(); ++i) {
-            const char ch = name[i];
-            if (ch == ' ' || ch == '-') {
-                result.push_back('_');
-            } else if (std::isupper(static_cast<unsigned char>(ch))) {
-                if (i > 0 && name[i - 1] != ' ' && name[i - 1] != '-' && name[i - 1] != '_' &&
-                    std::islower(static_cast<unsigned char>(name[i - 1]))) {
-                    result.push_back('_');
-                }
-                result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-            } else {
-                result.push_back(ch);
-            }
-        }
-        return result;
-    }
-
     // "00:0C:DF:12:34:56" / "00-0c-df-12-34-56" / "000cdf123456" -> lowercase
     // 12-hex-digit form; "" when the input is not a MAC address
     inline std::string NormalizeMac(const std::string &mac) {
@@ -125,37 +98,4 @@ namespace Common::StringUtil {
         }
         return s;
     }
-
-    // Standard Base64 (RFC 4648, with padding, no line breaks)
-    inline std::string Base64Encode(std::string_view input) {
-        static constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        std::string out;
-        out.reserve(((input.size() + 2) / 3) * 4);
-        std::size_t i = 0;
-        while (i + 3 <= input.size()) {
-            const auto a = static_cast<unsigned char>(input[i]), b = static_cast<unsigned char>(input[i + 1]),
-                    c = static_cast<unsigned char>(input[i + 2]);
-            out.push_back(kAlphabet[a >> 2]);
-            out.push_back(kAlphabet[((a & 0x03) << 4) | (b >> 4)]);
-            out.push_back(kAlphabet[((b & 0x0F) << 2) | (c >> 6)]);
-            out.push_back(kAlphabet[c & 0x3F]);
-            i += 3;
-        }
-        const std::size_t rem = input.size() - i;
-        if (rem == 1) {
-            const auto a = static_cast<unsigned char>(input[i]);
-            out.push_back(kAlphabet[a >> 2]);
-            out.push_back(kAlphabet[(a & 0x03) << 4]);
-            out.append("==");
-        } else if (rem == 2) {
-            const auto a = static_cast<unsigned char>(input[i]), b = static_cast<unsigned char>(input[i + 1]);
-            out.push_back(kAlphabet[a >> 2]);
-            out.push_back(kAlphabet[((a & 0x03) << 4) | (b >> 4)]);
-            out.push_back(kAlphabet[(b & 0x0F) << 2]);
-            out.push_back('=');
-        }
-        return out;
-    }
-} // namespace Common::StringUtil
-
-#endif	// COMMON_STRING_UTIL_H
+} // namespace common::StringUtil

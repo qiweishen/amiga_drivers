@@ -1,20 +1,9 @@
-/// @file driver_markers.h
-/// @brief GUI contract — single source of truth for the lifecycle marker
-/// strings the web GUI parses out of the unified log.
-///
-/// The Python mirror is app/services/markers.py; the two files must agree
-/// VERBATIM. Run `uv run python tools/check_contracts.py` after editing either
-/// side. Do NOT reword any value here without updating the mirror — the GUI
-/// health state machine (app/services/health.py) and the reattach clean-exit
-/// detection (app/services/process.py) match these strings literally.
-
-#ifndef COMMON_DRIVER_MARKERS_H
-#define COMMON_DRIVER_MARKERS_H
+#pragma once
 
 #include <string_view>
 
 
-namespace Common::Markers {
+namespace common::Markers {
     // Module tokens: the "[Module]:" tag of every log line
     // The GUI routes a line to a sensor's health state machine by exact module comparison
     inline constexpr std::string_view kModuleMain = "MainApp";
@@ -55,10 +44,15 @@ namespace Common::Markers {
     inline constexpr std::string_view kFx10InitFailed = "FX10 driver initialization failed";
     inline constexpr std::string_view kGoxInitFailed = "GoX driver initialization failed";
     inline constexpr std::string_view kLms4xxxInitFailed = "LMS4xxx driver initialization failed";
+    // Appended to a driver name by Main's no-data watchdog, e.g.
+    // "FX10 driver stopped: no data (silent for 31.0 s, ...)". Same
+    // "<DriverName><suffix>" shape as the two markers above, so the GUI routes
+    // it to that sensor's card. The disk guard has no such marker on purpose:
+    // it is not any one sensor's fault, and the GUI already shows free space.
+    inline constexpr std::string_view kGuardNoDataSuffix = " driver stopped: no data";
+
     inline constexpr std::string_view kAsterxRunException = "AsteRx run() exception";
     inline constexpr std::string_view kFx10RunException = "FX10 run() exception";
     inline constexpr std::string_view kGoxRunException = "GoX run() exception";
     inline constexpr std::string_view kLms4xxxRunException = "LMS4xxx run() exception";
-} // namespace Common::Markers
-
-#endif // COMMON_DRIVER_MARKERS_H
+} // namespace common::Markers

@@ -4,16 +4,17 @@
 // shares no code with the Recorder, so the on-disk format itself is what is
 // being verified (as scripts/inspect_raw.py will see it).
 
-#include "recorder.hpp"
+#include "recorder.h"
 
-#include "format.hpp"
-#include "frame.hpp"
-#include "stats.hpp"
+#include "format.h"
+#include "frame.h"
+#include "stats.h"
 
 #include <doctest/doctest.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,11 +23,12 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace {
     constexpr uint32_t kPfncMono8 = 0x01080001u;
 
-    std::string make_temp_dir() {
+    std::string MakeTempDir() {
         const char *base = std::getenv("TMPDIR");
         std::string tmpl = std::string(base && *base ? base : "/tmp") + "/jai_recorder_test_XXXXXX";
         std::vector<char> buf(tmpl.begin(), tmpl.end());
@@ -36,7 +38,7 @@ namespace {
         return std::string(dir);
     }
 
-    std::vector<std::string> read_lines(const std::string &path) {
+    std::vector<std::string> ReadLines(const std::string &path) {
         std::ifstream in(path);
         REQUIRE(in.is_open());
         std::vector<std::string> lines;
@@ -50,12 +52,55 @@ namespace {
     }
 } // namespace
 
+TEST_CASE("recorder: an existing camera directory cannot be overwritten") {
+    const auto tmp = MakeTempDir();
+    gox::RecorderOptions opts;
+    opts.camera_dir = tmp + "/cam0";
+    std::filesystem::create_directory(opts.camera_dir);
+    const auto raw = opts.camera_dir + "/seg_00001.raw";
+    { std::ofstream out(raw, std::ios::binary); out << "original acquisition"; }
+    gox::Recorder recorder(opts, nullptr);
+    CHECK_THROWS_AS(recorder.Open(), gox::IoError);
+    std::ifstream input(raw, std::ios::binary);
+    const std::string content{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    CHECK(content == "original acquisition");
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("recorder: a partial index batch is not appended again during error cleanup") {
+    const auto tmp = MakeTempDir();
+    gox::RecorderOptions opts;
+    opts.camera_dir = tmp + "/cam0";
+    opts.record_align = 512;
+    opts.segment_max_bytes = 1024; // one small frame, then rotation forces the index flush
+    gox::Recorder recorder(opts, nullptr);
+    recorder.Open();
+    gox::FrameMeta meta;
+    const std::vector<std::uint8_t> payload(100, 0x55);
+    recorder.WriteFrame(meta, payload.data(), payload.size());
+    int calls = 0;
+    recorder.SetIndexWriteHookForTest([&](int fd, const void *data, size_t size) -> ssize_t {
+        if (++calls == 1) return ::write(fd, data, std::min(size, size_t{17}));
+        errno = EIO;
+        return -1;
+    });
+    CHECK_THROWS_AS(recorder.WriteFrame(meta, payload.data(), payload.size()), gox::IoError);
+    CHECK_NOTHROW(recorder.close(false));
+    CHECK(calls == 2); // cleanup does not retry the failed batch
+    CHECK(std::filesystem::file_size(opts.camera_dir + "/seg_00001.idx.jsonl") == 0);
+    CHECK(std::filesystem::file_size(opts.camera_dir + "/seg_00001.raw") == 1024);
+    const auto summaries = ReadLines(opts.camera_dir + "/segments.jsonl");
+    REQUIRE(summaries.size() == 1);
+    CHECK(nlohmann::json::parse(summaries[0]).at("closed_clean") == false);
+    std::filesystem::remove_all(tmp);
+}
+
 TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byte-level re-parse") {
-    namespace fmt = jai::format;
+    namespace fmt = gox::format;
 
     // Payload sizes chosen so that with segment_max_bytes = 8192 and
     // record_align = 512 the layout is fully known in advance. Derivation:
-    // record = align_up(96 + size, 512), the file header occupies [0, 512),
+    // record = AlignUp(96 + size, 512), the file header occupies [0, 512),
     // and rotation triggers when a non-first record would end past 8192:
     //   frame 0 size  100 rec  512 -> seg 1 @  512
     //   frame 1 size  700 rec 1024 -> seg 1 @ 1024
@@ -73,37 +118,34 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
     const uint64_t expect_seg_bytes[4] = {5632, 5632, 9728, 2560};
     const uint64_t expect_total_record_bytes = 21504; // sum of the aligned record sizes
 
-    const std::string tmp = make_temp_dir();
+    const std::string tmp = MakeTempDir();
     uint8_t uuid[16];
     for (int i = 0; i < 16; ++i) {
         uuid[i] = static_cast<uint8_t>(0xA0 + i);
     }
 
-    jai::RecorderOptions opts;
+    gox::RecorderOptions opts;
     opts.camera_dir = tmp + "/cam0";
     opts.camera_id = "cam0";
     opts.camera_serial = "FAKE-1234";
     std::memcpy(opts.session_uuid, uuid, 16);
     opts.segment_max_bytes = 8192;
     opts.record_align = 512;
-    // min_free_bytes = 0 disables the free-space check; ENOSPC cannot be
-    // forced portably, so only the disabled path is exercised here.
-    opts.min_free_bytes = 0;
 
     // ---- write phase --------------------------------------------------
     std::vector<std::vector<uint8_t> > payloads;
-    jai::CameraStats stats;
+    gox::CameraStats stats;
     {
-        jai::Recorder rec(opts, &stats);
-        rec.open();
-        rec.open(); // idempotent
+        gox::Recorder rec(opts, &stats);
+        rec.Open();
+        rec.Open(); // idempotent
 
         for (size_t i = 0; i < sizes.size(); ++i) {
             std::vector<uint8_t> payload(sizes[i]);
             for (size_t j = 0; j < payload.size(); ++j) {
                 payload[j] = static_cast<uint8_t>(i * 31 + j);
             }
-            jai::FrameMeta meta;
+            gox::FrameMeta meta;
             meta.block_id = 1000 + i;
             meta.device_ts_ns = 1'000'000'000ull + i * 10'000'000ull;
             meta.host_realtime_ns = 1'752'000'000'000'000'000ull + i;
@@ -113,17 +155,21 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             meta.height = 480;
             meta.status_flags = (i == 2) ? fmt::kFrameFlagIncomplete : 0;
             meta.payload_size = payload.size();
-            meta.expected_size = payload.size();
-            rec.write_frame(meta, payload.data(), payload.size());
-            CHECK(rec.current_segment_index() == expect_seg[i]); // rotation at the expected frame
+            meta.padding_x = 3;
+            meta.padding_y = 7;
+            meta.chunk_count = 2;
+            meta.payload_type = 1;
+            meta.operation_result = (i == 2) ? 17 : 0;
+            rec.WriteFrame(meta, payload.data(), payload.size());
+            CHECK(rec.CurrentSegmentIndex() == expect_seg[i]); // rotation at the expected frame
             payloads.push_back(std::move(payload));
         }
-        CHECK(rec.frames_written() == 8u);
+        CHECK(rec.FramesWritten() == 8u);
         rec.close();
         rec.close(); // idempotent
 
-        jai::FrameMeta meta;
-        CHECK_THROWS_AS(rec.write_frame(meta, nullptr, 0), jai::IoError); // closed
+        gox::FrameMeta meta;
+        CHECK_THROWS_AS(rec.WriteFrame(meta, nullptr, 0), gox::IoError); // closed
     }
     CHECK(stats.frames_written.load() == 8u);
     CHECK(stats.segments_created.load() == 4u);
@@ -158,10 +204,10 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         CHECK(fh.record_align == 512u);
         CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) == 0u); // payload CRC option removed
         CHECK((fh.segment_flags & fmt::kSegFlagChunkData) == 0u); // always 0 in v1
-        CHECK(fmt::verify_file_header(fh));
+        CHECK(fmt::VerifyFileHeader(fh));
 
         // Walk the records exactly as an external reader would: the next
-        // record starts at align_up(offset + 96 + payload_size, record_align).
+        // record starts at AlignUp(offset + 96 + payload_size, record_align).
         uint64_t off = fmt::kFileHeaderSize;
         uint64_t frames_in_seg = 0;
         for (size_t g = 0; g < sizes.size(); ++g) {
@@ -177,7 +223,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             REQUIRE(std::fread(&h, sizeof(h), 1, f) == 1u);
             CHECK(h.frame_magic == fmt::kFrameMagic);
             CHECK(h.header_size == fmt::kFrameHeaderSize);
-            CHECK(fmt::verify_frame_header(h));
+            CHECK(fmt::VerifyFrameHeader(h));
             CHECK(h.block_id == 1000 + g);
             CHECK(h.device_ts_ns == 1'000'000'000ull + g * 10'000'000ull);
             CHECK(h.host_realtime_ns == 1'752'000'000'000'000'000ull + g);
@@ -195,7 +241,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             CHECK(h.payload_crc32c == 0u); // payload CRC option removed; field stays zero
 
             // Padding up to the next boundary must be zero.
-            const uint64_t rec_bytes = fmt::align_up(fmt::kFrameHeaderSize + sizes[g], 512);
+            const uint64_t rec_bytes = fmt::AlignUp(fmt::kFrameHeaderSize + sizes[g], 512);
             const size_t pad = static_cast<size_t>(rec_bytes - fmt::kFrameHeaderSize - sizes[g]);
             if (pad > 0) {
                 std::vector<uint8_t> padding(pad);
@@ -214,7 +260,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         // Per-segment index: one JSON line per frame, matching the data.
         char idx_name[40];
         std::snprintf(idx_name, sizeof(idx_name), "seg_%05u.idx.jsonl", seg);
-        const std::vector<std::string> lines = read_lines(opts.camera_dir + "/" + idx_name);
+        const std::vector<std::string> lines = ReadLines(opts.camera_dir + "/" + idx_name);
         REQUIRE(lines.size() == expect_seg_frames[seg - 1]);
         size_t li = 0;
         for (size_t g = 0; g < sizes.size(); ++g) {
@@ -234,12 +280,17 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             CHECK(j.at("w").get<uint32_t>() == 640u);
             CHECK(j.at("h").get<uint32_t>() == 480u);
             CHECK(j.at("fl").get<uint32_t>() == ((g == 2) ? 1u : 0u));
+            CHECK(j.at("padding_x") == 3);
+            CHECK(j.at("padding_y") == 7);
+            CHECK(j.at("chunk_count") == 2);
+            CHECK(j.at("payload_type") == 1);
+            CHECK(j.at("operation_result") == ((g == 2) ? 17 : 0));
             ++li;
         }
     }
 
     // ---- read phase: segments.jsonl ------------------------------------
-    const std::vector<std::string> seg_lines = read_lines(opts.camera_dir + "/segments.jsonl");
+    const std::vector<std::string> seg_lines = ReadLines(opts.camera_dir + "/segments.jsonl");
     REQUIRE(seg_lines.size() == 4u);
     struct SegExpect {
         uint64_t seq_first, seq_last, bid_first, bid_last;
@@ -269,11 +320,62 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
-    namespace fmt = jai::format;
+TEST_CASE("recorder: the shipped record_align pads the first record to 4096") {
+    namespace fmt = gox::format;
 
-    const std::string tmp = make_temp_dir();
-    jai::RecorderOptions opts;
+    // The production template uses record_align 4096, where the 512-byte file
+    // header is followed by real padding - a case the layout test above never
+    // reaches, because it aligns to 512.
+    const std::string tmp = MakeTempDir();
+    gox::RecorderOptions opts;
+    opts.camera_dir = tmp + "/cam0";
+    opts.camera_id = "cam0";
+    opts.segment_max_bytes = 1u << 20;
+    opts.record_align = 4096;
+
+    const std::vector<uint8_t> payload(1000, 0x5A);
+    {
+        gox::Recorder rec(opts, nullptr);
+        rec.Open();
+        gox::FrameMeta meta;
+        meta.block_id = 1;
+        meta.payload_size = payload.size();
+        rec.WriteFrame(meta, payload.data(), payload.size());
+        rec.WriteFrame(meta, payload.data(), payload.size());
+        rec.close();
+    }
+
+    const std::string seg_path = opts.camera_dir + "/seg_00001.raw";
+    CHECK(std::filesystem::file_size(seg_path) == 3u * 4096u); // header block + 2 records
+
+    std::FILE *f = std::fopen(seg_path.c_str(), "rb");
+    REQUIRE(f != nullptr);
+    fmt::FileHeader fh{};
+    REQUIRE(std::fread(&fh, sizeof(fh), 1, f) == 1u);
+    CHECK(fh.record_align == 4096u);
+    CHECK(fmt::VerifyFileHeader(fh));
+
+    // Everything between the file header and the first record must be zero.
+    std::vector<uint8_t> pad(4096 - fmt::kFileHeaderSize);
+    REQUIRE(std::fread(pad.data(), 1, pad.size(), f) == pad.size());
+    CHECK(static_cast<size_t>(std::count(pad.begin(), pad.end(), 0)) == pad.size());
+
+    // ... and the first record starts exactly on the boundary.
+    fmt::FrameHeader h{};
+    REQUIRE(std::fread(&h, sizeof(h), 1, f) == 1u);
+    CHECK(h.frame_magic == fmt::kFrameMagic);
+    CHECK(fmt::VerifyFrameHeader(h));
+    CHECK(h.frame_seq == 0u);
+    std::fclose(f);
+
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
+    namespace fmt = gox::format;
+
+    const std::string tmp = MakeTempDir();
+    gox::RecorderOptions opts;
     opts.camera_dir = tmp + "/cam0";
     opts.camera_id = "cam0";
     opts.camera_serial = "";
@@ -285,13 +387,13 @@ TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
         payload[j] = static_cast<uint8_t>(j ^ 0x5A);
     }
     {
-        jai::Recorder rec(opts, nullptr); // stats are optional
-        rec.open();
-        jai::FrameMeta meta;
+        gox::Recorder rec(opts, nullptr); // stats are optional
+        rec.Open();
+        gox::FrameMeta meta;
         meta.block_id = 1;
         meta.payload_size = payload.size();
-        rec.write_frame(meta, payload.data(), payload.size());
-        rec.write_frame(meta, payload.data(), payload.size());
+        rec.WriteFrame(meta, payload.data(), payload.size());
+        rec.WriteFrame(meta, payload.data(), payload.size());
         rec.close();
     }
 
@@ -305,13 +407,13 @@ TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
     REQUIRE(std::fread(&fh, sizeof(fh), 1, f) == 1u);
     CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) == 0u);
     CHECK(fh.record_align == 1u);
-    CHECK(fmt::verify_file_header(fh));
+    CHECK(fmt::VerifyFileHeader(fh));
 
     for (int i = 0; i < 2; ++i) {
         fmt::FrameHeader h{};
         REQUIRE(std::fread(&h, sizeof(h), 1, f) == 1u);
         CHECK(h.frame_magic == fmt::kFrameMagic);
-        CHECK(fmt::verify_frame_header(h)); // header CRC is always on
+        CHECK(fmt::VerifyFrameHeader(h)); // header CRC is always on
         CHECK(h.payload_crc32c == 0u); // payload CRC option removed
         CHECK(h.frame_seq == static_cast<uint64_t>(i));
         REQUIRE(std::fseek(f, static_cast<long>(h.payload_size), SEEK_CUR) == 0);

@@ -6,6 +6,34 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
+# HDF5 - Hierarchical data format version 5 library
+FetchContent_Declare(
+        hdf5
+        GIT_REPOSITORY https://github.com/HDFGroup/hdf5.git
+        GIT_TAG hdf5_1.14.6
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/FetchContent/hdf5
+)
+function(amiga_add_hdf5)
+    find_package(ZLIB REQUIRED)
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_STATIC_LIBS ON)
+    set(BUILD_TESTING OFF)
+    set(HDF5_BUILD_TOOLS OFF)
+    set(HDF5_BUILD_UTILS OFF)
+    set(HDF5_BUILD_EXAMPLES OFF)
+    set(HDF5_BUILD_HL_LIB OFF)
+    set(HDF5_BUILD_CPP_LIB OFF)
+    set(HDF5_ENABLE_Z_LIB_SUPPORT ON)   # gzip (deflate) filter on the channel datasets
+    set(HDF5_ENABLE_SZIP_SUPPORT OFF)
+    set(HDF5_ENABLE_THREADSAFE OFF)     # lms4xxx serializes its libhdf5 calls behind one process-wide mutex
+    FetchContent_MakeAvailable(hdf5)
+    set(hdf5_SOURCE_DIR "${hdf5_SOURCE_DIR}" PARENT_SCOPE)
+endfunction()
+amiga_add_hdf5()
+
+
+################################################################################
 # spdlog - Fast C++ logging library
 FetchContent_Declare(
         spdlog
@@ -31,7 +59,7 @@ FetchContent_MakeAvailable(yaml-cpp)
 
 
 ################################################################################
-# nlohmann/json - JSON for Modern C++
+# nlohmann/json - JSON for Modern C++ (drivers.json manifest, gox/fx10 tools)
 FetchContent_Declare(
         nlohmann-json
         GIT_REPOSITORY https://github.com/nlohmann/json.git

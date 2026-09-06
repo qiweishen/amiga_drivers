@@ -3,10 +3,14 @@
 
 add_executable(common_tests
         doctest_main.cpp
+        test_config_util.cpp
         test_driver_app.cpp
         test_drivers_json.cpp
         test_file_writer.cpp
+        test_ipv4.cpp
         test_logger.cpp
+        test_ring_buffer.cpp
+        test_run_guards.cpp
         test_util.cpp
 )
 

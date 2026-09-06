@@ -58,6 +58,7 @@ PAIRS = {
     "kFx10InitFailed": "FX10_INIT_FAILED",
     "kGoxInitFailed": "GOX_INIT_FAILED",
     "kLms4xxxInitFailed": "LMS4XXX_INIT_FAILED",
+    "kGuardNoDataSuffix": "GUARD_NO_DATA_SUFFIX",
     "kAsterxRunException": "ASTERX_RUN_EXCEPTION",
     "kFx10RunException": "FX10_RUN_EXCEPTION",
     "kGoxRunException": "GOX_RUN_EXCEPTION",
@@ -86,11 +87,12 @@ STATS_CONTRACT = {
         "fps": 24.0,
     },
     "fx10": {
-        "format_file": "fx10_driver/src/fx10_driver_app.cpp",
+        # fx10 renders the line in stats_line.cpp and emits it from the app layer
+        "format_file": "fx10_driver/src/stats_line.cpp",
         "literal": "fps={:.1f}",
         "emit_file": "fx10_driver/src/fx10_driver_app.cpp",
         "sample": "[Statistics] frames=1200  rate=50.0 Hz  fps=49.8  missed_triggers=0  "
-                  "temp=41.2000 °C  disk_free=812.0 GB",
+                  "temp_pcb=41.2  temp_fpga=52.7",
         "instance": None,  # fx10 is single-instance: no [tag] prefix
         "fps": 49.8,
     },
@@ -98,15 +100,17 @@ STATS_CONTRACT = {
         "format_file": "lms4xxx_driver/src/lms4xxx_driver_app.cpp",
         "literal": "fps={:.1f}",
         "emit_file": "lms4xxx_driver/src/lms4xxx_driver_app.cpp",
-        "sample": "[Statistics] [Front_Right_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=ok  frames=6000",
+        "sample": "[Statistics] [Front_Right_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=OK  frames=6000  "
+                  "parsed=6000  drop_ring=0  gaps=0  crc=0  frame_err=0  parse_err=0  written=5980  drop_q=0  "
+                  "files=1  bytes=34.20 MiB  queued=600.0  temp=41.2  unexpected=0",
         "instance": "Front_Right_Laser",
         "fps": 598.0,
     },
 }
 
-# Common::DriverLog g_log{"GoX"} | g_log{std::string(Common::Markers::kModuleFx10)}
+# common::DriverLog g_log{"GoX"} | g_log{std::string(common::Markers::kModuleFx10)}
 GLOG_RE = re.compile(
-    r'Common::DriverLog\s+g_log\s*\{\s*(?:std::string\s*\(\s*)?(?:Common::Markers::)?(k\w+|"[^"]*")'
+    r'common::DriverLog\s+g_log\s*\{\s*(?:std::string\s*\(\s*)?(?:common::Markers::)?(k\w+|"[^"]*")'
 )
 
 
@@ -156,7 +160,7 @@ def check_stats_contract(cpp: dict[str, str]) -> list[str]:
         # The module token routes the line to a sensor in the GUI.
         m = GLOG_RE.search(emit_path.read_text(encoding="utf-8")) if emit_path.is_file() else None
         if m is None:
-            failures.append(f"{spec['emit_file']}: no 'Common::DriverLog g_log{{...}}' declaration found")
+            failures.append(f"{spec['emit_file']}: no 'common::DriverLog g_log{{...}}' declaration found")
         else:
             token = m.group(1)
             module = cpp.get(token) if token.startswith("k") else token.strip('"')

@@ -1,26 +1,4 @@
-/// @file common/ring_buffer.h
-/// @brief Lock-free Single-Producer Single-Consumer (SPSC) ring buffer.
-///
-/// Designed for the callback→writer hot path in sensor drivers (e.g., SICK LiDAR
-/// at 600Hz); no mutex-based queue is needed for SPSC scenarios.
-///
-/// Key design decisions:
-/// - Capacity rounded up to power of 2 for fast modulo via bitmask
-/// - Cache-line-padded head/tail atomics to prevent false sharing
-/// - Monotonically increasing indices (never wrap the atomics themselves)
-/// - Placement new / explicit destructor for proper element lifetime management
-/// - memory_order_acquire/release for minimum necessary synchronization
-///
-/// Usage:
-///   Common::RingBuffer<PointCloudFrame> ring(1024);  // actual capacity = 1024
-///   // Producer thread:
-///   ring.try_push(std::move(frame));   // returns false if full
-///   // Consumer thread:
-///   PointCloudFrame frame;
-///   ring.try_pop(frame);               // returns false if empty
-
-#ifndef COMMON_RING_BUFFER_H
-#define COMMON_RING_BUFFER_H
+#pragma once
 
 #include <atomic>
 #include <cstddef>
@@ -29,7 +7,7 @@
 #include <type_traits>
 
 
-namespace Common {
+namespace common {
     /// Hardware cache line size used for padding to prevent false sharing.
     /// 64 bytes is standard for x86_64 and most ARM; conservative on platforms
     /// with larger lines (128 bytes on Apple M-series) but still correct.
@@ -165,7 +143,4 @@ namespace Common {
         // Consumer writes tail_, producer reads it.
         alignas(kCacheLineSize) std::atomic<std::size_t> tail_{0};
     };
-} // namespace Common
-
-
-#endif // COMMON_RING_BUFFER_H
+} // namespace common

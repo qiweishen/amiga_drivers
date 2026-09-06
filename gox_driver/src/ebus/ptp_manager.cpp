@@ -1,41 +1,34 @@
-#include "ebus/ptp_manager.hpp"
+#include "ebus/ptp_manager.h"
+#include "time_util.h"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <thread>
 
 #include "logger.h"
-#include "../../include/util.hpp"
-#include "ebus/camera_controller.hpp"
-#include "ebus/sdk_error.hpp"
+#include "string_util.h"
+#include "util.h"
+#include "apply_plan.h"
+#include "ebus/camera_controller.h"
 
-namespace jai::ebus {
+namespace gox::ebus {
     namespace {
-        Common::DriverLog g_log{"GoX"};
+        common::DriverLog g_log{"GoX"};
 
         constexpr int64_t kNsPerSecond = 1000000000ll;
-        constexpr int64_t kExpectedTaiUtcOffsetS = 37; // leap seconds as of 2026
+        constexpr uint32_t kStatusPollMs = 500;
 
+        // GO-X feature Names (manual p.128). There is no alternative spelling to
+        // fall back to: this camera family has no SFNC PtpEnable/PtpStatus pair.
+        constexpr const char *kEnableFeature = "GevIEEE1588";
+        constexpr const char *kStatusFeature = "GevIEEE1588Status";
+        constexpr const char *kAccuracyFeature = "GevIEEE1588ClockAccuracy";
 
-        std::string lower(std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-                return static_cast<char>(std::tolower(c));
-            });
-            return s;
-        }
-
-
-        bool iequals(const std::string &a, const std::string &b) {
-            return lower(a) == lower(b);
-        }
-
-
-        bool contains_ci(const std::string &haystack, const std::string &needle) {
-            return lower(haystack).find(lower(needle)) != std::string::npos;
-        }
+        // A bad health reading is re-checked this many times, one second apart,
+        // before the session is failed (mirrors the lms4xxx NTP watchdog).
+        constexpr int kHealthRetries = 3;
+        constexpr int kHealthRetryDelayMs = 1000;
     } // namespace
 
 
@@ -44,325 +37,307 @@ namespace jai::ebus {
     }
 
 
-    bool PtpManager::detect_features() {
-        if (cfg_.feature_set == "explicit") {
-            report_.feature_set = "explicit";
-            report_.enable_feature = cfg_.enable_feature;
-            report_.status_feature = cfg_.status_feature;
-            if (!feature_exists(params_, cfg_.enable_feature) || !feature_exists(params_, cfg_.status_feature)) {
-                g_log.error("[{}] [eBUS] explicit PTP features not found on device: {} / {}", camera_id_,
-                            cfg_.enable_feature,
-                            cfg_.status_feature);
-                return false;
-            }
-            if (feature_exists(params_, "PtpDataSetLatch")) {
-                report_.latch_command = "PtpDataSetLatch";
-            }
-            return true;
+    bool PtpManager::ReadStatus(std::string &out) {
+        if (!ReadEnumFeature(params_, kStatusFeature, out) &&
+            !ReadFeatureAsString(params_, kStatusFeature, out)) {
+            return false;
         }
-
-        const bool allow_gev = cfg_.feature_set == "auto" || cfg_.feature_set == "gev_ieee1588";
-        const bool allow_sfnc = cfg_.feature_set == "auto" || cfg_.feature_set == "sfnc_ptp";
-
-        // 1. GEV 2.0 SFNC pair (most likely on the JAI Go-X series).
-        if (allow_gev && feature_exists(params_, "GevIEEE1588") && feature_exists(params_, "GevIEEE1588Status")) {
-            report_.feature_set = "gev_ieee1588";
-            report_.enable_feature = "GevIEEE1588";
-            report_.status_feature = "GevIEEE1588Status";
-            return true;
-        }
-
-        // 2. SFNC 2.3+ pair (dataset reads need PtpDataSetLatch first).
-        if (allow_sfnc && feature_exists(params_, "PtpEnable") && feature_exists(params_, "PtpStatus")) {
-            report_.feature_set = "sfnc_ptp";
-            report_.enable_feature = "PtpEnable";
-            report_.status_feature = "PtpStatus";
-            if (feature_exists(params_, "PtpDataSetLatch")) {
-                report_.latch_command = "PtpDataSetLatch";
-            }
-            return true;
-        }
-
-        // 3. Fuzzy scan (auto only): a Boolean and an Enum whose names mention
-        // IEEE1588/Ptp; the enum must look like a status node.
-        if (cfg_.feature_set == "auto") {
-            std::string enable_name, status_name;
-            const uint32_t count = params_ != nullptr ? params_->GetCount() : 0;
-            for (uint32_t i = 0; i < count; ++i) {
-                PvGenParameter *p = params_->Get(i);
-                if (p == nullptr) {
-                    continue;
-                }
-                PvString pv_name;
-                p->GetName(pv_name);
-                const std::string name = to_std(pv_name);
-                if (!contains_ci(name, "ieee1588") && !contains_ci(name, "ptp")) {
-                    continue;
-                }
-                PvGenType type = PvGenTypeUndefined;
-                if (!p->GetType(type).IsOK()) {
-                    continue;
-                }
-                if (type == PvGenTypeBoolean && enable_name.empty() && !contains_ci(name, "status")) {
-                    enable_name = name;
-                } else if (type == PvGenTypeEnum && status_name.empty() && contains_ci(name, "status")) {
-                    status_name = name;
-                }
-            }
-            if (!enable_name.empty() && !status_name.empty()) {
-                g_log.warn("[{}] [eBUS] PTP features found by fuzzy scan: enable={} status={}", camera_id_, enable_name,
-                           status_name);
-                report_.feature_set = "fuzzy";
-                report_.enable_feature = enable_name;
-                report_.status_feature = status_name;
-                return true;
-            }
-        }
-        return false;
-    }
-
-
-    bool PtpManager::enable() {
-        report_ = PtpStatusReport{};
-
-        if (!cfg_.enabled) {
-            g_log.info("[{}] [eBUS] PTP disabled by config; device timestamps are free-running", camera_id_);
-            return true;
-        }
-
-        if (!detect_features()) {
-            const std::string msg = "No usable PTP feature pair found (feature_set=" + cfg_.feature_set +
-                                    "); the camera may not support IEEE 1588";
-            if (cfg_.on_timeout == "abort") {
-                g_log.error("[{}] [eBUS] {}", camera_id_, msg);
-                return false;
-            }
-            g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
-            return true;
-        }
-        report_.feature_found = true;
-
-        // Enable: the node is a Boolean on most cameras but an On/Off enum on
-        // some; dispatch on the actual type.
-        PvGenParameter *p = params_->Get(PvString(report_.enable_feature.c_str()));
-        PvGenType type = PvGenTypeUndefined;
-        PvResult r(PvResult::Code::GENERIC_ERROR);
-        if (p != nullptr && p->GetType(type).IsOK()) {
-            if (type == PvGenTypeBoolean) {
-                r = params_->SetBooleanValue(PvString(report_.enable_feature.c_str()), true);
-            } else if (type == PvGenTypeEnum) {
-                r = params_->SetEnumValue(PvString(report_.enable_feature.c_str()), PvString("On"));
-            }
-        }
-        if (!r.IsOK()) {
-            const std::string msg = "Enabling PTP via " + report_.enable_feature + " failed: " + pv_result_to_string(r);
-            if (cfg_.on_timeout == "abort") {
-                g_log.error("[{}] [eBUS] {}", camera_id_, msg);
-                return false;
-            }
-            g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
-            return true;
-        }
-        report_.enabled = true;
-        g_log.info("[{}] [eBUS] PTP enabled via {} (chain {}); Waiting for status \"{}\"", camera_id_,
-                   report_.enable_feature,
-                   report_.feature_set, cfg_.required_status);
+        last_status_ = out;
         return true;
     }
 
 
-    bool PtpManager::read_status(std::string &out) {
-        if (!report_.latch_command.empty()) {
-            execute_command_feature(params_, report_.latch_command);
-        }
-        if (read_enum_feature(params_, report_.status_feature, out)) {
+    bool PtpManager::ReadClockAccuracy(int64_t &out) {
+        if (ReadIntFeature(params_, kAccuracyFeature, out)) {
+            last_accuracy_ = out;
             return true;
         }
-        return read_feature_as_string(params_, report_.status_feature, out);
-    }
-
-
-    void PtpManager::read_dataset_extras() {
-        int64_t off = 0;
-        double off_f = 0;
-        if (read_int_feature(params_, "PtpOffsetFromMaster", off)) {
-            report_.offset_valid = true;
-            report_.offset_from_master_ns = off;
-        } else if (read_float_feature(params_, "PtpOffsetFromMaster", off_f)) {
-            report_.offset_valid = true;
-            report_.offset_from_master_ns = static_cast<int64_t>(off_f);
+        // The node is an enumeration (p.128: 0..20), and GetIntegerValue above
+        // fails on an enum node, so this is the path a real GO-X takes: read the
+        // entry's own value, which is the number the manual prints.
+        if (ReadEnumIntFeature(params_, kAccuracyFeature, out)) {
+            last_accuracy_ = out;
+            return true;
         }
+        // Last resort: the node is exposed as text only. read_enum_feature
+        // returns the entry NAME, so it has to be mapped back (a plain decimal
+        // string is accepted too).
+        std::string text;
+        if (!ReadEnumFeature(params_, kAccuracyFeature, text) &&
+            !ReadFeatureAsString(params_, kAccuracyFeature, text)) {
+            return false;
+        }
+        if (!PtpClockAccuracyFromName(text, out)) {
+            return false;
+        }
+        last_accuracy_ = out;
+        return true;
     }
 
 
-    bool PtpManager::wait_for_sync(StopController *stop) {
-        if (!cfg_.enabled || !report_.enabled) {
+    bool PtpManager::Enable() {
+        feature_found_ = false;
+        enabled_ = false;
+        synchronized_ = false;
+
+        if (!cfg_.enabled) {
+            g_log.Info("[{}] [eBUS] PTP disabled by config; device timestamps are free-running", camera_id_);
+            return true;
+        }
+
+        const auto degrade = [&](const std::string &msg) {
+            if (cfg_.on_timeout == PtpOnTimeout::kAbort) {
+                g_log.Error("[{}] [eBUS] {}", camera_id_, msg);
+                return false;
+            }
+            g_log.Warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
+            return true;
+        };
+
+        if (!FeatureExists(params_, kEnableFeature) || !FeatureExists(params_, kStatusFeature)) {
+            return degrade(std::string("PTP features ") + kEnableFeature + " / " + kStatusFeature +
+                           " not found on the device; this camera does not support IEEE 1588");
+        }
+        feature_found_ = true;
+
+        // GevIEEE1588 is a boolean, "0: False / 1: True", factory FALSE (p.128).
+        // The shared write path dispatches on the node's real type and verifies
+        // the read-back; required=false keeps the on_timeout policy in charge of
+        // what a failure means.
+        FeatureWrite enable_write;
+        enable_write.name = kEnableFeature;
+        enable_write.value = "true";
+        enable_write.value_is_string = false;
+        enable_write.strict = true;
+        if (!apply_genicam_feature(params_, enable_write, "[" + camera_id_ + "] [eBUS] PTP",
+                                   /*required=*/false)) {
+            return degrade(std::string("Enabling PTP via ") + kEnableFeature +
+                           " failed (see the warning above); PTP is not running");
+        }
+        enabled_ = true;
+        g_log.Info("[{}] [eBUS] PTP enabled via {}; Waiting for status \"slave\"", camera_id_, kEnableFeature);
+        return true;
+    }
+
+
+    bool PtpManager::WaitForSync(StopController *stop) {
+        if (!cfg_.enabled || !enabled_) {
             return true; // nothing to wait for (disabled, or already degraded via warn_continue)
         }
-        const uint64_t start_mono = now_monotonic_ns();
+        const uint64_t start_mono = common::TimeUtil::MonotonicNowNs();
         const uint64_t budget_ns = static_cast<uint64_t>(cfg_.sync_timeout_s * 1e9);
-        const bool check_servo = feature_exists(params_, "PtpServoStatus");
+
+        const auto degrade = [&](const std::string &msg) {
+            if (cfg_.on_timeout == PtpOnTimeout::kAbort) {
+                g_log.Error("[{}] [eBUS] {}", camera_id_, msg);
+                return false;
+            }
+            g_log.Warn("[{}] [eBUS] {}; continuing with ptp_synced=false - device_ts_ns degrades to a "
+                       "free-running tick counter", camera_id_, msg);
+            return true;
+        };
 
         while (true) {
-            if (stop != nullptr && stop->stop_requested()) {
-                g_log.warn("[{}] [eBUS] PTP wait interrupted by stop request", camera_id_);
+            if (stop != nullptr && stop->StopRequested()) {
+                g_log.Warn("[{}] [eBUS] PTP wait interrupted by stop request", camera_id_);
                 return false;
             }
 
             std::string status;
-            if (read_status(status)) {
-                report_.status = status;
-                if (iequals(status, "Faulty")) {
-                    const std::string msg =
+            if (ReadStatus(status)) {
+                switch (ClassifyPtpStatus(status)) {
+                    case PtpState::kFaulty:
+                        return degrade(
                             "camera PTP state is *Faulty*: the 1588 stack hit an internal error. This is "
                             "usually caused by incompatible master traffic (one-step Sync where the camera "
                             "expects Sync+FollowUp, or an invalid sourcePortIdentity such as portNumber 0) "
-                            "— fix or remove the offending grandmaster, then toggle GevIEEE1588 off/on "
-                            "(or power-cycle) to reset the state machine";
-                    if (cfg_.on_timeout == "abort") {
-                        g_log.error("[{}] [eBUS] {}", camera_id_, msg);
-                        return false;
-                    }
-                    g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
-                    return true;
-                }
-                if (iequals(status, "Master")) {
-                    const std::string msg =
+                            "- fix or remove the offending grandmaster, then toggle GevIEEE1588 off/on "
+                            "(or power-cycle) to reset the state machine");
+                    case PtpState::kMaster:
+                        return degrade(
                             "camera became PTP *Master*: no grandmaster is winning the BMCA on this "
                             "network. Check that the grandmaster is up, shares the camera's L2 domain, "
                             "and that the switch does not filter PTP multicast (224.0.1.129 / "
-                            "01-1B-19-00-00-00)";
-                    if (cfg_.on_timeout == "abort") {
-                        g_log.error("[{}] [eBUS] {}", camera_id_, msg);
-                        return false;
+                            "01-1B-19-00-00-00)");
+                    case PtpState::kSlave: {
+                        synchronized_ = true;
+                        lock_wait_ms_ = (common::TimeUtil::MonotonicNowNs() - start_mono) / 1000000ull;
+                        int64_t accuracy = 0;
+                        std::string accuracy_text = " clock_accuracy=<not readable>";
+                        if (ReadClockAccuracy(accuracy)) {
+                            accuracy_text = " clock_accuracy=" + std::to_string(accuracy);
+                            if (!PtpClockAccuracyOk(accuracy)) {
+                                accuracy_text += " (outside the driver's acceptance window 0..9)";
+                            }
+                        } else {
+                            accuracy_readable_ = false;
+                        }
+                        g_log.Info("[{}] [eBUS] PTP synchronized: status={} lock_wait={}ms{}", camera_id_,
+                                   last_status_, lock_wait_ms_, accuracy_text);
+                        return true;
                     }
-                    g_log.warn("[{}] [eBUS] {}; Continuing unsynchronized (warn_continue)", camera_id_, msg);
-                    return true;
-                }
-                bool ok = iequals(status, cfg_.required_status);
-                if (ok && check_servo) {
-                    std::string servo;
-                    if (read_enum_feature(params_, "PtpServoStatus", servo) ||
-                        read_feature_as_string(params_, "PtpServoStatus", servo)) {
-                        report_.servo_status = servo;
-                        ok = iequals(servo, "Locked");
-                    }
-                }
-                if (ok) {
-                    report_.lock_wait_ms = (now_monotonic_ns() - start_mono) / 1000000ull;
-                    read_dataset_extras();
-                    std::string grandmaster;
-                    read_feature_as_string(params_, "PtpGrandmasterClockID", grandmaster);
-                    g_log.info("[{}] [eBUS] PTP synchronized: status={}{} lock_wait={}ms{}", camera_id_, report_.status,
-                               check_servo ? (" servo=" + report_.servo_status) : std::string(), report_.lock_wait_ms,
-                               grandmaster.empty() ? std::string() : " grandmaster=" + grandmaster);
-                    return true;
+                    case PtpState::kOther:
+                        break; // still converging
                 }
             }
 
-            const uint64_t elapsed = now_monotonic_ns() - start_mono;
+            const uint64_t elapsed = common::TimeUtil::MonotonicNowNs() - start_mono;
             if (elapsed >= budget_ns) {
                 break;
             }
             const uint64_t remaining_ms = (budget_ns - elapsed) / 1000000ull;
             std::this_thread::sleep_for(
-                std::chrono::milliseconds(
-                    std::min<uint64_t>(cfg_.poll_interval_ms, std::max<uint64_t>(remaining_ms, 1))));
+                std::chrono::milliseconds(std::min<uint64_t>(kStatusPollMs, std::max<uint64_t>(remaining_ms, 1))));
         }
 
-        std::string msg = "PTP did not reach \"" + cfg_.required_status + "\" within " + std::to_string(
-                              cfg_.sync_timeout_s) +
-                          "s (last status \"" + report_.status + "\")";
-        if (iequals(report_.status, "Listening")) {
+        std::string msg = "PTP did not reach \"slave\" within " + std::to_string(cfg_.sync_timeout_s) +
+                          "s (last status \"" + last_status_ + "\")";
+        if (common::StringUtil::EqualsCi(last_status_, "listening")) {
             msg += "; stuck in Listening usually means the grandmaster is unreachable: verify it is "
                     "on the camera's L2 domain and the switch forwards PTP multicast";
         }
-        if (cfg_.on_timeout == "abort") {
-            g_log.error("[{}] [eBUS] {}", camera_id_, msg);
-            return false;
-        }
-        g_log.warn(
-            "[{}] [eBUS] {}; continuing with ptp_synced=false — device_ts_ns degrades to a free-running tick counter",
-            camera_id_,
-            msg);
-        return true;
+        return degrade(msg);
     }
 
-    void PtpManager::cross_check_timestamp() {
-        std::string cmd;
-        if (feature_exists(params_, "TimestampLatch")) {
-            cmd = "TimestampLatch";
-        } else if (feature_exists(params_, "GevTimestampControlLatch")) {
-            cmd = "GevTimestampControlLatch";
-        } else {
-            g_log.debug("[{}] [eBUS] no timestamp latch command; cross-check skipped", camera_id_);
-            return;
+
+    bool PtpManager::CheckHealth(StopController *stop) {
+        if (!cfg_.enabled || !synchronized_) {
+            return true; // nothing to guard
         }
-        std::string value_name;
-        if (feature_exists(params_, "TimestampLatchValue")) {
-            value_name = "TimestampLatchValue";
-        } else if (feature_exists(params_, "GevTimestampValue")) {
-            value_name = "GevTimestampValue";
-        } else {
-            g_log.debug("[{}] [eBUS] no timestamp latch value feature; cross-check skipped", camera_id_);
+
+        std::string status;
+        int64_t accuracy = 0;
+        std::string reason;
+
+        for (int attempt = 0; attempt <= kHealthRetries; ++attempt) {
+            if (attempt > 0) {
+                // A poll can land mid-BMCA; re-check quickly instead of waiting
+                // for the next 5 s tick before ending a recording. The wait is
+                // sliced so a shutdown request is not delayed by it.
+                for (int slept = 0; slept < kHealthRetryDelayMs; slept += 100) {
+                    if (stop != nullptr && stop->StopRequested()) {
+                        return true; // the session is ending; do not fail it here
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            reason.clear();
+
+            if (!ReadStatus(status)) {
+                reason = "GevIEEE1588Status is no longer readable";
+            } else if (ClassifyPtpStatus(status) != PtpState::kSlave) {
+                reason = "PTP status left the \"slave\" state (now \"" + status + "\")";
+            } else if (accuracy_readable_) {
+                if (!ReadClockAccuracy(accuracy)) {
+                    // Some firmware never populates the register; report it once
+                    // and keep guarding the status only.
+                    accuracy_readable_ = false;
+                    g_log.Warn("[{}] [eBUS] {} is not readable; the PTP guard continues on the status alone",
+                               camera_id_, kAccuracyFeature);
+                } else if (!PtpClockAccuracyOk(accuracy)) {
+                    reason = "PTP clock accuracy degraded to " + std::to_string(accuracy) +
+                             " (the driver accepts 0..9, i.e. 1 ms or better; the register itself ranges "
+                             "0..20 with 19 = Unknown, which is also the factory value)";
+                }
+            }
+
+            if (reason.empty()) {
+                if (attempt > 0) {
+                    g_log.Warn("[{}] [eBUS] PTP recovered after {} re-check(s)", camera_id_, attempt);
+                }
+                return true;
+            }
+            g_log.Warn("[{}] [eBUS] PTP health check failed ({}), re-checking [{}/{}]", camera_id_, reason,
+                       attempt + 1, kHealthRetries + 1);
+        }
+
+        g_log.Error("[{}] [eBUS] PTP synchronization lost: {}. Recorded device timestamps are no longer "
+                    "traceable to the grandmaster; stopping to keep the dataset honest",
+                    camera_id_, reason);
+        return false;
+    }
+
+
+    void PtpManager::CrossCheckTimestamp() {
+        if (!FeatureExists(params_, "TimestampLatch") || !FeatureExists(params_, "TimestampLatchValue")) {
+            g_log.Debug("[{}] [eBUS] no timestamp latch feature; cross-check skipped", camera_id_);
             return;
         }
 
         // Bracket the latch with host CLOCK_REALTIME samples; the midpoint is
         // our best estimate of "host time when the camera latched".
-        const uint64_t t0 = now_realtime_ns();
-        if (!execute_command_feature(params_, cmd)) {
-            g_log.warn("[{}] [eBUS] {} failed; timestamp cross-check skipped", camera_id_, cmd);
+        const uint64_t t0 = common::TimeUtil::RealtimeNowNs();
+        if (!ExecuteCommandFeature(params_, "TimestampLatch")) {
+            g_log.Warn("[{}] [eBUS] TimestampLatch failed; timestamp cross-check skipped", camera_id_);
             return;
         }
-        const uint64_t t1 = now_realtime_ns();
-        int64_t ticks = 0;
-        if (!read_int_feature(params_, value_name, ticks)) {
-            g_log.warn("[{}] [eBUS] {} not readable; timestamp cross-check skipped", camera_id_, value_name);
+        const uint64_t t1 = common::TimeUtil::RealtimeNowNs();
+        int64_t device_ns = 0;
+        if (!ReadIntFeature(params_, "TimestampLatchValue", device_ns)) {
+            g_log.Warn("[{}] [eBUS] TimestampLatchValue not readable; timestamp cross-check skipped", camera_id_);
             return;
         }
-        int64_t device_ns = ticks;
-        if (report_.tick_frequency > 0 && report_.tick_frequency != kNsPerSecond) {
-            device_ns =
-                    static_cast<int64_t>(static_cast<long double>(ticks) * 1e9L / static_cast<long double>(report_.
-                                             tick_frequency));
-        }
-        const int64_t midpoint = static_cast<int64_t>(t0 / 2 + t1 / 2);
-        const int64_t raw_offset = midpoint - device_ns; // host(UTC) - device(TAI when synced)
+        // The GO-X tick frequency is fixed at 1 GHz (manual p.121), so ticks are
+        // already nanoseconds.
 
-        // PTP time is TAI: expect host(UTC) - device(TAI) ~= -37 s. Detect 37+-1 s
-        // and remove it before reporting so a healthy setup reads near zero.
+        const int64_t midpoint = static_cast<int64_t>(t0 / 2 + t1 / 2);
+        const int64_t raw_offset = midpoint - device_ns; // host(UTC) - Device(TAI when synced)
+
+        // The manual (p.121) only states that PTP time is a 1 ns count with a
+        // 1970-01-01 origin; whether the grandmaster serves TAI or UTC is not a
+        // camera property. kAssumedTaiUtcOffsetS is this driver's assumption:
+        // when the measured offset lands within 1 s of it, report the corrected
+        // value (a healthy TAI setup then reads near zero) and record both
+        // numbers plus the assumption in device.json.
         int64_t adjusted = raw_offset;
-        report_.tai_offset_detected = false;
-        if (cfg_.expect_tai_offset && std::llabs(raw_offset + kExpectedTaiUtcOffsetS * kNsPerSecond) <= kNsPerSecond) {
-            adjusted = raw_offset + kExpectedTaiUtcOffsetS * kNsPerSecond;
-            report_.tai_offset_detected = true;
+        bool tai_detected = false;
+        if (std::llabs(raw_offset + kAssumedTaiUtcOffsetS * kNsPerSecond) <= kNsPerSecond) {
+            adjusted = raw_offset + kAssumedTaiUtcOffsetS * kNsPerSecond;
+            tai_detected = true;
         }
 
         std::string drift;
         if (have_first_latch_offset_) {
-            drift = " drift_since_start=" + std::to_string(adjusted - first_latch_offset_ns_) + "ns";
+            drift_ns_ = adjusted - first_latch_offset_ns_;
+            drift = " drift_since_start=" + std::to_string(drift_ns_) + "ns";
         } else {
             have_first_latch_offset_ = true;
             first_latch_offset_ns_ = adjusted;
+            drift_ns_ = 0;
         }
-        g_log.info(
-            "[{}] [eBUS] timestamp cross-check: host-device offset {}ns (bracket {}ns{}){} — offset is only authoritative if "
-            "the host clock is PTP/NTP disciplined",
-            camera_id_, adjusted, t1 - t0, report_.tai_offset_detected ? ", TAI-UTC 37s removed" : "", drift);
+        have_offset_ = true;
+        raw_offset_ns_ = raw_offset;
+        adjusted_offset_ns_ = adjusted;
+        tai_detected_ = tai_detected;
+        g_log.Info(
+            "[{}] [eBUS] timestamp cross-check: host-device offset {}ns (bracket {}ns{}){} - offset is only "
+            "authoritative if the host clock is PTP/NTP disciplined",
+            camera_id_, adjusted, t1 - t0, tai_detected ? ", TAI-UTC 37s removed" : "", drift);
     }
 
-    void PtpManager::refresh_offset() {
-        if (!cfg_.enabled || !report_.feature_found) {
+
+    void PtpManager::RefreshOffset() {
+        if (!cfg_.enabled || !feature_found_) {
             return;
         }
-        if (!report_.latch_command.empty()) {
-            execute_command_feature(params_, report_.latch_command);
-        }
-        read_dataset_extras();
-        if (report_.offset_valid) {
-            g_log.info("[{}] [eBUS] PtpOffsetFromMaster={}ns", camera_id_, report_.offset_from_master_ns);
-        }
-        cross_check_timestamp();
+        CrossCheckTimestamp();
     }
-} // namespace jai::ebus
+
+
+    PtpSummary PtpManager::Summary() const {
+        PtpSummary s;
+        s.enabled = cfg_.enabled;
+        s.feature_found = feature_found_;
+        s.written = enabled_;
+        s.synchronized = synchronized_;
+        s.status = last_status_;
+        s.accuracy = last_accuracy_;
+        s.lock_wait_ms = lock_wait_ms_;
+        s.have_offset = have_offset_;
+        s.raw_offset_ns = raw_offset_ns_;
+        s.adjusted_offset_ns = adjusted_offset_ns_;
+        s.drift_ns = drift_ns_;
+        s.tai_detected = tai_detected_;
+        return s;
+    }
+} // namespace gox::ebus

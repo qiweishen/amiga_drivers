@@ -48,7 +48,7 @@ def _session_dirs(output_dir: Path) -> set[str]:
 
 
 def _log_file(session: Path) -> Path:
-    return session / f"log_{session.name}.log"
+    return session / "raw" / f"log_{session.name}.log"
 
 
 async def preflight() -> tuple[list[str], list[str]]:
@@ -71,7 +71,7 @@ async def preflight() -> tuple[list[str], list[str]]:
     if not any(settings["enables"].values()):
         errors.append("No sensor is enabled (every Enable flag is false)")
     if STATE.snapshot_busy and (settings["enables"].get("gox", False) or settings["enables"].get("fx10", False)):
-        errors.append("A camera snapshot is in progress — the GigE control channel is exclusive; wait for it to finish (≤30s)")
+        errors.append("A camera tool (snapshot / Set IP) is in progress — the GigE control channel is exclusive; wait for it to finish (≤45 s)")
     return errors, warnings
 
 
@@ -101,6 +101,7 @@ async def start() -> None:
     STATE.enables_at_start = dict(settings["enables"])
     STATE.pending_config_notice = False
     launch_stderr.clear()
+    TAILER.stop()
     BUFFER.clear()
     MONITOR.reset(settings["enables"], config_store.lms_instance_names())
     STATS.reset()  # MONITOR.reset rebuilt STATE.sensors; drop the stale per-camera map
@@ -136,7 +137,7 @@ async def _watch(proc: asyncio.subprocess.Process, output_dir: Path, known: set[
             launch_stderr.append(line.raw)
             # Once the file log is live the tailer is the primary feed; stderr
             # lines would duplicate it, so only forward them before that.
-            if not session_found.is_set():
+            if not TAILER.ready:
                 BUFFER.append(line)
 
     async def detect_session() -> None:
@@ -180,8 +181,8 @@ async def _watch(proc: asyncio.subprocess.Process, output_dir: Path, known: set[
         STATE.last_error = err.raw if err else "\n".join(list(launch_stderr)[-5:])
 
 
-async def stop(term_timeout: float = 15.0) -> None:
-    """SIGTERM the remote process, escalate to SIGKILL after the timeout."""
+async def stop(term_timeout: float = 60.0) -> None:
+    """Request graceful shutdown; slow disk/SDK drains must not be killed automatically."""
     if STATE.process_state not in (ProcState.RUNNING, ProcState.STARTING):
         return
     STATE.process_state = ProcState.STOPPING
@@ -192,14 +193,13 @@ async def stop(term_timeout: float = 15.0) -> None:
             break
         await asyncio.sleep(0.5)
     else:
-        BUFFER.append(parse_line("graceful stop timed out — sending SIGKILL", fallback_module="gui"))
-        await runtime.pkill(PROCESS_NAME, "KILL")
-        while await runtime.pgrep(PROCESS_NAME):
-            await asyncio.sleep(0.5)
+        STATE.last_error = "Shutdown is still draining or blocked; inspect the driver log before manually forcing termination"
+        BUFFER.append(parse_line(STATE.last_error, fallback_module="gui"))
+        return  # attached watcher / detached poller will still observe eventual completion
     # The attached watcher (if any) records the exit code; for detached runs
     # the exit poller finishes the transition.
-    if not STATE.attached and STATE.process_state is ProcState.STOPPING:
-        STATE.process_state = ProcState.EXITED
+    # Detached runs are finalized by poll_exit after the final log is ingested.
+    # Process disappearance alone says nothing about recording integrity.
 
 
 async def reattach() -> None:

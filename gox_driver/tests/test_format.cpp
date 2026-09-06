@@ -3,9 +3,9 @@
 // header; the tests here pin the actual encoded bytes so any layout or
 // endianness regression fails loudly, independent of the C++ struct rules.
 
-#include "../include/format.hpp"
+#include "../include/format.h"
 
-#include "../include/util.hpp"
+#include "../include/util.h"
 
 #include <doctest/doctest.h>
 
@@ -13,25 +13,25 @@
 #include <cstring>
 #include <string>
 
-using namespace jai::format;
+using namespace gox::format;
 
 TEST_CASE("crc32c: standard vector, empty input and incremental chaining") {
     // RFC 3720 / common CRC-32C (Castagnoli) test vector.
-    CHECK(crc32c("123456789", 9) == 0xE3069283u);
+    CHECK(Crc32c("123456789", 9) == 0xE3069283u);
 
     // Empty input yields 0 with the default seed and preserves any seed
-    // (crc32c(data, 0, seed) == seed), which is what makes chaining work.
-    CHECK(crc32c("", 0) == 0u);
-    CHECK(crc32c("", 0, 0xDEADBEEFu) == 0xDEADBEEFu);
+    // (Crc32c(data, 0, seed) == seed), which is what makes chaining work.
+    CHECK(Crc32c("", 0) == 0u);
+    CHECK(Crc32c("", 0, 0xDEADBEEFu) == 0xDEADBEEFu);
 
     // Chained/seeded computation equals the one-shot result.
-    CHECK(crc32c("6789", 4, crc32c("12345", 5)) == 0xE3069283u);
+    CHECK(Crc32c("6789", 4, Crc32c("12345", 5)) == 0xE3069283u);
 
     // Byte-at-a-time chaining also equals the one-shot result.
     const char *s = "123456789";
     uint32_t crc = 0;
     for (size_t i = 0; i < 9; ++i) {
-        crc = crc32c(s + i, 1, crc);
+        crc = Crc32c(s + i, 1, crc);
     }
     CHECK(crc == 0xE3069283u);
 
@@ -41,8 +41,8 @@ TEST_CASE("crc32c: standard vector, empty input and incremental chaining") {
     for (size_t i = 0; i < sizeof(buf); ++i) {
         buf[i] = static_cast<uint8_t>(i * 7 + 3);
     }
-    const uint32_t whole = crc32c(buf, sizeof(buf));
-    CHECK(crc32c(buf + 13, sizeof(buf) - 13, crc32c(buf, 13)) == whole);
+    const uint32_t whole = Crc32c(buf, sizeof(buf));
+    CHECK(Crc32c(buf + 13, sizeof(buf) - 13, Crc32c(buf, 13)) == whole);
 }
 
 TEST_CASE("format: FrameHeader golden bytes (little-endian layout lock)") {
@@ -62,7 +62,7 @@ TEST_CASE("format: FrameHeader golden bytes (little-endian layout lock)") {
     h.payload_size = 307200; // 640 * 480 Mono8
     h.frame_seq = 41;
     h.payload_crc32c = 0xDEADBEEFu;
-    seal_frame_header(h);
+    SealFrameHeader(h);
 
     uint8_t bytes[sizeof(FrameHeader)];
     std::memcpy(bytes, &h, sizeof(h));
@@ -93,25 +93,25 @@ TEST_CASE("format: FrameHeader golden bytes (little-endian layout lock)") {
             "01000801" "80020000" "e0010000" "04000000" "02000000" "05000000" //
             "00b0040000000000" "2900000000000000" //
             "efbeadde" "00000000" "00000000";
-    CHECK(jai::hex_prefix(bytes, 92) == expected_hex);
+    CHECK(gox::HexPrefix(bytes, 92) == expected_hex);
 
     // The trailing 4 bytes are the CRC-32C over the 92 bytes above; computed
     // here (not hardcoded) so the golden test stays valid if the CRC
     // implementation is swapped for another correct one.
     uint32_t stored_crc = 0;
     std::memcpy(&stored_crc, bytes + 92, 4);
-    CHECK(stored_crc == crc32c(bytes, 92));
-    CHECK(verify_frame_header(h));
+    CHECK(stored_crc == Crc32c(bytes, 92));
+    CHECK(VerifyFrameHeader(h));
 
     // Any corrupted byte must break verification.
     FrameHeader corrupted = h;
     reinterpret_cast<uint8_t *>(&corrupted)[17] ^= 0x01; // inside device_ts_ns
-    CHECK_FALSE(verify_frame_header(corrupted));
+    CHECK_FALSE(VerifyFrameHeader(corrupted));
 
     // Re-sealing after a change makes the header verifiable again.
     corrupted.status_flags |= kFrameFlagResultNotOk;
-    seal_frame_header(corrupted);
-    CHECK(verify_frame_header(corrupted));
+    SealFrameHeader(corrupted);
+    CHECK(VerifyFrameHeader(corrupted));
 }
 
 TEST_CASE("format: FileHeader golden byte spot checks via make_file_header") {
@@ -129,18 +129,18 @@ TEST_CASE("format: FileHeader golden byte spot checks via make_file_header") {
     // Spot checks at the offsets pinned by the header's static_asserts;
     // expected bytes derived by hand from the little-endian encoding.
     CHECK(std::memcmp(bytes, "JAIRAWSG", 8) == 0); // [0]   file_magic
-    CHECK(jai::hex_prefix(bytes + 8, 4) == "00020000"); // [8]   file_header_size = 512
-    CHECK(jai::hex_prefix(bytes + 12, 2) == "0100"); // [12]  version_major = 1
-    CHECK(jai::hex_prefix(bytes + 14, 2) == "0000"); // [14]  version_minor = 0
-    CHECK(jai::hex_prefix(bytes + 16, 4) == "0d0c0b0a"); // [16]  BOM 0x0A0B0C0D
-    CHECK(jai::hex_prefix(bytes + 20, 4) == "07000000"); // [20]  segment_index = 7
-    CHECK(jai::hex_prefix(bytes + 24, 8) == "0807060504030201"); // [24]  created_realtime_ns
+    CHECK(gox::HexPrefix(bytes + 8, 4) == "00020000"); // [8]   file_header_size = 512
+    CHECK(gox::HexPrefix(bytes + 12, 2) == "0100"); // [12]  version_major = 1
+    CHECK(gox::HexPrefix(bytes + 14, 2) == "0000"); // [14]  version_minor = 0
+    CHECK(gox::HexPrefix(bytes + 16, 4) == "0d0c0b0a"); // [16]  BOM 0x0A0B0C0D
+    CHECK(gox::HexPrefix(bytes + 20, 4) == "07000000"); // [20]  segment_index = 7
+    CHECK(gox::HexPrefix(bytes + 24, 8) == "0807060504030201"); // [24]  created_realtime_ns
     CHECK(std::memcmp(bytes + 32, uuid, 16) == 0); // [32]  session_uuid
     CHECK(std::memcmp(bytes + 48, "cam0\0", 5) == 0); // [48]  camera_id, NUL padded
     CHECK(std::memcmp(bytes + 112, "SN-GOX-0042\0", 12) == 0); // [112] camera_serial
-    CHECK(jai::hex_prefix(bytes + 176, 4) == "60000000"); // [176] frame_header_size = 96
-    CHECK(jai::hex_prefix(bytes + 180, 4) == "00100000"); // [180] record_align = 4096
-    CHECK(jai::hex_prefix(bytes + 184, 4) == "02000000"); // [184] segment_flags = PAYLOAD_CRC
+    CHECK(gox::HexPrefix(bytes + 176, 4) == "60000000"); // [176] frame_header_size = 96
+    CHECK(gox::HexPrefix(bytes + 180, 4) == "00100000"); // [180] record_align = 4096
+    CHECK(gox::HexPrefix(bytes + 184, 4) == "02000000"); // [184] segment_flags = PAYLOAD_CRC
 
     // The string tails and the reserved block must be all zero.
     size_t nonzero = 0;
@@ -159,13 +159,13 @@ TEST_CASE("format: FileHeader golden byte spot checks via make_file_header") {
     // [508] header_crc32c over bytes [0, 508); computed, not hardcoded.
     uint32_t stored_crc = 0;
     std::memcpy(&stored_crc, bytes + 508, 4);
-    CHECK(stored_crc == crc32c(bytes, 508));
-    CHECK(verify_file_header(fh));
+    CHECK(stored_crc == Crc32c(bytes, 508));
+    CHECK(VerifyFileHeader(fh));
 
     // A single corrupted byte (even inside reserved space) breaks verification.
     FileHeader corrupted = fh;
     reinterpret_cast<uint8_t *>(&corrupted)[200] ^= 0x40;
-    CHECK_FALSE(verify_file_header(corrupted));
+    CHECK_FALSE(VerifyFileHeader(corrupted));
 }
 
 TEST_CASE("format: make_file_header truncates over-long camera identifiers") {
@@ -180,19 +180,19 @@ TEST_CASE("format: make_file_header truncates over-long camera identifiers") {
     CHECK(std::string(fh.camera_serial) == std::string(63, 'y'));
     CHECK(fh.record_align == 1u);
     CHECK(fh.segment_flags == 0u);
-    CHECK(verify_file_header(fh));
+    CHECK(VerifyFileHeader(fh));
 }
 
 TEST_CASE("format: align_up edge cases") {
-    CHECK(align_up(0, 4096) == 0u);
-    CHECK(align_up(0, 1) == 0u);
-    CHECK(align_up(1, 1) == 1u); // align 1: identity (alignment disabled)
-    CHECK(align_up(12345, 1) == 12345u);
-    CHECK(align_up(7, 0) == 7u); // align 0 is treated as "no alignment"
-    CHECK(align_up(4096, 4096) == 4096u); // exact multiple stays put
-    CHECK(align_up(8192, 4096) == 8192u);
-    CHECK(align_up(4097, 4096) == 8192u); // one past a boundary rounds up
-    CHECK(align_up(4095, 4096) == 4096u); // one before a boundary rounds up
-    CHECK(align_up(96 + 100, 512) == 512u); // typical frame record rounding
-    static_assert(align_up(513, 512) == 1024, "align_up must be usable in constant expressions");
+    CHECK(AlignUp(0, 4096) == 0u);
+    CHECK(AlignUp(0, 1) == 0u);
+    CHECK(AlignUp(1, 1) == 1u); // align 1: Identity (alignment disabled)
+    CHECK(AlignUp(12345, 1) == 12345u);
+    CHECK(AlignUp(7, 0) == 7u); // align 0 is treated as "no alignment"
+    CHECK(AlignUp(4096, 4096) == 4096u); // exact multiple stays put
+    CHECK(AlignUp(8192, 4096) == 8192u);
+    CHECK(AlignUp(4097, 4096) == 8192u); // one past a boundary rounds up
+    CHECK(AlignUp(4095, 4096) == 4096u); // one before a boundary rounds up
+    CHECK(AlignUp(96 + 100, 512) == 512u); // typical frame record rounding
+    static_assert(AlignUp(513, 512) == 1024, "align_up must be usable in constant expressions");
 }

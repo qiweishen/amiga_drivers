@@ -1,12 +1,4 @@
-/// @file bounded_queue.h
-/// @brief Bounded blocking queue with close()-and-drain EOS semantics.
-///
-/// Complements the lock-free SPSC RingBuffer: use RingBuffer on hot paths,
-/// BoundedQueue where the consumer must drain remaining items after close()
-/// (orderly shutdown without losing tail data). Originated in gox_driver.
-
-#ifndef COMMON_BOUNDED_QUEUE_H
-#define COMMON_BOUNDED_QUEUE_H
+#pragma once
 
 #include <chrono>
 #include <condition_variable>
@@ -15,7 +7,7 @@
 #include <mutex>
 
 
-namespace Common {
+namespace common {
     template<typename T>
     class BoundedQueue {
     public:
@@ -62,26 +54,6 @@ namespace Common {
                 not_full_.wait(lock, [&] { return closed_ || items_.size() < capacity_; });
                 if (closed_) {
                     return false;
-                }
-                items_.push_back(std::move(item));
-            }
-            not_empty_.notify_one();
-            return true;
-        }
-
-        // Push that atomically evicts the OLDEST item when full (single lock:
-        // no consumer can interleave). Refuses when closed. `dropped` reports
-        // whether an item was evicted
-        bool push_drop_oldest(T &&item, bool &dropped) {
-            dropped = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (closed_) {
-                    return false;
-                }
-                if (items_.size() >= capacity_) {
-                    items_.pop_front();
-                    dropped = true;
                 }
                 items_.push_back(std::move(item));
             }
@@ -149,6 +121,4 @@ namespace Common {
         std::deque<T> items_;
         bool closed_ = false;
     };
-} // namespace Common
-
-#endif	// COMMON_BOUNDED_QUEUE_H
+} // namespace common

@@ -1,6 +1,6 @@
-#include "chunk_pool.hpp"
+#include "chunk_pool.h"
 
-namespace jai {
+namespace gox {
     ChunkPool::ChunkPool(size_t count, size_t chunk_bytes) : capacity_(count), chunk_bytes_(chunk_bytes) {
         free_list_.reserve(count);
         for (size_t i = 0; i < count; ++i) {
@@ -8,7 +8,7 @@ namespace jai {
         }
     }
 
-    FrameChunkPtr ChunkPool::acquire() {
+    FrameChunkPtr ChunkPool::Acquire() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (free_list_.empty()) {
             return nullptr;
@@ -19,7 +19,7 @@ namespace jai {
         return chunk;
     }
 
-    void ChunkPool::release(FrameChunkPtr chunk) {
+    void ChunkPool::Release(FrameChunkPtr chunk) {
         if (!chunk) {
             return;
         }
@@ -30,8 +30,8 @@ namespace jai {
         // else: excess chunk is destroyed (should not happen in practice)
     }
 
-    size_t ChunkPool::available() const {
+    size_t ChunkPool::Available() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return free_list_.size();
     }
-} // namespace jai
+} // namespace gox

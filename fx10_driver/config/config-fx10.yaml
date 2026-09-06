@@ -2,128 +2,89 @@
 # FX10e Driver Configuration
 # =============================================================
 
-# Specim FX10e hyperspectral camera configuration.
+# Specim FX10e hyperspectral line-scan camera.
 # Referenced by config/config-main.yaml ("FX10 Driver Config Path").
 
 
-# --- General Settings ---
+
+# --- Device ---
 device:
-    id: ""                          # eBUS connection ID / device user ID; wins over mac/ip
-    mac: ""                         # MAC selection (discovery match, survives a bad IP config); wins over ip
-    ip: "10.95.0.100"              # used when id and mac are empty
-    force_ip:                       # FORCEIP rescue for a wrong-subnet camera (temporary, lost on power cycle); requires mac
-        enabled: false
-        ip: ""                      # required when enabled
-        subnet_mask: ""             # required when enabled
-        gateway: "0.0.0.0"
+    mac: ""                             # discovery match; wins over ip
+    ip: "10.95.0.100"                   # direct connect; used when mac is empty
 
 
-# --- Receiver Settings ---
+# --- Acquisition ---
 acquisition:
-    spatial_binning: 1              # [1 | 2 | 4 | 8] -> 1024/512/256/128 pixel width
-    spectral_binning: 1             # [1 | 2 | 4 | 8] -> 448/224/112/56 bands
-    pixel_format: Mono12Packed      # [Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8]
-    exposure_ms: 10.0               # float, ms [10..419000] us / 1000
-    frame_rate_hz: 50.0             # freerun rate; under external trigger = EXPECTED PPS
-    status_line: false              # keep off: if enabled the last line of the ROI is overwritten with camera information
+    spatial_binning: 1                  # 1 | 2 | 4 | 8 -> 1024 | 512 | 256 | 128 samples
+    spectral_binning: 2                 # 1 | 2 | 4 | 8 -> 448 | 224 | 112 | 56 bands; 2 = factory (p.44); mroi needs 1
+    pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
+    exposure_ms: 10.0                   # > 0 (camera range 0.01..419)
+    frame_rate_hz: 50.0                 # > 0; freerun rate, or the expected pulse rate under external trigger
+    status_line: false                  # true replaces the last image row with camera status (p.34)
+    image_enhancement: true             # AIE (p.32); only true is supported (node name unknown, use features.raw)
     trigger:
-        mode: external              # [freerun | external] disable trigger / enable trigger (external = SensorSync pulses on Line0)
-        activation: rising          # [rising | falling] specifies the activation mode of the trigger
-        delay_ms: 0.0               # float, ms [10..419000] / 1000
-        exposure_control: camera    # [camera | pulse_width] preset exposure / exposure = pulse
+        mode: freerun                  # freerun | external
+        activation: rising              # rising | falling
+        delay_ms: 0.0                   # 0..419
+        exposure_control: camera        # camera | pulse_width
         selector_entry: FrameStart
-        source_entry: Line0         # Line0 = ISO_TRIGGER (pin 8)
+        source_entry: Line0             # Line0 = ISO_TRIGGER pin 8
     mroi:
-        enabled: false              # requires spectral_binning: 1; AIE adds 3+3 margin rows/region
-        multiband_string: ""        # e.g. "10 20;100 20;200 20" (start_row height; ...)
+        enabled: false                  # requires 1 x 1 binning (p.9, p.26)
+        multiband_string: ""            # "start_row height;..." e.g. "10 20;100 20"; rows 0..1081, height 1..448, total <= 448
 
 
-# --- Sensor Trigger (Teensy SensorSync-Logger, submodule/sensor_trigger) ---
-# The camera channel's pulse rate is commanded at every session start:
-# external trigger -> acquisition.frame_rate_hz (board minimum 1 Hz),
-# freerun -> channel off. Other Teensy channels keep their config.h rates.
+# --- Sensor Trigger (Teensy SensorSync, submodule/sensor_trigger) ---
 sensor_trigger:
-    enabled: true
-    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16840200-if00"
-    trigger_channel: 0              # Teensy trig[N] wired to the camera trigger input (0 = FX10E)
+    enabled: false
+    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16840200-if00"    # required when enabled
+    trigger_channel: 0                  # >= 0; Teensy trig[N] wired to the camera
 
 
 # =============================================================
-# DO NOT CHANGE
+# ADVANCED: do not change without a reason
 # =============================================================
+# --- Features ---
+# applied last, in order: { name, type: int | float | bool | enum | string | command, value }
 features:
-    # All node names below are VERIFIED by using eBUS Player (eBUS SDK version 6.5.1)
-    map:
-        spectral_binning: BinningVertical
-        spatial_binning: BinningHorizontal
-        pixel_format: PixelFormat
-        exposure_time: ExposureTime
-        frame_rate: AcquisitionFrameRate
-        frame_rate_enable: EnAcquisitionFrameRate
-        status_line: EnStatusLine
-        trigger_selector: TriggerSelector
-        trigger_mode: TriggerMode
-        trigger_activation: TriggerActivation
-        trigger_delay: TriggerDelay
-        trigger_source: TriggerSource
-        mroi_enable: MROI_Enable
-        mroi_index: MROI_Index
-        mroi_y: MROI_Y
-        mroi_h: MROI_H
-        missed_trigger_count: Counter1_Value    # Counter1 EventSource=MissedTrigger,
-        missed_trigger_reset: Counter1_Reset    # auto-reset at AcquisitionStart
-        device_temperature: DeviceTemperature   # selector: ProcPCB | FPGA
-    # Escape hatch: [{name: Node, type: enum, value: Entry}, ...]
-    raw: [
-        {name: OffsetX, type: int, value: 0},
-        {name: OffsetY, type: int, value: 0},
-        {name: LineSource, type: enum, value: ExposureActive},
-    ]
+    raw:
+        -   { name: LineSource, type: enum, value: ExposureActive }
 
 
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Network Transfer Settings ---
+# --- Output (ENVI BIL) ---
+output:
+    rotation:
+        max_lines: 0                    # 0 = no rotation by line count
+        max_mb: 2048                    # 0 = no rotation by size
+    flush_interval_mb: 64               # 0..4096; 0 = fdatasync only at segment boundaries
+    on_gap: pad_zero                    # record | pad_zero; use .lines.csv, never infer trigger identity from line index
+    wavelengths:
+        source: none                    # none = uncalibrated DN, NO wavelength axis; file/list requires calibration below
+        file: ""                        # calibration-pack text file
+        list: []
+        grid: { start_nm: 400.0, end_nm: 1000.0 }   # start_nm < end_nm
+        fwhm_list: []                   # empty = no fwhm in the .hdr
+        # For file/list, add calibration from THIS device's pack (do not guess):
+        # calibration: { reference: PACK_REVISION, device_serial: SERIAL,
+        #                samples: WIDTH, bands: HEIGHT, offset_x: X, offset_y: Y }
+    max_duration_s: 0                   # >= 0; 0 = unlimited
+    max_frames: 0                       # >= 0; 0 = unlimited
+
+
+# --- Network ---
 network:
-    packet_size: 0                  # 0 = negotiate (jumbo if NIC/switch allow; set MTU 9000)
-    socket_rx_buffer_mb: 32         # user-mode socket RX buffer (no kernel filter driver in Docker)
-    buffer_count: auto              # auto (or 0) = ceil(fps * stall_budget_s) + 16; else an integer
-    stall_budget_s: 2.0             # disk-stall absorption target for auto sizing
-    max_buffer_memory_mb: 512
-    retrieve_timeout_ms: 1000
+    packet_size: 0                      # 0 = negotiate (jumbo needs MTU 9000)
+    socket_rx_buffer_mb: 32             # 1..1024
+    buffer_count: auto                  # auto (= 0) | >= 1
+    stall_budget_s: 2.0                 # >= 0
+    max_buffer_memory_mb: 512           # >= 1
+    retrieve_timeout_ms: 1000           # 1..10000
     reconnect:
         enabled: true
-        max_attempts: 5
-        backoff_ms: 2000
+        max_attempts: 5                 # >= 0
+        backoff_ms: 2000                # >= 0
 
 
-# --- Output Settings ---
-output:
-    output_dir: /data/captures      # standalone-era default; the unified runtime overrides
-    base_name: fx10e
-    rotation:
-        max_lines: 100000           # 0 = no rotation by line count
-        max_megabytes: 0            # 0 = no rotation by size
-    on_gap: pad_zero                # record (gaps counted in the log only) | pad_zero (keeps BIL line index aligned with the trigger sequence — required for sensor_trigger timing)
-    wavelengths:
-        source: grid                # file | list | grid
-        file: ""                    # calibration-pack text file (floats, '#' comments)
-        list: [ ]
-        grid: { start_nm: 400.0, end_nm: 1000.0 }
-        fwhm_list: [ ]              # optional; empty = omit fwhm from the .hdr
-
-
-# --- Some guards ---
-disk:
-    min_free_gb: 2                  # hard floor: clean stop + finalize when reached
-    warn_free_gb: 5
-
-watchdog:
-    no_frame_warn_s: 5
-    no_frame_abort_s: -1            # -1 = auto (external trigger: never abort; freerun: 10 s)
-
-
-# --- Statistics Interval Time ---
+# --- Logging ---
 logging:
-    stats_interval_s: 1
+    stats_interval_s: 2.5               # >= 0; 0 = off

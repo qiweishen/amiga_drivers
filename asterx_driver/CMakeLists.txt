@@ -4,15 +4,7 @@
 # spdlog (compiled), yaml-cpp and Threads are provided by amiga_common.
 # Qt5 (Core, Network, SerialPort) is a hard dependency of the vendored
 # Septentrio SsnRx SDK — the devcontainer provides it via qtbase5-dev +
-# libqt5serialport5-dev. GoogleTest is fetched here for unit tests only.
-
-# Build options
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    option(ASTERX_BUILD_TESTS "Build asterx unit tests" ON)
-else ()
-    option(ASTERX_BUILD_TESTS "Build asterx unit tests" OFF)
-endif ()
-
+# libqt5serialport5-dev.
 
 ################################################################################
 # Required System Packages (Threads provided by top-level)
@@ -57,7 +49,7 @@ add_library(asterx_lib STATIC
         src/asterx_driver_app.cpp
         # Q_OBJECT headers live in include/, away from their .cpp files:
         # AUTOMOC only auto-discovers same-directory headers, so list them
-        include/session.hpp
+        include/session.h
 )
 set_target_properties(asterx_lib PROPERTIES
         CXX_EXTENSIONS OFF
@@ -71,7 +63,7 @@ target_include_directories(asterx_lib PUBLIC
 target_link_libraries(asterx_lib PUBLIC
         # Septentrio SDK (provides Qt5::Network/SerialPort transitively)
         ssnrx
-        # session.hpp exposes QObject/QTimer in its public interface
+        # session.h exposes QObject/QTimer in its public interface
         Qt5::Core
         # Shared common library provides spdlog, yaml-cpp, Threads
         amiga_common
@@ -79,18 +71,8 @@ target_link_libraries(asterx_lib PUBLIC
 
 
 ################################################################################
-# Tests (GoogleTest via FetchContent, hermetic;
-# enable_testing() is called at the top level)
-if (ASTERX_BUILD_TESTS)
-    include(FetchContent)
-    FetchContent_Declare(
-            googletest
-            GIT_REPOSITORY https://github.com/google/googletest.git
-            GIT_TAG v1.14.0
-            GIT_SHALLOW TRUE
-    )
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+# Tests (doctest; enable_testing() is called at the top level)
+if (AMIGA_BUILD_TESTS)
     add_subdirectory(tests)
 endif ()
 
@@ -103,6 +85,6 @@ message(STATUS "   AsteRx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Qt5:              ${Qt5_VERSION} (${Qt5_DIR})")
-message(STATUS "  Build Tests:      ${ASTERX_BUILD_TESTS}")
+message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

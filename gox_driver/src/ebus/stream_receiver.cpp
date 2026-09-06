@@ -1,4 +1,6 @@
-#include "ebus/stream_receiver.hpp"
+#include "ebus/stream_receiver.h"
+#include "utility.h"
+#include "time_util.h"
 
 #include <PvImage.h>
 #include <algorithm>
@@ -7,14 +9,15 @@
 #include <cstring>
 #include <fstream>
 
-#include "../../include/format.hpp"
+#include "buffering.h"
+#include "format.h"
 #include "logger.h"
-#include "../../include/util.hpp"
-#include "ebus/sdk_error.hpp"
+#include "util.h"
+#include "ebus/sdk_error.h"
 
-namespace jai::ebus {
+namespace gox::ebus {
     namespace {
-        Common::DriverLog g_log{"GoX"};
+        common::DriverLog g_log{"GoX"};
 
         constexpr uint32_t kRetrieveTimeoutMs = 1000;
         constexpr uint32_t kDrainTimeoutMs = 500;
@@ -25,10 +28,9 @@ namespace jai::ebus {
         constexpr uint32_t kFallbackPacketSize = 1476; // safe on any 1500-MTU path
     } // namespace
 
-    StreamReceiver::StreamReceiver(uint32_t camera_index, const CameraConfig &cfg, const OutputConfig &output,
+    StreamReceiver::StreamReceiver(const CameraConfig &cfg, const OutputConfig &output,
                                    CameraController *controller, StopController *stop,
-                                   CameraStats *stats) : camera_index_(camera_index),
-                                                         camera_id_(cfg.id),
+                                   CameraStats *stats) : camera_id_(cfg.id),
                                                          cfg_(cfg),
                                                          output_(output),
                                                          controller_(controller),
@@ -38,114 +40,131 @@ namespace jai::ebus {
 
     StreamReceiver::~StreamReceiver() {
         try {
-            teardown();
+            Teardown();
         } catch (const std::exception &e) {
-            g_log.warn("[{}] [eBUS] stream teardown in destructor failed: {}", camera_id_, e.what());
+            g_log.Warn("[{}] [eBUS] stream teardown in destructor failed: {}", camera_id_, e.what());
         }
     }
 
-    void StreamReceiver::open() {
+    void StreamReceiver::Open() {
         const NetworkConfig &sc = cfg_.network;
         stream_ = std::make_unique<PvStreamGEV>();
 
-        // 1. Socket receive buffer — must be set before Open() (eBUS 6.5+
-        // returns NETWORK_CONFIG_ERROR afterwards). The kernel silently clamps
-        // the request to net.core.rmem_max; verified by read-back below.
+        // eBUS 6.5.1 PvStreamGEV.h: set before Open(). On Linux, a request
+        // above rmem_max uses that limit and returns INVALID_PARAMETER. The
+        // post-Open readback may include doubled kernel bookkeeping space;
+        // it is not directly comparable to the requested payload capacity.
         rx_buffer_requested_ = sc.socket_rx_buffer_mb * 1024u * 1024u;
+        rx_buffer_effective_ = 0;
+        rx_buffer_read_result_ = "NOT_QUERIED";
         PvResult r = stream_->SetUserModeSocketRxBufferSize(rx_buffer_requested_);
-        if (!r.IsOK()) {
-            g_log.warn("[{}] [eBUS] SetUserModeSocketRxBufferSize({}) failed: {}", camera_id_, rx_buffer_requested_,
-                       pv_result_to_string(r));
+        rx_buffer_set_result_ = ToStd(r.GetCodeString());
+        if (r.GetCode() == PvResult::Code::INVALID_PARAMETER) {
+            g_log.Warn("[{}] [eBUS] SetUserModeSocketRxBufferSize({} bytes): {}. On Linux, eBUS 6.5.1 "
+                       "uses net.core.rmem_max and returns INVALID_PARAMETER when the request exceeds that limit; "
+                       "check sysctl net.core.rmem_max in the acquisition environment. Reading back after Open",
+                       camera_id_, rx_buffer_requested_, PvResultToString(r));
+        } else if (!r.IsOK()) {
+            g_log.Warn("[{}] [eBUS] SetUserModeSocketRxBufferSize({} bytes) failed: {}; "
+                       "requested capacity is not confirmed", camera_id_, rx_buffer_requested_,
+                       PvResultToString(r));
         }
 
         // 2. Open. Port 0 = auto; local_ip pins the stream to one NIC.
-        const std::string &device_ip = controller_->identity().ip;
-        CHECK_PV(
-            stream_->Open(PvString(device_ip.c_str()), 0, static_cast<uint16_t>(sc.channel), PvString(sc.local_ip.c_str(
-            ))),
-            "PvStreamGEV::Open(" + device_ip + ")");
-        local_ip_ = to_std(stream_->GetLocalIPAddress());
+        const std::string &device_ip = controller_->Identity().ip;
+        // Channel 0: DeviceStreamChannelCount is 1 (Fixed) on the GO-X (manual p.125)
+        CHECK_PV(stream_->Open(PvString(device_ip.c_str()), 0, 0, PvString(sc.local_ip.c_str())),
+                 "PvStreamGEV::Open(" + device_ip + ")");
+        local_ip_ = ToStd(stream_->GetLocalIPAddress());
         local_port_ = stream_->GetLocalPort();
 
         uint32_t effective_rx = 0;
-        if (stream_->GetUserModeSocketRxBufferSize(effective_rx).IsOK()) {
+        const PvResult rx_read = stream_->GetUserModeSocketRxBufferSize(effective_rx);
+        rx_buffer_read_result_ = ToStd(rx_read.GetCodeString());
+        if (rx_read.IsOK()) {
             rx_buffer_effective_ = effective_rx;
-        }
-        if (rx_buffer_effective_ != 0 && rx_buffer_effective_ < rx_buffer_requested_) {
-            g_log.warn(
-                "[{}] [eBUS] socket rx buffer truncated by the kernel: requested {}, effective {}; fix on the host: sysctl -w "
-                "net.core.rmem_max={}",
-                camera_id_, human_bytes(rx_buffer_requested_), human_bytes(rx_buffer_effective_), rx_buffer_requested_);
+            g_log.Info("[{}] [eBUS] socket rx buffer: requested={} bytes, SDK SO_RCVBUF readback={} bytes, "
+                       "set_result={}; Linux readback may include doubled bookkeeping allocation",
+                       camera_id_, rx_buffer_requested_, rx_buffer_effective_, rx_buffer_set_result_);
+            if (rx_buffer_effective_ < rx_buffer_requested_) {
+                g_log.Warn("[{}] [eBUS] socket rx readback is below the requested size; "
+                           "receive buffering is smaller than configured", camera_id_);
+            }
+        } else if (rx_read.GetCode() == PvResult::Code::NOT_SUPPORTED) {
+            g_log.Info("[{}] [eBUS] socket rx readback: {}; this API only supports the user-mode receiver, "
+                       "socket capacity is unavailable", camera_id_, PvResultToString(rx_read));
+        } else {
+            g_log.Warn("[{}] [eBUS] GetUserModeSocketRxBufferSize failed: {}; socket capacity is unknown",
+                       camera_id_, PvResultToString(rx_read));
         }
 
         // 3. Packet size (device-side GevSCPSPacketSize, TLParamsLocked-guarded:
         // must happen before StreamEnable).
-        PvDeviceGEV *dev = controller_->device();
+        PvDeviceGEV *dev = controller_->Device();
         if (sc.packet_size == 0) {
-            r = dev->NegotiatePacketSize(sc.channel);
+            r = dev->NegotiatePacketSize(0);
             if (!r.IsOK()) {
-                g_log.warn("[{}] [eBUS] NegotiatePacketSize failed ({}); falling back to SetPacketSize({})", camera_id_,
-                           pv_result_to_string(r),
+                g_log.Warn("[{}] [eBUS] NegotiatePacketSize failed ({}); falling back to SetPacketSize({})", camera_id_,
+                           PvResultToString(r),
                            kFallbackPacketSize);
-                CHECK_PV(dev->SetPacketSize(kFallbackPacketSize, sc.channel), "PvDeviceGEV::SetPacketSize(fallback)");
+                CHECK_PV(dev->SetPacketSize(kFallbackPacketSize, 0), "PvDeviceGEV::SetPacketSize(fallback)");
             }
         } else {
-            r = dev->SetPacketSize(sc.packet_size, sc.channel);
+            r = dev->SetPacketSize(sc.packet_size, 0);
             if (!r.IsOK()) {
-                g_log.warn("[{}] [eBUS] SetPacketSize({}) failed ({}); trying negotiation", camera_id_, sc.packet_size,
-                           pv_result_to_string(r));
-                r = dev->NegotiatePacketSize(sc.channel);
+                g_log.Warn("[{}] [eBUS] SetPacketSize({}) failed ({}); trying negotiation", camera_id_, sc.packet_size,
+                           PvResultToString(r));
+                r = dev->NegotiatePacketSize(0);
                 if (!r.IsOK()) {
-                    CHECK_PV(dev->SetPacketSize(kFallbackPacketSize, sc.channel),
-                             "PvDeviceGEV::SetPacketSize(fallback)");
+                    CHECK_PV(dev->SetPacketSize(kFallbackPacketSize, 0), "PvDeviceGEV::SetPacketSize(fallback)");
                 }
             }
         }
         int64_t effective_ps = 0;
-        if (read_int_feature(controller_->params(), "GevSCPSPacketSize", effective_ps)) {
+        if (ReadIntFeature(controller_->Params(), "GevSCPSPacketSize", effective_ps)) {
             packet_size_ = static_cast<uint32_t>(effective_ps);
         }
-        g_log.info("[{}] [eBUS] stream open: device {} -> {}:{} channel {}, packet size {}", camera_id_, device_ip,
-                   local_ip_,
-                   local_port_,
-                   sc.channel, packet_size_);
+        g_log.Info("[{}] [eBUS] stream open: device {} -> {}:{}, packet size {}", camera_id_, device_ip,
+                   local_ip_, local_port_, packet_size_);
 
         // 4. Point the device's stream channel at our receiver.
-        CHECK_PV(dev->SetStreamDestination(stream_->GetLocalIPAddress(), stream_->GetLocalPort(), sc.channel),
+        CHECK_PV(dev->SetStreamDestination(stream_->GetLocalIPAddress(), stream_->GetLocalPort(), 0),
                  "PvDeviceGEV::SetStreamDestination");
 
-        // 5. Optional inter-packet delay (bandwidth partitioning across cameras).
-        if (sc.gev_scpd_ticks > 0) {
-            RawFeature f;
-            f.name = "GevSCPD";
-            f.value = std::to_string(sc.gev_scpd_ticks);
-            apply_genicam_feature(controller_->params(), f, "[" + camera_id_ + "] device", /*required=*/false);
-        }
-
-        // 6. Receiver-side tuning escape hatch (PvStream GenICam parameters).
-        for (const RawFeature &f: sc.receiver_tuning) {
+        // 5. Receiver-side tuning escape hatch (PvStream GenICam parameters).
+        // Device-side features are NOT written here: their legal ranges depend on
+        // PixelFormat/ROI/GevGVSPExtendedIDMode, which apply_config writes next
+        // (manual p.130), so every device write lives in the apply plan.
+        for (const RawFeature &raw: sc.receiver_tuning) {
+            FeatureWrite f;
+            f.name = raw.name;
+            f.value = raw.value;
+            f.value_is_string = raw.value_is_string;
+            f.strict = false; // escape hatch: the camera's clamping is its business
             apply_genicam_feature(stream_->GetParameters(), f, "[" + camera_id_ + "] stream");
         }
     }
 
-    void StreamReceiver::allocate_buffers() {
+    void StreamReceiver::AllocateBuffers() {
         if (!stream_ || !stream_->IsOpen()) {
             throw SdkError("allocate_buffers: stream not open");
         }
-        expected_payload_size_ = controller_->payload_size();
+        expected_payload_size_ = controller_->PayloadSize();
         if (expected_payload_size_ == 0) {
             throw SdkError("device reports zero payload size");
         }
 
+        // GetQueuedBufferMaximum() is the SDK's own ceiling: queueing past it
+        // fails with an opaque error, so the auto rule clamps to it.
+        const uint32_t queued_max = stream_->GetQueuedBufferMaximum();
         uint32_t count = cfg_.network.buffer_count;
         if (count == 0) {
-            // Auto: absorb ~0.5 s at the configured frame rate, plus headroom.
-            if (cfg_.acquisition.frame_rate_hz && *cfg_.acquisition.frame_rate_hz > 0) {
-                const double n = std::ceil(*cfg_.acquisition.frame_rate_hz * 0.5) + 8.0;
-                count = static_cast<uint32_t>(std::clamp(n, 16.0, 256.0));
-            } else {
-                count = 32;
-            }
+            count = AutoBufferCount(cfg_.acquisition.frame_rate_hz ? *cfg_.acquisition.frame_rate_hz : 0.0,
+                                      queued_max);
+        } else if (queued_max != 0 && count > queued_max) {
+            g_log.Warn("[{}] [eBUS] network.buffer_count {} exceeds the stream's maximum of {}; using {}",
+                       camera_id_, count, queued_max, queued_max);
+            count = queued_max;
         }
 
         buffers_.reserve(count);
@@ -163,53 +182,53 @@ namespace jai::ebus {
                 throw SdkError("PvStreamGEV::QueueBuffer", qr);
             }
         }
-        g_log.info("[{}] [eBUS] {} GVSP buffers of {} queued ({} total)", camera_id_, count,
-                   human_bytes(expected_payload_size_),
-                   human_bytes(count * expected_payload_size_));
+        g_log.Info("[{}] [eBUS] {} GVSP buffers of {} queued ({} total)", camera_id_, count,
+                   common::HumanBytes(expected_payload_size_),
+                   common::HumanBytes(count * expected_payload_size_));
     }
 
     bool StreamReceiver::process_buffer(PvBuffer *buffer, const PvResult &op_result, ChunkPool &pool,
-                                        BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames) {
+                                        common::BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames) {
         // Clocks sampled immediately: these bracket the retrieve instant.
-        const uint64_t host_rt = now_realtime_ns();
-        const uint64_t host_mono = now_monotonic_ns();
+        const uint64_t host_rt = common::TimeUtil::RealtimeNowNs();
+        const uint64_t host_mono = common::TimeUtil::MonotonicNowNs();
 
         const uint32_t code = op_result.GetCode();
         if (code == PvResult::Code::ABORTED) {
-            // Stop flow in progress; teardown() collects the remaining buffers.
+            // Stop flow in progress; Teardown() collects the remaining buffers.
             return false;
         }
         if (code == PvResult::Code::BUFFER_TOO_SMALL) {
-            g_log.error("[{}] [eBUS] buffer too small for the incoming payload — the device "
+            g_log.Error("[{}] [eBUS] buffer too small for the incoming payload — the device "
                         "payload size changed after buffer allocation; fatal",
                         camera_id_);
-            stream_->QueueBuffer(buffer);
-            stop_->request_stop(StopReason::Error);
+            Requeue(buffer);
+            stop_->RequestStop(StopReason::kError);
             return false;
         }
 
+        // BlockID gap detection - the authoritative network-loss counter. It runs
+        // before any early return: skipping one arrived ID would fabricate a gap
+        // on the next frame and double-count it in the emitted-frame rate.
+        const uint64_t block_id = buffer->GetBlockID();
+        const BlockIdGap gap = block_id_.Observe(block_id);
         uint32_t flags = 0;
+        if (gap.gap) {
+            stats_->blockid_gap_events.fetch_add(1, std::memory_order_relaxed);
+            stats_->frames_lost_gap.fetch_add(gap.missing, std::memory_order_relaxed);
+            flags |= format::kFrameFlagBlockIdGap;
+        }
+
         if (!op_result.IsOK()) {
             // Degraded frame: TOO_MANY_RESENDS / RESENDS_FAILURE / IMAGE_ERROR
             // and friends. GetAcquiredSize() bytes are still valid.
-            if (output_.on_buffer_error == "drop") {
+            if (output_.on_buffer_error == OnBufferError::kDrop) {
                 stats_->frames_error_dropped.fetch_add(1, std::memory_order_relaxed);
-                stream_->QueueBuffer(buffer);
+                Requeue(buffer);
                 return true;
             }
             flags |= format::kFrameFlagIncomplete | format::kFrameFlagResultNotOk;
         }
-
-        // BlockID gap detection — the authoritative network-loss counter.
-        const uint64_t block_id = buffer->GetBlockID();
-        if (have_last_bid_ && block_id > last_bid_ + 1) {
-            const uint64_t missing = block_id - last_bid_ - 1;
-            stats_->blockid_gap_events.fetch_add(1, std::memory_order_relaxed);
-            stats_->frames_lost_gap.fetch_add(missing, std::memory_order_relaxed);
-            flags |= format::kFrameFlagBlockIdGap;
-        }
-        have_last_bid_ = true;
-        last_bid_ = block_id;
 
         // Device timestamp plausibility (recorded verbatim either way).
         const uint64_t device_ts = buffer->GetTimestamp();
@@ -222,33 +241,54 @@ namespace jai::ebus {
         }
 
         if (max_frames > 0 && recorded_ok_ >= max_frames) {
-            stream_->QueueBuffer(buffer); // limit already reached (drain path)
+            Requeue(buffer); // limit already reached (drain path)
             return true;
         }
 
         const uint64_t acquired = buffer->GetAcquiredSize();
         const uint8_t *src = buffer->GetDataPointer();
+        if (acquired != 0 && src == nullptr) {
+            stats_->frames_error_dropped.fetch_add(1, std::memory_order_relaxed);
+            g_log.Error("[{}] [eBUS] non-empty buffer has no payload pointer; stopping", camera_id_);
+            Requeue(buffer);
+            stop_->RequestStop(StopReason::kError);
+            return false;
+        }
 
-        FrameChunkPtr chunk = pool.acquire();
+        FrameChunkPtr chunk = pool.Acquire();
         if (!chunk) {
             // Writer is behind and the pool is empty: drop_newest semantics keep
             // the PvBuffer flowing back so the NIC never drops whole blocks.
             stats_->frames_dropped_queue.fetch_add(1, std::memory_order_relaxed);
-            stream_->QueueBuffer(buffer);
+            Requeue(buffer);
             return true;
         }
 
-        const size_t copy_n = static_cast<size_t>(std::min<uint64_t>(acquired, chunk->capacity));
+        if (acquired > chunk->capacity) {
+            // The device payload grew past the pool's chunk size: a truncated record is worthless
+            if (!oversize_warned_) {
+                oversize_warned_ = true;
+                g_log.Error("[{}] [eBUS] frame of {} bytes exceeds the chunk capacity {} — dropped (and every "
+                            "later one like it)", camera_id_, acquired, chunk->capacity);
+            }
+            stats_->frames_error_dropped.fetch_add(1, std::memory_order_relaxed);
+            pool.Release(std::move(chunk));
+            Requeue(buffer);
+            return true;
+        }
+        const size_t copy_n = static_cast<size_t>(acquired);
         if (src != nullptr && copy_n > 0) {
             std::memcpy(chunk->data.get(), src, copy_n);
         }
 
         FrameMeta meta;
-        meta.camera_index = camera_index_;
         meta.block_id = block_id;
         meta.device_ts_ns = device_ts;
         meta.host_realtime_ns = host_rt;
         meta.host_monotonic_ns = host_mono;
+        meta.payload_type = static_cast<uint32_t>(buffer->GetPayloadType());
+        meta.chunk_count = buffer->GetChunkCount();
+        meta.operation_result = code;
         if (buffer->GetPayloadType() == PvPayloadTypeImage) {
             PvImage *image = buffer->GetImage();
             if (image != nullptr) {
@@ -257,25 +297,27 @@ namespace jai::ebus {
                 meta.height = image->GetHeight();
                 meta.offset_x = image->GetOffsetX();
                 meta.offset_y = image->GetOffsetY();
+                meta.padding_x = image->GetPaddingX();
+                meta.padding_y = image->GetPaddingY();
             }
         }
         meta.status_flags = flags;
         meta.payload_size = copy_n;
-        meta.expected_size = expected_payload_size_;
         chunk->meta = meta;
 
         // Return the PvBuffer to the SDK before touching the (possibly blocking)
         // queue — the SDK pool must never wait on downstream I/O.
-        stream_->QueueBuffer(buffer);
+        Requeue(buffer);
 
-        const bool block_policy = output_.queue_on_full == "block";
+        const bool block_policy = output_.queue_on_full == QueueOnFull::kBlock;
         bool pushed;
         if (block_policy) {
             // Bounded waits instead of push_blocking(): a stop request (or a
             // writer wedged on a hung filesystem) must never deadlock the
             // acquisition thread. A failed push_wait_for leaves `chunk` intact.
             pushed = queue.push_wait_for(std::move(chunk), std::chrono::milliseconds(100));
-            while (!pushed && !stop_->stop_requested() && !local_stop_.load(std::memory_order_relaxed)) {
+            while (!pushed && !queue.closed() && !stop_->StopRequested() &&
+                   !local_stop_.load(std::memory_order_relaxed)) {
                 pushed = queue.push_wait_for(std::move(chunk), std::chrono::milliseconds(100));
             }
         } else {
@@ -283,7 +325,7 @@ namespace jai::ebus {
         }
         if (!pushed) {
             if (chunk) {
-                pool.release(std::move(chunk));
+                pool.Release(std::move(chunk));
             }
             stats_->frames_dropped_queue.fetch_add(1, std::memory_order_relaxed);
             return true;
@@ -295,18 +337,18 @@ namespace jai::ebus {
             stats_->frames_retrieved_ok.fetch_add(1, std::memory_order_relaxed);
             ++recorded_ok_;
             if (max_frames > 0 && recorded_ok_ >= max_frames) {
-                g_log.info("[{}] [eBUS] max_frames ({}) reached", camera_id_, max_frames);
-                stop_->request_stop(StopReason::LimitReached);
+                g_log.Info("[{}] [eBUS] max_frames ({}) reached", camera_id_, max_frames);
+                stop_->RequestStop(StopReason::kLimitReached);
             }
         }
         stats_->queue_depth.store(queue.size(), std::memory_order_relaxed);
 
         // Early warning when the SDK pool is running dry (writer falling behind).
         if (buffers_.size() >= 4 && stream_->GetQueuedBufferCount() < buffers_.size() / 4) {
-            const uint64_t now = now_monotonic_ns();
+            const uint64_t now = common::TimeUtil::MonotonicNowNs();
             if (now - last_behind_warn_mono_ns_ > 5000000000ull) {
                 last_behind_warn_mono_ns_ = now;
-                g_log.warn("[{}] [eBUS] writer falling behind: only {}/{} GVSP buffers queued", camera_id_,
+                g_log.Warn("[{}] [eBUS] writer falling behind: only {}/{} GVSP buffers queued", camera_id_,
                            stream_->GetQueuedBufferCount(),
                            buffers_.size());
             }
@@ -314,50 +356,34 @@ namespace jai::ebus {
         return true;
     }
 
-    void StreamReceiver::run_acquisition(ChunkPool &pool, BoundedQueue<FrameChunkPtr> &queue, uint64_t max_frames,
-                                         const WatchdogConfig &watchdog, double no_frame_abort_s) {
+    void StreamReceiver::RunAcquisition(ChunkPool &pool, common::BoundedQueue<FrameChunkPtr> &queue,
+                                         uint64_t max_frames) {
         stats_->queue_capacity.store(queue.capacity(), std::memory_order_relaxed);
 
-        // fx10 watchdog: genuine retrieve timeouts are the "idle" state
-        // (expected under external trigger when pulses pause); track the
-        // silence and warn/abort on the configured thresholds.
-        using clock = std::chrono::steady_clock;
-        const auto warn_interval = std::chrono::duration_cast<clock::duration>(
-            std::chrono::duration<double>(watchdog.no_frame_warn_s));
-        auto last_frame = clock::now();
-        auto next_warn = last_frame + warn_interval;
+        // Liveness for Main's no-data watchdog. Genuine retrieve timeouts are
+        // the "idle" state (expected under an external trigger when the pulses
+        // pause), so this loop only reports how long the silence has lasted; how
+        // long it MAY last is one rig-wide policy, decided by Main.
+        stats_->data_reference_mono_ns.store(common::TimeUtil::MonotonicNowNs(), std::memory_order_release);
 
-        while (!stop_->stop_requested() && !local_stop_.load(std::memory_order_relaxed)) {
+        while (!stop_->StopRequested() && !local_stop_.load(std::memory_order_relaxed)) {
             PvBuffer *buffer = nullptr;
             PvResult op_result;
             const PvResult r = stream_->RetrieveBuffer(&buffer, &op_result, kRetrieveTimeoutMs);
             if (!r.IsOK()) {
                 if (r.GetCode() == PvResult::Code::TIMEOUT) {
-                    stats_->retrieve_timeouts.fetch_add(1, std::memory_order_relaxed);
-                    const double quiet = std::chrono::duration<double>(clock::now() - last_frame).count();
-                    if (no_frame_abort_s > 0.0 && quiet > no_frame_abort_s) {
-                        g_log.error("[{}] [eBUS] Watchdog: no frames for {:.1f} s; stopping", camera_id_, quiet);
-                        stop_->request_stop(StopReason::Error);
-                        break;
-                    }
-                    if (watchdog.no_frame_warn_s > 0.0 && clock::now() >= next_warn) {
-                        g_log.warn(
-                            "[{}] [eBUS] No frames for {:.1f} s (external trigger idle, pulses stopped, or stream problem)",
-                            camera_id_, quiet);
-                        next_warn = clock::now() + std::chrono::duration_cast<clock::duration>(
-                                        std::chrono::duration<double>(std::max(watchdog.no_frame_warn_s, quiet)));
-                    }
-                    continue;
+                    continue; // idle, not an error; how long it may last is Main's call
                 }
                 if (r.GetCode() == PvResult::Code::ABORTED) {
                     break; // stop flow
                 }
-                g_log.error("[{}] [eBUS] RetrieveBuffer failed: {}", camera_id_, pv_result_to_string(r));
-                stop_->request_stop(StopReason::Error);
+                g_log.Error("[{}] [eBUS] RetrieveBuffer failed: {}", camera_id_, PvResultToString(r));
+                stop_->RequestStop(StopReason::kError);
                 break;
             }
-            last_frame = clock::now();
-            next_warn = last_frame + warn_interval;
+            // Before process_buffer: this is the transport's liveness, not the
+            // writer's — a stalled queue must not read as a dead camera.
+            stats_->data_reference_mono_ns.store(common::TimeUtil::MonotonicNowNs(), std::memory_order_release);
             if (!process_buffer(buffer, op_result, pool, queue, max_frames)) {
                 break;
             }
@@ -367,10 +393,10 @@ namespace jai::ebus {
         // AcquisitionStop taking effect are still recorded. Wall-clock bounded:
         // if the camera is somehow still streaming (AcquisitionStop failed),
         // shutdown must not hang here.
-        const uint64_t drain_deadline = now_monotonic_ns() + kDrainMaxTotalNs;
+        const uint64_t drain_deadline = common::TimeUtil::MonotonicNowNs() + kDrainMaxTotalNs;
         while (true) {
-            if (now_monotonic_ns() >= drain_deadline) {
-                g_log.warn("[{}] [eBUS] drain budget exhausted while frames were still arriving; "
+            if (common::TimeUtil::MonotonicNowNs() >= drain_deadline) {
+                g_log.Warn("[{}] [eBUS] drain budget exhausted while frames were still arriving; "
                            "did AcquisitionStop reach the device?",
                            camera_id_);
                 break;
@@ -386,9 +412,12 @@ namespace jai::ebus {
             }
         }
         stats_->queue_depth.store(queue.size(), std::memory_order_relaxed);
+        // Disarm Main's watchdog: this camera is done acquiring, so its silence
+        // from here on is expected.
+        stats_->data_reference_mono_ns.store(0, std::memory_order_release);
     }
 
-    void StreamReceiver::teardown() {
+    void StreamReceiver::Teardown() {
         if (torn_down_ || !stream_) {
             torn_down_ = true;
             return;
@@ -397,7 +426,7 @@ namespace jai::ebus {
 
         // AcquisitionStop was already issued by the session; now release
         // TLParamsLocked and collect every in-flight buffer before Close().
-        controller_->stream_disable(/*ignore_errors=*/true);
+        controller_->StreamDisable(/*ignore_errors=*/true);
         if (stream_->IsOpen()) {
             stream_->AbortQueuedBuffers();
             while (stream_->GetQueuedBufferCount() > 0) {
@@ -405,44 +434,49 @@ namespace jai::ebus {
                 PvResult op_result;
                 const PvResult r = stream_->RetrieveBuffer(&buffer, &op_result, kDrainTimeoutMs);
                 if (!r.IsOK()) {
-                    g_log.warn("[{}] [eBUS] retrieve of aborted buffer failed: {}", camera_id_, pv_result_to_string(r));
+                    g_log.Warn("[{}] [eBUS] retrieve of aborted buffer failed: {}", camera_id_, PvResultToString(r));
                     break;
                 }
                 // op result ABORTED expected here; buffers are not requeued.
             }
         }
-        buffers_.clear(); // frees every PvBuffer (all retrieved by now)
+        // Close() first: on the break path above the SDK may still hold queued
+        // buffers, and freeing those before the stream is closed is a
+        // use-after-free inside the SDK's receive thread.
         if (stream_->IsOpen()) {
             stream_->Close();
         }
         stream_.reset();
-        g_log.info("[{}] [eBUS] stream closed", camera_id_);
+        // Destroy the SDK stream before releasing user buffers, including the
+        // path where Close()/AbortQueuedBuffers() could not drain the queue.
+        buffers_.clear();
+        g_log.Info("[{}] [eBUS] stream closed", camera_id_);
     }
 
-    void StreamReceiver::poll_stream_stats() {
+    void StreamReceiver::PollStreamStats() {
         if (!stream_) {
             return;
         }
         // Only the two counters that feed the periodic stats line and the
-        // clean() verdict; the session-end full dump covers everything else.
+        // Clean() verdict; the session-end full dump covers everything else.
         PvGenParameterArray *sp = stream_->GetParameters();
         int64_t v = 0;
-        if (read_int_feature(sp, "BlocksDropped", v)) {
+        if (ReadIntFeature(sp, "BlocksDropped", v)) {
             stats_->stream_blocks_dropped.store(static_cast<uint64_t>(v), std::memory_order_relaxed);
         }
-        if (read_int_feature(sp, "ErrorCount", v)) {
+        if (ReadIntFeature(sp, "ErrorCount", v)) {
             stats_->stream_error_count.store(static_cast<uint64_t>(v), std::memory_order_relaxed);
         }
     }
 
-    void StreamReceiver::dump_stream_params(const std::string &path) {
+    void StreamReceiver::DumpStreamParams(const std::string &path) {
         if (!stream_) {
             return;
         }
         try {
             std::ofstream out(path, std::ios::trunc);
             if (!out) {
-                g_log.warn("[{}] [eBUS] cannot open stream parameter dump {}", camera_id_, path);
+                g_log.Warn("[{}] [eBUS] cannot open stream parameter dump {}", camera_id_, path);
                 return;
             }
             out << "# PvStream parameter dump: " << camera_id_ << "\n";
@@ -460,13 +494,31 @@ namespace jai::ebus {
                     value = "<not readable>";
                 } else {
                     PvString s;
-                    value = p->ToString(s).IsOK() ? to_std(s) : "<error>";
+                    value = p->ToString(s).IsOK() ? ToStd(s) : "<error>";
                 }
-                out << to_std(name) << " = " << value << "\n";
+                out << ToStd(name) << " = " << value << "\n";
             }
-            g_log.info("[{}] [eBUS] stream statistics dumped: {}", camera_id_, path);
+            g_log.Info("[{}] [eBUS] stream statistics dumped: {}", camera_id_, path);
         } catch (const std::exception &e) {
-            g_log.warn("[{}] [eBUS] stream parameter dump failed: {}", camera_id_, e.what());
+            g_log.Warn("[{}] [eBUS] stream parameter dump failed: {}", camera_id_, e.what());
         }
     }
-} // namespace jai::ebus
+
+    void StreamReceiver::Requeue(PvBuffer *buffer) {
+        // A buffer that never re-enters the ring shrinks the pool for good; retry before counting it lost
+        PvResult r;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            r = stream_->QueueBuffer(buffer);
+            if (r.IsOK() || r.GetCode() == PvResult::Code::PENDING) {
+                return;
+            }
+        }
+        ++requeue_failures_;
+        g_log.Error("[{}] [eBUS] QueueBuffer failed ({}), pool shrank to {} of {} buffers", camera_id_,
+                    PvResultToString(r), buffers_.size() - requeue_failures_, buffers_.size());
+        if (requeue_failures_ >= buffers_.size()) {
+            g_log.Error("[{}] [eBUS] buffer pool exhausted: every QueueBuffer failed — fatal", camera_id_);
+            stop_->RequestStop(StopReason::kError);
+        }
+    }
+} // namespace gox::ebus

@@ -1,4 +1,4 @@
-#include "accounting.hpp"
+#include "accounting.h"
 
 
 namespace fx10 {
@@ -9,12 +9,18 @@ namespace fx10 {
     } // namespace
 
 
-    BlockIdTracker::Observation BlockIdTracker::observe(std::uint64_t block_id) {
+    BlockIdTracker::Observation BlockIdTracker::Observe(std::uint64_t block_id) {
         Observation out;
         ++observed_;
 
         if (block_id > kMax16) {
             saw_wide_ = true;
+        }
+
+        if (block_id == 0 || (mode_ == Mode::k16Bit && block_id > kMax16)) {
+            ++anomalies_;
+            out.anomaly = true;
+            return out; // an invalid first ID must not seed the continuity baseline
         }
 
         if (first_) {
@@ -30,7 +36,6 @@ namespace fx10 {
                 // ID 0 never appears on a 16-bit GVSP wire (skipped on wrap).
                 ++anomalies_;
                 out.anomaly = true;
-                prev_ = block_id == 0 ? prev_ : block_id; // keep prev on invalid 0
                 return out;
             }
             const std::uint64_t expected = prev_ >= kMax16 ? 1 : prev_ + 1;
@@ -48,6 +53,7 @@ namespace fx10 {
                 // Backwards / duplicate — reordering, not a loss.
                 ++anomalies_;
                 out.anomaly = true;
+                return out; // preserve the last forward ID across duplicates/reordering
             }
             prev_ = block_id;
             return out;
@@ -57,7 +63,6 @@ namespace fx10 {
         if (block_id <= prev_) {
             ++anomalies_;
             out.anomaly = true;
-            prev_ = block_id;
             return out;
         }
         out.gap_before = block_id - prev_ - 1;
@@ -68,7 +73,7 @@ namespace fx10 {
     }
 
 
-    RunStatus classify(const Counters &c) {
+    RunStatus Classify(const Counters &c) {
         const bool clean = c.frames_missed_rx == 0 && c.op_errors == 0 &&
                            c.size_mismatch_drops == 0 && c.write_errors == 0 &&
                            c.blockid_anomalies == 0 && c.missed_trigger_delta <= 0;
@@ -76,7 +81,7 @@ namespace fx10 {
     }
 
 
-    const char *toString(RunStatus status) {
+    const char *ToString(RunStatus status) {
         return status == RunStatus::kClean ? "CLEAN" : "DEGRADED";
     }
 } // namespace fx10

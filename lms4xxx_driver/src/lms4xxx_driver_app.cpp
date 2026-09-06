@@ -2,257 +2,300 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
 #include "driver_markers.h"
-#include "lms4xxx_tool.h"
 #include "logger.h"
+#include "time_util.h"
 #include "utility.h"
 
 
 namespace {
-    Common::DriverLog g_log{std::string(Common::Markers::kModuleLms4xxx)};
+    common::DriverLog g_log{std::string(common::Markers::kModuleLms4xxx)};
 
-    // Main loop polling interval
     constexpr auto kPollInterval = std::chrono::milliseconds(200);
 
-    // "hh:mm:ss"
-    std::string HumanDuration(std::uint64_t seconds) {
-        return fmt::format("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60);
-    }
-
     // DriverStatistics::NtpStatus -> status-line token
-    const char *NtpStatusText(std::uint8_t status) {
+    const char *NtpStatusText(lms4xxx::DriverStatistics::NtpStatus status) {
         switch (status) {
-            case LMS4xxx::DriverStatistics::kNtpOk:
-                return "ok";
-            case LMS4xxx::DriverStatistics::kNtpNoTimestamp:
+            case lms4xxx::DriverStatistics::NtpStatus::kOk:
+                return "OK";
+            case lms4xxx::DriverStatistics::NtpStatus::kNoTimestamp:
                 return "NO-TS";
-            case LMS4xxx::DriverStatistics::kNtpUnreachable:
+            case lms4xxx::DriverStatistics::NtpStatus::kUnreachable:
                 return "UNREACH";
             default:
-                return "off";
+                return "OFF";
         }
     }
 
-    // Adaptive "N.NN GiB/MiB/KiB"
-    std::string HumanBytes(std::uint64_t bytes) {
-        constexpr double kKiB = 1024.0;
-        const auto b = static_cast<double>(bytes);
-        if (b >= kKiB * kKiB * kKiB) {
-            return fmt::format("{:.2f} GiB", b / (kKiB * kKiB * kKiB));
-        }
-        if (b >= kKiB * kKiB) {
-            return fmt::format("{:.2f} MiB", b / (kKiB * kKiB));
-        }
-        if (b >= kKiB) {
-            return fmt::format("{:.2f} KiB", b / kKiB);
-        }
-        return fmt::format("{} B", bytes);
-    }
-
-    // Build channel mask from scan config.
-    std::uint16_t BuildChannelMask(const LMS4xxx::ScanConfig &scan) {
-        std::uint16_t mask = 0;
-        if (scan.enable_distance) {
-            mask |= LMS4xxx::ChannelMask::kDist1;
-        }
-        if (scan.enable_rssi) {
-            mask |= LMS4xxx::ChannelMask::kRssi1;
-        }
-        if (scan.enable_reflectance) {
-            mask |= LMS4xxx::ChannelMask::kRefl1;
-        }
-        if (scan.enable_angle_correction) {
-            mask |= LMS4xxx::ChannelMask::kAngl1;
-        }
-        if (scan.enable_quality) {
-            mask |= LMS4xxx::ChannelMask::kQlty1;
-        }
-        return mask;
+    // DIST + ANGL + QLTY always; the remission channel follows scan.remission
+    std::uint16_t BuildChannelMask(const lms4xxx::ScanConfig &scan) {
+        const std::uint16_t remission = scan.remission == lms4xxx::Remission::kRefl
+                                            ? lms4xxx::ChannelMask::kRefl1
+                                            : lms4xxx::ChannelMask::kRssi1;
+        return static_cast<std::uint16_t>(lms4xxx::ChannelMask::kDist1 | remission | lms4xxx::ChannelMask::kAngl1 |
+                                          lms4xxx::ChannelMask::kQlty1);
     }
 } // namespace
 
 
-Lms4xxxDriverApp::Lms4xxxDriverApp(LiDARConfig config) : impl_(std::make_unique<Impl>()), config_(std::move(config)) {
+Lms4xxxDriverApp::Lms4xxxDriverApp(const common::Config &run, const lms4xxx::AppConfig &config,
+                                   const lms4xxx::LidarConfig &lidar) :
+    impl_(std::make_unique<Impl>()),
+    instance_name_(lidar.id),
+    driver_config_(config.DriverConfigFor(lidar)),
+    output_(config.output),
+    telemetry_interval_s_(config.telemetry_interval_s),
+    stats_interval_s_(config.stats_interval_s),
+    data_folder_path_(run.data_folder_path.string()),
+    timestamp_(run.timestamp),
+    config_path_(run.lms4xxx_config_path.string()) {
 }
 
 
 Lms4xxxDriverApp::~Lms4xxxDriverApp() {
     if (impl_->driver) {
-        shutdown();
+        Shutdown();
     }
 }
 
 
-bool Lms4xxxDriverApp::init(const std::function<bool()> & /*external_stop*/) {
-    impl_->instance_name = config_.position_name.empty() ? config_.hostname : config_.position_name;
-
-    // Apply hostname override to driver config
-    if (!config_.hostname.empty()) {
-        config_.driver_config.device.ip = config_.hostname;
-    }
-    // Instance tag: every driver-internal log line becomes "[<instance>] ..."
-    config_.driver_config.name = impl_->instance_name;
-
-    // Map LiDARConfig NTP fields to DriverConfig.ntp — unconditionally, so an
-    // empty yaml server or a bad interval fails Validate() instead of silently
-    // falling back to compiled-in defaults
-    config_.driver_config.ntp.enable = config_.enable_ntp;
-    config_.driver_config.ntp.server_ip = config_.ntp_server_ip;
-    config_.driver_config.ntp.update_interval_s =
-            config_.sync_time > 0.0 ? static_cast<std::uint32_t>(std::lround(config_.sync_time)) : 0;
-    config_.driver_config.ntp.check_status_s =
-            config_.ntp_check_status_s > 0.0 ? static_cast<std::uint32_t>(std::lround(config_.ntp_check_status_s)) : 0;
-
-    auto ec = config_.driver_config.Validate();
-    if (ec) {
-        g_log.error("[{}] Invalid configuration: {}", impl_->instance_name, ec.message());
+bool Lms4xxxDriverApp::Init(const std::function<bool()> &external_stop) {
+    const auto stopped = [&] {
+        return terminate_.load(std::memory_order_acquire) || (external_stop && external_stop());
+    };
+    if (stopped()) {
         return false;
     }
+    impl_->driver = std::make_unique<lms4xxx::Lms4xxxDriver>(driver_config_);
 
-    impl_->driver = std::make_unique<LMS4xxx::LMS4xxxDriver>(config_.driver_config);
-
-    impl_->driver->SetErrorCallback([name = impl_->instance_name](std::error_code err, const std::string &detail) {
-        g_log.error("[{}] Error: {}{}", name, err.message(), detail.empty() ? "" : " (" + detail + ")");
+    impl_->driver->SetErrorCallback([name = instance_name_](std::error_code err, const std::string &detail) {
+        g_log.Error("[{}] Error: {}{}", name, err.message(), detail.empty() ? "" : " (" + detail + ")");
     });
 
-    if (!config_.data_folder_path.empty()) {
-        LMS4xxx::ScanRecordWriter::Config writer_config;
-        writer_config.bin_path = fmt::format("{}/bin/lms4xxx/scan_{}_{}.bin", config_.data_folder_path,
-                                             impl_->instance_name, config_.timestamp);
-        writer_config.instance = impl_->instance_name;
-        writer_config.channel_mask = BuildChannelMask(config_.driver_config.scan);
-        writer_config.queue_capacity = config_.recording_queue_capacity;
-        writer_config.write_buffer_size = config_.recording_write_buffer_size;
-        writer_config.max_file_bytes = config_.recording_max_file_bytes;
-
-        impl_->writer = std::make_unique<LMS4xxx::ScanRecordWriter>(writer_config);
-        impl_->driver->SetScanCallback([writer = impl_->writer.get()](const LMS4xxx::ScanData &scan) {
-            writer->OnScan(scan);
-        });
-
-        g_log.trace("[{}] Scan recording enabled (channels: 0x{:02X})", impl_->instance_name,
-                    writer_config.channel_mask);
-    } else {
-        g_log.error("[{}] Cannot set up the scan writer (empty data folder path)", impl_->instance_name);
+    if (data_folder_path_.empty()) {
+        g_log.Error("[{}] Cannot set up the scan writer (empty data folder path)", instance_name_);
         return false;
     }
 
-    ec = impl_->driver->Connect();
+    auto ec = impl_->driver->Connect();
     if (ec) {
-        g_log.error("[{}] Connect failed: {}", impl_->instance_name, ec.message());
+        g_log.Error("[{}] Connect failed: {}", instance_name_, ec.message());
         return false;
     }
 
+    if (stopped()) {
+        return false;
+    }
     ec = impl_->driver->Configure();
     if (ec) {
-        g_log.error("[{}] Configure failed: {}", impl_->instance_name, ec.message());
+        g_log.Error("[{}] Configure failed: {}", instance_name_, ec.message());
         impl_->driver->Disconnect();
         return false;
     }
 
-    g_log.info(fmt::runtime(Common::Markers::kLmsInitializedInstTpl), impl_->instance_name);
+    if (stopped()) {
+        return false;
+    }
+    // The writer needs the device identity, so it is created after Configure()
+    const auto &identity = impl_->driver->GetDeviceIdentity();
+    lms4xxx::ScanRecordWriter::Config writer_config;
+    writer_config.output_path = fmt::format("{}/lms4xxx/scan_{}_{}.h5", data_folder_path_, instance_name_, timestamp_);
+    writer_config.instance = instance_name_;
+    writer_config.session_timestamp = timestamp_;
+    writer_config.config_yaml_path = config_path_;
+    writer_config.channel_mask = BuildChannelMask(driver_config_.scan);
+    writer_config.remission = lms4xxx::RemissionName(driver_config_.scan.remission);
+    writer_config.device_firmware = identity.firmware_designation +
+                                    (identity.firmware_version.empty() ? "" : " " + identity.firmware_version);
+    writer_config.device_order_number = identity.order_number;
+    writer_config.device_type = identity.device_type;
+    writer_config.device_name = identity.location_name;
+    writer_config.device_keeps_flagged_points = identity.is_s01_variant;
+    writer_config.audit = impl_->driver->GetDeviceAudit(); // -> root attributes (docs/FORMAT_H5.md)
+    writer_config.queue_capacity = output_.queue_max_frames;
+    writer_config.max_file_bytes = output_.max_file_bytes;
+    writer_config.chunk_frames = output_.chunk_frames;
+    writer_config.flush_interval_ms = output_.flush_interval_ms;
+    writer_config.compression_level = output_.compression_level;
+    writer_config.swmr = output_.swmr;
+
+    impl_->writer = std::make_unique<lms4xxx::ScanRecordWriter>(writer_config);
+    impl_->driver->SetScanCallback([writer = impl_->writer.get()](const lms4xxx::ScanData &scan) {
+        writer->OnScan(scan);
+    });
+    g_log.Trace("[{}] Scan recording enabled (channels: 0x{:02X})", instance_name_,
+                writer_config.channel_mask);
+
+    g_log.Info(fmt::runtime(common::Markers::kLmsInitializedInstTpl), instance_name_);
     return true;
 }
 
 
-void Lms4xxxDriverApp::run() {
+void Lms4xxxDriverApp::Run() {
     if (!impl_->driver) {
-        g_log.error(true, "run() called without init()");
+        g_log.Error(true, "Run() called without Init()");
         return;
     }
 
-    // Start scan record writer before scanning so no frames are missed
-    if (impl_->writer && !impl_->writer->Start(config_.driver_config.scan)) {
+    // Before scanning so no frames are missed
+    if (impl_->writer && !impl_->writer->Start()) {
         terminate_.store(true, std::memory_order_release);
-        g_log.error(true, "[{}] Cannot start the scan writer: recording is mandatory for a run",
-                    impl_->instance_name);
+        g_log.Error(true, "[{}] Cannot start the scan writer", instance_name_);
         return; // unreachable
     }
 
     auto ec = impl_->driver->StartScanning();
     if (ec) {
-        // Clean up BEFORE the throw: error(true, ...) never returns
+        // Error(true, ...) never returns
         if (impl_->writer) {
             impl_->writer->Stop();
         }
         terminate_.store(true, std::memory_order_release);
-        g_log.error(true, "[{}] Start scanning failed: {}", impl_->instance_name, ec.message());
+        g_log.Error(true, "[{}] Start scanning failed: {}", instance_name_, ec.message());
         return; // unreachable; keeps the control flow obvious
     }
 
-    g_log.info("[{}] Scanning started", impl_->instance_name);
+    g_log.Info("[{}] Scanning started", instance_name_);
 
-    // Main loop: wait for termination, periodically log the status line
     using clock = std::chrono::steady_clock;
-    const double stats_interval = config_.stats_interval_s;
+    const double stats_interval = stats_interval_s_;
     impl_->scan_start = clock::now();
     auto last_stats = impl_->scan_start;
+    auto last_telemetry_request = impl_->scan_start;
     std::uint64_t rate_prev_frames = 0;
     std::uint64_t rate_prev_written = 0;
+    std::uint64_t rate_prev_queued = 0;
     auto rate_prev_time = impl_->scan_start;
+
+    // Arms Main's no-data watchdog: from here on, silence is not expected.
+    // A device that keeps the TCP connection open but stops streaming produces
+    // no read error, no fault and no frames, so nothing else would end the run.
+    scan_start_us_.store(common::TimeUtil::SteadyNowUs(), std::memory_order_release);
+
+    // One telemetry round immediately, so even a short run carries a sample.
+    if (telemetry_interval_s_ > 0.0) {
+        impl_->driver->RequestTelemetry();
+    }
 
     while (!terminate_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(kPollInterval);
 
-        // Check if driver is still healthy
         if (!impl_->driver->IsScanning()) {
-            g_log.warn("[{}] Scanning stopped unexpectedly", impl_->instance_name);
+            g_log.Warn("[{}] Scanning stopped unexpectedly", instance_name_);
+            RequestFailure();
+            break;
+        }
+        // Data past a fault is invalid: end the Run (cause already logged)
+        if (impl_->driver->HasFault()) {
+            MarkFailed();
+            g_log.Error("[{}] Fatal driver fault — terminating the Run (see the error above for the cause)",
+                        instance_name_);
             terminate_.store(true, std::memory_order_release);
             break;
         }
-        // Fatal fault (first-scan verification failure / NTP clock wrong /
-        // receive-channel error): data collected past it is invalid, so the
-        // run terminates instead of silently recording on. The specific cause
-        // was already reported at error level via the driver's error callback.
-        if (impl_->driver->HasFault()) {
-            g_log.error("[{}] Fatal driver fault — terminating the run (see the error above for the cause)",
-                        impl_->instance_name);
+        // Recording is mandatory: a dead writer ends the run like a failed Start()
+        if (impl_->writer && impl_->writer->HasFailed()) {
+            MarkFailed();
+            g_log.Error("[{}] Scan writer stopped on a recording failure — terminating the Run (see the "
+                        "[Writer] error above for the cause)", instance_name_);
             terminate_.store(true, std::memory_order_release);
             break;
         }
 
         const auto now = clock::now();
+
+        // The stall watchdog lives in Main now (Guards: in config-main.yaml),
+        // which polls MicrosSinceLastData() for every sensor with one policy.
+
+        // Device telemetry: ask, then hand whatever came back to the recorder.
+        if (telemetry_interval_s_ > 0.0) {
+            if (std::chrono::duration<double>(now - last_telemetry_request).count() >=
+                telemetry_interval_s_) {
+                last_telemetry_request = now;
+                impl_->driver->RequestTelemetry();
+            }
+            lms4xxx::TelemetrySample sample;
+            if (impl_->driver->TakeTelemetry(sample) && impl_->writer) {
+                impl_->writer->OnTelemetry(sample);
+                impl_->last_telemetry = sample;
+            }
+        }
+
         if (stats_interval > 0 && std::chrono::duration<double>(now - last_stats).count() >= stats_interval) {
             last_stats = now;
             const auto drv = impl_->driver->GetStatistics();
-            const LMS4xxx::ScanRecordWriter::Statistics wr =
-                    impl_->writer ? impl_->writer->GetStatistics() : LMS4xxx::ScanRecordWriter::Statistics{};
-            // Sensor's actual scan rate since the previous status line (the
-            // device streams one CoLa B frame per scan)
+            const lms4xxx::ScanRecordWriter::Statistics wr =
+                    impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
+            // One CoLa B frame per scan
             const double dt = std::chrono::duration<double>(now - rate_prev_time).count();
             const double scan_hz = dt > 0.0
                                        ? static_cast<double>(drv.frames_received - rate_prev_frames) / dt
                                        : 0.0;
-            // Scans that actually reached the .bin on disk over the same window;
-            // fps < rate means the writer queue is shedding frames.
+            // app/services/driver_stats.py defines fps= as frames ACTUALLY
+            // WRITTEN TO DISK per second, and that is what the dashboard card
+            // shows for every other driver. Queue acceptance is a different
+            // number and gets its own field.
             const double write_fps = dt > 0.0
                                          ? static_cast<double>(wr.frames_written - rate_prev_written) / dt
                                          : 0.0;
+            const double queued_fps = dt > 0.0
+                                          ? static_cast<double>(wr.frames_queued - rate_prev_queued) / dt
+                                          : 0.0;
             rate_prev_frames = drv.frames_received;
             rate_prev_written = wr.frames_written;
+            rate_prev_queued = wr.frames_queued;
             rate_prev_time = now;
             const auto uptime_s = static_cast<std::uint64_t>(std::chrono::duration<double>(now - impl_->scan_start).
                 count());
-            g_log.info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
+            // Field order and the double-space separator are a GUI contract
+            // (app/services/driver_stats.py routes on the "[Statistics] [<id>] "
+            // prefix and reads fps=; tools/check_contracts.py pins a rendered
+            // sample). New fields are APPENDED, never interleaved.
+            g_log.Info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
                        "drop_ring={}  gaps={}  crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  "
-                       "bytes={}",
-                       impl_->instance_name, HumanDuration(uptime_s), scan_hz, write_fps,
+                       "bytes={}  queued={:.1f}  temp={}  unexpected={}",
+                       instance_name_, common::TimeUtil::HumanDuration(uptime_s), scan_hz, write_fps,
                        NtpStatusText(drv.ntp_status),
                        drv.frames_received, drv.frames_parsed, drv.frames_dropped, drv.counter_gaps, drv.crc_errors,
                        drv.framing_errors, drv.parse_errors, wr.frames_written, wr.frames_dropped, wr.files_created,
-                       HumanBytes(wr.bytes_written));
+                       common::HumanBytes(wr.bytes_written), queued_fps,
+                       impl_->last_telemetry.temperature_c
+                           ? fmt::format("{:.1f}", *impl_->last_telemetry.temperature_c)
+                           : "n/a",
+                       drv.unexpected_replies);
         }
     }
 
-    g_log.trace("[{}] Run() exiting", impl_->instance_name);
+    // Disarm before the run thread exits: whatever ends the run, silence from
+    // here on is expected and must not be reported as a watchdog trip.
+    scan_start_us_.store(0, std::memory_order_release);
+
+    g_log.Trace("[{}] Run() exiting", instance_name_);
 }
 
 
-void Lms4xxxDriverApp::shutdown() {
+std::optional<std::uint64_t> Lms4xxxDriverApp::MicrosSinceLastData() const {
+    const auto started_us = scan_start_us_.load(std::memory_order_acquire);
+    if (started_us == 0) {
+        return std::nullopt; // not streaming: connecting, configuring, or done
+    }
+    if (const auto since_frame_us = impl_->driver->MicrosSinceLastFrame(); since_frame_us > 0) {
+        return since_frame_us;
+    }
+    // Nothing has arrived yet, so the subscription itself is the reference.
+    const auto now_us = common::TimeUtil::SteadyNowUs();
+    return now_us > started_us ? now_us - started_us : 0;
+}
+
+
+void Lms4xxxDriverApp::Shutdown() {
+    scan_start_us_.store(0, std::memory_order_release);
     if (!impl_->driver) {
         return;
     }
@@ -260,33 +303,57 @@ void Lms4xxxDriverApp::shutdown() {
     if (impl_->driver->IsScanning()) {
         impl_->driver->StopScanning();
     }
+    if (impl_->driver->HasFault()) {
+        MarkFailed();
+    }
 
-    // Stop recording first: flush remaining frames and close the binary file,
-    // so the final summary reports the on-disk totals
+    // Stop the writer first so the summary reports the on-disk totals
     if (impl_->writer) {
         impl_->writer->Stop();
+        if (impl_->writer->HasFailed()) {
+            MarkFailed();
+        }
     }
 
     const auto drv = impl_->driver->GetStatistics();
-    const LMS4xxx::ScanRecordWriter::Statistics wr =
-            impl_->writer ? impl_->writer->GetStatistics() : LMS4xxx::ScanRecordWriter::Statistics{};
+    const lms4xxx::ScanRecordWriter::Statistics wr =
+            impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
+    // A clean file close does not make missing scans complete. Keep transport,
+    // parser and writer loss visible in the rig's final manifest/exit status.
+    if (drv.frames_dropped != 0 || drv.counter_gaps != 0 || drv.crc_errors != 0 ||
+        drv.framing_errors != 0 || drv.parse_errors != 0 || wr.frames_dropped != 0) {
+        MarkFailed();
+    }
+    final_statistics_ = {
+        {"instance", instance_name_}, {"frames_received", drv.frames_received},
+        {"frames_parsed", drv.frames_parsed}, {"dropped_ring", drv.frames_dropped},
+        {"counter_gaps", drv.counter_gaps}, {"crc_errors", drv.crc_errors},
+        {"framing_errors", drv.framing_errors}, {"parse_errors", drv.parse_errors},
+        {"frames_queued", wr.frames_queued}, {"frames_written", wr.frames_written},
+        {"dropped_writer", wr.frames_dropped}, {"bytes_written", wr.bytes_written},
+        {"files_created", wr.files_created}, {"recording_incomplete", HasFailed()}
+    };
     const auto duration_s = impl_->scan_start == std::chrono::steady_clock::time_point{}
                                 ? 0ull
                                 : static_cast<std::uint64_t>(std::chrono::duration<double>(
                                         std::chrono::steady_clock::now() - impl_->scan_start)
                                     .count());
-    g_log.info("[Statistics] [{}] Final: duration={}  frames={}  parsed={}  delivery={:.1f}%  ntp={}  "
+    g_log.Info("[Statistics] [{}] Final: duration={}  frames={}  parsed={}  delivery={:.1f}%  ntp={}  "
                "dropped_ring={}  counter_gaps={}  crc_errors={}  framing_errors={}  parse_errors={}  "
-               "frames_written={}  dropped_queue={}  bytes={}  files={}",
-               impl_->instance_name, HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
+               "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}",
+               instance_name_, common::TimeUtil::HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
                drv.DeliveryRate(), NtpStatusText(drv.ntp_status), drv.frames_dropped, drv.counter_gaps,
-               drv.crc_errors, drv.framing_errors, drv.parse_errors, wr.frames_written, wr.frames_dropped,
-               HumanBytes(wr.bytes_written), wr.files_created);
+               drv.crc_errors, drv.framing_errors, drv.parse_errors, drv.unexpected_replies,
+               wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created);
 
     impl_->driver->Disconnect();
 
-    g_log.info(fmt::runtime(Common::Markers::kLmsShutdownInstTpl), impl_->instance_name);
+    if (HasFailed()) {
+        g_log.Error("[{}] LMS4xxx driver ended with issues; recording is INCOMPLETE", instance_name_);
+    } else {
+        g_log.Info(fmt::runtime(common::Markers::kLmsShutdownInstTpl), instance_name_);
+    }
 
-    // Reset driver so destructor and repeated shutdown() calls are no-ops.
+    // Makes the destructor and repeated Shutdown() no-ops
     impl_->driver.reset();
 }

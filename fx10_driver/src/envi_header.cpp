@@ -1,15 +1,15 @@
-#include "envi_header.hpp"
+#include "envi_header.h"
 
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
-#include "envi_recorder.hpp"
 
 namespace fx10 {
     namespace {
         // ENVI '{ }' blocks cannot contain braces; replace them in free text.
-        std::string sanitizeBraces(const std::string &text) {
+        std::string SanitizeBraces(const std::string &text) {
             std::string out = text;
             for (char &c: out) {
                 if (c == '{') {
@@ -24,9 +24,9 @@ namespace fx10 {
 
 
         // " 400.000, 402.691, ...", 8 values per line, no trailing comma.
-        void appendValueBlock(std::ostringstream &os, const char *key, const std::vector<double> &values) {
+        void AppendValueBlock(std::ostringstream &os, const char *key, const std::vector<double> &values) {
             std::ostringstream block;
-            block << std::fixed << std::setprecision(3);
+            block << std::setprecision(std::numeric_limits<double>::max_digits10);
             block << key << " = {\n";
             for (std::size_t i = 0; i < values.size(); ++i) {
                 block << " " << values[i];
@@ -43,23 +43,23 @@ namespace fx10 {
     } // namespace
 
 
-    std::string generateEnviHeader(const EnviHeaderInfo &info) {
+    std::string GenerateEnviHeader(const EnviHeaderInfo &info) {
         if (info.samples == 0 || info.bands == 0) {
-            throw RecorderError("[Writer] ENVI header: samples and bands must be non-zero");
+            throw std::invalid_argument("ENVI header: samples and bands must be non-zero");
         }
         if (!info.wavelengths_nm.empty() && info.wavelengths_nm.size() != info.bands) {
-            throw RecorderError("[Writer] ENVI header: wavelength count " +
+            throw std::invalid_argument("ENVI header: wavelength count " +
                                 std::to_string(info.wavelengths_nm.size()) +
                                 " does not match bands " + std::to_string(info.bands));
         }
         if (!info.fwhm_nm.empty() && info.fwhm_nm.size() != info.bands) {
-            throw RecorderError("[Writer] ENVI header: fwhm count " + std::to_string(info.fwhm_nm.size()) +
+            throw std::invalid_argument("ENVI header: fwhm count " + std::to_string(info.fwhm_nm.size()) +
                                 " does not match bands " + std::to_string(info.bands));
         }
 
         std::ostringstream os;
         os << "ENVI\n";
-        os << "description = {\n" << sanitizeBraces(info.description) << "}\n";
+        os << "description = {\n" << SanitizeBraces(info.description) << "}\n";
         os << "samples = " << info.samples << "\n";
         os << "lines = " << info.lines << "\n";
         os << "bands = " << info.bands << "\n";
@@ -74,10 +74,10 @@ namespace fx10 {
         }
         if (!info.wavelengths_nm.empty()) {
             os << "wavelength units = Nanometers\n";
-            appendValueBlock(os, "wavelength", info.wavelengths_nm);
+            AppendValueBlock(os, "wavelength", info.wavelengths_nm);
         }
         if (!info.fwhm_nm.empty()) {
-            appendValueBlock(os, "fwhm", info.fwhm_nm);
+            AppendValueBlock(os, "fwhm", info.fwhm_nm);
         }
 
         return os.str();

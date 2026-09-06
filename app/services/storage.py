@@ -12,9 +12,9 @@ from pathlib import Path
 from ..state import STATE
 from . import config_store
 
-# scan_<InstanceName>_<YYYYMMDD_HHMMSS>[_NNN].bin — the name may contain
-# spaces/underscores; the timestamp anchors the greedy group.
-_LMS_FILE_RE = re.compile(r"^scan_(.+)_\d{8}_\d{6}(?:_\d+)?\.bin$")
+# scan_<InstanceName>_<YYYYMMDD_HHMMSS>_NNN.h5 (HDF5 split files) — the name
+# may contain underscores; the timestamp anchors the greedy group.
+_LMS_FILE_RE = re.compile(r"^scan_(.+)_\d{8}_\d{6}(?:_\d+)?\.h5$")
 
 _prev: dict[str, tuple[float, int]] = {}  # key -> (t, bytes)
 
@@ -37,9 +37,9 @@ def _du(path: Path) -> int:
 
 
 def _collect(session: Path) -> dict[str, int]:
-    """Sensor-key -> bytes for the active session's bin/ tree."""
+    """Sensor-key -> bytes for the active session's raw/ tree."""
     sizes: dict[str, int] = {}
-    bin_dir = session / "bin"
+    bin_dir = session / "raw"
     for driver in ("gox", "asterx", "fx10"):
         d = bin_dir / driver
         if d.is_dir():

@@ -6,57 +6,34 @@
 # repo level in 3rd_party/.
 # The eBUS SDK is a hard requirement (see the shared root cmake/FindeBUS.cmake,
 # one Pleora SDK serves gox and fx10); the devcontainer installs it from
-# fx10_driver/resource/.
-
-# Build options
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    option(GOX_BUILD_TESTS "Build gox unit tests (SDK-free)" ON)
-else ()
-    option(GOX_BUILD_TESTS "Build gox unit tests (SDK-free)" OFF)
-endif ()
+# resource/ (repo root).
 
 # Directory-scoped: applies only to targets defined in this directory
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 
 ################################################################################
-# eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake)
-find_package(eBUS)
-if (NOT eBUS_FOUND)
-    message(FATAL_ERROR
-        "eBUS SDK not found "
-        "(expected under /opt/jai/ebus_sdk/<dist> or /opt/pleora/ebus_sdk/<dist>) "
-        "or pass -DEBUS_SDK_ROOT=/path/to/sdk. The devcontainer installs it from "
-        "fx10_driver/resource/ (see .devcontainer/Dockerfile).")
-endif ()
+# eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake).
+# common/ already failed the configure with a helpful message when it is
+# missing; the call here only (re)creates the directory-scoped eBUS::eBUS target.
+find_package(eBUS REQUIRED)
 
 
 ################################################################################
-# Compile-time GenICam env constants for ebus/env_bootstrap.cpp (directory-
-# scoped, same mechanism as fx10). Values come from root cmake/FindeBUS.cmake.
-if (NOT DEFINED EBUS_GENICAM_ROOT_DIR)
-    set(EBUS_GENICAM_ROOT_DIR "")
-endif ()
-if (NOT DEFINED EBUS_GENICAM_ENV_NAME)
-    set(EBUS_GENICAM_ENV_NAME "GENICAM_ROOT_V3_4")
-endif ()
-add_compile_definitions(
-    GOX_GENICAM_ENV_NAME="${EBUS_GENICAM_ENV_NAME}"
-    GOX_GENICAM_ROOT="${EBUS_GENICAM_ROOT_DIR}"
-)
-
-
-################################################################################
-# jai_core - SDK-free capture core (config, format, recorder, logging facade)
-# Headers live under include/ (include/core, include/ebus, ...); includes are
-# rooted there, e.g. #include "core/config.hpp".
+# jai_core
 add_library(jai_core STATIC
-        src/chunk_pool.cpp
         src/app_config.cpp
+        src/apply_plan.cpp
+        src/block_id_tracker.cpp
+        src/buffering.cpp
+        src/chunk_pool.cpp
+        src/device_json.cpp
         src/format.cpp
+        src/ptp_status.cpp
         src/recorder.cpp
         src/signal_stop.cpp
         src/stats.cpp
+        src/user_set.cpp
         src/util.cpp
 )
 target_include_directories(jai_core PUBLIC
@@ -78,25 +55,22 @@ target_link_libraries(jai_core PUBLIC
 ################################################################################
 # SDK-dependent targets
 
-# jai_ebus - eBUS SDK glue (discovery, camera control, streaming, PTP) +
-# the shared capture orchestration (CaptureRunner)
+# jai_ebus - eBUS SDK glue (camera control, streaming, PTP) + the shared
+# capture orchestration (CaptureRunner). Discovery, the GenICam env bootstrap
+# and the PvResult error plumbing come from common/ (amiga_ebus).
 add_library(jai_ebus STATIC
     src/capture_runner.cpp
     src/ebus/camera_controller.cpp
     src/ebus/camera_session.cpp
-    src/ebus/discovery.cpp
-    src/ebus/env_bootstrap.cpp
     src/ebus/ptp_manager.cpp
-    src/ebus/sdk_error.cpp
     src/ebus/stream_receiver.cpp
 )
 # RPATH to the SDK/GenICam lib dirs propagates from eBUS::eBUS
 # (INTERFACE_LINK_OPTIONS, see cmake/FindeBUS.cmake) to every consumer,
 # including the top-level AmigaDrivers executable.
-target_link_libraries(jai_ebus PUBLIC jai_core eBUS::eBUS)
+target_link_libraries(jai_ebus PUBLIC jai_core amiga_ebus eBUS::eBUS)
 
-# gox_lib - Amiga-facing wrapper layer (GoxDriverApp), consumed by the
-# top-level AmigaDrivers executable
+# gox_lib - Amiga-facing wrapper layer (GoxDriverApp)
 add_library(gox_lib STATIC
     src/gox_driver_app.cpp
 )
@@ -110,35 +84,44 @@ target_link_libraries(gox_lib PUBLIC
     amiga_common
 )
 
-add_executable(jai_discover tools/discover_main.cpp)
-target_link_libraries(jai_discover PRIVATE jai_ebus)
-
-# jai_snapshot - one-shot frame grab for the web GUI preview loop
-# (config/config-gox-snapshot.yaml + CLI overrides; see tools/snapshot_main.cpp)
+# jai_snapshot - one-shot frame grab for the web GUI preview loop (device
+# enumeration is the common ebus_discover tool)
 add_executable(jai_snapshot tools/snapshot_main.cpp)
 target_link_libraries(jai_snapshot PRIVATE jai_ebus)
 
-set_target_properties(jai_discover jai_snapshot PROPERTIES
+set_target_properties(jai_snapshot PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
 
 ################################################################################
 # Tests (doctest, SDK-free; enable_testing() is called at the top level)
-if (GOX_BUILD_TESTS)
-    add_executable(jai_tests
-        tests/doctest_main.cpp
+if (AMIGA_BUILD_TESTS)
+    set(GOX_TEST_SOURCES
+        tests/test_apply_plan.cpp
+        tests/test_block_id_tracker.cpp
+        tests/test_buffering.cpp
         tests/test_config.cpp
+        tests/test_device_json.cpp
         tests/test_format.cpp
-        tests/test_frame_queue.cpp
+        tests/test_ptp_status.cpp
         tests/test_recorder.cpp
+        tests/test_signal_stop.cpp
         tests/test_stats.cpp
+        tests/test_templates.cpp
+        tests/test_user_set.cpp
+        tests/test_util.cpp
     )
-    target_link_libraries(jai_tests PRIVATE jai_core)
-    set_target_properties(jai_tests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests
-    )
-    add_test(NAME jai_tests COMMAND jai_tests)
+    add_executable(gox_tests tests/doctest_main.cpp ${GOX_TEST_SOURCES})
+    target_link_libraries(gox_tests PRIVATE jai_core)
+    # The shipped templates are asserted against the (strict) loader
+    target_compile_definitions(gox_tests PRIVATE GOX_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config")
+    set_target_properties(gox_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests)
+    # One ctest entry per source file (doctest --source-file filter)
+    foreach (test_source IN LISTS GOX_TEST_SOURCES)
+        get_filename_component(test_name ${test_source} NAME_WE)
+        add_test(NAME gox.${test_name} COMMAND gox_tests --source-file=*${test_name}.cpp)
+    endforeach ()
 endif ()
 
 
@@ -150,6 +133,6 @@ message(STATUS "   Gox_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  eBUS SDK:         ${EBUS_SDK_ROOT_DIR}")
-message(STATUS "  Build Tests:      ${GOX_BUILD_TESTS}")
+message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

@@ -1,78 +1,44 @@
 # =============================================================
-# GoX Driver Configuration --- For Snapshot
+# GoX Driver Configuration - Snapshot
 # =============================================================
+# Single-frame profile for jai_snapshot (GUI preview / exposure tuning).
+# The tool forces: max_frames 1, max_duration_s 15, ptp off, trigger freerun,
+# statistics off, cameras[0] enabled, output under --out.
+# Placeholders overridden by the GUI: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain).
+# Unknown keys are errors; omitted keys keep the driver defaults.
 
-# JAI GoX RGB camera configuration.
 
-# *************************************************************
-# For Snapshot
-# *************************************************************
-
-# Single-shot capture profile for jai_snapshot (GUI preview / exposure tuning).
-# - device.ip and exposure/gain are placeholders: the GUI overrides them per
-#   shot via --ip / --exposure-us / --gain (this file is never rewritten).
-# - jai_snapshot unconditionally forces max_frames=1, max_duration_s<=15,
-#   ptp.enabled=false and trigger freerun, even if this file is edited.
-# - acquisition.pixel_format must stay within the PFNC table supported by
-#   scripts/unpack_raw.py, otherwise the PNG decode fails.
-
-# --- General Settings ---
+# --- Cameras ---
 cameras:
-    -   id: "cam0"
-        enabled: true
-
+    -   id: cam0
         device:
-            mac: ""                     # GUI overrides via --ip/--mac
-            ip: "10.95.76.106"          # placeholder; the GUI passes --ip
-            force_ip:
-                enabled: false
-                ip: ""
-                subnet_mask: ""
-                gateway: "0.0.0.0"
-
-        # --- Receiver Settings ---
+            mac: ""                     # --mac
+            ip: "10.95.76.106"          # --ip
         acquisition:
-            exposure_ms: 20.0           # placeholder; the GUI passes --exposure-us
-            gain: 1.0                   # placeholder; the GUI passes --gain
-            pixel_format: "BayerRG12Packed" # must be in unpack_raw.py's PFNC table
-            trigger:
-                mode: freerun           # forced by jai_snapshot anyway
+            exposure_ms: 20.0           # > 0; < 1000 / frame_rate_hz
+            gain: 1.0                   # 1.0..126.0
+            pixel_format: BayerRG12Packed   # must be in scripts/unpack_raw.py's PFNC table
+            frame_rate_hz: 3.0          # >= 0.125; sets the exposure ceiling (factory 8 fps clamps > ~114 ms)
 
-        features:
-            raw: [ ]
-
-        # --- Network Transfer Settings ---
+        # =============================================================
+        # ADVANCED: do not change without a reason
+        # =============================================================
         network:
-            channel: 0
-            buffer_count: 16            # constraint: 0 (auto) or >= 4
-            packet_size: 0              # 0 = NegotiatePacketSize (fallback 1476)
-            socket_rx_buffer_mb: 16
+            buffer_count: 8             # 0 = auto | >= 4
+            packet_size: 0              # 0 = negotiate | 1476..12036
+            socket_rx_buffer_mb: 16     # 1..1024
             local_ip: ""
-            gev_scpd_ticks: 0
-            receiver_tuning: [ ]
+            throughput_safety_margin_pct: 0
 
 
 # =============================================================
-# NOT RECOMMEND TO CHANGE
+# ADVANCED: do not change without a reason
 # =============================================================
-# --- Output Settings ---
+# --- Output (jai-raw-seg) ---
 output:
-    output_dir: "/workspace/app/_runtime/snapshot" # fallback; the GUI always overrides via --out
-    segment_size_gib: 1.0
-    record_align: 4096
-    queue_max_frames: 4                 # only 1 frame: minimize memory (pool = queue + 2)
-    queue_on_full: "block"              # the single frame must never be dropped
-    on_buffer_error: "record_flagged"   # record incomplete frames too; unpack pads them with --pad-incomplete
-    flush_interval_mb: 64
-    max_frames: 1                       # stop right after the first frame
-    max_duration_s: 15                  # safety net: never let the GUI hang waiting
-
-
-# --- Some guards ---
-disk:
-    min_free_gb: 1
-
-
-# --- PTP Settings ---
-ptp:
-    enabled: false                      # free-running timestamps are fine for a preview
+    segment_size_mb: 1024               # > 0
+    record_align: 4096                  # power of two
+    queue_max_frames: 4                 # >= 2; pool = queue + 2
+    queue_on_full: block                # the single frame must never be dropped
+    on_buffer_error: record_flagged     # unpack pads incomplete frames with --pad-incomplete
+    flush_interval_mb: 64               # > 0

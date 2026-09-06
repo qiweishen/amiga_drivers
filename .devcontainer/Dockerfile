@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ----- 3rd_party libraries ----- \
     libboost-all-dev \
     libeigen3-dev \
+    zlib1g-dev \
     openssl \
     libssl-dev \
     qtbase5-dev \
@@ -56,7 +57,7 @@ RUN apt-get install -y --no-install-recommends \
 COPY resource/eBUS_SDK_Ubuntu-22.04-x86_64-*.deb /tmp/ebus/
 RUN dpkg -i /tmp/ebus/eBUS_SDK_Ubuntu-22.04-x86_64-*.deb
 ENV EBUS_SDK_ROOT=/opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64
-# fx10's FindeBUS reads PUREGEV_ROOT; gox's FindeBUS reads EBUS_SDK_ROOT
+# Fx10's FindeBUS reads PUREGEV_ROOT; Go-X's FindeBUS reads EBUS_SDK_ROOT
 ENV PUREGEV_ROOT=${EBUS_SDK_ROOT}
 ENV GENICAM_ROOT_V3_4=${EBUS_SDK_ROOT}/lib/genicam
 ENV LD_LIBRARY_PATH=${EBUS_SDK_ROOT}/lib:${EBUS_SDK_ROOT}/lib/genicam/bin/Linux64_x64

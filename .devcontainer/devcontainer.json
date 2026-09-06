@@ -1,7 +1,7 @@
 {
-    "name": "Amiga Sensor Dev",
+    "name": "Amiga Drivers Dev",
     "dockerComposeFile": "./docker-compose.yml",
-    "service": "amiga-sensor-dev",
+    "service": "amiga-drivers-dev",
     "workspaceFolder": "/workspace",
 
     // Container user settings

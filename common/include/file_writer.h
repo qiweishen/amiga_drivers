@@ -1,19 +1,4 @@
-/// @file file_writer.h
-/// @brief Shared binary-file writing infrastructure (header-only).
-///
-/// Two building blocks; the on-disk formats stay driver-private:
-///  - BufferedFileWriter: ofstream + pubsetbuf boilerplate with an explicit
-///    open-failure check (a silently unopened ofstream swallows all writes).
-///  - RotatingFileWriter: size/interval rotation, lazy or eager open,
-///    sequence-numbered paths via callback, optional per-file header hook and
-///    an optional pre-write size cap (segment size as a HARD limit).
-///
-/// Neither class is thread-safe and neither throws; callers own the threading
-/// model, the error reaction (throw / stop / degrade) and any statistics that
-/// must be readable across threads.
-
-#ifndef COMMON_FILE_WRITER_H
-#define COMMON_FILE_WRITER_H
+#pragma once
 
 #include <chrono>
 #include <cstdint>
@@ -24,7 +9,7 @@
 #include <vector>
 
 
-namespace Common {
+namespace common {
     class BufferedFileWriter {
     public:
         BufferedFileWriter() = default;
@@ -35,7 +20,7 @@ namespace Common {
         BufferedFileWriter &operator=(const BufferedFileWriter &) = delete;
 
         // pubsetbuf must precede open; buffer_size = 0 keeps the default buffer
-        [[nodiscard]] bool Open(const std::string &path, std::size_t buffer_size,
+        bool Open(const std::string &path, std::size_t buffer_size,
                                 std::ios::openmode mode = std::ios::out | std::ios::binary) {
             Close();
             if (buffer_size > 0) {
@@ -43,15 +28,18 @@ namespace Common {
                 file_.rdbuf()->pubsetbuf(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
             }
             file_.open(path, mode);
+            if (!file_.is_open()) {
+                return false;
+            }
             path_ = path;
-            return file_.is_open();
+            return true;
         }
 
-        [[nodiscard]] bool IsOpen() const { return file_.is_open(); }
+        bool IsOpen() const { return file_.is_open(); }
 
         // False once any write/flush failed (badbit/failbit); IsOpen() stays
         // true on a failed stream, so error detection must use this
-        [[nodiscard]] bool Good() const { return file_.good(); }
+        bool Good() const { return file_.good(); }
 
         void Write(const void *data, std::size_t len) {
             file_.write(static_cast<const char *>(data), static_cast<std::streamsize>(len));
@@ -70,7 +58,7 @@ namespace Common {
             }
         }
 
-        [[nodiscard]] const std::string &Path() const { return path_; }
+        const std::string &Path() const { return path_; }
 
     private:
         std::ofstream file_;
@@ -93,14 +81,11 @@ namespace Common {
             // making it a hard per-file cap (e.g. RxTools refuses >= 2 GB files)
             bool precheck_size_cap = false;
 
-            // Called right after each file opens (e.g. write the format header).
-            // Return false to fail the open. Header bytes count towards the
-            // file-size rotation threshold but not towards Stats.bytes_written
             std::function<bool(std::ofstream &)> on_new_file;
         };
 
-        // NOT thread-safe across threads (single writer at a time); read from
-        // the writing thread only
+        // NOT thread-safe across threads (single writer at a time);
+        // read from the writing thread only
         struct Stats {
             std::uint64_t bytes_written = 0; // record payload bytes (headers excluded)
             std::uint64_t records_written = 0;
@@ -118,8 +103,10 @@ namespace Common {
 
         // Close the current file and open the next sequence file. Eager users
         // (writer threads that must fail fast) call this from their Start()
-        [[nodiscard]] bool OpenNext() {
-            CloseCurrent();
+        bool OpenNext() {
+            if (!CloseCurrent()) {
+                return false;
+            }
             const std::string path = opts_.make_path(seq_);
             if (opts_.buffer_bytes > 0) {
                 if (buffer_.size() != opts_.buffer_bytes) {
@@ -130,6 +117,7 @@ namespace Common {
             }
             file_.open(path, std::ios::out | std::ios::binary);
             if (!file_.is_open()) {
+                failed_ = true;
                 return false;
             }
             current_path_ = path;
@@ -139,6 +127,7 @@ namespace Common {
             file_start_ = std::chrono::steady_clock::now();
             if (opts_.on_new_file) {
                 if (!opts_.on_new_file(file_) || !file_) {
+                    failed_ = true;
                     CloseCurrent();
                     return false;
                 }
@@ -148,21 +137,25 @@ namespace Common {
             return true;
         }
 
-        // Append one record: opens the first file lazily, applies the pre-write
-        // cap and the post-write size/interval rotation. Returns false on any
-        // open or stream failure (the stream state is left for inspection)
-        [[nodiscard]] bool Append(const void *data, std::size_t len) {
+        bool Append(const void *data, std::size_t len) {
+            if (failed_) {
+                return false;
+            }
             if (!file_.is_open() && !OpenNext()) {
                 return false;
             }
-            if (opts_.precheck_size_cap && opts_.max_file_bytes > 0 && current_bytes_ > 0 &&
-                current_bytes_ + len > opts_.max_file_bytes) {
-                if (!OpenNext()) {
+            if (opts_.precheck_size_cap && opts_.max_file_bytes > 0) {
+                if (len > opts_.max_file_bytes) {
+                    failed_ = true;
+                    return false; // hard cap: one record can never fit
+                }
+                if (current_bytes_ > opts_.max_file_bytes - len && !OpenNext()) {
                     return false;
                 }
             }
             file_.write(static_cast<const char *>(data), static_cast<std::streamsize>(len));
             if (!file_) {
+                failed_ = true;
                 return false;
             }
             current_bytes_ += len;
@@ -173,24 +166,29 @@ namespace Common {
 
         // Close so the next Append starts a fresh sequence file (segment
         // boundaries then coincide with link gaps)
-        void EndSegment() { CloseCurrent(); }
+        bool EndSegment() { return CloseCurrent(); }
 
-        void Close() { CloseCurrent(); }
+        bool Close() { return CloseCurrent(); }
 
-        [[nodiscard]] bool IsOpen() const { return file_.is_open(); }
-        [[nodiscard]] const Stats &GetStats() const { return stats_; }
-        [[nodiscard]] const std::string &CurrentPath() const { return current_path_; }
-        [[nodiscard]] std::uint64_t CurrentFileBytes() const { return current_bytes_; }
+        bool Failed() const { return failed_; }
+
+        bool IsOpen() const { return file_.is_open(); }
+        const Stats &GetStats() const { return stats_; }
+        const std::string &CurrentPath() const { return current_path_; }
+        std::uint64_t CurrentFileBytes() const { return current_bytes_; }
 
     private:
-        void CloseCurrent() {
+        bool CloseCurrent() {
             if (file_.is_open()) {
                 file_.flush();
+                failed_ = failed_ || !file_;
                 file_.close();
+                failed_ = failed_ || !file_;
             }
+            return !failed_;
         }
 
-        [[nodiscard]] bool RotateIfNeeded() {
+        bool RotateIfNeeded() {
             const bool by_size = opts_.max_file_bytes > 0 && current_bytes_ >= opts_.max_file_bytes;
             const bool by_time = opts_.rotate_interval.count() > 0 &&
                                  (std::chrono::steady_clock::now() - file_start_) >= opts_.rotate_interval;
@@ -208,7 +206,6 @@ namespace Common {
         std::chrono::steady_clock::time_point file_start_{};
         std::uint32_t seq_ = 0;
         Stats stats_{};
+        bool failed_ = false;
     };
-} // namespace Common
-
-#endif	// COMMON_FILE_WRITER_H
+} // namespace common

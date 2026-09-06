@@ -1,7 +1,8 @@
+# Effective floor is 3.18: the fetched HDF5 (cmake/Dependencies.cmake) requires it
 cmake_minimum_required(VERSION 3.14)
 project(AmigaDrivers
         VERSION 0.1.0
-        DESCRIPTION "Amiga Drivers - LMS4xxx, JAI Go-X, Septentrio AsteRx and Specim FX10"
+        DESCRIPTION "Amiga Drivers - Septentrio AsteRx, Specim FX10e, JAI Go-X, and SICK LMS4xxx"
         LANGUAGES CXX C
 )
 
@@ -37,7 +38,7 @@ find_package(Threads REQUIRED)
 
 
 ################################################################################
-# Shared FetchContent libraries (spdlog, yaml-cpp, and nlohmann/json)
+# Shared FetchContent libraries (HDF5, spdlog, yaml-cpp, and nlohmann/json)
 include(${CMAKE_SOURCE_DIR}/cmake/Dependencies.cmake)
 
 # Shared find modules (cmake/FindeBUS.cmake serves gox_driver and fx10_driver)
@@ -45,7 +46,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 
 ################################################################################
-# Testing (ctest; driver test targets register via add_test / gtest_discover_tests)
+# Testing. One switch for every driver and common; ON in every build type so
+# template/schema drift is caught in the Release builds the rig actually runs.
+option(AMIGA_BUILD_TESTS "Build unit tests" ON)
 enable_testing()
 
 # GUI marker contract: driver_markers.h and app/services/markers.py must agree
@@ -67,14 +70,7 @@ add_subdirectory(common)
 add_subdirectory(lms4xxx_driver)
 add_subdirectory(gox_driver)
 add_subdirectory(asterx_driver)
-# After asterx: in Debug its FetchContent googletest registers GTest::* first,
-# so fx10's tests reuse it instead of the apt fallback
 add_subdirectory(fx10_driver)
-
-
-################################################################################
-# DataConverter (standalone binary-to-CSV post-processing tool)
-add_subdirectory(parse)
 
 
 ################################################################################
@@ -123,6 +119,7 @@ message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Output Dir:       ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "")
 message(STATUS "  Shared Dependencies:")
+message(STATUS "    hdf5:           ${hdf5_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")
 message(STATUS "    nlohmann/json:  ${nlohmann-json_SOURCE_DIR}")

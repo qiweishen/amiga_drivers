@@ -2,115 +2,130 @@
 # AsteRx Driver Configuration
 # =============================================================
 
-# Septentrio AsteRx GNSS/INS receiver configuration.
+# Septentrio AsteRx RBi3 Pro+ GNSS/INS receiver.
 # Referenced by config/config-main.yaml ("ASTERX Driver Config Path").
 
 
-# --- General Settings ---
+
+# --- Device ---
 device:
-    ip: "10.95.2.102"    # receiver IP or hostname
-    # Single TCP connection: ASCII commands AND the SBF stream share it.
-    port: 28784    # plaintext command port (28783 = TLS, not implemented)
-    user: "admin"
-    password: "septentrio"
+    ip: "10.95.2.102"
+    port: 28784                         # 1..65535
+    user: "admin"                       # 1..16 chars, not RxAdmin (p.87)
+    password: "septentrio"              # 1..16 chars
 
 
-# --- Receiver Settings ---
+# --- Receiver ---
 receiver:
-    require_aux1: true  # fail fast if the receiver has no Aux1 capability
+    warmup:
+        min_uptime_s: 1200              # >= 0; 0 = no uptime gate (PTP reaches spec after ~20 min (1200), p.47)
+        require_finetime: true          # ReceiverStatus FINETIME bit (p.374)
+
+    ntrip:
+        enabled: false
+        caster: www.smartnetaus.com     # <= 40 chars, no whitespace
+        port: 15101                     # 1..65535
+        username: "<?>"                 # <= 128 chars
+        password: "<?>"                 # <= 32 chars; " ' $ & , are escaped by the driver
+        mount_point: MSM_VRS            # <= 32 chars
+        version: v2                     # v1 | v2
+        tls: false
+        send_gga_to_caster: auto        # auto | off | sec1 | sec5 | sec10 | sec60
+
+    antenna:
+        main_antenna_type: Unknown      # exact lstAntennaInfo name or Unknown (p.66)
+        aux_antenna_type: Unknown
+        attitude_offset_deg:            # Main->Aux1 baseline vs vehicle axis
+            heading: 0.0                # -360..360
+            pitch: 0.0                  # -90..90
+        antenna_lever_arm_m:            # IMU reference -> main ARP; X fwd, Y right, Z down (p.113)
+            x: 0.0                      # -100..100
+            y: 0.0                      # -100..100
+            z: 0.0                      # -100..100
+
+    # =============================================================
+    # ADVANCED: do not change without a reason
+    # =============================================================
+    gnss:
+        cn0_mask_dbhz: 0                # 0..60
+        elevation_mask_deg: 0           # -90..90
+        satellite_tracking: all         # all | none | GPS+GLONASS+GALILEO+SBAS+BEIDOU+QZSS | G01+R01+...
+        satellite_usage: all            # same syntax
+        satellite_health_override: none # same syntax
+        signal_tracking: all            # all | signal names and constellations joined by +
+        signal_usage: all               # all | signal names joined by + (no constellation aliases, p.131)
 
     imu:
-        # Boot records raw ExtSensorMeas before GNSS time is known.
-        # Those early frames may carry invalid timestamps.
-        startup_data_mode: GnssTimeKnown    # Boot | GnssTimeKnown
+        startup_data_mode: GnssTimeKnown        # GnssTimeKnown | Boot (p.173)
+        imu_orientation:
+            orientation_mode: SensorDefault     # SensorDefault | manual | fixed (p.112)
+            theta_x_deg: 0.0            # -180..180
+            theta_y_deg: 0.0            # -90..90
+            theta_z_deg: 0.0            # -180..180
 
-        # SensorDefault assumes the marked IMU X axis points forward, Y right, Z down.
-        orientation_mode: SensorDefault    # SensorDefault | manual | fixed
-        theta_x_deg: 0.0
-        theta_y_deg: 0.0
-        theta_z_deg: 0.0
+    navigation:
+        pvt_mode: all                   # all | StandAlone+SBAS+DGNSS+RTKFloat+RTKFixed+RTK (any subset)
+        receiver_dynamics: Moderate     # Max | High | Moderate | Low (p.125)
+        vehicle_application: Unknown
+        clock_sync_threshold: usec500   # ClockSteering | usec500 | msec1 | msec2 | msec3 | msec4 | msec5 (p.152)
+        multipath_mitigation: true      # code and carrier (p.95)
+        ins_output_location: POI1       # MainAnt | POI1
 
-        # Lever arm from IMU reference point to main GNSS antenna ARP, expressed in the vehicle frame, meters.
-        ant_lever_arm_m:
-            x: 0.0
-            y: 0.0
-            z: 0.0
+    time_system:
+        ptp_server: true
+        ntp_server: true
+        pps:
+            interval: sec1              # off | msec10 | msec20 | msec50 | msec100 | msec200 | msec250 | msec500 | sec1 | sec2 | sec4 | sec5 | sec10 | sec30 | sec60
+            polarity: Low2High          # Low2High | High2Low (p.156)
+            delay_ns: 0.0               # -1000000..1000000, 2 decimals
+            time_scale: GPS             # GPS | Galileo | BeiDou | GLONASS | UTC | RxClock
+            max_holdover_s: 60          # 0..3600
+            pulse_width_ms: 5.0         # 0.000001..1000
 
-    gnss_attitude:
-        mode: MultiAntenna    # MultiAntenna | none
-        attitude_offset_deg:
-            heading: 0.0
-            pitch: 0.0
-
-    tracking:
-        # Reset receiver-side filters on startup so stale settings cannot silently disable a constellation/frequency.
-        enable_all: true
-        cn0_mask_dbhz: 0
-
-    # OnChange means the receiver's natural renewal rate, avoiding driver-side decimation.
-    # Allowed intervals:
-    #     OnChange
-    #     msec5 msec10 msec20 msec40 msec50 msec100 msec200 msec500
-    #     sec1 sec2 sec5 sec10 sec15 sec30 sec60 min2 min5 min10 min15 min30 min60
-    # Through IPx port, the IP port we used to connect receiver
-    streams:
+    sbf_streams:                        # interval: OnChange | msec5..msec500 | sec1..sec60 | min2..min60 (p.202); one stream must carry Status or ReceiverStatus
         -   id: 1
-            blocks: [ "ExtSensorMeas" ]                                           # raw IMU
-            interval: "OnChange"
+            blocks: [ Measurements ]                                        # raw Main+Aux1 observations
+            interval: OnChange
         -   id: 2
-            blocks: [ "MeasEpoch", "MeasExtra", "EndOfMeas" ]                     # main+Aux1 raw obs
-            interval: "OnChange"
+            blocks: [ GPS, GLO, GAL, BDS, QZS, GEO, RawNavBits ]            # ephemeris, UTC/iono models, raw nav bits
+            interval: OnChange
         -   id: 3
-            blocks: [ "AuxAntPositions", "AttEuler", "AttCovEuler", "EndOfAtt" ]  # baseline + attitude
-            interval: "OnChange"
+            blocks: [ ExtSensors ]                                          # raw IMU
+            interval: OnChange
         -   id: 4
-            blocks: [ "ExtSensorStatus", "ExtSensorInfo", "IMUSetup" ]            # IMU setup/status
-            interval: "OnChange"
+            blocks: [ DiffCorr ]                                            # NTRIP correction input
+            interval: OnChange
         -   id: 5
-            blocks: [ "ReceiverStatus", "QualityInd", "ReceiverTime", "ChannelStatus" ]
-            interval: "OnChange"
+            blocks: [ PVTCart, PosCart, PVTGeod, PVTExtra, Attitude ]       # GNSS solutions
+            interval: OnChange
         -   id: 6
-            # Navigation ephemeris, UTC/ionosphere models, raw nav bits and orrection/setup context
-            # needed for self-contained RTK/PPK/RINEX export.
-            # Kept separate from the Measurements stream to avoid duplicate MeasEpoch.
-            blocks: [ "GPS", "GLO", "GAL", "BDS", "QZS", "RawNavBits",
-                      "ReceiverSetup", "Commands", "DiffCorr" ]
-            interval: "OnChange"
+            blocks: [ INSNavCart, INSNavGeod, INSSupport ]                  # INS/GNSS solution
+            interval: OnChange
         -   id: 7
-            # Absolute position for the live map + fused INS pose (live_*.csv / web GUI).
-            # NOT OnChange: the INS solution renews at up to 200 Hz;
-            # msec100 caps both blocks at 10 Hz — plenty for the 0.5 s GUI tail and ~16 MB/h of CSV.
-            blocks: [ "PVTGeodetic", "INSNavGeod" ]
-            interval: "msec100"
-
-    # NMEA sentence output on fixed receiver ports ("pins", e.g. COM2) to feed external hardware
-    # Allowed descriptors:
-    #     COM1-COM4  USB1-USB2  IP10-IP17  NTR1-NTR3  IPS1-IPS5  IPR1-IPR5  DSK1
-    # Allowed messages:
-    #     GGA GLL GNS GST HDT RMC VTG ZDA HRP THS PASHR
-    pin_streams:
+            blocks: [ Time ]                                                # time / sync status, PPS offset
+            interval: OnChange
         -   id: 8
-            descriptor: COM2
-            message: ZDA
-            interval: "sec1"
+            blocks: [ Status ]                                              # ReceiverStatus for the warm-up gate
+            interval: OnChange
+        -   id: 9
+            blocks: [ ReceiverSetup, RxComponents, RxMessage, Commands, Comment, InterfaceStats ]
+            interval: OnChange
+
+    nmea_streams:                       # [] = none; ids follow list order, max 10 (p.193)
+        -   descriptor: COM1            # COM1..COM2 | USB1..USB2 | IP10..IP17 | NTR1..NTR3 | IPS1..IPS5 | IPR1..IPR5 | LOG1..LOG2
+            messages: [ ZDA ]           # GGA | GLL | GNS | GST | HDT | RMC | VTG | ZDA | HRP | THS | PASHR
+            interval: sec1
 
 
-# =============================================================
-# NOT RECOMMEND TO CHANGE
-# =============================================================
-# --- Output Settings ---
+# --- Output (SBF) ---
 output:
-    output_dir: "./recordings"    # overridden to <data_folder>/bin/asterx/ in unified mode
-    file_prefix: "asterx"
-    # Real-time per-block live_*.csv beside the .sbf (feeds the web GUI's AsteRx Live page).
-    # Parse/write failures only disable the CSV, never affect the .sbf recording.
-    live_csv: true
-    # Must stay < 2 GiB.
-    # The RxTools converters (sbf2rin/sbf2asc) refuse SBF inputs of 2 GB or larger.
-    # Rotation doubles as the post-processing guarantee.
-    rotate_bytes: 1073741824    # 1 GiB
-    rotate_interval_s: 3600     # 1 hour
+    file_prefix: asterx                 # <prefix>_<seq>.sbf
+    live_csv: true                      # per-block live_*.csv beside the .sbf (GUI live view)
+    rotation:
+        max_bytes: 1073741824           # 1..2147483647 (sbf2rin refuses >= 2 GiB)
+        max_interval_s: 3600            # > 0
 
 
-# --- Statistics Interval Time ---
-stats_period_s: 2.5
+# --- Logging ---
+logging:
+    stats_interval_s: 2.5               # > 0

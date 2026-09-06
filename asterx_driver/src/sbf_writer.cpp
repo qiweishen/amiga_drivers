@@ -1,4 +1,4 @@
-#include "sbf_writer.hpp"
+#include "sbf_writer.h"
 
 #include <stdexcept>
 #include <system_error>
@@ -11,15 +11,15 @@
 namespace asterx {
     namespace {
         constexpr std::string_view kModule = "AsteRx";
-        Common::DriverLog g_log{std::string(kModule)};
+        common::DriverLog g_log{std::string(kModule)};
 
-        Common::RotatingFileWriter::Options make_options(const SbfWriter::Config &cfg) {
-            Common::RotatingFileWriter::Options opts;
+        common::RotatingFileWriter::Options MakeOptions(const SbfWriter::Config &cfg) {
+            common::RotatingFileWriter::Options opts;
             // Fresh UTC stamp per file; seq is 0-based in the core, 1-based in
             // names. Capture by value: the lambda outlives this function
             opts.make_path = [dir = cfg.output_dir, prefix = cfg.file_prefix](std::uint32_t seq) {
                 return (dir /
-                        (prefix + "-" + Common::TimeUtil::CompactUtcNow() + "-" +
+                        (prefix + "-" + common::TimeUtil::CompactUtcNow() + "-" +
                          std::to_string(seq + 1) + ".sbf"))
                         .string();
             };
@@ -31,11 +31,12 @@ namespace asterx {
     } // namespace
 
 
-    SbfWriter::SbfWriter(Config cfg) : cfg_(std::move(cfg)), writer_(make_options(cfg_)) {
+    SbfWriter::SbfWriter(Config cfg) : cfg_(std::move(cfg)), writer_(MakeOptions(cfg_)) {
         std::error_code ec;
         std::filesystem::create_directories(cfg_.output_dir, ec);
         if (ec) {
-            g_log.error("[Writer] Cannot create output directory '{}': {}", cfg_.output_dir.string(), ec.message());
+            throw std::runtime_error("cannot create SBF output directory '" + cfg_.output_dir.string() +
+                                     "': " + ec.message());
         }
     }
 
@@ -43,37 +44,34 @@ namespace asterx {
     SbfWriter::~SbfWriter() { close(); }
 
 
-    void SbfWriter::close() noexcept { writer_.Close(); }
+    bool SbfWriter::close() noexcept { return writer_.Close(); }
 
 
-    void SbfWriter::end_segment() noexcept {
+    bool SbfWriter::EndSegment() noexcept {
         if (writer_.IsOpen()) {
-            g_log.info("[Writer] Closing segment {} ({} bytes)", writer_.CurrentPath(), writer_.CurrentFileBytes());
-            writer_.EndSegment();
+            g_log.Info("[Writer] Closing segment {} ({} bytes)", writer_.CurrentPath(), writer_.CurrentFileBytes());
         }
+        return writer_.EndSegment();
     }
 
 
-    void SbfWriter::write_block(const QByteArray &block) {
+    bool SbfWriter::WriteBlock(const QByteArray &block) {
         if (block.isEmpty()) {
-            return;
+            return true;
         }
 
         const auto files_before = writer_.GetStats().files_opened;
         if (!writer_.Append(block.constData(), static_cast<std::size_t>(block.size()))) {
             if (!writer_.IsOpen()) {
-                g_log.error("[Writer] Cannot open SBF output file in '{}'", cfg_.output_dir.string());
+                g_log.Error("[Writer] Cannot open SBF output file in '{}'", cfg_.output_dir.string());
+            } else {
+                g_log.Error("[Writer] Cannot write SBF block to '{}'", writer_.CurrentPath());
             }
-            g_log.error("[Writer] Cannot write SBF block to '{}'", writer_.CurrentPath());
+            return false;
         }
         if (writer_.GetStats().files_opened != files_before) {
-            g_log.info("[Writer] Recording to {}", writer_.CurrentPath());
+            g_log.Info("[Writer] Recording to {}", writer_.CurrentPath());
         }
-    }
-
-
-    WriterStats SbfWriter::stats() const noexcept {
-        const auto &s = writer_.GetStats();
-        return WriterStats{s.bytes_written, s.records_written, s.files_opened};
+        return true;
     }
 } // namespace asterx

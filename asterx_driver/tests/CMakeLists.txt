@@ -1,40 +1,34 @@
-#
-# Slim unit tests. Three suites:
-#   asterx_test_commands     - command composition + geometry readback verifiers
-#   asterx_test_app_config   - YAML config loading/validation
-#   asterx_test_sbf_parsers  - live SBF block parsers (synthetic frames)
-#
-# The Septentrio SsnRx SDK itself is vendor-verified code and is not unit
-# tested here; it is exercised end-to-end by the unified AmigaDrivers binary.
-#
+################################################################################
+# asterx unit tests (doctest, device-free; the session tests use a fake receiver on localhost)
 
-include(GoogleTest)
+set(ASTERX_TEST_SOURCES
+        test_app_config.cpp
+        test_commands.cpp
+        test_sbf_live_recorder.cpp
+        test_sbf_parsers.cpp
+        test_sbf_writer.cpp
+        test_session.cpp
+        test_warmup_gate.cpp
+)
 
-function(asterx_add_test name)
-    cmake_parse_arguments(_T "" "" "SRCS;LIBS" ${ARGN})
+add_executable(asterx_tests
+        doctest_main.cpp
+        ${ASTERX_TEST_SOURCES}
+)
 
-    add_executable(${name} ${_T_SRCS})
-    # Project headers come from asterx_lib's PUBLIC include/ directory.
-    target_link_libraries(${name}
-        PRIVATE
-            asterx_lib
-            GTest::gtest
-            GTest::gtest_main
-            ${_T_LIBS})
+# The session test builds SBF frames with the vendored CRC helper (SsnRx src)
+target_link_libraries(asterx_tests PRIVATE asterx_lib Qt5::Core Qt5::Network)
+target_include_directories(asterx_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rd_party)
+target_include_directories(asterx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} "${SSNRX_DIR}/src")
+target_compile_definitions(asterx_tests PRIVATE
+        ASTERX_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../config")
 
-    target_compile_features(${name} PRIVATE cxx_std_17)
+set_target_properties(asterx_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests)
 
-    gtest_discover_tests(${name}
-        DISCOVERY_TIMEOUT 30
-        PROPERTIES
-            LABELS unit)
-endfunction()
-
-asterx_add_test(asterx_test_commands
-    SRCS test_commands.cpp)
-
-asterx_add_test(asterx_test_app_config
-    SRCS test_app_config.cpp)
-
-asterx_add_test(asterx_test_sbf_parsers
-    SRCS test_sbf_parsers.cpp)
+# One ctest entry per source file (doctest --source-file filter)
+foreach (test_source IN LISTS ASTERX_TEST_SOURCES)
+    get_filename_component(test_name ${test_source} NAME_WE)
+    add_test(NAME asterx.${test_name}
+            COMMAND asterx_tests --source-file=*${test_source})
+endforeach ()

@@ -1,12 +1,11 @@
-"""GoX helpers: camera discovery (jai_discover --json) and the snapshot
-pipeline (jai_snapshot in the container -> unpack_raw.py on the host ->
-8-bit JPEG for the browser + brightness histogram)."""
+"""GoX helpers: the snapshot pipeline (jai_snapshot in the container ->
+unpack_raw.py on the host -> 8-bit JPEG for the browser + brightness
+histogram). Device discovery is driver-neutral: services/ebus_tools.py."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import shutil
 import subprocess
 import time
@@ -16,7 +15,6 @@ import cv2
 import numpy as np
 
 from ..constants import (
-    BIN_DISCOVER,
     BIN_SNAPSHOT,
     SNAPSHOT_CONFIG,
     SNAPSHOT_DIR,
@@ -36,24 +34,6 @@ CLIP_THRESHOLD = 0xFFF0  # a saturated 12-bit pixel after --shift-to-16bit
 
 
 @dataclass
-class Device:
-    model: str
-    ip: str
-    mac: str
-    serial: str
-    user_name: str
-    config_valid: bool
-
-
-@dataclass
-class DiscoverResult:
-    devices: list[Device] = field(default_factory=list)
-    raw_output: str = ""
-    error: str = ""
-    json_supported: bool = True
-
-
-@dataclass
 class SnapshotResult:
     ok: bool
     reason: str = ""  # FAIL reason / pipeline error
@@ -68,7 +48,9 @@ class SnapshotResult:
 
 
 def guard_reason() -> str | None:
-    """Why snapshot/discover must NOT run right now (GigE control is exclusive).
+    """Why a camera-touching tool (snapshot, Set IP) must NOT run right now
+    (GigE control is exclusive). Discovery itself is fine: it is a broadcast
+    the camera answers without a control channel.
 
     Uses the Enable-GOX value captured at process start — the live file value
     can be toggled mid-run and must not unlock the camera the driver owns.
@@ -77,40 +59,6 @@ def guard_reason() -> str | None:
         if STATE.enables_at_start.get("gox", False):
             return "Recording is running with GoX enabled — the driver owns the cameras; stop recording first"
     return None
-
-
-async def discover(timeout_ms: int = 1500) -> DiscoverResult:
-    discover_bin = runtime.exec_path(BIN_DISCOVER)
-    res = await runtime.exec_(
-        [discover_bin, "--timeout", str(timeout_ms), "--json"], timeout=timeout_ms / 1000 + 15
-    )
-    raw = (res.stdout + ("\n" + res.stderr if res.stderr.strip() else "")).strip()
-    if res.code == 2 and "unknown argument" in res.stderr:
-        # Old binary without --json: degrade to the human-readable table.
-        res = await runtime.exec_(
-            [discover_bin, "--timeout", str(timeout_ms)], timeout=timeout_ms / 1000 + 15
-        )
-        return DiscoverResult(raw_output=res.stdout + res.stderr, json_supported=False,
-                              error="" if res.ok else "jai_discover failed (old binary without --json)")
-    if not res.ok:
-        return DiscoverResult(raw_output=raw, error=f"jai_discover failed (exit {res.code}): {res.stderr.strip()}")
-    try:
-        doc = json.loads(res.stdout)
-    except json.JSONDecodeError as e:
-        return DiscoverResult(raw_output=raw, error=f"Cannot parse the --json output: {e}")
-    devices = [
-        Device(
-            model=d.get("model", ""),
-            ip=d.get("ip", ""),
-            mac=d.get("mac", ""),
-            serial=d.get("serial", ""),
-            user_name=d.get("user_name", ""),
-            config_valid=bool(d.get("config_valid", False)),
-        )
-        for iface in doc.get("interfaces", [])
-        for d in iface.get("devices", [])
-    ]
-    return DiscoverResult(devices=devices, raw_output=raw)
 
 
 async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:

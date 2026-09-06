@@ -1,125 +1,139 @@
-#include "../include/accounting.hpp"
+#include "../include/accounting.h"
 
-#include <gtest/gtest.h>
+#include <doctest/doctest.h>
 
 using fx10::BlockIdTracker;
-using fx10::classify;
+using fx10::Classify;
 using fx10::Counters;
 using fx10::RunStatus;
 
 using Mode = BlockIdTracker::Mode;
 
-TEST(BlockIdTracker, SequentialHasNoGaps) {
+TEST_CASE("BlockIdTracker: SequentialHasNoGaps") {
     BlockIdTracker tracker;
     for (std::uint64_t id = 1; id <= 5; ++id) {
-        const auto obs = tracker.observe(id);
-        EXPECT_EQ(obs.gap_before, 0u);
-        EXPECT_FALSE(obs.anomaly);
+        const auto obs = tracker.Observe(id);
+        CHECK(obs.gap_before == 0u);
+        CHECK_FALSE(obs.anomaly);
     }
-    EXPECT_EQ(tracker.observed(), 5u);
-    EXPECT_EQ(tracker.totalMissed(), 0u);
+    CHECK(tracker.Observed() == 5u);
+    CHECK(tracker.TotalMissed() == 0u);
 }
 
-TEST(BlockIdTracker, SimpleGap) {
+TEST_CASE("BlockIdTracker: SimpleGap") {
     BlockIdTracker tracker;
-    tracker.observe(1);
-    tracker.observe(2);
-    const auto obs = tracker.observe(5); // 3 and 4 missing
-    EXPECT_EQ(obs.gap_before, 2u);
-    EXPECT_EQ(obs.first_missing, 3u);
-    EXPECT_EQ(tracker.totalMissed(), 2u);
+    tracker.Observe(1);
+    tracker.Observe(2);
+    const auto obs = tracker.Observe(5); // 3 and 4 missing
+    CHECK(obs.gap_before == 2u);
+    CHECK(obs.first_missing == 3u);
+    CHECK(tracker.TotalMissed() == 2u);
 }
 
-TEST(BlockIdTracker, SixteenBitWrapSkipsZero) {
+TEST_CASE("BlockIdTracker: SixteenBitWrapSkipsZero") {
     BlockIdTracker tracker;
-    tracker.observe(65534);
-    EXPECT_EQ(tracker.observe(65535).gap_before, 0u);
-    const auto wrap = tracker.observe(1); // ...65535, 1, 2... (0 skipped)
-    EXPECT_EQ(wrap.gap_before, 0u);
-    EXPECT_FALSE(wrap.anomaly);
-    EXPECT_EQ(tracker.observe(2).gap_before, 0u);
-    EXPECT_EQ(tracker.totalMissed(), 0u);
+    tracker.Observe(65534);
+    CHECK(tracker.Observe(65535).gap_before == 0u);
+    const auto wrap = tracker.Observe(1); // ...65535, 1, 2... (0 skipped)
+    CHECK(wrap.gap_before == 0u);
+    CHECK_FALSE(wrap.anomaly);
+    CHECK(tracker.Observe(2).gap_before == 0u);
+    CHECK(tracker.TotalMissed() == 0u);
 }
 
-TEST(BlockIdTracker, GapAcrossWrap) {
+TEST_CASE("BlockIdTracker: GapAcrossWrap") {
     BlockIdTracker tracker;
-    tracker.observe(65534);
-    const auto obs = tracker.observe(2); // missing 65535 and 1
-    EXPECT_EQ(obs.gap_before, 2u);
-    EXPECT_EQ(obs.first_missing, 65535u);
-    EXPECT_FALSE(obs.anomaly);
+    tracker.Observe(65534);
+    const auto obs = tracker.Observe(2); // missing 65535 and 1
+    CHECK(obs.gap_before == 2u);
+    CHECK(obs.first_missing == 65535u);
+    CHECK_FALSE(obs.anomaly);
 }
 
-TEST(BlockIdTracker, DuplicateAndBackwardsAreAnomalies) {
+TEST_CASE("BlockIdTracker: DuplicateAndBackwardsAreAnomalies") {
     BlockIdTracker tracker;
-    tracker.observe(10);
-    EXPECT_TRUE(tracker.observe(10).anomaly); // duplicate
-    EXPECT_TRUE(tracker.observe(5).anomaly); // backwards
-    EXPECT_EQ(tracker.anomalies(), 2u);
-    EXPECT_EQ(tracker.totalMissed(), 0u);
+    tracker.Observe(10);
+    CHECK(tracker.Observe(10).anomaly); // duplicate
+    CHECK(tracker.Observe(5).anomaly); // backwards
+    CHECK(tracker.Anomalies() == 2u);
+    CHECK(tracker.TotalMissed() == 0u);
 }
 
-TEST(BlockIdTracker, ZeroIdIsAnomalyInSixteenBitSpace) {
+TEST_CASE("BlockIdTracker: ZeroIdIsAnomalyInSixteenBitSpace") {
     BlockIdTracker tracker;
-    tracker.observe(5);
-    EXPECT_TRUE(tracker.observe(0).anomaly);
+    tracker.Observe(5);
+    CHECK(tracker.Observe(0).anomaly);
     // Stream continues as if 0 never happened.
-    EXPECT_EQ(tracker.observe(6).gap_before, 0u);
+    CHECK(tracker.Observe(6).gap_before == 0u);
 }
 
-TEST(BlockIdTracker, SixtyFourBitMode) {
+TEST_CASE("BlockIdTracker: ReorderingDoesNotCreateFalseLossOnRecovery") {
+    for (const Mode mode : {Mode::k16Bit, Mode::k64Bit}) {
+        BlockIdTracker tracker(mode);
+        CHECK(tracker.Observe(0).anomaly);
+        CHECK_FALSE(tracker.Observe(100).anomaly);
+        CHECK(tracker.Observe(99).anomaly);
+        CHECK(tracker.Observe(100).anomaly);
+        CHECK(tracker.Observe(101).gap_before == 0);
+        CHECK(tracker.Observe(103).gap_before == 1);
+        CHECK(tracker.Observe(104).gap_before == 0);
+        CHECK(tracker.TotalMissed() == 1);
+    }
+}
+
+TEST_CASE("BlockIdTracker: SixtyFourBitMode") {
     BlockIdTracker tracker(Mode::k64Bit);
-    tracker.observe(65535);
-    EXPECT_EQ(tracker.observe(65536).gap_before, 0u); // no wrap in 64-bit mode
-    EXPECT_EQ(tracker.observe(65540).gap_before, 3u);
-    EXPECT_TRUE(tracker.observe(1).anomaly); // backwards
+    tracker.Observe(65535);
+    CHECK(tracker.Observe(65536).gap_before == 0u); // no wrap in 64-bit mode
+    CHECK(tracker.Observe(65540).gap_before == 3u);
+    CHECK(tracker.Observe(1).anomaly); // backwards
 }
 
-TEST(BlockIdTracker, AutoStaysSixteenBitOnWrap) {
+TEST_CASE("BlockIdTracker: AutoStaysSixteenBitOnWrap") {
     BlockIdTracker tracker(Mode::kAuto);
-    tracker.observe(65535);
-    EXPECT_EQ(tracker.observe(1).gap_before, 0u); // interpreted as 16-bit wrap
+    tracker.Observe(65535);
+    CHECK(tracker.Observe(1).gap_before == 0u); // interpreted as 16-bit wrap
 }
 
-TEST(BlockIdTracker, AutoSwitchesToWideOnLargeId) {
+TEST_CASE("BlockIdTracker: AutoSwitchesToWideOnLargeId") {
     BlockIdTracker tracker(Mode::kAuto);
-    tracker.observe(65535);
-    const auto obs = tracker.observe(65536); // 64-bit camera crossing the boundary
-    EXPECT_EQ(obs.gap_before, 0u);
-    EXPECT_FALSE(obs.anomaly);
+    tracker.Observe(65535);
+    const auto obs = tracker.Observe(65536); // 64-bit camera crossing the boundary
+    CHECK(obs.gap_before == 0u);
+    CHECK_FALSE(obs.anomaly);
     // Once wide, a drop back to 1 is an anomaly, not a wrap.
-    EXPECT_TRUE(tracker.observe(1).anomaly);
+    CHECK(tracker.Observe(1).anomaly);
 }
 
-TEST(Classify, CleanAndDegraded) {
+TEST_CASE("Classify: CleanAndDegraded") {
     Counters c;
-    EXPECT_EQ(classify(c), RunStatus::kClean); // missed_trigger_delta = -1 (unmapped) is clean
+    CHECK(Classify(c) == RunStatus::kClean); // missed_trigger_delta = -1 (unmapped) is clean
 
     c.missed_trigger_delta = 0;
-    EXPECT_EQ(classify(c), RunStatus::kClean);
+    CHECK(Classify(c) == RunStatus::kClean);
 
     Counters degraded;
     degraded.frames_missed_rx = 1;
-    EXPECT_EQ(classify(degraded), RunStatus::kDegraded);
+    CHECK(Classify(degraded) == RunStatus::kDegraded);
 
     degraded = Counters{};
     degraded.op_errors = 1;
-    EXPECT_EQ(classify(degraded), RunStatus::kDegraded);
+    CHECK(Classify(degraded) == RunStatus::kDegraded);
 
     degraded = Counters{};
     degraded.write_errors = 1;
-    EXPECT_EQ(classify(degraded), RunStatus::kDegraded);
+    CHECK(Classify(degraded) == RunStatus::kDegraded);
 
     degraded = Counters{};
     degraded.blockid_anomalies = 1;
-    EXPECT_EQ(classify(degraded), RunStatus::kDegraded);
+    CHECK(Classify(degraded) == RunStatus::kDegraded);
 
     degraded = Counters{};
     degraded.missed_trigger_delta = 3;
-    EXPECT_EQ(classify(degraded), RunStatus::kDegraded);
+    CHECK(Classify(degraded) == RunStatus::kDegraded);
 
     // Padded gap lines imply frames_missed_rx > 0, but padding alone is bookkeeping.
     degraded = Counters{};
     degraded.gap_lines_padded = 5;
-    EXPECT_EQ(classify(degraded), RunStatus::kClean);
+    CHECK(Classify(degraded) == RunStatus::kClean);
 }

@@ -57,12 +57,12 @@ TEST_CASE(
     "file log lines match the GUI LINE_RE contract"
 ) {
     const auto path = MakeLogPath("format");
-    Common::Logger::init({path.string(), /*quiet=*/true}, "common_tests_format");
+    common::Logger::Init({path.string(), /*quiet=*/true}, "common_tests_format");
 
-    Common::Log::log_message(spdlog::level::trace, Common::Markers::kModuleMain, "trace message");
-    Common::Log::log_message(spdlog::level::info, Common::Markers::kModuleGox, Common::Markers::kGoxInitialized);
-    Common::Log::log_message(spdlog::level::warn, Common::Markers::kModuleLms4xxx, "with detail", "detail text");
-    Common::Log::log_and_throw(Common::Markers::kModuleMain, "boom", "", /*throw_error=*/false);
+    common::Log::LogMessage(spdlog::level::trace, common::Markers::kModuleMain, "trace message");
+    common::Log::LogMessage(spdlog::level::info, common::Markers::kModuleGox, common::Markers::kGoxInitialized);
+    common::Log::LogMessage(spdlog::level::warn, common::Markers::kModuleLms4xxx, "with detail", "detail text");
+    common::Log::LogAndThrow(common::Markers::kModuleMain, "boom", "", /*throw_error=*/false);
 
     const auto lines = ReadLines(path);
     REQUIRE(lines.size() == 4);
@@ -77,8 +77,8 @@ TEST_CASE(
     // Spot-check module token and message routing of the marker line
     REQUIRE(std::regex_match(lines[1], m, kLineRe));
     CHECK(m[2].str() == "info");
-    CHECK(m[3].str() == std::string(Common::Markers::kModuleGox));
-    CHECK(m[4].str() == std::string(Common::Markers::kGoxInitialized));
+    CHECK(m[3].str() == std::string(common::Markers::kModuleGox));
+    CHECK(m[4].str() == std::string(common::Markers::kGoxInitialized));
 
     // The " - " detail suffix stays inside the msg group
     REQUIRE(std::regex_match(lines[2], m, kLineRe));
@@ -91,30 +91,30 @@ TEST_CASE(
     "throw semantics (logger.h contract)"
 ) {
     const auto path = MakeLogPath("throw");
-    Common::Logger::init({path.string(), /*quiet=*/true}, "common_tests_throw");
+    common::Logger::Init({path.string(), /*quiet=*/true}, "common_tests_throw");
 
     // log_message is pure logging at ANY level — never throws
-    CHECK_NOTHROW(Common::Log::log_message(spdlog::level::err, "Main", "boom"));
-    CHECK_NOTHROW(Common::Log::log_message(spdlog::level::critical, "Main", "boom"));
+    CHECK_NOTHROW(common::Log::LogMessage(spdlog::level::err, "Main", "boom"));
+    CHECK_NOTHROW(common::Log::LogMessage(spdlog::level::critical, "Main", "boom"));
     // log_and_throw is the only throwing path, and only when asked
-    CHECK_THROWS_AS(Common::Log::log_and_throw("Main", "boom"), std::runtime_error);
-    CHECK_NOTHROW(Common::Log::log_and_throw("Main", "boom", "", /*throw_error=*/false));
+    CHECK_THROWS_AS(common::Log::LogAndThrow("Main", "boom"), std::runtime_error);
+    CHECK_NOTHROW(common::Log::LogAndThrow("Main", "boom", "", /*throw_error=*/false));
     // DriverLog never throws by default (safe in threads/destructors/Qt slots)
-    Common::DriverLog log("AsteRx");
-    CHECK_NOTHROW(log.error("disk write failed: {}", 42));
-    CHECK_NOTHROW(log.critical("fatal but non-throwing: {}", "reason"));
-    // The explicit error(bool, ...) overload throws only when asked; the thrown
+    common::DriverLog Log("AsteRx");
+    CHECK_NOTHROW(Log.Error("disk write failed: {}", 42));
+    CHECK_NOTHROW(Log.Critical("fatal but non-throwing: {}", "reason"));
+    // The explicit Error(bool, ...) overload throws only when asked; the thrown
     // message is the formatted text. Reserved for the *_driver_app layer.
-    CHECK_NOTHROW(log.error(false, "recoverable: {}", 1));
-    CHECK_THROWS_AS(log.error(true, "fatal: {}", 2), std::runtime_error);
+    CHECK_NOTHROW(Log.Error(false, "recoverable: {}", 1));
+    CHECK_THROWS_AS(Log.Error(true, "fatal: {}", 2), std::runtime_error);
     try {
-        log.error(true, "fatal: {}", 3);
+        Log.Error(true, "fatal: {}", 3);
     } catch (const std::runtime_error &e) {
         CHECK(std::string(e.what()) == "fatal: 3");
     }
     // A leading string literal must resolve to the non-throwing overload, never
     // via const char* -> bool conversion (SFINAE-guarded).
-    CHECK_NOTHROW(log.error("plain message, no args"));
+    CHECK_NOTHROW(Log.Error("plain message, no args"));
 }
 
 
@@ -123,13 +123,13 @@ TEST_CASE(
     "DriverLog lines carry the [module]: prefix and pass LINE_RE"
 ) {
     const auto path = MakeLogPath("driverlog");
-    Common::Logger::init({path.string(), /*quiet=*/true}, "common_tests_driverlog");
+    common::Logger::Init({path.string(), /*quiet=*/true}, "common_tests_driverlog");
 
-    Common::DriverLog log("AsteRx", spdlog::level::info);
-    log.debug("filtered out by min_level {}", 1);
-    log.info("hello {}", 1);
-    log.error("oops {}", 2);
-    log.critical("fatal {}", 3);
+    common::DriverLog Log("AsteRx", spdlog::level::info);
+    Log.Debug("filtered out by min_level {}", 1);
+    Log.Info("hello {}", 1);
+    Log.Error("oops {}", 2);
+    Log.Critical("fatal {}", 3);
 
     const auto lines = ReadLines(path);
     REQUIRE(lines.size() == 3); // debug filtered by the driver-level min_level
@@ -157,12 +157,12 @@ TEST_CASE(
     // The web GUI tails this file from ANOTHER process, so it cannot flush it;
     // and an abort() would take an unflushed buffer with it, losing exactly the
     // crash tail. spdlog flushes nothing by default (flush_level_ = off), hence
-    // the flush_on(err) in Logger::init. Info/trace lines are covered by the
+    // the flush_on(err) in Logger::Init. Info/trace lines are covered by the
     // background spdlog::flush_every() and are deliberately not asserted here.
     const auto path = MakeLogPath("flush");
-    Common::Logger::init({path.string(), /*quiet=*/true}, "common_tests_flush");
+    common::Logger::Init({path.string(), /*quiet=*/true}, "common_tests_flush");
 
-    Common::Log::log_message(spdlog::level::err, Common::Markers::kModuleMain, "reaches disk at once");
+    common::Log::LogMessage(spdlog::level::err, common::Markers::kModuleMain, "reaches disk at once");
 
     // NOTE: read WITHOUT ReadLines() — that helper flushes, which is the very
     // thing this test must not do.
@@ -177,21 +177,21 @@ TEST_CASE(
 
     "marker templates render the exact GUI-matched strings"
 ) {
-    CHECK(fmt::format(fmt::runtime(Common::Markers::kLmsInitializedInstTpl), "front")
+    CHECK(fmt::format(fmt::runtime(common::Markers::kLmsInitializedInstTpl), "front")
         == "LiDAR instance [front] initialized successfully");
-    CHECK(fmt::format(fmt::runtime(Common::Markers::kLmsShutdownInstTpl), "front")
+    CHECK(fmt::format(fmt::runtime(common::Markers::kLmsShutdownInstTpl), "front")
         == "LiDAR instance [front] driver shutdown completely");
-    CHECK(fmt::format(fmt::runtime(Common::Markers::kReceivedSignalTpl), 15)
+    CHECK(fmt::format(fmt::runtime(common::Markers::kReceivedSignalTpl), 15)
         == "Received signal 15, shutting down all drivers...");
 
     // The [Main] failure markers must factor into <name> + fixed suffix — the
     // GUI maps them to sensors by leading name and detects kind by suffix
     const std::string init_suffix = " driver initialization failed";
     const std::string run_suffix = " run() exception";
-    CHECK(std::string(Common::Markers::kAsterxInitFailed) == "AsteRx" + init_suffix);
-    CHECK(std::string(Common::Markers::kGoxInitFailed) == "GoX" + init_suffix);
-    CHECK(std::string(Common::Markers::kLms4xxxInitFailed) == "LMS4xxx" + init_suffix);
-    CHECK(std::string(Common::Markers::kAsterxRunException) == "AsteRx" + run_suffix);
-    CHECK(std::string(Common::Markers::kGoxRunException) == "GoX" + run_suffix);
-    CHECK(std::string(Common::Markers::kLms4xxxRunException) == "LMS4xxx" + run_suffix);
+    CHECK(std::string(common::Markers::kAsterxInitFailed) == "AsteRx" + init_suffix);
+    CHECK(std::string(common::Markers::kGoxInitFailed) == "GoX" + init_suffix);
+    CHECK(std::string(common::Markers::kLms4xxxInitFailed) == "LMS4xxx" + init_suffix);
+    CHECK(std::string(common::Markers::kAsterxRunException) == "AsteRx" + run_suffix);
+    CHECK(std::string(common::Markers::kGoxRunException) == "GoX" + run_suffix);
+    CHECK(std::string(common::Markers::kLms4xxxRunException) == "LMS4xxx" + run_suffix);
 }

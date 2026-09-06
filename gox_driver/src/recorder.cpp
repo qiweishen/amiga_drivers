@@ -1,4 +1,4 @@
-#include "recorder.hpp"
+#include "recorder.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -7,17 +7,17 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
-#include "format.hpp"
+#include "format.h"
 #include "logger.h"
-#include "util.hpp"
+#include "time_util.h"
+#include "util.h"
 
-namespace jai {
+namespace gox {
     namespace {
-        Common::DriverLog g_log{"GoX"};
+        common::DriverLog g_log{"GoX"};
 
         constexpr size_t kIdxBufFlushBytes = 64 * 1024;
         constexpr uint64_t kIdxFlushFrames = 100;
@@ -31,14 +31,19 @@ namespace jai {
             throw IoError(what + ": " + std::strerror(errno));
         }
 
-        void write_all(int fd, const void *data, size_t size, const char *what) {
+        void WriteAll(int fd, const void *data, size_t size, const char *what,
+                      const Recorder::IndexWriteHook &hook = {}) {
             const uint8_t *p = static_cast<const uint8_t *>(data);
             while (size > 0) {
-                ssize_t n = ::write(fd, p, size);
+                ssize_t n = hook ? hook(fd, p, size) : ::write(fd, p, size);
                 if (n < 0) {
                     if (errno == EINTR) {
                         continue;
                     }
+                    throw_errno(what);
+                }
+                if (n == 0) {
+                    errno = EIO;
                     throw_errno(what);
                 }
                 p += n;
@@ -54,15 +59,15 @@ namespace jai {
         try {
             close();
         } catch (const std::exception &e) {
-            g_log.error("[{}] [Writer] close failed in destructor: {}", opts_.camera_id, e.what());
+            g_log.Error("[{}] [Writer] close failed in destructor: {}", opts_.camera_id, e.what());
         }
     }
 
-    void Recorder::open() {
+    void Recorder::Open() {
         if (opened_) {
             return;
         }
-        if (::mkdir(opts_.camera_dir.c_str(), 0755) != 0 && errno != EEXIST) {
+        if (::mkdir(opts_.camera_dir.c_str(), 0755) != 0) {
             throw_errno("mkdir " + opts_.camera_dir);
         }
         dir_fd_ = ::open(opts_.camera_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -70,20 +75,24 @@ namespace jai {
             throw_errno("open dir " + opts_.camera_dir);
         }
         std::string segments_path = opts_.camera_dir + "/segments.jsonl";
-        segments_fd_ = ::open(segments_path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        segments_fd_ = ::open(segments_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         if (segments_fd_ < 0) {
+            const int saved = errno;
+            ::close(dir_fd_);
+            dir_fd_ = -1;
+            errno = saved;
             throw_errno("open " + segments_path);
         }
         opened_ = true;
-        open_segment();
+        OpenSegment();
     }
 
-    void Recorder::open_segment() {
+    void Recorder::OpenSegment() {
         ++segment_index_;
         char name[32];
         snprintf(name, sizeof(name), "seg_%05u.raw", segment_index_);
         std::string seg_path = opts_.camera_dir + "/" + name;
-        seg_fd_ = ::open(seg_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        seg_fd_ = ::open(seg_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         if (seg_fd_ < 0) {
             throw_errno("open " + seg_path);
         }
@@ -95,16 +104,16 @@ namespace jai {
             if (errno == ENOSPC) {
                 throw_errno("fallocate " + seg_path);
             }
-            g_log.warn("[{}] [Writer] fallocate unsupported on this filesystem ({}); continuing without preallocation",
+            g_log.Warn("[{}] [Writer] fallocate unsupported on this filesystem ({}); continuing without preallocation",
                        opts_.camera_id, std::strerror(errno));
         }
 
         // Per-frame header CRC is always on; the optional payload CRC was
         // dropped (kSegFlagPayloadCrc stays defined in the frozen format).
         format::FileHeader fh =
-                format::make_file_header(segment_index_, now_realtime_ns(), opts_.session_uuid, opts_.camera_id.c_str(),
+                format::make_file_header(segment_index_, common::TimeUtil::RealtimeNowNs(), opts_.session_uuid, opts_.camera_id.c_str(),
                                          opts_.camera_serial.c_str(), opts_.record_align, /*seg_flags=*/0);
-        write_all(seg_fd_, &fh, sizeof(fh), "write file header");
+        WriteAll(seg_fd_, &fh, sizeof(fh), "write file header");
         if (::fdatasync(seg_fd_) != 0) {
             throw_errno("fdatasync file header");
         }
@@ -113,11 +122,11 @@ namespace jai {
         // Pad so the first record starts on a record_align boundary — every
         // record offset in the file is then a multiple of record_align
         // (mmap/O_DIRECT friendly; format.hpp layout contract).
-        const uint64_t first_record = format::align_up(seg_offset_, opts_.record_align);
+        const uint64_t first_record = format::AlignUp(seg_offset_, opts_.record_align);
         uint64_t pad_left = first_record - seg_offset_;
         while (pad_left > 0) {
             size_t n = static_cast<size_t>(std::min<uint64_t>(pad_left, sizeof(kZeros)));
-            write_all(seg_fd_, kZeros, n, "write header padding");
+            WriteAll(seg_fd_, kZeros, n, "write header padding");
             pad_left -= n;
         }
         seg_offset_ = first_record;
@@ -126,14 +135,16 @@ namespace jai {
         char idx_name[40];
         snprintf(idx_name, sizeof(idx_name), "seg_%05u.idx.jsonl", segment_index_);
         std::string idx_path = opts_.camera_dir + "/" + idx_name;
-        idx_fd_ = ::open(idx_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        idx_fd_ = ::open(idx_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         if (idx_fd_ < 0) {
             throw_errno("open " + idx_path);
         }
         idx_buf_.clear();
+        idx_committed_bytes_ = 0;
+        idx_write_failed_ = false;
         idx_buf_.reserve(kIdxBufFlushBytes + 512);
         idx_frames_pending_ = 0;
-        idx_last_flush_mono_ns_ = now_monotonic_ns();
+        idx_last_flush_mono_ns_ = common::TimeUtil::MonotonicNowNs();
 
         // Persist the directory entries of the new files.
         if (::fsync(dir_fd_) != 0) {
@@ -144,23 +155,25 @@ namespace jai {
         if (stats_) {
             stats_->segments_created.fetch_add(1, std::memory_order_relaxed);
         }
-        g_log.debug("[{}] [Writer] opened segment {}", opts_.camera_id, seg_path);
+        g_log.Debug("[{}] [Writer] opened segment {}", opts_.camera_id, seg_path);
     }
 
-    void Recorder::write_frame(const FrameMeta &meta, const uint8_t *data, size_t size) {
+    void Recorder::WriteFrame(const FrameMeta &meta, const uint8_t *data, size_t size) {
         if (!opened_ || closed_) {
             throw IoError("recorder not open");
         }
+        if (size != 0 && data == nullptr) {
+            throw IoError("non-empty frame has no payload pointer");
+        }
 
-        const uint64_t record_bytes = format::align_up(format::kFrameHeaderSize + size, opts_.record_align);
+        const uint64_t record_bytes = format::AlignUp(format::kFrameHeaderSize + size, opts_.record_align);
 
         // Rotate when this record would overflow the segment (never split a
         // record). A single record larger than the segment size still goes into
         // its own fresh segment.
         if (seg_frames_ > 0 && seg_offset_ + record_bytes > opts_.segment_max_bytes) {
-            close_segment(true);
-            check_free_space();
-            open_segment();
+            CloseSegment(true);
+            OpenSegment();
         }
 
         format::FrameHeader h{};
@@ -179,7 +192,7 @@ namespace jai {
         h.payload_size = size;
         h.frame_seq = frame_seq_;
         h.payload_crc32c = 0; // populated only under kSegFlagPayloadCrc (option removed)
-        format::seal_frame_header(h);
+        format::SealFrameHeader(h);
 
         const uint64_t record_offset = seg_offset_;
         const size_t pad = static_cast<size_t>(record_bytes - format::kFrameHeaderSize - size);
@@ -197,12 +210,12 @@ namespace jai {
             iovcnt = 3;
             total += pad;
         }
-        write_iov_all(iov, iovcnt, total);
+        WriteIovAll(iov, iovcnt, total);
         if (pad > sizeof(kZeros)) {
             size_t left = pad;
             while (left > 0) {
                 size_t n = std::min(left, sizeof(kZeros));
-                write_all(seg_fd_, kZeros, n, "write padding");
+                WriteAll(seg_fd_, kZeros, n, "write padding");
                 left -= n;
             }
         }
@@ -224,22 +237,27 @@ namespace jai {
         }
 
         // Index line. Written after the payload so the index is always a subset
-        // of the data. Short keys keep it ~150 bytes/frame.
-        char line[320];
+        // of the data. SDK-only fields supplement the fixed version-1 raw header.
+        char line[1024];
         int n = snprintf(line, sizeof(line),
                          "{\"seq\":%" PRIu64 ",\"bid\":%" PRIu64 ",\"dts\":%" PRIu64 ",\"hrt\":%" PRIu64 ",\"hmn\":%"
                          PRIu64
                          ",\"off\":%" PRIu64
                          ",\"psz\":%zu,\"pf\":%u,\"w\":%u,\"h\":%u,"
-                         "\"fl\":%u}\n",
+                         "\"fl\":%u,\"ox\":%u,\"oy\":%u,\"payload_type\":%u,"
+                         "\"padding_x\":%u,\"padding_y\":%u,\"chunk_count\":%u,\"operation_result\":%u}\n",
                          frame_seq_, meta.block_id, meta.device_ts_ns, meta.host_realtime_ns, meta.host_monotonic_ns,
                          record_offset,
-                         size, meta.pixel_format, meta.width, meta.height, meta.status_flags);
-        if (n > 0) {
+                         size, meta.pixel_format, meta.width, meta.height, meta.status_flags,
+                         meta.offset_x, meta.offset_y, meta.payload_type, meta.padding_x, meta.padding_y,
+                         meta.chunk_count, meta.operation_result);
+        if (n > 0 && n < static_cast<int>(sizeof(line))) {
             idx_buf_.append(line, static_cast<size_t>(n));
+        } else {
+            throw IoError("frame index serialization failed");
         }
         ++idx_frames_pending_;
-        flush_index(false);
+        FlushIndex(false);
 
         if (seg_frames_ == 0) {
             seg_seq_first_ = frame_seq_;
@@ -258,7 +276,7 @@ namespace jai {
         }
     }
 
-    void Recorder::write_iov_all(const struct iovec *iov, int iovcnt, size_t total) {
+    void Recorder::WriteIovAll(const struct iovec *iov, int iovcnt, size_t total) {
         struct iovec local[3];
         for (int i = 0; i < iovcnt; ++i) {
             local[i] = iov[i];
@@ -266,6 +284,10 @@ namespace jai {
         struct iovec *cur = local;
         while (total > 0) {
             ssize_t n = ::writev(seg_fd_, cur, iovcnt);
+            if (n == 0) {
+                errno = EIO;
+                throw_errno("writev made no progress");
+            }
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -289,25 +311,32 @@ namespace jai {
         }
     }
 
-    void Recorder::flush_index(bool force) {
+    void Recorder::FlushIndex(bool force) {
         bool due = force || idx_buf_.size() >= kIdxBufFlushBytes || idx_frames_pending_ >= kIdxFlushFrames;
         if (!due) {
-            uint64_t now = now_monotonic_ns();
+            uint64_t now = common::TimeUtil::MonotonicNowNs();
             due = idx_frames_pending_ > 0 && now - idx_last_flush_mono_ns_ >= kIdxFlushIntervalNs;
         }
         if (!due || idx_buf_.empty()) {
             if (due) {
-                idx_last_flush_mono_ns_ = now_monotonic_ns();
+                idx_last_flush_mono_ns_ = common::TimeUtil::MonotonicNowNs();
             }
             return;
         }
-        write_all(idx_fd_, idx_buf_.data(), idx_buf_.size(), "write index");
+        if (idx_write_failed_) throw IoError("index previously failed; refusing to append a duplicate partial batch");
+        try {
+            WriteAll(idx_fd_, idx_buf_.data(), idx_buf_.size(), "write index", index_write_hook_);
+        } catch (...) {
+            idx_write_failed_ = true;
+            throw;
+        }
+        idx_committed_bytes_ += idx_buf_.size();
         idx_buf_.clear();
         idx_frames_pending_ = 0;
-        idx_last_flush_mono_ns_ = now_monotonic_ns();
+        idx_last_flush_mono_ns_ = common::TimeUtil::MonotonicNowNs();
     }
 
-    void Recorder::append_segment_summary(bool clean) {
+    void Recorder::AppendSegmentSummary(bool clean) {
         char name[32];
         snprintf(name, sizeof(name), "seg_%05u.raw", segment_index_);
         char line[512];
@@ -320,63 +349,72 @@ namespace jai {
                          name, seg_frames_, seg_offset_, seg_seq_first_, seg_seq_last_, seg_bid_first_, seg_bid_last_,
                          seg_dts_first_,
                          seg_dts_last_, clean ? "true" : "false");
-        if (n > 0) {
-            write_all(segments_fd_, line, static_cast<size_t>(n), "write segments.jsonl");
+        if (n > 0 && n < static_cast<int>(sizeof(line))) {
+            WriteAll(segments_fd_, line, static_cast<size_t>(n), "write segments.jsonl");
+        } else {
+            throw IoError("segment summary serialization failed");
         }
     }
 
-    void Recorder::close_segment(bool clean) {
+    void Recorder::CloseSegment(bool clean) {
         if (seg_fd_ < 0) {
             return;
         }
-        flush_index(true);
+        if (idx_write_failed_) {
+            // The failed batch may contain a partial JSON line. Never append it
+            // again at the partial offset during error cleanup; retain a valid prefix.
+            if (::ftruncate(idx_fd_, static_cast<off_t>(idx_committed_bytes_)) != 0) {
+                throw_errno("truncate failed index batch");
+            }
+            idx_buf_.clear();
+            clean = false;
+        } else {
+            FlushIndex(true);
+        }
         if (::fdatasync(idx_fd_) != 0) {
             throw_errno("fdatasync index");
         }
         ::close(idx_fd_);
         idx_fd_ = -1;
+        // A partial frame must be removed before the final durability barrier.
+        if (::ftruncate(seg_fd_, static_cast<off_t>(seg_offset_)) != 0) {
+            throw_errno("truncate segment");
+        }
         if (::fdatasync(seg_fd_) != 0) {
             throw_errno("fdatasync segment");
         }
         ::close(seg_fd_);
         seg_fd_ = -1;
-        append_segment_summary(clean);
+        AppendSegmentSummary(clean);
         if (::fdatasync(segments_fd_) != 0) {
             throw_errno("fdatasync segments.jsonl");
         }
     }
 
-    void Recorder::check_free_space() {
-        if (opts_.min_free_bytes == 0) {
-            return;
-        }
-        struct statvfs vfs{};
-        if (::statvfs(opts_.camera_dir.c_str(), &vfs) != 0) {
-            return; // best effort
-        }
-        uint64_t free_bytes = static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize;
-        if (free_bytes < opts_.min_free_bytes) {
-            throw IoError(
-                "free disk space below threshold (" + human_bytes(free_bytes) + " < " + human_bytes(
-                    opts_.min_free_bytes) +
-                ")");
-        }
-    }
-
-    void Recorder::close() {
+    void Recorder::close(bool clean) {
         if (!opened_ || closed_) {
             return;
         }
         closed_ = true;
-        close_segment(true);
-        if (segments_fd_ >= 0) {
-            ::close(segments_fd_);
-            segments_fd_ = -1;
+        const auto release_fds = [this] {
+            for (int *fd: {&idx_fd_, &seg_fd_, &segments_fd_}) {
+                if (*fd >= 0) {
+                    ::close(*fd);
+                    *fd = -1;
+                }
+            }
+            if (dir_fd_ >= 0) {
+                (void) ::fsync(dir_fd_);
+                ::close(dir_fd_);
+                dir_fd_ = -1;
+            }
+        };
+        try {
+            CloseSegment(clean);
+        } catch (...) {
+            release_fds();
+            throw;
         }
-        if (dir_fd_ >= 0) {
-            (void) ::fsync(dir_fd_);
-            ::close(dir_fd_);
-            dir_fd_ = -1;
-        }
+        release_fds();
     }
-} // namespace jai
+} // namespace gox

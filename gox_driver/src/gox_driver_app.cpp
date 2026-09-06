@@ -2,50 +2,47 @@
 
 #include <chrono>
 #include <filesystem>
-#include <spdlog/spdlog.h>
-#include <string_view>
 #include <thread>
 
-#include "capture_runner.hpp"
-#include "app_config.hpp"
+#include "capture_runner.h"
+#include "app_config.h"
 #include "logger.h"
-#include "signal_stop.hpp"
+#include "signal_stop.h"
 #include "driver_markers.h"
-#include "ebus/env_bootstrap.hpp"
+#include "ebus/env_bootstrap.h"
 #include "utility.h"
 
 
 namespace {
     // App-level module token: this file's error lines drive the GUI health machine
-    Common::DriverLog g_log{std::string(Common::Markers::kModuleGox)};
+    common::DriverLog g_log{std::string(common::Markers::kModuleGox)};
 } // namespace
 
 
-GoxDriverApp::GoxDriverApp(const Common::Config &config) : stop_(std::make_unique<jai::StopController>()) {
-    // Actual config loading is deferred to init()
-    std::filesystem::path exe_dir = Common::GetExecutableDir(); // exe_dir + "../../" -> project root
+GoxDriverApp::GoxDriverApp(const common::Config &config) : stop_(std::make_unique<gox::StopController>()) {
+    // Actual config loading is deferred to Init()
+    std::filesystem::path exe_dir = common::GetExecutableDir(); // exe_dir + "../../" -> project root
     config_path_ = exe_dir / "../../" / config.gox_config_path;
     data_folder_path_ = config.data_folder_path;
 }
 
 
 GoxDriverApp::~GoxDriverApp() {
-    shutdown();
+    Shutdown();
 }
 
 
-bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
-    // Lenient YAML config load (critical invariants still throw ConfigError)
-    jai::AppConfig cfg;
+bool GoxDriverApp::Init(const std::function<bool()> &external_stop) {
+    gox::AppConfig cfg;
     try {
-        cfg = jai::load_config(config_path_);
-    } catch (const jai::ConfigError &e) {
-        g_log.error("GoX config error: {}", e.what());
+        cfg = gox::LoadAppConfig(config_path_);
+    } catch (const gox::ConfigError &e) {
+        g_log.Error("GoX config error: {}", e.what());
         return false;
     }
 
     // GenICam environment; must precede the first eBUS SDK call
-    jai::ebus::bootstrap_env();
+    common::Ebus::BootstrapEnv();
 
     for (const auto &cam: cfg.cameras) {
         if (cam.enabled) {
@@ -55,12 +52,12 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
 
     // Bring-up can block for minutes (discovery retries, PTP convergence), so a watcher
     // thread forwards an external terminate into the StopController
-    runner_ = std::make_unique<jai::CaptureRunner>(std::move(cfg), stop_.get());
+    runner_ = std::make_unique<gox::CaptureRunner>(std::move(cfg), stop_.get());
     std::atomic<bool> bring_up_done{false};
     std::thread watcher([this, &external_stop, &bring_up_done] {
         while (!bring_up_done.load(std::memory_order_acquire)) {
             if (terminate_.load(std::memory_order_acquire) || (external_stop && external_stop())) {
-                stop_->request_stop(jai::StopReason::External);
+                stop_->RequestStop(gox::StopReason::kExternal);
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -69,9 +66,9 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
     bool bring_up_ok = false;
     std::exception_ptr bring_up_error;
     try {
-        bring_up_ok = runner_->init(data_folder_path_ + "/bin/gox");
+        bring_up_ok = runner_->Init(data_folder_path_ + "/gox");
     } catch (...) {
-        // CaptureRunner::init is documented not to throw, but the watcher must
+        // CaptureRunner::Init is documented not to throw, but the watcher must
         // never be destroyed while joinable (std::terminate)
         bring_up_error = std::current_exception();
     }
@@ -81,32 +78,44 @@ bool GoxDriverApp::init(const std::function<bool()> &external_stop) {
         std::rethrow_exception(bring_up_error);
     }
     if (!bring_up_ok) {
-        if (stop_->stop_requested() && stop_->reason() == jai::StopReason::External) {
-            g_log.warn("GoX bring-up interrupted by shutdown request");
+        if (stop_->StopRequested() && stop_->Reason() == gox::StopReason::kExternal) {
+            g_log.Warn("GoX bring-up interrupted by shutdown request");
+            runner_.reset(); // Init already unwound; interruption is not a recording error
         } else {
-            g_log.error("GoX startup failed: {}", runner_->last_error());
+            g_log.Error("GoX startup failed: {}", runner_->LastError());
         }
         return false;
     }
 
     for (const auto &id: camera_ids_) {
-        g_log.info(fmt::runtime(Common::Markers::kGoxInitializedInstTpl), id);
+        g_log.Info(fmt::runtime(common::Markers::kGoxInitializedInstTpl), id);
     }
-    g_log.info("{}", Common::Markers::kGoxInitialized);
+    g_log.Info("{}", common::Markers::kGoxInitialized);
     return true;
 }
 
 
-void GoxDriverApp::run() {
+void GoxDriverApp::Run() {
     if (runner_) {
-        // External terminate -> StopReason::External
-        runner_->monitor_loop([this] { return terminate_.load(std::memory_order_acquire); });
+        // External terminate -> StopReason::kExternal
+        runner_->MonitorLoop([this] { return terminate_.load(std::memory_order_acquire); });
     }
     terminate_.store(true, std::memory_order_release);
 }
 
 
-void GoxDriverApp::shutdown() {
+std::optional<std::uint64_t> GoxDriverApp::MicrosSinceLastData() const {
+    // runner_ is created once in Init() and never replaced, and its session list
+    // is stable between Init() and Shutdown() — which Main only calls after it
+    // has joined the run thread. The read itself touches one atomic per camera.
+    if (!runner_ || shutdown_called_.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    return runner_->MicrosSinceLastData();
+}
+
+
+void GoxDriverApp::Shutdown() {
     if (shutdown_called_.exchange(true)) {
         return;
     }
@@ -116,13 +125,14 @@ void GoxDriverApp::shutdown() {
     if (!runner_) {
         return;
     }
-    const bool clean = runner_->shutdown();
+    const bool clean = runner_->Shutdown();
     if (clean) {
         for (const auto &id: camera_ids_) {
-            g_log.info(fmt::runtime(Common::Markers::kGoxShutdownInstTpl), id);
+            g_log.Info(fmt::runtime(common::Markers::kGoxShutdownInstTpl), id);
         }
-        g_log.info("{}", Common::Markers::kGoxShutdown);
+        g_log.Info("{}", common::Markers::kGoxShutdown);
     } else {
-        g_log.warn("{} ({})", Common::Markers::kGoxSessionIssues, runner_->last_error());
+        MarkFailed();
+        g_log.Error("{} ({})", common::Markers::kGoxSessionIssues, runner_->LastError());
     }
 }

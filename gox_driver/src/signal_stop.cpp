@@ -1,14 +1,14 @@
-#include "signal_stop.hpp"
+#include "signal_stop.h"
 
 #include <csignal>
 #include <unistd.h>
 
-namespace jai {
+namespace gox {
     namespace {
         StopController *g_controller = nullptr;
         volatile sig_atomic_t g_signal_count = 0;
 
-        void handle_stop_signal(int) {
+        void HandleStopSignal(int) {
             // No compound assignment on volatile (deprecated since C++20); a
             // plain read-modify-write is fine for sig_atomic_t in a handler
             g_signal_count = g_signal_count + 1;
@@ -18,32 +18,32 @@ namespace jai {
                 _exit(130);
             }
             if (g_controller != nullptr) {
-                g_controller->request_stop(StopReason::Signal);
+                g_controller->RequestStop(StopReason::kSignal);
             }
         }
     } // namespace
 
-    const char *stop_reason_name(StopReason reason) {
+    const char *StopReasonName(StopReason reason) {
         switch (reason) {
-            case StopReason::None:
+            case StopReason::kNone:
                 return "none";
-            case StopReason::Signal:
+            case StopReason::kSignal:
                 return "signal";
-            case StopReason::LimitReached:
+            case StopReason::kLimitReached:
                 return "limit_reached";
-            case StopReason::Error:
+            case StopReason::kError:
                 return "error";
-            case StopReason::External:
+            case StopReason::kExternal:
                 return "external";
         }
         return "unknown";
     }
 
-    void install_signal_handlers(StopController *controller) {
+    void InstallSignalHandlers(StopController *controller) {
         g_controller = controller;
 
         struct sigaction sa{};
-        sa.sa_handler = handle_stop_signal;
+        sa.sa_handler = HandleStopSignal;
         sigemptyset(&sa.sa_mask);
         sa.sa_flags = 0; // no SA_RESTART: blocking syscalls should wake up
         sigaction(SIGINT, &sa, nullptr);
@@ -54,4 +54,4 @@ namespace jai {
         sigemptyset(&ign.sa_mask);
         sigaction(SIGPIPE, &ign, nullptr);
     }
-} // namespace jai
+} // namespace gox
