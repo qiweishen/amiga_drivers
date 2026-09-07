@@ -1,5 +1,5 @@
 ################################################################################
-# AsteRx-i3 D Pro+ Driver (Septentrio raw IMU + dual-antenna GNSS recorder)
+# AsteRx RBi3 Pro+ Driver (Septentrio raw IMU + dual-antenna GNSS recorder)
 # This is a subdirectory of the top-level AmigaDrivers project.
 # spdlog (compiled), yaml-cpp and Threads are provided by amiga_common.
 # Qt5 (Core, Network, SerialPort) is a hard dependency of the vendored
@@ -44,6 +44,7 @@ add_library(asterx_lib STATIC
         src/commands.cpp
         src/sbf_live_recorder.cpp
         src/sbf_parsers.cpp
+        src/sbf_write_queue.cpp
         src/sbf_writer.cpp
         src/session.cpp
         src/asterx_driver_app.cpp

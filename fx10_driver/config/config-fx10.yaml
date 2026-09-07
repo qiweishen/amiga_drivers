@@ -48,6 +48,7 @@ sensor_trigger:
 # applied last, in order: { name, type: int | float | bool | enum | string | command, value }
 features:
     raw:
+        -   { name: LineSelector, type: enum, value: LineOut0 }
         -   { name: LineSource, type: enum, value: ExposureActive }
 
 
@@ -56,7 +57,7 @@ output:
     rotation:
         max_lines: 0                    # 0 = no rotation by line count
         max_mb: 2048                    # 0 = no rotation by size
-    flush_interval_mb: 64               # 0..4096; 0 = fdatasync only at segment boundaries
+    flush_interval_mb: 64               # 0..4096; 0 = fdatasync only at segment boundaries (periodic fdatasync runs on a helper thread)
     on_gap: pad_zero                    # record | pad_zero; use .lines.csv, never infer trigger identity from line index
     wavelengths:
         source: none                    # none = uncalibrated DN, NO wavelength axis; file/list requires calibration below
@@ -79,10 +80,7 @@ network:
     stall_budget_s: 2.0                 # >= 0
     max_buffer_memory_mb: 512           # >= 1
     retrieve_timeout_ms: 1000           # 1..10000
-    reconnect:
-        enabled: true
-        max_attempts: 5                 # >= 0
-        backoff_ms: 2000                # >= 0
+    # No reconnect block: a link loss during a run ends the whole rig (fail-fast)
 
 
 # --- Logging ---

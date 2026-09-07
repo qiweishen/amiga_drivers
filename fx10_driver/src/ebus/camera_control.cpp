@@ -471,8 +471,20 @@ namespace fx10 {
     void CameraControl::ApplyAcquisitionConfig(const AcquisitionConfig &acquisition,
                                                const std::vector<RawFeature> &raw) {
         const std::vector<FeatureWrite> plan = BuildApplyPlan(acquisition, raw);
+        bool line_selector_written = false;
         for (const FeatureWrite &write: plan) {
-            ApplyWrite(write);
+            // LineSelector/Line1 is not confirmed by the FX10 reference manual.
+            // A device without that node can expose LineSource directly. If
+            // the node exists, never rely on an inherited selector value.
+            if (write.node == "LineSource" && !line_selector_written &&
+                device_.GetParameters()->Get(PvString("LineSelector")) != nullptr) {
+                failNode("LineSource", "this camera exposes LineSelector; precede LineSource in features.raw "
+                         "with the verified strobe LineSelector entry from this camera's node map");
+            }
+            const bool applied = ApplyWrite(write);
+            if (write.node == "LineSelector" && applied) {
+                line_selector_written = true;
+            }
         }
         // Raw overrides run last. Recheck values the receiver/calibration logic
         // relies on so an override cannot silently invalidate that contract.

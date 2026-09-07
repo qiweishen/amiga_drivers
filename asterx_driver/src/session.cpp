@@ -1,5 +1,7 @@
 #include "session.h"
 
+#include <QMetaObject>
+
 #include "logger.h"
 #include "sbf_parsers.h"
 #include "string_util.h"
@@ -37,6 +39,14 @@ namespace asterx {
                                                                cfg_.file_prefix,
                                                                cfg_.rotate_bytes,
                                                                std::chrono::seconds(cfg_.rotate_interval_seconds),
+                                                           },
+                                                           cfg_.write_queue_bytes,
+                                                           [this] {
+                                                               // Writer thread -> Qt thread; dropped if this
+                                                               // object is gone before the event runs
+                                                               QMetaObject::invokeMethod(
+                                                                   this, [this] { OnWriteFailed(); },
+                                                                   Qt::QueuedConnection);
                                                            }),
                                                        prewarm_writer_(SbfWriter::Config{
                                                            cfg_.output_dir / "prewarm", cfg_.file_prefix,
@@ -146,7 +156,7 @@ namespace asterx {
 
         connect(rx_.get(), &SSN::SsnRx::sbfCRCError, this, [this]() {
             ++crc_errors_;
-            g_log.Warn("[TCP] SBF CRC error (total {})", crc_errors_);
+            OnStreamDamage("SBF CRC error", crc_errors_);
         });
 
         connect(rx_.get(), &SSN::SsnRx::discardedBytes, this, [this](int n) {
@@ -165,6 +175,7 @@ namespace asterx {
 
 
     void Session::Start() {
+        writer_.Start();
         stats_timer_.start(cfg_.stats_period_ms);
         StartConnect();
     }
@@ -391,18 +402,15 @@ namespace asterx {
             return;
         }
         if (state_ == State::kRecording && went_back) {
-            // A receiver reset normally drops the TCP session (reconnect -> full
-            // reconfigure -> warm-up again); this catches the in-session case.
-            g_log.Warn("Receiver up-time went backwards ({} -> {}): receiver reset detected — closing the segment "
-                       "and re-entering warm-up", FormatHms(previous), FormatHms(status.up_time));
-            if (!writer_.EndSegment()) {
-                FailStartup("cannot finish SBF segment after receiver reset");
-                return;
-            }
-            if (!recovery_timer_.isActive()) {
-                recovery_timer_.start(kRecoveryTimeoutMs);
-            }
-            EnterWarmup();
+            // A receiver reset normally drops the TCP session; this catches the
+            // in-session case. Either way the observations across the reset are
+            // gone: fail-fast, no re-warm-up into an incomplete recording.
+            ++recording_errors_;
+            g_log.Critical("Receiver up-time went backwards ({} -> {}): receiver reset during recording — stopping "
+                           "the rig (fail-fast: the SBF recording would be incomplete)",
+                           FormatHms(previous), FormatHms(status.up_time));
+            Shutdown();
+            emit FatalError();
         }
     }
 
@@ -430,9 +438,12 @@ namespace asterx {
             }
             opened_gate = true; // the ReceiverStatus that opened the gate is recorded too
         }
-        if (!writer_.WriteBlock(block)) {
-            // Disk failure is not survivable for a recorder
-            g_log.Critical("SBF write failed — stopping acquisition (disk full or output directory lost?)");
+        if (!writer_.Enqueue(block)) {
+            // Refused: the disk fell behind for longer than the queue budget, or a
+            // write already failed. Neither is survivable for a recorder (a dropped
+            // block is data loss; fail-fast)
+            ++recording_errors_;
+            g_log.Critical("SBF write queue refused a block ({}) — stopping acquisition", writer_.LastError());
             Shutdown();
             emit FatalError();
             return;
@@ -458,10 +469,40 @@ namespace asterx {
         }
         if (message.find("Invalid SBF block length") != std::string::npos) {
             ++length_errors_;
-            g_log.Warn("invalid SBF block length (total {})", length_errors_);
+            OnStreamDamage("invalid SBF block length", length_errors_);
             return;
         }
         HandleFailure("communication error: " + message);
+    }
+
+
+    void Session::OnStreamDamage(const char *what, std::uint64_t total) {
+        if (state_ == State::kStopping) {
+            return;
+        }
+        if (state_ != State::kRecording) {
+            // Only the prewarm context is affected; the parser resyncs on the next block
+            g_log.Warn("[TCP] {} before recording (total {}); prewarm context only", what, total);
+            return;
+        }
+        // A damaged block is a lost block: the .sbf is incomplete from here on
+        ++recording_errors_;
+        g_log.Critical("{} during recording (total {}): a block is lost — stopping the rig (fail-fast: the SBF "
+                       "recording would be incomplete)", what, total);
+        Shutdown();
+        emit FatalError();
+    }
+
+
+    void Session::OnWriteFailed() {
+        if (state_ == State::kStopping) {
+            return;
+        }
+        ++recording_errors_;
+        g_log.Critical("SBF write failed ({}) — stopping acquisition (disk full or output directory lost?)",
+                       writer_.LastError());
+        Shutdown();
+        emit FatalError();
     }
 
 
@@ -471,6 +512,16 @@ namespace asterx {
         }
         if (!ever_configured_) {
             FailStartup(reason);
+            return;
+        }
+        if (state_ == State::kRecording) {
+            // Fail-fast: the SBF stream has a gap from here on. Reconnecting would
+            // resurrect a recording that is already incomplete, so end the rig now
+            ++recording_errors_;
+            g_log.Critical("Link failure during recording: {} — stopping the rig (fail-fast: the SBF recording "
+                           "would be incomplete; no reconnect)", reason);
+            Shutdown();
+            emit FatalError();
             return;
         }
         ++recovery_events_; // reconnect may recover transport, never the missing observations
@@ -490,10 +541,10 @@ namespace asterx {
         if (rx_) {
             rx_->closeConnection(); // the socket may still be open (e.g. prompt failure)
         }
-        const bool main_closed = writer_.EndSegment();
-        const bool prewarm_closed = prewarm_writer_.EndSegment();
-        if (!main_closed || !prewarm_closed) {
-            FailStartup("cannot finish SBF segment during recovery");
+        // Only the prewarm context is open before Recording (the main writer has
+        // not been fed yet), so that is the segment a reconnect closes
+        if (!prewarm_writer_.EndSegment()) {
+            FailStartup("cannot finish prewarm SBF segment during recovery");
             return;
         }
         live_.Flush(); // keep the GUI tail current across the link gap; files stay open
@@ -550,22 +601,25 @@ namespace asterx {
         if (state_ != State::kRecording) {
             return;
         }
-        const auto &s = writer_.Stats();
+        const auto s = writer_.GetStats();
         g_log.Info(
-            "[Statistics] blocks={}  bytes={}  files={}  crc_fail={}  length_errors={}  discarded_bytes={}  temperature={}°C",
+            "[Statistics] blocks={}  bytes={}  files={}  crc_fail={}  length_errors={}  discarded_bytes={}  "
+            "temperature={}°C  queue_pending={}  queue_max={}",
             s.records_written, s.bytes_written, s.files_opened, crc_errors_, length_errors_, discarded_bytes_,
-            temperature_);
+            temperature_, s.pending_bytes, s.max_pending_bytes);
     }
 
 
     nlohmann::ordered_json Session::FinalStatistics() const {
-        const auto &s = writer_.Stats();
+        const auto s = writer_.GetStats();
         const auto &pre = prewarm_writer_.Stats();
         return {{"blocks_written", s.records_written}, {"bytes_written", s.bytes_written},
-                {"files_opened", s.files_opened}, {"prewarm_blocks", pre.records_written},
+                {"files_opened", s.files_opened}, {"write_queue_max_pending_bytes", s.max_pending_bytes},
+                {"prewarm_blocks", pre.records_written},
                 {"prewarm_bytes", pre.bytes_written}, {"crc_errors", crc_errors_},
                 {"length_errors", length_errors_}, {"discarded_stream_bytes", discarded_bytes_},
-                {"recovery_events", recovery_events_}, {"known_acquisition_incomplete", RecordingIncomplete()}};
+                {"recovery_events", recovery_events_}, {"recording_errors", recording_errors_},
+                {"known_acquisition_incomplete", RecordingIncomplete()}};
     }
 
     void Session::Shutdown() {
@@ -584,14 +638,16 @@ namespace asterx {
         if (rx_) {
             rx_->closeConnection(); // closing the socket also stops the IPxx streams
         }
-        const bool clean = writer_.close();
+        // Drains the queue (every accepted block reaches the disk) and joins the writer thread
+        const bool clean = writer_.Close();
         const bool prewarm_clean = prewarm_writer_.close();
         live_.close();
         if (!clean || !prewarm_clean) {
-            g_log.Error("SBF final flush/close failed; recording is INCOMPLETE");
+            ++recording_errors_;
+            g_log.Error("SBF final flush/close failed ({}); recording is INCOMPLETE", writer_.LastError());
             emit FatalError();
         }
-        const auto &s = writer_.Stats();
+        const auto s = writer_.GetStats();
         const auto &lv = live_.GetStats();
         const auto &prewarm = prewarm_writer_.Stats();
         g_log.Info("[Statistics] Prewarm context: blocks={} bytes={} files={} (separate prewarm/ SBF, not accepted samples)",
@@ -599,8 +655,8 @@ namespace asterx {
         g_log.Info("Acquisition stopped ({} blocks delivered)", s.records_written);
         g_log.Info(
             "[Statistics] Final: blocks={}  bytes={}  files={}  crc_fail={}  length_errors={}  discarded_bytes={}  "
-            "temperature={}°C  live_rows={}  live_parse_errors={}",
+            "temperature={}°C  live_rows={}  live_parse_errors={}  queue_max={}  recording_errors={}",
             s.records_written, s.bytes_written, s.files_opened, crc_errors_, length_errors_, discarded_bytes_,
-            temperature_, lv.rows_written, lv.parse_errors);
+            temperature_, lv.rows_written, lv.parse_errors, s.max_pending_bytes, recording_errors_);
     }
 } // namespace asterx

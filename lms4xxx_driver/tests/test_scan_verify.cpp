@@ -1,4 +1,5 @@
-// VerifyScanContent: the first telegram must match the fixed measurement setup exactly
+// VerifyScanContent: the first telegram must match the fixed measurement setup exactly;
+// DeviceTimePlausible: the NTP time lock's notion of a synchronised device clock
 
 #include <doctest/doctest.h>
 
@@ -91,5 +92,50 @@ TEST_CASE("Every deviation is named") {
         const auto problems = VerifyScanContent(s, Config(Remission::kRssi), false);
         CHECK(problems.find("encoder") != std::string::npos);
         CHECK(problems.find("device name") != std::string::npos);
+    }
+}
+
+TEST_CASE("DeviceTimePlausible separates a synchronised clock from the free-running boot clock") {
+    ScanTimestamp ts;
+    SUBCASE("the epoch the device boots at is not plausible") {
+        ts.year = 1970;
+        ts.month = 1;
+        ts.day = 1;
+        ts.hour = 0;
+        ts.minute = 12;
+        ts.second = 34;
+        CHECK_FALSE(DeviceTimePlausible(ts));
+    }
+    SUBCASE("a date before the floor is not plausible") {
+        ts.year = 2025;
+        ts.month = 12;
+        ts.day = 31;
+        ts.hour = 23;
+        ts.minute = 59;
+        ts.second = 59;
+        ts.microsecond = 999999;
+        CHECK_FALSE(DeviceTimePlausible(ts));
+    }
+    SUBCASE("the floor itself and anything later is plausible") {
+        ts.year = 2026;
+        ts.month = 1;
+        ts.day = 1;
+        CHECK(DeviceTimePlausible(ts));
+        ts.month = 9;
+        ts.day = 7;
+        ts.hour = 10;
+        ts.minute = 30;
+        ts.second = 5;
+        ts.microsecond = 123456;
+        CHECK(DeviceTimePlausible(ts));
+    }
+    SUBCASE("malformed fields are never plausible") {
+        ts.year = 2026;
+        ts.month = 13; // DeviceTimeUnixUs() rejects it as 0
+        ts.day = 1;
+        CHECK_FALSE(DeviceTimePlausible(ts));
+        ts.month = 1;
+        ts.microsecond = 1000000;
+        CHECK_FALSE(DeviceTimePlausible(ts));
     }
 }

@@ -68,8 +68,7 @@ struct Fx10DriverApp::Impl {
 
     std::string stop_reason = "completed"; // logged by EnviRecorder::Stop as the exit reason
     int last_exit_code = 0; // standalone exit-code semantics, reported at shutdown
-    bool retryable_link_loss = false;
-    bool run_incomplete = false; // sticky across connection sessions, checked only after Run joins
+    bool run_incomplete = false; // checked only after Run joins
 };
 
 
@@ -87,15 +86,6 @@ Fx10DriverApp::~Fx10DriverApp() {
 
 bool Fx10DriverApp::StopRequested() const {
     return terminate_.load(std::memory_order_acquire) || (external_stop_ && external_stop_());
-}
-
-
-void Fx10DriverApp::SleepInterruptible(int total_ms) const {
-    while (total_ms > 0 && !StopRequested()) {
-        const int slice = total_ms < 100 ? total_ms : 100;
-        std::this_thread::sleep_for(std::chrono::milliseconds(slice));
-        total_ms -= slice;
-    }
 }
 
 
@@ -170,6 +160,11 @@ Fx10DriverApp::BringUp Fx10DriverApp::BringUpSession() const {
                        "use the line index and a verified anchor, never infer association from padding");
             s.trigger_log = std::make_unique<fx10::SensorTriggerLog>(cfg.sensor_trigger.port);
             s.trigger_log->Open();
+        } else {
+            // SensorSync is the FX10's only path to GPS time (host time is never a
+            // time source on this platform)
+            g_log.Warn("sensor_trigger.enabled=false: lines carry only the camera's raw GVSP tick; no GPS/PPS "
+                       "time association is possible for this run");
         }
         if (stopped()) {
             return BringUp::kStopped;
@@ -287,11 +282,8 @@ Fx10DriverApp::BringUp Fx10DriverApp::BringUpSession() const {
 bool Fx10DriverApp::StartStreaming() {
     auto &cfg = impl_->config;
     auto &s = *impl_->session;
-    // Per-session outcome state; without the reset a clean session after a
-    // reconnect would inherit the previous session's exit code
     impl_->stop_reason = "completed";
     impl_->last_exit_code = 0;
-    impl_->retryable_link_loss = false;
 
     s.recorder = std::make_unique<fx10::EnviRecorder>(cfg.recording, s.counters);
     try {
@@ -379,8 +371,8 @@ void Fx10DriverApp::MonitorLoop() {
 
     while (true) {
         // Republish the receiver's liveness for Main. impl_->session is owned by
-        // THIS thread (the reconnect loop resets it), so Main must never reach
-        // into it; it reads this atomic instead.
+        // THIS thread (teardown resets it), so Main must never reach into it; it
+        // reads this atomic instead.
         data_reference_us_.store(
             watchdog_applies ? s.receiver.LastDataReferenceUs().value_or(0) : 0, std::memory_order_release);
 
@@ -390,6 +382,16 @@ void Fx10DriverApp::MonitorLoop() {
         }
         if (s.receiver.Failed() || (s.recorder && s.recorder->Failed())) {
             break; // classified in teardownSession_
+        }
+        // Fail-fast: the first lost or unrecorded frame ends the whole rig now
+        // rather than marking the run DEGRADED at the end — an incomplete
+        // recording is worthless and the operator restarts immediately.
+        if (s.receiver.LossSeen() || (s.recorder && s.recorder->LossSeen())) {
+            g_log.Error("First data-loss event (see the warning above) — stopping the rig (fail-fast: the "
+                        "recording would be incomplete)");
+            impl_->stop_reason = "data-loss";
+            impl_->last_exit_code = 10;
+            break;
         }
         if (s.trigger_log && !s.trigger_log->Ok()) {
             g_log.Error("Sensor trigger log/protocol integrity failed (I/O, rejected command, restart or event loss); stopping");
@@ -427,6 +429,16 @@ void Fx10DriverApp::MonitorLoop() {
             missed = s.control->TryGetInt(fx10::node::kMissedTriggerCount);
             temp_pcb = s.control->TryReadTemperature("ProcPCB");
             temp_fpga = s.control->TryReadTemperature("FPGA");
+
+            // A missed trigger is a frame that does not exist: fail-fast here too
+            // (the camera counter is only readable on this slow cadence).
+            if (missed && s.missed_baseline >= 0 && *missed - s.missed_baseline > 0) {
+                g_log.Error("Camera reports {} missed trigger(s) since acquisition start — stopping the rig "
+                            "(fail-fast: frames are missing from the recording)", *missed - s.missed_baseline);
+                impl_->stop_reason = "missed-triggers";
+                impl_->last_exit_code = 10;
+                break;
+            }
 
             // Manual Table 8 (p.44): the camera cancels operation at 80 C
             // (processing board) / 90 C (FPGA); Troubleshooting (p.43) lists
@@ -494,7 +506,7 @@ void Fx10DriverApp::MonitorLoop() {
 
 void Fx10DriverApp::TeardownSession() {
     // Disarm Main's no-data watchdog first: from here on there is no session,
-    // and the reconnect gap that may follow is silence this driver expects.
+    // and the silence that follows is expected.
     data_reference_us_.store(0, std::memory_order_release);
     if (!impl_->session) {
         return;
@@ -521,18 +533,16 @@ void Fx10DriverApp::TeardownSession() {
             case fx10::StreamReceiver::FatalKind::kLinkLost:
                 exit_code = 21;
                 impl_->stop_reason = "link-loss";
-                impl_->retryable_link_loss = true;
                 break;
             case fx10::StreamReceiver::FatalKind::kFirstFrame:
                 exit_code = 3;
                 impl_->stop_reason = "first-frame-mismatch";
                 break;
             case fx10::StreamReceiver::FatalKind::kStreamUnusable:
-                // The link is up but the data is not usable: a reconnect is the
-                // right response, same as a link loss.
+                // The link is up but the data is not usable; classified like a
+                // link loss (no reconnect: the recording is already incomplete).
                 exit_code = 21;
                 impl_->stop_reason = "stream-unusable";
-                impl_->retryable_link_loss = true;
                 break;
             case fx10::StreamReceiver::FatalKind::kSinkFailed:
                 break; // the recorder branch below carries the real cause
@@ -552,14 +562,12 @@ void Fx10DriverApp::TeardownSession() {
         // Classified by kind, not by matching substrings of the message.
         exit_code = s.recorder->GetErrorKind() == fx10::ErrorKind::kIo ? 20 : 10;
         impl_->stop_reason = "recorder-failure";
-        impl_->retryable_link_loss = false;
     }
     if (trigger_log_failed) {
         // A timing-log failure (disk full) outranks a concurrent link loss: the
-        // frames have no time source, so a reconnect must not resurrect the run.
+        // frames have no time source.
         exit_code = 20;
         impl_->stop_reason = "trigger-log-failure";
-        impl_->retryable_link_loss = false;
     }
 
     if (s.recorder) {
@@ -585,39 +593,12 @@ void Fx10DriverApp::TeardownSession() {
 
 
 void Fx10DriverApp::Run() {
-    // Consecutive failed reconnects, reset by every session that streams.
-    int attempts = 0;
-    while (!StopRequested()) {
-        if (!impl_->session) {
-            // Reconnect path only; the first session comes from Init()
-            if (attempts >= impl_->config.network.reconnect.max_attempts) {
-                g_log.Error("Connect Failed: {} reconnect attempts exhausted", attempts);
-                break;
-            }
-            ++attempts;
-            g_log.Warn("Link lost — reconnect attempt {}/{} in {} ms (new connection epoch)", attempts,
-                       impl_->config.network.reconnect.max_attempts, impl_->config.network.reconnect.backoff_ms);
-            SleepInterruptible(impl_->config.network.reconnect.backoff_ms);
-            if (StopRequested()) break;
-            const BringUp bring_up = BringUpSession();
-            if (bring_up == BringUp::kStopped) {
-                break; // clean external stop during the reconnect: not a failure
-            }
-            if (bring_up != BringUp::kOk) {
-                impl_->run_incomplete = true;
-                if (impl_->last_exit_code == 1) break; // a rejected calibration/configuration is not a transient link fault
-                continue; // each failed bring-up consumes exactly one attempt
-            }
-        }
-        if (!StartStreaming()) {
-            break;
-        }
-        attempts = 0; // this session reached the streaming state
+    // One connection epoch per run: a link loss, like any data loss, ends the
+    // whole rig (fail-fast) instead of reconnecting into a recording that is
+    // already incomplete. The session comes from Init().
+    if (!StopRequested() && impl_->session && StartStreaming()) {
         MonitorLoop();
         TeardownSession();
-        if (StopRequested() || !impl_->retryable_link_loss || !impl_->config.network.reconnect.enabled) {
-            break;
-        }
     }
     // Any exit (internal failure, limits, external stop) takes the whole rig down
     terminate_.store(true, std::memory_order_release);

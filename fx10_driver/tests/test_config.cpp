@@ -56,7 +56,6 @@ network:
   stall_budget_s: 1.5
   max_buffer_memory_mb: 256
   retrieve_timeout_ms: 500
-  reconnect: { enabled: false, max_attempts: 3, backoff_ms: 100 }
 acquisition:
   pixel_format: Mono8
   spatial_binning: 2
@@ -92,8 +91,6 @@ logging:
     CHECK(c.network.socket_rx_buffer_mb == 64);
     CHECK(c.network.buffer_count == 128);
     CHECK(c.network.stall_budget_s == doctest::Approx(1.5));
-    CHECK_FALSE(c.network.reconnect.enabled);
-    CHECK(c.network.reconnect.max_attempts == 3);
     CHECK(c.acquisition.pixel_format == "Mono8");
     CHECK(c.acquisition.spectral_binning == 4);
     CHECK(c.acquisition.spatial_binning == 2);
@@ -143,13 +140,14 @@ TEST_CASE("config: the shipped templates parse and stay in sync") {
         CHECK(c->acquisition.image_enhancement);
         CHECK_FALSE(c->acquisition.status_line);
         CHECK(c->recording.flush_interval_mb > 0u);
-        // LineSelector must precede LineSource in features.raw
+        // The template cannot prove whether this firmware exposes LineSelector.
+        // When both writes are configured, retain their order. CameraControl
+        // requires a preceding selector at runtime if the actual node exists.
         const auto source = std::find_if(c->features.raw.begin(), c->features.raw.end(),
                                          [](const RawFeature &f) { return f.name == "LineSource"; });
-        if (source != c->features.raw.end()) {
-            const auto selector = std::find_if(c->features.raw.begin(), c->features.raw.end(),
-                                               [](const RawFeature &f) { return f.name == "LineSelector"; });
-            REQUIRE(selector != c->features.raw.end());
+        const auto selector = std::find_if(c->features.raw.begin(), c->features.raw.end(),
+                                           [](const RawFeature &f) { return f.name == "LineSelector"; });
+        if (source != c->features.raw.end() && selector != c->features.raw.end()) {
             CHECK(selector < source);
         }
     }
@@ -204,7 +202,8 @@ TEST_CASE("config: network values that reach unsigned SDK parameters") {
     CHECK(Contains(ErrorOf("network: { max_buffer_memory_mb: -1 }"), "network.max_buffer_memory_mb"));
     CHECK(Contains(ErrorOf("network: { stall_budget_s: -0.5 }"), "network.stall_budget_s"));
     CHECK(Contains(ErrorOf("network: { packet_size: -1 }"), "network.packet_size"));
-    CHECK(Contains(ErrorOf("network: { reconnect: { backoff_ms: -1 } }"), "network.reconnect.backoff_ms"));
+    // The reconnect block was retired with the fail-fast policy: a link loss ends the rig
+    CHECK(Contains(ErrorOf("network: { reconnect: { enabled: true } }"), "network.reconnect"));
     const AppConfig c = LoadAppConfigText(
         "network: { retrieve_timeout_ms: 500, socket_rx_buffer_mb: 64, max_buffer_memory_mb: 256, "
         "stall_budget_s: 0, packet_size: 0 }");

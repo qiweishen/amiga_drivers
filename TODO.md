@@ -26,7 +26,7 @@ Modularization roadmap (decided 2026-07; details in the session notes):
 - [x] F — fx10 integration: root FindeBUS unification (single Pleora SDK for
       gox + fx10), `Fx10DriverApp` on `IDriverApp` + `Common::DriverLog`, GUI
       contract markers + `/fx10` tools page + `fx10_snapshot`; the ENVI on-disk
-      format stays frozen (see `fx10_driver/docs/BRINGUP.md`)
+      format stays frozen (see `fx10_driver/docs/DEVICE_CONFIG.md`)
 - [x] P8 — Style finalization (2026-09): Google PascalCase for every function and
       method, lowercase namespaces (`common`, `asterx`, `fx10`, `gox`, `lms4xxx`),
       `.h` + `#pragma once` everywhere, lms4xxx file prefix dropped, comment

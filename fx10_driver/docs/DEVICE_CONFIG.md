@@ -1,7 +1,7 @@
 # FX10 camera configuration
 
-On every bring-up (first start, every reconnect of the `AmigaDrivers` session
-and the `fx10_snapshot` tool) the driver returns the camera to its factory
+On every bring-up (the `AmigaDrivers` session start and the `fx10_snapshot`
+tool) the driver returns the camera to its factory
 baseline and then applies its own configuration, so that a setting left on the
 camera by a previous user can never influence a recording. Nothing is saved on
 the camera; the IP configuration is never written. Page numbers refer to the
@@ -13,11 +13,10 @@ User Manual 2.2).
 * **Baseline = `CameraHeadFactoryReset` then `UserSetLoad`.** The manual
   documents no user sets, no IP configuration and no reset command (it defers
   the GenICam interface to the GigE Vision standard, p.20), so both node names
-  come from the camera itself — find them with `fx10_snapshot --dump-features`.
-  Neither is optional: they are the entire basis for "the camera is now at its
-  factory values", which every later write is verified against, so a firmware
-  without either one fails the bring-up with the node name in the message
-  rather than proceeding on an assumption.
+  need confirmation in the device's GenICam node map. The current driver
+  requires both commands and fails bring-up if either is unavailable.
+  An acknowledged command and subsequent control readiness do not prove
+  every factory value; the driver verifies the configuration it applies.
 * **Order.** The reset runs after connect and before the stream open (it resets
   `GevSCPSPacketSize`, which `openStream()` then negotiates or writes), after a
   best-effort `AcquisitionStop` — user sets load only while acquisition is
@@ -103,7 +102,7 @@ Written but **not** exposed (hidden, driver-internal):
 | `MROI_Enable = false` | Written even when MROI is off: it survives a power cycle, so "off" must be asserted, not assumed |
 | Counter1 `EventSource = MissedTrigger` + `Counter1_Reset` | The missed-trigger counter (p.27) is BOUND and RESET by the driver, so `missed_triggers=` cannot report some other event source a previous user configured. Optional: a camera without those nodes costs the metric, not the recording |
 | `DeviceTemperatureSelector` before each temperature read | Two sensors with different limits — processing board 80 °C, FPGA 90 °C, and the camera CANCELS operation above them (p.44). A read without the selector means nothing |
-| `LineSelector` before `LineSource` (`features.raw`) | `LineSource` applies to whichever line the selector points at; the strobe is what the SensorSync board reads back |
+| `LineSelector` before `LineSource` (`features.raw`), when the node exists | `CameraControl` requires an explicit preceding selector write when the camera exposes `LineSelector`. A camera without this node can expose `LineSource` directly; the driver does not invent a `Line1` entry. The physical strobe routing still needs confirmation on the actual device. |
 
 ## Sequence
 
@@ -168,13 +167,38 @@ eBUS Player 6.5.1; `features.raw` is the escape hatch for anything else.
 The manual names features in the Lumo/ASCII interface, not in GenICam, so a few
 roles must be filled in from the camera itself:
 
-    fx10_snapshot --config config/config-fx10.yaml --dump-features > features.txt
+Inspect an existing GenICam node-map export or the device's feature list in an
+already available eBUS Player. The current `fx10_snapshot` tool has no
+`--dump-features` option and performs factory preparation and acquisition; it
+must not be treated as a read-only node-dump command. Confirm the node types,
+access and entry spellings for `features.raw` (e.g. the AIE node),
+`DeviceTemperatureSelector`, `Counter1_EventSource`, and `LineSource`.
+Check whether `LineSelector` exists before choosing an entry for it.
 
-prints `category | name | type | access | value | [min..max] | {entries}` for
-every feature and exits without recording. Use it to find node names for
-`features.raw` (e.g. the AIE node), and to confirm the entry spellings for
-`DeviceTemperatureSelector` (`ProcPCB` / `FPGA`), `Counter1_EventSource`
-(`MissedTrigger`) and `LineSelector` (`Line1` / `ISO_STROBE`).
+## Recording policy: time source, fail-fast, durability
+
+* **Time.** The FX10's only path to GPS time is SensorSync (`sensor_trigger`,
+  strobe edges against AsteRx PPS/ZDA). With `sensor_trigger.enabled: false`
+  the driver warns at bring-up: the lines then carry the camera's raw GVSP tick
+  and nothing that can be associated with another sensor offline. Host time is
+  never a time source on this platform (the `host_receive_*` columns of the
+  line index are diagnostics, kept for format stability).
+* **Fail-fast.** The first lost or unrecorded frame ends the whole rig at once:
+  the monitor thread polls `StreamReceiver::LossSeen()` (RetrieveBuffer error,
+  failed operation result, non-image payload, BlockID anomaly, requeue failure)
+  and `EnviRecorder::LossSeen()` (BlockID gap, rejected buffer, wrong geometry)
+  every 200 ms, and the camera's missed-trigger counter on the 60 s telemetry
+  tick. An incomplete recording is worthless to the platform; the operator
+  restarts immediately instead of finding a DEGRADED run at the end. For the
+  same reason there is no reconnect loop any more: a link loss (or an unusable
+  stream) ends the run — the frames across the gap are gone either way.
+* **Durability off the acquisition thread.** `write(2)` only lands in the
+  page cache; the periodic `fdatasync` (`output.flush_interval_mb`) waits for
+  the disk and used to run on the acquisition thread, where a slow disk could
+  exhaust the ~2 s SDK buffer budget and lose frames. It now runs on a helper
+  thread inside `EnviRecorder` on dup'd descriptors; flush failures are counted
+  there and folded into `write_errors` when the segment finalizes. The
+  finalize itself (truncate → fdatasync → rename → `.hdr`) is unchanged.
 
 ## Not done, and why
 
@@ -190,21 +214,24 @@ every feature and exits without recording. Use it to find node names for
 * **What `CameraHeadFactoryReset` actually resets**, and whether the subsequent
   `UserSetLoad` lands on the factory set — the driver does not write
   `UserSetSelector`, so it loads whichever set the camera currently has
-  selected. Both node names came from the camera, not the manual. To check:
-  change a parameter in SOPAS/eBUS Player, then compare
-  `fx10_snapshot --dump-features` before and after a bring-up.
+  selected. Compare device node-map exports before and after a bring-up
+  performed by the operator; the manual alone does not establish the reset scope.
 * **The AIE GenICam node name.** The manual gives only the Lumo name
   (`Camera.Image.AberrationCorrection.Enabled`, p.39), so the config accepts
   only `image_enhancement: true` (the factory value, nothing is written); to turn
-  AIE off, find the node with `--dump-features` and write it via `features.raw`.
+  AIE off, first confirm the node and supported values in the actual device's
+  node map before configuring a write through `features.raw`.
 * **`Counter1_EventSource` and its `MissedTrigger` entry.** The counter is
   documented (p.27), the node names are not. Both writes are optional: a camera
   without them logs a WARN and `missed_triggers=` reads `n/a`.
 * **`DeviceTemperatureSelector` entry spellings** (`ProcPCB` / `FPGA`). A wrong
   entry means the corresponding `temp_*` field reads `n/a`, never a wrong
   number.
-* **The `LineSelector` entry for the strobe output** (shipped as `Line1`). This
-  one is a REQUIRED write (it is in `features.raw`), so a wrong entry fails the
-  bring-up loudly rather than silently misrouting the strobe.
+* **Whether `LineSelector` exists, and the strobe entry if it does.** The current
+  acquisition template writes only `LineSource = ExposureActive`.
+  `CameraControl` permits that when the device has no `LineSelector`; otherwise
+  it stops before the `LineSource` write and requires an explicit preceding
+  selector from the actual node map. Every configured enum write is read back.
+  Neither the template nor a unit test proves routing to `ISO_STROBE` pin 2.
 * Whether a mechanical-shutter node exists (p.47 documents the shutter, not a
   node name); the driver never actuates it.

@@ -328,6 +328,7 @@ namespace fx10 {
         }
         ++queue_failures_;
         ++counters_.op_errors;
+        loss_seen_.store(true, std::memory_order_release);
         g_log.Error("[eBUS] QueueBuffer failed ({}), pool shrank by {} buffer(s)", pv(result.GetCodeString()),
                     queue_failures_);
         if (queue_failures_ >= buffers_.size()) {
@@ -407,6 +408,7 @@ namespace fx10 {
                 // Other codes are stream errors
                 if (result.GetCode() != PvResult::Code::TIMEOUT) {
                     ++counters_.op_errors;
+                    loss_seen_.store(true, std::memory_order_release);
                     last_arrival = clock::now(); // the SDK answered, just not with a frame
                     if (clock::now() >= next_unusable_warn) {
                         next_unusable_warn = clock::now() + kUnusableWarnInterval;
@@ -431,6 +433,7 @@ namespace fx10 {
             const auto host_receive_mono = common::TimeUtil::MonotonicNowNs();
             if (!op_result.IsOK()) {
                 ++counters_.op_errors;
+                loss_seen_.store(true, std::memory_order_release);
                 g_log.Warn("[eBUS] Buffer operation error: {}", pv(op_result.GetCodeString()));
                 sink.OnRejected(buffer->GetBlockID(), "operation-error");
                 Requeue(buffer);
@@ -439,6 +442,7 @@ namespace fx10 {
             }
             if (buffer->GetPayloadType() != PvPayloadTypeImage) {
                 ++counters_.op_errors;
+                loss_seen_.store(true, std::memory_order_release);
                 g_log.Warn("[eBUS] Non-image payload type {} dropped", static_cast<int>(buffer->GetPayloadType()));
                 sink.OnRejected(buffer->GetBlockID(), "non-image");
                 Requeue(buffer);
@@ -455,6 +459,7 @@ namespace fx10 {
             const auto observation = tracker_.Observe(buffer->GetBlockID());
             if (observation.anomaly) {
                 ++counters_.blockid_anomalies;
+                loss_seen_.store(true, std::memory_order_release);
                 g_log.Warn("[eBUS] BlockID anomaly at {}", buffer->GetBlockID());
             }
             if (observation.gap_before > 0) {

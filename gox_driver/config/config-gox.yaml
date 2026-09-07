@@ -16,11 +16,11 @@ cameras:
             ip: "10.95.1.101"           # direct connect; used when mac is empty
 
         acquisition:
-            exposure_ms: 150.0          # > 0; freerun: < 1000 / frame_rate_hz
-            gain: 1.0                   # 1.0..126.0 (magnification, not dB, p.148)
+            exposure_ms: 150.0              # > 0; freerun: < 1000 / frame_rate_hz
+            gain: 1.0                       # 1.0..126.0 (magnification, not dB, p.148)
             pixel_format: BayerRG12Packed   # GenICam entry, verbatim; 12-bit formats also set SensorDigitizationBits
-            frame_rate_hz: 3.0          # >= 0.125; freerun only
-            blemish_correction: false   # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
+            frame_rate_hz: 5.0              # >= 0.125; freerun only
+            blemish_correction: false       # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
                 mode: freerun           # freerun | external
                 activation: rising      # rising | falling
@@ -51,11 +51,12 @@ cameras:
 # ADVANCED: do not change without a reason
 # =============================================================
 # --- PTP ---
+# PTP is the camera's only absolute time (grandmaster: AsteRx RBi3 Pro+, GPS timescale; host time is never used).
+# enabled: false is accepted but warned: the frames then carry free-running ticks that cannot be associated offline.
 ptp:
-    enabled: true
+    enabled: false
     sync_timeout_s: 10.0                # > 0
     on_timeout: abort                   # abort | warn_continue
-    offset_report_interval_s: 10.0      # >= 0; 0 = only at session start/end
 
 
 # --- Output (jai-raw-seg) ---
@@ -63,7 +64,7 @@ output:
     segment_size_mb: 2048               # > 0
     record_align: 4096                  # power of two; 1 = none
     queue_max_frames: 0                 # 0 = auto (~2 s) | >= 2
-    queue_on_full: drop_newest          # drop_newest | block
+    queue_on_full: drop_newest          # drop_newest | block; any dropped frame ends the whole rig (fail-fast)
     on_buffer_error: record_flagged     # record_flagged | drop
     flush_interval_mb: 64               # > 0
     max_frames: 0                       # >= 0; 0 = unlimited

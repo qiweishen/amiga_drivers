@@ -180,13 +180,12 @@ namespace gox {
 
             ParseNetwork(n, path, c.network);
 
-            // Freerun: the exposure ceiling is the frame period (manual p.142); past it the camera clamps
             const auto &acq = c.acquisition;
-            if (acq.trigger.mode == TriggerMode::kFreerun && acq.exposure_ms && acq.frame_rate_hz) {
-                const double period_ms = 1000.0 / *acq.frame_rate_hz;
+            if (acq.exposure_ms && acq.frame_rate_hz) {
+                const double period_ms = 900.0 / *acq.frame_rate_hz;
                 if (*acq.exposure_ms >= period_ms) {
                     Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*acq.exposure_ms) +
-                                                ") must be below the freerun frame period 1000/frame_rate_hz (" +
+                                                ") must be below the frame period 900/frame_rate_hz (" +
                                                 std::to_string(period_ms) + " ms); lower the exposure or the frame rate");
                 }
             }
@@ -220,8 +219,7 @@ namespace gox {
             Read(out, "output", "max_frames", cfg.output.max_frames);
             ReadRange<double>(out, "output", "max_duration_s", 0.0, 86400.0, cfg.output.max_duration_s);
 
-            const YAML::Node ptp = OptionalMap(root, "", "ptp",
-                                               {"enabled", "sync_timeout_s", "on_timeout", "offset_report_interval_s"});
+            const YAML::Node ptp = OptionalMap(root, "", "ptp", {"enabled", "sync_timeout_s", "on_timeout"});
             Read(ptp, "ptp", "enabled", cfg.ptp.enabled);
             if (Read(ptp, "ptp", "sync_timeout_s", cfg.ptp.sync_timeout_s) && cfg.ptp.sync_timeout_s <= 0) {
                 Fail("ptp.sync_timeout_s", "must be > 0");
@@ -229,7 +227,6 @@ namespace gox {
             ReadEnum<PtpOnTimeout>(ptp, "ptp", "on_timeout",
                                    {{"abort", PtpOnTimeout::kAbort}, {"warn_continue", PtpOnTimeout::kWarnContinue}},
                                    cfg.ptp.on_timeout);
-            ReadRange<double>(ptp, "ptp", "offset_report_interval_s", 0.0, 86400.0, cfg.ptp.offset_report_interval_s);
 
             const YAML::Node logging = OptionalMap(root, "", "logging", {"stats_interval_s"});
             if (Read(logging, "logging", "stats_interval_s", cfg.stats_interval_s) && cfg.stats_interval_s <= 0) {

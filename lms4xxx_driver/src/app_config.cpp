@@ -24,11 +24,15 @@ namespace lms4xxx {
         }
 
         void ParseNtp(const YAML::Node &root, NtpConfig &ntp) {
-            const YAML::Node n = OptionalMap(root, "", "ntp", {"enabled", "server", "sync_interval_s", "check_status_s"});
+            const YAML::Node n = OptionalMap(root, "", "ntp",
+                                             {"enabled", "server", "sync_interval_s", "check_status_s",
+                                              "lock_timeout_s", "max_time_step_ms"});
             Read(n, "ntp", "enabled", ntp.enabled);
             Read(n, "ntp", "server", ntp.server);
             ReadRange<std::uint32_t>(n, "ntp", "sync_interval_s", 1, 3600, ntp.sync_interval_s);
             ReadRange<std::uint32_t>(n, "ntp", "check_status_s", 1, 3600, ntp.check_status_s);
+            ReadRange<std::uint32_t>(n, "ntp", "lock_timeout_s", 1, 3600, ntp.lock_timeout_s);
+            ReadRange<std::uint32_t>(n, "ntp", "max_time_step_ms", 1, 60000, ntp.max_time_step_ms);
             if (ntp.enabled && !IsIpv4(ntp.server)) {
                 Fail("ntp.server", "must be a dotted-quad IPv4 address when ntp.enabled is true");
             }

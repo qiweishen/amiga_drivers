@@ -26,9 +26,6 @@ namespace gox::ebus {
         // False when the requirement was not met under on_timeout=abort, or the process is stopping
         bool WaitForSync(StopController *stop);
 
-        // Re-reads the clock and repeats the host/device timestamp cross-check
-        void RefreshOffset();
-
         // Periodic: status must stay "slave" and accuracy within 0..9; a bad reading is re-checked a
         // few times first. False = synchronization lost (caller stops); true when PTP is off
         bool CheckHealth(StopController *stop);
@@ -41,8 +38,6 @@ namespace gox::ebus {
 
         bool ReadClockAccuracy(int64_t &out);
 
-        void CrossCheckTimestamp();
-
         std::string camera_id_;
         PvGenParameterArray *params_;
         PtpConfig cfg_;
@@ -54,15 +49,5 @@ namespace gox::ebus {
         std::string last_status_;
         int64_t last_accuracy_ = -1; // -1 = never read
         uint64_t lock_wait_ms_ = 0;
-
-        bool have_first_latch_offset_ = false;
-        int64_t first_latch_offset_ns_ = 0;
-
-        // Last CrossCheckTimestamp() result, mirrored into the sidecars.
-        bool have_offset_ = false;
-        int64_t raw_offset_ns_ = 0;
-        int64_t adjusted_offset_ns_ = 0;
-        int64_t drift_ns_ = 0;
-        bool tai_detected_ = false;
     };
 } // namespace gox::ebus

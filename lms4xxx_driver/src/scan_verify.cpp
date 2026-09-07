@@ -2,8 +2,16 @@
 
 #include <spdlog/fmt/fmt.h>
 
+#include "scan_record.h"
+
 
 namespace lms4xxx {
+    bool DeviceTimePlausible(const ScanTimestamp &ts) {
+        // DeviceTimeUnixUs() is 0 for malformed fields, which the floor rejects as well
+        return DeviceTimeUnixUs(ts) >= kEarliestPlausibleDeviceTimeUs;
+    }
+
+
     std::string VerifyScanContent(const ScanData &scan, const ScanConfig &scan_config, bool ntp_enabled) {
         std::string problems;
         const auto bad = [&problems](bool cond, const std::string &what) {

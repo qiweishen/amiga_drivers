@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <thread>
 
 #include "logger.h"
@@ -16,7 +15,6 @@ namespace gox::ebus {
     namespace {
         common::DriverLog g_log{"GoX"};
 
-        constexpr int64_t kNsPerSecond = 1000000000ll;
         constexpr uint32_t kStatusPollMs = 500;
 
         // GO-X feature Names (manual p.128). There is no alternative spelling to
@@ -81,7 +79,10 @@ namespace gox::ebus {
         synchronized_ = false;
 
         if (!cfg_.enabled) {
-            g_log.Info("[{}] [eBUS] PTP disabled by config; device timestamps are free-running", camera_id_);
+            // Host time is never recorded as a time source on this platform; PTP is the
+            // camera's only absolute time
+            g_log.Warn("[{}] [eBUS] ptp.enabled=false: device timestamps are free-running 1 GHz ticks with NO "
+                       "absolute time; offline association with GNSS time is impossible for this run", camera_id_);
             return true;
         }
 
@@ -258,72 +259,6 @@ namespace gox::ebus {
     }
 
 
-    void PtpManager::CrossCheckTimestamp() {
-        if (!FeatureExists(params_, "TimestampLatch") || !FeatureExists(params_, "TimestampLatchValue")) {
-            g_log.Debug("[{}] [eBUS] no timestamp latch feature; cross-check skipped", camera_id_);
-            return;
-        }
-
-        // Bracket the latch with host CLOCK_REALTIME samples; the midpoint is
-        // our best estimate of "host time when the camera latched".
-        const uint64_t t0 = common::TimeUtil::RealtimeNowNs();
-        if (!ExecuteCommandFeature(params_, "TimestampLatch")) {
-            g_log.Warn("[{}] [eBUS] TimestampLatch failed; timestamp cross-check skipped", camera_id_);
-            return;
-        }
-        const uint64_t t1 = common::TimeUtil::RealtimeNowNs();
-        int64_t device_ns = 0;
-        if (!ReadIntFeature(params_, "TimestampLatchValue", device_ns)) {
-            g_log.Warn("[{}] [eBUS] TimestampLatchValue not readable; timestamp cross-check skipped", camera_id_);
-            return;
-        }
-        // The GO-X tick frequency is fixed at 1 GHz (manual p.121), so ticks are
-        // already nanoseconds.
-
-        const int64_t midpoint = static_cast<int64_t>(t0 / 2 + t1 / 2);
-        const int64_t raw_offset = midpoint - device_ns; // host(UTC) - Device(TAI when synced)
-
-        // The manual (p.121) only states that PTP time is a 1 ns count with a
-        // 1970-01-01 origin; whether the grandmaster serves TAI or UTC is not a
-        // camera property. kAssumedTaiUtcOffsetS is this driver's assumption:
-        // when the measured offset lands within 1 s of it, report the corrected
-        // value (a healthy TAI setup then reads near zero) and record both
-        // numbers plus the assumption in device.json.
-        int64_t adjusted = raw_offset;
-        bool tai_detected = false;
-        if (std::llabs(raw_offset + kAssumedTaiUtcOffsetS * kNsPerSecond) <= kNsPerSecond) {
-            adjusted = raw_offset + kAssumedTaiUtcOffsetS * kNsPerSecond;
-            tai_detected = true;
-        }
-
-        std::string drift;
-        if (have_first_latch_offset_) {
-            drift_ns_ = adjusted - first_latch_offset_ns_;
-            drift = " drift_since_start=" + std::to_string(drift_ns_) + "ns";
-        } else {
-            have_first_latch_offset_ = true;
-            first_latch_offset_ns_ = adjusted;
-            drift_ns_ = 0;
-        }
-        have_offset_ = true;
-        raw_offset_ns_ = raw_offset;
-        adjusted_offset_ns_ = adjusted;
-        tai_detected_ = tai_detected;
-        g_log.Info(
-            "[{}] [eBUS] timestamp cross-check: host-device offset {}ns (bracket {}ns{}){} - offset is only "
-            "authoritative if the host clock is PTP/NTP disciplined",
-            camera_id_, adjusted, t1 - t0, tai_detected ? ", TAI-UTC 37s removed" : "", drift);
-    }
-
-
-    void PtpManager::RefreshOffset() {
-        if (!cfg_.enabled || !feature_found_) {
-            return;
-        }
-        CrossCheckTimestamp();
-    }
-
-
     PtpSummary PtpManager::Summary() const {
         PtpSummary s;
         s.enabled = cfg_.enabled;
@@ -333,11 +268,6 @@ namespace gox::ebus {
         s.status = last_status_;
         s.accuracy = last_accuracy_;
         s.lock_wait_ms = lock_wait_ms_;
-        s.have_offset = have_offset_;
-        s.raw_offset_ns = raw_offset_ns_;
-        s.adjusted_offset_ns = adjusted_offset_ns_;
-        s.drift_ns = drift_ns_;
-        s.tai_detected = tai_detected_;
         return s;
     }
 } // namespace gox::ebus

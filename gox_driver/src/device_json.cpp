@@ -373,14 +373,9 @@ namespace gox {
         ptp["status"] = r.ptp.status;
         ptp["accuracy"] = r.ptp.accuracy >= 0 ? ordered_json(r.ptp.accuracy) : ordered_json(nullptr);
         ptp["lock_wait_ms"] = r.ptp.lock_wait_ms;
-        ptp["raw_offset_ns"] = r.ptp.have_offset ? ordered_json(r.ptp.raw_offset_ns) : ordered_json(nullptr);
-        ptp["adjusted_offset_ns"] = r.ptp.have_offset ? ordered_json(r.ptp.adjusted_offset_ns) : ordered_json(nullptr);
-        ptp["drift_ns"] = r.ptp.have_offset ? ordered_json(r.ptp.drift_ns) : ordered_json(nullptr);
-        ptp["tai_utc_offset_detected"] = r.ptp.tai_detected;
-        ptp["assumed_tai_utc_offset_s"] = kAssumedTaiUtcOffsetS;
         // The manual documents neither the grandmaster's timescale nor a leap
-        // second count; 37 s is this driver's assumption (p.121).
-        ptp["driver_assumption"] = true;
+        // second count (p.121), and no host clock is consulted to guess it.
+        ptp["timescale"] = kPtpTimescaleNote;
         doc["ptp"] = std::move(ptp);
 
         doc["recording_contract"] = {
@@ -409,7 +404,6 @@ namespace gox {
         ordered_json ptp;
         ptp["status"] = OptString(s.ptp_status);
         ptp["accuracy"] = OptInt(s.ptp_accuracy);
-        ptp["offset_ns"] = OptInt(s.ptp_offset_ns);
         row["ptp"] = std::move(ptp);
         return row.dump();
     }

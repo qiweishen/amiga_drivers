@@ -1,10 +1,9 @@
 /// @file test_frame_receiver.cpp
 /// @brief FrameReceiver: framing, resynchronisation and error reporting.
 ///
-/// This is the only thing between a TCP byte stream and the parser, and it had
-/// no test. The resync path in particular steps four bytes at a time, so on a
-/// stream that is not CoLa B it produces errors indefinitely — which is exactly
-/// what the consecutive-error count exists to make visible.
+/// This is the boundary between a TCP byte stream and the parser. Recovery must
+/// preserve split/overlapping STX candidates, report corruption once and keep
+/// reporting new garbage so a dead stream remains detectable.
 
 #include <doctest/doctest.h>
 
@@ -130,11 +129,80 @@ TEST_CASE("FrameReceiver reports a checksum mismatch and recovers") {
     stream.insert(stream.end(), good.begin(), good.end());
     receiver.Feed(stream.data(), stream.size());
 
-    REQUIRE(c.errors.size() >= 1);
+    REQUIRE(c.errors.size() == 1);
     CHECK(c.errors[0] == FrameReceiver::FrameError::kChecksumMismatch);
     // The good frame behind it must still arrive.
     REQUIRE(c.frames.size() == 1);
     CHECK(c.frames[0] == DataOf(good));
+}
+
+TEST_CASE("FrameReceiver accounts rejected tails once across every Feed boundary") {
+    auto checksum_bad = Frame("LMDscandata", {0x01});
+    checksum_bad.back() ^= 0xFF;
+    const std::vector<std::uint8_t> length_bad = {0x02, 0x02, 0x02, 0x02, 0x00, 0x10, 0x00, 0x00};
+    const std::vector<std::uint8_t> empty = {0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const auto good = Frame("LMDscandata", {0x09});
+
+    for (const auto &bad: {checksum_bad, length_bad, empty}) {
+        auto stream = bad;
+        stream.insert(stream.end(), good.begin(), good.end());
+        for (std::size_t split = 1; split < stream.size(); ++split) {
+            CAPTURE(bad.size());
+            CAPTURE(split);
+            Collector c;
+            auto receiver = c.Make(1024);
+            receiver.Feed(stream.data(), split);
+            receiver.Feed(stream.data() + split, stream.size() - split);
+            REQUIRE(c.errors.size() == 1);
+            CHECK(c.errors.front() == (bad == checksum_bad ? FrameReceiver::FrameError::kChecksumMismatch
+                                                         : FrameReceiver::FrameError::kLengthOutOfRange));
+            REQUIRE(c.frames.size() == 1);
+            CHECK(c.frames.front() == DataOf(good));
+
+            // Recovery resets the consecutive counter; the carried tail must
+            // not leak into the accounting of a later corrupted telegram.
+            receiver.Feed(checksum_bad.data(), checksum_bad.size());
+            CHECK(c.errors.size() == 2);
+            CHECK(c.last_consecutive == 1);
+        }
+    }
+}
+
+TEST_CASE("FrameReceiver keeps detecting new garbage after a rejected candidate") {
+    Collector c;
+    auto receiver = c.Make();
+    auto bad = Frame("LMDscandata", {0x01});
+    bad.back() ^= 0xFF;
+    receiver.Feed(bad.data(), bad.size());
+    REQUIRE(c.errors.size() == 1);
+
+    const std::vector<std::uint8_t> garbage(64, 0x55);
+    for (std::size_t i = 0; i < 4; ++i) {
+        receiver.Feed(garbage.data(), garbage.size());
+        REQUIRE(c.errors.size() == i + 2);
+        CHECK(c.errors.back() == FrameReceiver::FrameError::kGarbage);
+        CHECK(c.last_consecutive == i + 2);
+    }
+    CHECK(c.frames.empty());
+}
+
+TEST_CASE("FrameReceiver recovers an STX overlapping a rejected candidate") {
+    const auto good = Frame("LMDscandata", {0x09});
+    for (std::size_t prefix = 1; prefix <= 3; ++prefix) {
+        std::vector<std::uint8_t> stream(prefix, 0x02);
+        stream.insert(stream.end(), good.begin(), good.end());
+        for (std::size_t split = 1; split < stream.size(); ++split) {
+            CAPTURE(prefix);
+            CAPTURE(split);
+            Collector c;
+            auto receiver = c.Make(1024);
+            receiver.Feed(stream.data(), split);
+            receiver.Feed(stream.data() + split, stream.size() - split);
+            CHECK_FALSE(c.errors.empty());
+            REQUIRE(c.frames.size() == 1);
+            CHECK(c.frames.front() == DataOf(good));
+        }
+    }
 }
 
 TEST_CASE("FrameReceiver rejects a length field beyond the maximum") {
@@ -149,8 +217,8 @@ TEST_CASE("FrameReceiver rejects a length field beyond the maximum") {
 }
 
 TEST_CASE("Consecutive framing errors are counted so a dead stream can be detected") {
-    // A run of 0x02 looks like an STX at every offset, so resync finds one every
-    // four bytes and never converges. The driver latches a fault above a
+    // A run of 0x02 looks like an STX at every offset, so resync keeps finding
+    // rejected candidates and never converges. The driver latches a fault above a
     // threshold; that only works if `consecutive` really counts from the last
     // GOOD frame.
     Collector c;
@@ -162,8 +230,8 @@ TEST_CASE("Consecutive framing errors are counted so a dead stream can be detect
     CHECK(c.errors.size() > 100);
     CHECK(c.last_consecutive == c.errors.size());
 
-    // ...and one valid frame ends the burst, so a single corrupted frame in an
-    // otherwise healthy stream can never reach the threshold.
+    // A valid frame ends the burst; the following simple checksum failure
+    // must start at one, without adding its discarded tail as another error.
     const auto good = Frame("LMDscandata", {0x09});
     receiver.Feed(good.data(), good.size());
     REQUIRE(c.frames.size() == 1);

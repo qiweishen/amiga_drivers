@@ -1,6 +1,7 @@
 #include "../include/accounting.h"
 
 #include <doctest/doctest.h>
+#include <initializer_list>
 
 using fx10::BlockIdTracker;
 using fx10::Classify;

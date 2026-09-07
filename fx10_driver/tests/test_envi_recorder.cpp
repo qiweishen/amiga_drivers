@@ -506,7 +506,9 @@ TEST_CASE("EnviRecorder: PeriodicFlushHappensOnTheConfiguredByteCadence") {
     Counters counters;
     EnviRecorder recorder(config, counters);
 
-    int syncs = 0;
+    // The periodic flush runs on the recorder's helper thread: atomic counter,
+    // and a drain before every assertion.
+    std::atomic<int> syncs{0};
     recorder.SetSyncHookForTest([&syncs](int fd) {
         ++syncs;
         return ::fdatasync(fd);
@@ -518,14 +520,18 @@ TEST_CASE("EnviRecorder: PeriodicFlushHappensOnTheConfiguredByteCadence") {
     for (std::uint64_t id = 1; id <= 2; ++id) {
         recorder.OnFrame(MakeBigFrame(line, id));
     }
+    recorder.DrainPendingFlushesForTest();
     CHECK_MESSAGE((syncs == 0), "under the cadence: no flush yet");
     recorder.OnFrame(MakeBigFrame(line, 3)); // 1.3 MiB written
+    recorder.DrainPendingFlushesForTest();
     CHECK(syncs == 2); // pixels and identity index
     for (std::uint64_t id = 4; id <= 5; ++id) {
         recorder.OnFrame(MakeBigFrame(line, id));
     }
+    recorder.DrainPendingFlushesForTest();
     CHECK_MESSAGE((syncs == 2), "the cadence counts from the LAST flush, not from the segment start");
     recorder.OnFrame(MakeBigFrame(line, 6)); // 2.6 MiB written
+    recorder.DrainPendingFlushesForTest();
     CHECK(syncs == 4);
 
     recorder.Stop();
@@ -540,7 +546,7 @@ TEST_CASE("EnviRecorder: FlushIntervalZeroKeepsTheOldSegmentBoundaryBehaviour") 
     Counters counters;
     EnviRecorder recorder(config, counters);
 
-    int syncs = 0;
+    std::atomic<int> syncs{0};
     recorder.SetSyncHookForTest([&syncs](int fd) {
         ++syncs;
         return ::fdatasync(fd);
@@ -566,7 +572,7 @@ TEST_CASE("EnviRecorder: FailedPeriodicFlushIsCountedButDoesNotKillTheRun") {
     EnviRecorder recorder(config, counters);
     recorder.Start(MakeBigInit());
 
-    int syncs = 0;
+    std::atomic<int> syncs{0};
     recorder.SetSyncHookForTest([&syncs](int fd) -> int {
         // Fail only the periodic flushes; let the finalize succeed.
         if (++syncs <= 2) {
@@ -580,8 +586,10 @@ TEST_CASE("EnviRecorder: FailedPeriodicFlushIsCountedButDoesNotKillTheRun") {
         recorder.OnFrame(MakeBigFrame(line, id));
     }
     CHECK_FALSE(recorder.Failed());
-    CHECK(counters.write_errors >= 2u);
+    // The flush runs on the helper thread; its failures reach the ledger when
+    // the segment finalizes (single-writer rule), i.e. at Stop().
     recorder.Stop();
+    CHECK(counters.write_errors >= 1u); // the two failed syncs of one flush request count once
     CHECK_FALSE(recorder.Failed());
     CHECK(counters.segments_finalized == 1u);
     CHECK(fs::exists(recorder.SessionDir() / "segment_0001.hdr"));

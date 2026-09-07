@@ -5,6 +5,9 @@
 
 #include <doctest/doctest.h>
 
+#include <unistd.h>
+
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -170,6 +173,43 @@ TEST_CASE(
     std::string line;
     REQUIRE(std::getline(in, line));
     CHECK(line.find("reaches disk at once") != std::string::npos);
+}
+
+
+TEST_CASE(
+
+    "a stalled stderr reader never blocks logging (non-blocking console sink)"
+) {
+    // The GUI holds the process's stderr pipe. Fill such a pipe and never read
+    // it: every log call must still return at once, the dropped lines must be
+    // counted, and the file log must stay complete.
+    int fds[2];
+    REQUIRE(::pipe(fds) == 0);
+    const int saved_stderr = ::dup(STDERR_FILENO);
+    REQUIRE(saved_stderr >= 0);
+    REQUIRE(::dup2(fds[1], STDERR_FILENO) == STDERR_FILENO);
+
+    const auto path = MakeLogPath("nonblock");
+    common::Logger::Init({path.string(), /*quiet=*/false}, "common_tests_nonblock"); // stderr is a pipe now
+    const auto dropped_before = common::Logger::ConsoleLinesDropped();
+
+    constexpr int kLines = 4000; // ~80 B each: well past the 64 KiB pipe capacity
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kLines; ++i) {
+        common::Log::LogMessage(spdlog::level::info, common::Markers::kModuleMain,
+                                "filler line for a pipe nobody reads, number " + std::to_string(i));
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    // Restore stderr before any assertion can print
+    ::dup2(saved_stderr, STDERR_FILENO);
+    ::close(saved_stderr);
+    ::close(fds[0]);
+    ::close(fds[1]);
+
+    CHECK(elapsed < std::chrono::seconds(2));
+    CHECK(common::Logger::ConsoleLinesDropped() > dropped_before);
+    CHECK(ReadLines(path).size() >= static_cast<std::size_t>(kLines)); // the file sink saw everything
 }
 
 

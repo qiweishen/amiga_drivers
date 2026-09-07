@@ -1,22 +1,3 @@
-// fx10_snapshot: one-shot ENVI cube grab for the web GUI preview / exposure
-// tuning loop. Reuses the fx10 pipeline with snapshot invariants forced
-// (freerun, one bounded segment, tool-side frame counting), so the cube lands
-// as a normal ENVI session at <out>/snap_<utc>/segment_0001.{bil,hdr},
-// decodable by the GUI. Device enumeration is the common ebus_discover tool.
-//
-// Machine-readable contract for the GUI (like jai_snapshot, this tool never
-// calls common::Logger::Init — fx10 internals land on spdlog's implicit stdout
-// logger, so the GUI matches the LAST line of the shape below):
-//   SNAPSHOT: OK <session_dir>
-//   SNAPSHOT: FAIL <code> <reason>
-// --dump-features is a second, operator-facing mode: it connects, writes the
-// camera's whole GenICam feature list to stdout and exits (no SNAPSHOT: line,
-// no recording). It is how features.raw node names are found on a real camera.
-//
-// Exit codes: 0 ok, 2 args/config/--out unusable, 3 connect/control, 5 stream
-// or recorder runtime failure, 7 no frames on disk (no finalized .hdr),
-// 130 interrupted.
-
 #include <spdlog/spdlog.h>
 
 #include <cerrno>
@@ -73,12 +54,6 @@ namespace {
             "  --fps <f>          freerun frame rate (default 50; capped at 1000/exposure_ms)\n"
             "  -h, --help         show this help and exit\n"
             "\n"
-            "Other modes:\n"
-            "  --dump-features    connect, print every GenICam feature of the camera to\n"
-            "                     stdout (category | name | type | access | value | range |\n"
-            "                     entries) and exit. --out is not needed. This is how node\n"
-            "                     names for features.raw are discovered on a real camera.\n"
-            "\n"
             "Last stdout line: \"SNAPSHOT: OK <session_dir>\" or \"SNAPSHOT: FAIL <code> <reason>\".\n",
             argv0);
     }
@@ -133,17 +108,12 @@ int main(int argc, char **argv) {
     std::optional<int> spatial_binning;
     std::optional<int> spectral_binning;
     double fps = 50.0;
-    bool dump_features = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             PrintUsage(argv[0]);
             return 0;
-        }
-        if (arg == "--dump-features") { // valueless: must precede the value check
-            dump_features = true;
-            continue;
         }
         if (i + 1 >= argc) {
             return Fail(2, "bad arguments: " + arg + " requires a value (see --help)");
@@ -183,9 +153,6 @@ int main(int argc, char **argv) {
         } else {
             return Fail(2, "bad arguments: unknown option " + arg + " (see --help)");
         }
-    }
-    if (config_path.empty() || (out_dir.empty() && !dump_features)) {
-        return Fail(2, "--config and --out are required (see --help)");
     }
     if (!ip.empty() && !mac.empty()) {
         return Fail(2, "--ip and --mac are mutually exclusive");
@@ -237,14 +204,6 @@ int main(int argc, char **argv) {
     cfg.recording.max_duration_s = 0.0;
     cfg.logging.stats_interval_s = 0.0;
 
-    std::error_code ec;
-    if (!dump_features) {
-        std::filesystem::create_directories(out_dir, ec);
-        if (ec) {
-            return Fail(2, "cannot create --out directory: " + ec.message());
-        }
-    }
-
     // GUI cancel (SIGTERM) / Ctrl+C: the eBUS calls block without a cancellation
     // API, so the flag is polled between bring-up steps and in the capture loop.
     std::signal(SIGINT, OnSignal);
@@ -271,18 +230,6 @@ int main(int argc, char **argv) {
     std::unique_ptr<fx10::CameraControl> control;
     try {
         control = std::make_unique<fx10::CameraControl>(*receiver.Device());
-        if (dump_features) {
-            // BEFORE loadFactoryDefaults and before any write: the point of the
-            // dump is to show what this camera actually exposes and currently
-            // holds, so it is also usable to audit a camera the driver just ran.
-            const std::size_t n = control->DumpAllFeatures(std::cout);
-            std::cout.flush();
-            // Deliberately NOT a "SNAPSHOT: ..." line: the dump is a human/
-            // operator tool and stdout is the dump itself, so nothing here may
-            // look like the GUI's last-line contract.
-            std::fprintf(stderr, "# %zu features dumped\n", n);
-            return 0;
-        }
         control.reset();
         if (!fx10::PrepareFactoryDefaults(receiver, [] { return g_signal != 0; })) {
             return Fail(130, "interrupted");

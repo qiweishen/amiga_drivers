@@ -158,10 +158,6 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
     r.ptp.synchronized = true;
     r.ptp.status = "slave";
     r.ptp.accuracy = 6;
-    r.ptp.have_offset = true;
-    r.ptp.raw_offset_ns = -37000000123ll;
-    r.ptp.adjusted_offset_ns = -123;
-    r.ptp.tai_detected = true;
 
     const nlohmann::ordered_json doc = gox::BuildDeviceJson(r);
 
@@ -222,15 +218,13 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
     CHECK(doc["runtime"]["buffer_count"] == 16);
     CHECK(doc["runtime"]["counter0_bound"] == true);
 
-    // PTP: the 37 s is the driver's assumption about the grandmaster, not a
-    // camera property, so both numbers and the assumption are recorded.
+    // PTP: no host-clock cross-check exists any more; the timescale is a rig
+    // property the driver states as unverified rather than guessing.
     CHECK(doc["ptp"]["status"] == "slave");
     CHECK(doc["ptp"]["accuracy"] == 6);
-    CHECK(doc["ptp"]["raw_offset_ns"] == -37000000123ll);
-    CHECK(doc["ptp"]["adjusted_offset_ns"] == -123);
-    CHECK(doc["ptp"]["tai_utc_offset_detected"] == true);
-    CHECK(doc["ptp"]["assumed_tai_utc_offset_s"] == 37);
-    CHECK(doc["ptp"]["driver_assumption"] == true);
+    CHECK(doc["ptp"]["timescale"] == gox::kPtpTimescaleNote);
+    CHECK_FALSE(doc["ptp"].contains("raw_offset_ns"));
+    CHECK_FALSE(doc["ptp"].contains("assumed_tai_utc_offset_s"));
 }
 
 TEST_CASE("device_json: an empty report still has every key, with nulls") {
@@ -246,7 +240,7 @@ TEST_CASE("device_json: an empty report still has every key, with nulls") {
     CHECK(doc["derived"]["black_level"]["black_level_register"].is_null());
     CHECK(doc["transport"]["AcquisitionFrameRateMin"].is_null());
     CHECK(doc["ptp"]["accuracy"].is_null()); // -1 = never read
-    CHECK(doc["ptp"]["raw_offset_ns"].is_null());
+    CHECK(doc["ptp"]["timescale"].is_string());
 }
 
 TEST_CASE("device_json: build_telemetry_line is one parseable row per poll") {
@@ -260,7 +254,6 @@ TEST_CASE("device_json: build_telemetry_line is one parseable row per poll") {
     s.pause_rx = 0;
     s.ptp_status = "slave";
     s.ptp_accuracy = 6;
-    s.ptp_offset_ns = -123;
 
     const std::string line = gox::BuildTelemetryLine(s);
     CHECK(line.find('\n') == std::string::npos); // the writer adds the newline
@@ -273,7 +266,7 @@ TEST_CASE("device_json: build_telemetry_line is one parseable row per poll") {
     CHECK(row["pause_rx"] == 0);
     CHECK(row["ptp"]["status"] == "slave");
     CHECK(row["ptp"]["accuracy"] == 6);
-    CHECK(row["ptp"]["offset_ns"] == -123);
+    CHECK_FALSE(row["ptp"].contains("offset_ns")); // the host-clock cross-check is gone
 }
 
 TEST_CASE("device_json: a telemetry row keeps its shape when the camera answers nothing") {
@@ -287,5 +280,4 @@ TEST_CASE("device_json: a telemetry row keeps its shape when the camera answers 
     CHECK(row["pause_rx"].is_null());
     CHECK(row["ptp"]["status"].is_null());
     CHECK(row["ptp"]["accuracy"].is_null());
-    CHECK(row["ptp"]["offset_ns"].is_null());
 }

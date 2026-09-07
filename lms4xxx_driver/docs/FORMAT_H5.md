@@ -109,9 +109,15 @@ explicitly established. There is no host/device-clock fallback; tests without
 SensorSync do not provide cross-sensor time association.
 
 * `device_time_unix_us` — the telegram's timestamp (year…microsecond fields
-  combined, UTC), NTP-synchronised (see `ntp=` in the status line). With NTP
-  off the device clock free-runs and the driver switches the time stamp block
-  off (`has_timestamp` = 0, `device_time_unix_us` = 0, `ts_*` = 0).
+  combined, UTC), NTP-synchronised (see `ntp=` in the status line). Scans are
+  only written after the driver's time lock: the first recorded scan is the
+  first one whose time stamp is at or after 2026-01-01 (the device streams a
+  free-running 1970-epoch clock before its first NTP sync), and from then on
+  the device time must advance in step with `time_since_startup_us`
+  (`ntp.max_time_step_ms`, `DEVICE_CONFIG.md` "Time") or the run faults. With
+  NTP off (a warned configuration) the device clock free-runs and the driver
+  switches the time stamp block off (`has_timestamp` = 0,
+  `device_time_unix_us` = 0, `ts_*` = 0).
 * `time_since_startup_us` — device uptime, wraps every 2^32 µs (~71 min);
   `inspect_h5.py` uses it for the span/rate estimate.
 

@@ -17,6 +17,8 @@ namespace asterx {
         std::string file_prefix{"asterx"};
         std::uint64_t rotate_bytes{1ull << 30};
         int rotate_interval_seconds{3600};
+        // SbfWriteQueue budget: how far the disk may fall behind before the run ends
+        std::uint64_t write_queue_bytes{256ull << 20};
         bool live_csv{true}; // per-block live_*.csv beside the .sbf (GUI live view)
 
         int stats_period_ms{2500};

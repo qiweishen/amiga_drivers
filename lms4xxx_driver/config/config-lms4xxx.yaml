@@ -34,11 +34,18 @@ scan:
 # ADVANCED: do not change without a reason
 # =============================================================
 # --- NTP (device clock) ---
+# The only absolute time source of the LiDAR: with NTP off the scans carry
+# nothing but the device uptime (wraps every 71.6 min) and cannot be associated
+# with any other sensor offline — the driver warns loudly. Host time is never
+# used. The device must be able to reach the server (AsteRx RBi3 Pro+, GPS time)
+# from its own subnet: see docs/DEVICE_CONFIG.md, "Time".
 ntp:
-    enabled: false
-    server: "10.95.2.102"               # IPv4; required when enabled
+    enabled: true
+    server: "10.95.2.102"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
     sync_interval_s: 1                  # 1..3600
     check_status_s: 5                   # 1..3600; server probe period while scanning
+    lock_timeout_s: 60                  # 1..3600; first plausible device time stamp must arrive within this
+    max_time_step_ms: 1000              # 1..60000; device time vs uptime disagreement between scans that faults the run
 
 
 # --- Telemetry ---

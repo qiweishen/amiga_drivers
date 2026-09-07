@@ -1,5 +1,7 @@
 #include "logger.h"
 
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -7,6 +9,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <stdexcept>
 #include <vector>
+
+#include "nonblocking_stderr_sink.h"
 
 
 namespace {
@@ -18,9 +22,20 @@ namespace {
 namespace common {
     namespace Logger {
         void Init(const Config &config, const std::string &logger_name) {
-            auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+            // A terminal gets colours and may block (a human is reading); a pipe or
+            // file (the GUI, docker exec) gets the non-blocking sink: a stalled
+            // reader must never stall an acquisition thread through a log call
+            spdlog::sink_ptr console_sink;
+            if (::isatty(STDERR_FILENO)) {
+                auto color = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+                color->set_pattern("%^[%H:%M:%S] [%l] %v%$");
+                console_sink = color;
+            } else {
+                auto plain = std::make_shared<NonBlockingStderrSink>();
+                plain->set_pattern("[%H:%M:%S] [%l] %v");
+                console_sink = plain;
+            }
             console_sink->set_level(config.quiet ? spdlog::level::warn : spdlog::level::trace);
-            console_sink->set_pattern("%^[%H:%M:%S] [%l] %v%$");
 
             std::vector<spdlog::sink_ptr> sinks{console_sink};
 
@@ -41,6 +56,9 @@ namespace common {
             spdlog::set_default_logger(logger);
             spdlog::flush_every(std::chrono::milliseconds(200));
         }
+
+
+        std::uint64_t ConsoleLinesDropped() { return NonBlockingStderrSink::DroppedCount(); }
     } // namespace Logger
 
 

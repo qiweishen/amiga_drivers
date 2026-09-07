@@ -59,7 +59,7 @@ attributes (`device_*`, `FORMAT_H5.md`).
 | 10 | `sWN LFPcubicareafilter 00 00000000 00016680 FFFF5038 0000AFC8` | rectangular filter off (box 0…9.1776 m, ±4.5 m) | strict | 109 |
 | 11 | `sWN LFPglossfilter 00` | gloss compensation off | strict | 112 |
 | 12 | `sWN TSCTCtimezone 22` | 34 = COORD_WORLD_TIME: device timestamps in UTC | tolerate-sFA | 100 |
-| 13 | NTP on: `sWN TSCRole 01`, `sWN TSCTCSrvAddr a b c d`, `sWN TSCTCupdatetime <s>`; NTP off: `sWN TSCRole 00` | per `ntp:` in the yaml; the server is probed with an SNTP query and watched while scanning | tolerate-sFA | 96–102 |
+| 13 | NTP on (shipped default): `sWN TSCRole 01`, `sWN TSCTCSrvAddr a b c d`, `sWN TSCTCupdatetime <s>`; NTP off: `sWN TSCRole 00` | per `ntp:` in the yaml; the server is probed with an SNTP query and watched while scanning; the device time itself is checked by the time lock (see "Time" below) | tolerate-sFA | 96–102 |
 | 14 | `sMN LMCstartmeas` | laser and motor on | `sAN 00` | 75 |
 | 15 | `sMN Run` | activates all parameters, logs out, laser on | `sAN 01` | 83 |
 | 16 | `sRN SCdevicestate` every 200 ms, up to 10 s | wait for `01` Ready (p.46); `02` Error → messages logged, fatal | — | 124 |
@@ -68,6 +68,42 @@ The device clock is never set from the host (`LSPsetdatetime` is not sent):
 the host clock is not trusted. With NTP on the device synchronises to the
 configured server and the telegram carries the time stamp block; with NTP off
 the clock free-runs (p.97: no RTC) and the time stamp block is switched off.
+
+## Time
+
+NTP is the LiDAR's **only** absolute time source, so the shipped configuration
+enables it. With `ntp.enabled: false` the driver warns at start-up: the scans
+then carry nothing but the device uptime (`time_since_startup_us`, wraps every
+71.6 min) and cannot be associated with any other sensor offline. No host time
+is recorded on this platform in any case.
+
+* **Server.** The AsteRx RBi3 Pro+ serves NTP (and PTP) on its own address,
+  10.95.2.102, on the GPS timescale. The LiDARs sit on 10.95.76.x, so the
+  device itself must be able to route to that address: set the device gateway
+  (`EIgate`, p.136, factory 0.0.0.0) to the host's eno1 address and enable IP
+  forwarding on the host, or put the LiDARs on the AsteRx subnet. The driver
+  does not write network parameters. The host-side SNTP probe only proves that
+  the server is alive from the host; it says nothing about the device's route.
+* **Time lock.** The LMS4xxx has no RTC (p.97): until its first NTP sync the
+  time stamp block carries a free-running clock that starts at the 1970 epoch.
+  The parse thread therefore records nothing until the first telegram whose
+  time stamp is at or after 2026-01-01T00:00:00Z
+  (`kEarliestPlausibleDeviceTimeUs`, `include/scan_verify.h`). Scans before
+  that are counted (`prelock=` in the status line, `prelock_scans_discarded`
+  in `drivers.json`) but not written; their telegram counters are still tracked
+  so the lock does not produce a false counter gap. No plausible time stamp
+  within `ntp.lock_timeout_s` of the stream start faults the run (`ntp=NO-LOCK`
+  in the status line until then; `ntp=OK` once locked).
+* **Step check.** Once locked, the device time must advance in step with the
+  device uptime: between consecutive recorded scans
+  `|Δdevice_time − Δuptime|` (uptime taken modulo 2^32 µs) above
+  `ntp.max_time_step_ms` is an NTP step or a clock fault while recording and
+  faults the run; the largest value seen is reported as `tstep_max_us=`. A
+  device time that falls below the floor again after the lock faults as well.
+* **Fail-fast.** Like every other loss (ring/queue overflow, telegram counter
+  gap, checksum/framing/parse error), a time fault ends the whole rig at once —
+  an incomplete recording is worthless to the platform and the operator
+  restarts immediately.
 
 After `Run`, `sEN LMDscandata 1` starts the stream. The first telegram is the
 proof that everything took effect: DIST1 + RSSI1/REFL1 + ANGL1 + QLTY1, exactly

@@ -15,6 +15,7 @@
 #include "frame_receiver.h"
 #include "scan_data_parser.h"
 #include "ntp_probe.h"
+#include "scan_record.h"
 #include "scan_verify.h"
 #include "ring_buffer.h"
 #include "tcp_client.h"
@@ -31,14 +32,24 @@ namespace {
 
     constexpr auto kParseBackoffSleep = std::chrono::microseconds(100);
 
-    // Framing errors resync four bytes at a time, so garbage never stops
-    // producing them. ~1000 in a row is far beyond what one corrupted frame or
-    // a lost TCP segment can cause.
+    // Bound repeated rejected candidates/garbage spans without a valid frame.
+    // This resync threshold does not measure lost scans; payload contents and
+    // TCP receive chunking affect how many error events are observed.
     constexpr std::uint64_t kMaxConsecutiveFramingErrors = 1000;
     constexpr std::uint32_t kMaxFrameBytes = 64 * 1024; // send_and_receive and FrameReceiver agree
 
     constexpr int kNtpProbeTimeoutMs = 2000;
     constexpr int kNtpProbeMaxFailures = 3; // consecutive, tolerates UDP loss
+
+    // Telegram time stamp block as ISO-8601 UTC for log lines
+    std::string FormatDeviceTime(const lms4xxx::ScanData &scan) {
+        if (!scan.has_timestamp) {
+            return "<no time stamp block>";
+        }
+        const auto &ts = scan.timestamp;
+        return fmt::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z", ts.year, ts.month, ts.day, ts.hour,
+                           ts.minute, ts.second, ts.microsecond);
+    }
 
     // "01 00 0D .." for readback-mismatch diagnostics
     std::string HexBytes(const std::vector<std::uint8_t> &bytes) {
@@ -778,7 +789,8 @@ namespace lms4xxx {
                         g_log.Info("[{}] NTP server {} reachable again ({})", Tag(), config.ntp.server, detail);
                     }
                     failures = 0;
-                    stats.ntp_status.store(DriverStatistics::NtpStatus::kOk, std::memory_order_relaxed);
+                    // ntp_status is owned by the time lock on the parse thread while
+                    // scanning (NO-LOCK -> OK); a reachable server does not change it
                     continue;
                 }
                 ++failures;
@@ -799,10 +811,87 @@ namespace lms4xxx {
         }
 
 
+        // NTP time lock, parse thread only. The LMS4xxx has no RTC (manual p.97):
+        // until its first NTP sync the time stamp block carries a free-running
+        // clock, so scans before the first plausible device time are counted but
+        // not recorded (none within ntp.lock_timeout_s faults the run). Once
+        // locked, device time must advance in step with the device uptime: a
+        // disagreement beyond ntp.max_time_step_ms between consecutive scans is
+        // an NTP step or a clock fault while recording, and faults the run. Host
+        // time is never consulted — the platform does not trust it.
+        struct TimeGate {
+            std::chrono::steady_clock::time_point deadline;
+            bool locked = false;
+            std::int64_t prev_device_time_us = 0;
+            std::uint32_t prev_uptime_us = 0;
+        };
+
+        // True when the scan may be recorded; false = discarded (pre-lock) or faulted
+        bool TimeGateAdmits(const ScanData &scan, TimeGate &gate) {
+            const std::int64_t device_time_us = DeviceTimeUnixUs(scan.timestamp);
+            const bool plausible = scan.has_timestamp && DeviceTimePlausible(scan.timestamp);
+            if (!gate.locked) {
+                if (!plausible) {
+                    const auto discarded = stats.prelock_scans_discarded.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (std::chrono::steady_clock::now() >= gate.deadline) {
+                        g_log.Error("[{}] Device clock did not reach a plausible NTP time within {} s (last device "
+                                    "time {}, {} scans discarded) — the device cannot reach NTP server {}? Check "
+                                    "the route/gateway from the LiDAR subnet (manual p.136)", Tag(),
+                                    config.ntp.lock_timeout_s, FormatDeviceTime(scan), discarded, config.ntp.server);
+                        fault.store(true, std::memory_order_release);
+                        ReportError(make_error_code(ErrorCode::kInvalidConfig), "NTP time lock timeout");
+                    }
+                    return false;
+                }
+                gate.locked = true;
+                gate.prev_device_time_us = device_time_us;
+                gate.prev_uptime_us = scan.time_since_startup_us;
+                stats.ntp_status.store(DriverStatistics::NtpStatus::kOk, std::memory_order_relaxed);
+                g_log.Info("[{}] NTP time lock: device time {} at uptime {} us ({} pre-lock scans discarded)", Tag(),
+                           FormatDeviceTime(scan), scan.time_since_startup_us,
+                           stats.prelock_scans_discarded.load(std::memory_order_relaxed));
+                return true;
+            }
+            if (!plausible) {
+                g_log.Error("[{}] Device time became implausible after the NTP lock ({}) — stopping", Tag(),
+                            FormatDeviceTime(scan));
+                fault.store(true, std::memory_order_release);
+                ReportError(make_error_code(ErrorCode::kInvalidConfig), "device time lost NTP plausibility");
+                return false;
+            }
+            // Unsigned subtraction wraps correctly across the 2^32 us uptime rollover
+            const std::uint32_t uptime_delta = scan.time_since_startup_us - gate.prev_uptime_us;
+            const std::int64_t step_us = (device_time_us - gate.prev_device_time_us) -
+                                         static_cast<std::int64_t>(uptime_delta);
+            gate.prev_device_time_us = device_time_us;
+            gate.prev_uptime_us = scan.time_since_startup_us;
+            const std::int64_t magnitude = step_us < 0 ? -step_us : step_us;
+            std::int64_t seen = stats.max_time_step_us.load(std::memory_order_relaxed);
+            while (magnitude > seen &&
+                   !stats.max_time_step_us.compare_exchange_weak(seen, magnitude, std::memory_order_relaxed)) {
+            }
+            if (magnitude > static_cast<std::int64_t>(config.ntp.max_time_step_ms) * 1000) {
+                g_log.Error("[{}] Device time stepped by {} ms against the device uptime between consecutive scans "
+                            "(limit {} ms; device time now {}): NTP re-synchronisation or clock fault while "
+                            "recording — stopping", Tag(), step_us / 1000, config.ntp.max_time_step_ms,
+                            FormatDeviceTime(scan));
+                fault.store(true, std::memory_order_release);
+                ReportError(make_error_code(ErrorCode::kInvalidConfig), "device time step while recording");
+                return false;
+            }
+            return true;
+        }
+
+
         void ParseLoop() {
             g_log.Trace("[{}] Parse thread started", Tag());
 
             bool first_frame = true;
+            TimeGate time_gate;
+            time_gate.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.ntp.lock_timeout_s);
+            if (config.ntp.enabled) {
+                stats.ntp_status.store(DriverStatistics::NtpStatus::kNotLocked, std::memory_order_relaxed);
+            }
 
             while (true) {
                 // A latched fault means the data is worthless; stop feeding the recorder here rather than
@@ -886,6 +975,14 @@ namespace lms4xxx {
                 stats.last_telegram_counter.store(scan.telegram_counter, std::memory_order_relaxed);
                 stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);
                 stats.last_frame_time_us.store(frame.receive_timestamp_us, std::memory_order_relaxed);
+
+                // Counters above are tracked for every scan; only time-locked scans are recorded
+                if (config.ntp.enabled && !TimeGateAdmits(scan, time_gate)) {
+                    if (fault.load(std::memory_order_acquire)) {
+                        break;
+                    }
+                    continue;
+                }
 
                 ScanDataCallback cb;
                 {
@@ -1145,7 +1242,7 @@ namespace lms4xxx {
                 } else {
                     stats_ptr->framing_errors.fetch_add(1, std::memory_order_relaxed);
                 }
-                // Resync steps four bytes at a time, so a stream that is no
+                // Resync examines each possible STX, so a stream that is no
                 // longer CoLa B produces errors indefinitely instead of ever
                 // failing. Past this many in a row without a single good frame
                 // the link is not going to recover on its own.

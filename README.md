@@ -5,18 +5,29 @@ one log, one session folder — a GNSS/INS receiver, two GigE Vision cameras and
 set of 2D LiDARs recording concurrently behind a shared logging, configuration
 and lifecycle framework, with a web control panel on top.
 
-The acquisition time reference is **AsteRx GPS time**. Field captures use
-SensorSync driven by AsteRx PPS and ZDA; its ZDA-to-GPS conversion must be
-established from the receiver configuration. Other device clocks and host
-clocks are diagnostic only and must never be used as an association fallback.
-Tests without SensorSync may record images without cross-sensor time association.
-Host monotonic clocks are used only for operational deadlines and statistics.
+**Time.** The acquisition time reference is **AsteRx GPS time**, and each sensor's
+absolute time comes from its own source only: the AsteRx stamps its SBF blocks in
+GPS time and serves NTP and PTP on its own address (GPS timescale); the LMS4xxx
+synchronise to it over NTP, the Go-X over PTP, and the FX10 is timed through
+SensorSync (strobe edges against AsteRx PPS/ZDA — the ZDA-to-GPS conversion must
+be established from the receiver configuration). Host clocks are **never** a time
+source and are never added to the recorded data: the `host_*` columns some
+formats carry are diagnostics, and host monotonic time is used only for
+operational deadlines and statistics. A driver whose time source is switched off
+in its yaml (`ntp.enabled`, `ptp.enabled`, `sensor_trigger.enabled`) warns at
+start-up, because its data can then not be associated with anything offline.
+Tests without SensorSync record FX10 images without cross-sensor time association.
 
-All four apps share `Init → Run → Shutdown` and a sticky `HasFailed()` result.
-Shutdown drains accepted data before releasing resources; a recording/close
-failure takes precedence over an operator stop and produces a failed run with
-exit code 1. Protocol-specific device commands retain their device semantics.
-Session names remain second-resolution and existing GoX output may be overwritten.
+**Fail-fast.** All four apps share `Init → Run → Shutdown` and a sticky
+`HasFailed()` result. The first data-loss event in any driver — a damaged or
+dropped SBF block, a link loss while recording, a dropped or incomplete camera
+frame, a BlockID gap, a LiDAR ring/queue overflow, telegram counter gap or NTP
+time-lock fault — stops the whole rig immediately: an incomplete recording is
+never kept running, the operator restarts and re-captures. Shutdown drains
+accepted data before releasing resources; a recording/close failure takes
+precedence over an operator stop and produces a failed run with exit code 1.
+Protocol-specific device commands retain their device semantics. Session folders
+are named at second resolution and an existing one is refused, never reused.
 
 <p align="left">
   <img alt="C++20"    src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white">
@@ -40,17 +51,18 @@ Session names remain second-resolution and existing GoX output may be overwritte
 
 | Sensor | Driver | Transport | Records |
 |---|---|---|---|
-| Septentrio **AsteRx-i3 D Pro+** (GNSS/INS) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks + `live_*.csv` telemetry sidecar |
-| JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP) | `jai-raw-seg` segments + `device.json` + `telemetry.jsonl` per camera |
-| Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP) | ENVI BIL `.bil`/`.hdr` + SensorSync `sensor_trigger.log` |
-| SICK **LMS4000** 2D LiDARs (×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111 | `scan_<id>_<ts>_NNN.h5` (`lms4xxx-h5` v3) |
+| Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (+ `prewarm/` context) + `live_*.csv` telemetry sidecar |
+| JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP), PTP slave | `jai-raw-seg` segments + `idx.jsonl` + `device.json` + `telemetry.jsonl` per camera |
+| Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP) | ENVI BIL `.bil`/`.hdr` + `.lines.csv` + SensorSync `sensor_trigger.log` |
+| SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | `scan_<id>_<ts>_NNN.h5` (`lms4xxx-h5` v3) |
 
 Every driver **resets the device to a known baseline on each start** and then
 writes only the parameters the recording depends on, reading each one back.
 No driver ever writes network/IP settings — the single IP writer in the code base
 is the operator-triggered `ebus_set_ip` tool behind *Camera Tools → Set IP*.
 Per-device rules, telegram-by-telegram, live in each driver's
-[`docs/DEVICE_CONFIG.md`](#documentation).
+[`docs/DEVICE_CONFIG.md`](#documentation); the rig's addresses and the time
+server are listed in `resource/devices_ip.yaml`.
 
 ## Architecture
 
@@ -59,29 +71,37 @@ Per-device rules, telegram-by-telegram, live in each driver's
                       |              AmigaDrivers (main.cpp)              |
                       |  SignalHandler · spdlog (single instance) ·       |
                       |  session folder · config snapshot · drivers.json  |
-                      |  · terminate propagation · exit status            |
+                      |  · rig-wide guards · terminate propagation ·      |
+                      |  exit status                                      |
                       +--+----------+----------+----------+---------------+
                          |          |          |          |
-                 AsterxDriverApp GoxApp    Fx10App    Lms4xxxApp (xN)
+                 AsterxDriverApp  GoxApp    Fx10App    Lms4xxxApp (xN)
                          |          |          |          |
                   Qt thread +   eBUS SDK   eBUS SDK   TCP CoLa-B client
-                  SsnRx (TCP)   (GVSP)     (GVSP)     + SPSC ring buffer
-                         |          |          |      + writer thread
+                  SsnRx (TCP)   (GVSP)     (GVSP)     + SPSC rings
+                  + SBF write   + chunk    + flush    + parse thread
+                    thread        queue +    thread   + writer thread
+                                  writer
+                         |          |          |          |
                      SBF files  jai-raw-seg ENVI BIL  scan_*.h5
                                  segments   + trig log
 ```
 
-Every driver app implements the same duck-typed interface consumed by
-`main.cpp`: `bool init([external_stop])` / `void run()` / `void shutdown()` /
-`std::atomic<bool>& TerminateFlag()`. Each app runs `run()` on its own thread;
-the main thread polls all terminate flags and propagates the first termination
-to everyone (orderly join + shutdown).
+Every driver app derives from `common::IDriverApp` (`common/include/driver_app.h`):
+`bool Init(external_stop)` / `void Run()` / `void Shutdown()`, a sticky
+`HasFailed()`, `MicrosSinceLastData()` for the no-data watchdog and a shared
+`TerminateFlag()`. `main.cpp` initialises the enabled drivers **sequentially**
+(AsteRx first — its warm-up gate holds the whole rig until the receiver has GPS
+time), runs each `Run()` on its own thread, polls all terminate flags every
+100 ms together with the rig-wide guards, and propagates the first termination to
+everyone (orderly join + shutdown in reverse order).
 
 **A failed run is visible from the outside.** `main` exits `0` on a clean or
-signal-interrupted run and `1` when a driver ended the run itself, and
-`drivers.json` in the session folder records `completed`, `interrupted (signal N)`
-or `failed (<driver>)`. Without that, a rig that died thirty seconds into a
-two-hour session was indistinguishable from one that finished.
+signal-interrupted run and `1` when a driver ended the run itself (or the
+configuration could not even be snapshotted), and `drivers.json` in the session
+folder records `completed`, `interrupted (signal N)`, `failed (<driver>)`,
+`failed (disk)` or `failed (configuration)`. Without that, a rig that died thirty
+seconds into a two-hour session was indistinguishable from one that finished.
 
 ### Targets and libraries
 
@@ -89,9 +109,9 @@ two-hour session was indistinguishable from one that finished.
 |--------|-------------|
 | `AmigaDrivers` | The unified executable — the only acquisition entry point |
 | `ebus_discover` / `ebus_set_ip` | GigE Vision enumeration for both camera drivers / camera re-addressing (FORCEIP + persistent IP); both live in `common/` and are used by the web GUI |
-| `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). `fx10_snapshot --dump-features` also prints the camera's whole GenICam feature list, which is how `features.map` node names are found on real hardware |
+| `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
 | `asterx_lib`, `fx10_lib`, `gox_lib`, `lms4xxx_lib` | Per-driver static libraries |
-| `amiga_common` | Shared infrastructure: logging, config loading, signal handling, SPSC ring buffer, GUI marker contract |
+| `amiga_common` | Shared infrastructure: logging (file + non-blocking console sink), config schema helpers, signal handling, SPSC ring buffer, bounded queue, rotating file writer, rig guards, `drivers.json`, GUI marker contract |
 | `amiga_ebus` | The eBUS-SDK-dependent layer shared by gox and fx10 (`common/include/ebus`): GenICam env bootstrap, PvResult errors, discovery, device IP configuration |
 
 ### Dependencies
@@ -101,10 +121,9 @@ two-hour session was indistinguishable from one that finished.
 | HDF5 1.14.6 (C library, static `hdf5-static`) | FetchContent, pinned in `3rd_party/FetchContent/` (`cmake/Dependencies.cmake`) | lms4xxx scan recorder (`lms4xxx-h5`, see `docs/FORMAT_H5.md`) |
 | zlib (`zlib1g-dev`) | system (devcontainer apt) | HDF5 gzip filter — a hard requirement of the pinned HDF5 CMake |
 | spdlog v1.17.0 (+fmt) | FetchContent, pinned in `3rd_party/FetchContent/` | all (single process-wide logger) |
-| yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + asterx/fx10/lms4xxx configs |
-| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | gox (`jai-raw-seg` `idx.jsonl`, device sidecars, snapshot tools) + `drivers.json` |
-| doctest 2.4.11 | vendored `3rd_party/doctest/` | common + gox + lms4xxx unit tests |
-| GoogleTest v1.14 | FetchContent (asterx); apt fallback (fx10) | asterx + fx10 unit tests |
+| yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + all four driver configs |
+| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | gox (`jai-raw-seg` `idx.jsonl`, device sidecars, snapshot tools), asterx/fx10 sidecars, `drivers.json` |
+| doctest 2.4.11 | vendored `3rd_party/doctest/` | every unit-test suite (common + the four drivers) |
 | Boost (header-only) | system | lms4xxx (Asio TCP) |
 | Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
 | eBUS SDK (Pleora) 6.5.1 | installed in the devcontainer (single SDK, root `cmake/FindeBUS.cmake`) | gox + fx10 (GigE Vision) |
@@ -119,9 +138,10 @@ cd amiga_drivers                               # fx10_core fails to configure wi
 git submodule update --init                    # ...or this, on an existing clone
 ```
 
-The C++ side builds inside the `amiga-drivers-dev` devcontainer (repo mounted at
-`/workspace`), which brings the eBUS SDK, Qt5, Boost and zlib. `Build.bash`
-installs the SDK `.deb` from `resource/` if it is missing.
+The C++ side builds inside the `amiga-drivers-dev` devcontainer
+(`.devcontainer/`, repo mounted at `/workspace`), which brings the eBUS SDK,
+Qt5, Boost and zlib. `Build.bash` installs the SDK `.deb` from `resource/` if it
+is missing.
 
 ### Build
 
@@ -130,8 +150,9 @@ docker exec -w /workspace amiga-drivers-dev bash -lc \
   'cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)'
 ```
 
-Binaries land in `build/bin/`. Unit tests are **on in Debug, off in Release**, so
-a Release `ctest` runs nothing — see [Development](#development).
+Binaries land in `build/bin/`, the test binaries in `build/bin/tests/`. Unit
+tests build in every configuration (`AMIGA_BUILD_TESTS`, default `ON`) — see
+[Development](#development).
 
 ### Run
 
@@ -163,22 +184,22 @@ the drivers, their per-driver config paths and the output root:
 
 ```yaml
 General:
+    Operator: <Dev>
+    Field: <Test>
     Output Directory: ./data
-    Enable ASTERX: false
-    Enable FX10: true
+    Enable ASTERX: true            # the GUI's Enable switches write these
+    Enable FX10: false
     Enable GOX: true
     Enable LMS4XXX: false
     ASTERX Driver Config Path: ./asterx_driver/config/config-asterx.yaml
     FX10 Driver Config Path: ./fx10_driver/config/config-fx10.yaml
     GOX Driver Config Path: ./gox_driver/config/config-gox.yaml
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
-Guards:                        # rig-wide, see Health guards below
-    Disk Min Free GiB: 5       # stop the whole run below this (0 = off)
+Guards:                            # rig-wide, see Health guards below
+    Disk Min Free GiB: 5           # stop the whole run below this (0 = off)
     Disk Warn Free GiB: 20
-    No Data Warn S: 5
-    No Data Abort S: 60        # any sensor silent this long stops the run (0 = off)
-Logging System:
-    Enable Logging: true
+    No Data Warn S: 15
+    No Data Abort S: 60            # any sensor silent this long stops the run (0 = off)
 ```
 
 The `Guards:` values are range-checked at load, and a warning threshold that
@@ -189,7 +210,9 @@ the log still says it is armed.
 Each driver config is a heavily commented YAML template next to its driver. The
 templates are **part of the documentation** — every non-obvious value carries the
 manual page it comes from — so the GUI edits them as text rather than
-re-serialising them.
+re-serialising them. The shipped defaults keep every time source on
+(`ntp.enabled: true`, `ptp.enabled: true`); the FX10 `sensor_trigger` block is
+enabled per rig once the SensorSync board is wired.
 
 **One schema policy for all four drivers** (`common/include/config_util.h`):
 unknown keys are startup errors that name the key and list the accepted set,
@@ -199,37 +222,55 @@ refused by name, never wrapped). The templates share one layout — banner,
 `device:`/`cameras:`/`lidar:`, acquisition, driver extras, `output:`, `network:`,
 `logging:` — one comment style (short trailing notes: unit, range, allowed
 values) and one unit-suffix rule (`_s`, `_ms`, `_hz`, `_mb`, `_bytes`, `_deg`).
-Each driver's tests load its shipped template, so template rot fails the build.
+Each driver's tests load its shipped template(s), so template rot fails the build.
 
 ## Session output
 
-Each run creates one session folder:
+Each run creates one session folder; everything the run produces sits under
+`raw/`:
 
 ```
 <Output Directory>/<YYYYMMDD_HHMMSS>/
-├── log_<ts>.log                  # unified trace-level log (the GUI's primary feed)
-├── drivers.json                  # run header, versions, per-driver enable/config, final status
-├── config/                       # snapshot of every enabled driver's config
 └── raw/
-    ├── asterx/                   # *.sbf blocks + live_*.csv telemetry sidecar
-    ├── gox/<cam>/                # jai-raw-seg segments + idx.jsonl
-    │                             #   + device.json (one-shot audit) + telemetry.jsonl
-    ├── fx10/<base>_<UTC>Z/       # ENVI segment_NNNN.bil + .hdr, sensor_trigger.log
-    └── lms4xxx/                  # scan_<instance>_<ts>_NNN.h5
+    ├── log_<ts>.log                  # unified trace-level log (the GUI's primary feed)
+    ├── drivers.json                  # run header, versions, per-driver final statistics, final status
+    ├── config/                       # snapshot of config-main + every enabled driver's config
+    ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; prewarm/ holds the
+    │                                 #   SBF context streamed before the warm-up gate opened
+    ├── gox/<cam>/                    # seg_NNNNN.raw (jai-raw-seg) + seg_NNNNN.idx.jsonl + segments.jsonl
+    │                                 #   + device.json (one-shot audit) + telemetry.jsonl + stream_stats.txt
+    ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv + sensor_trigger.log
+    └── lms4xxx/                      # scan_<instance>_<ts>_NNN.h5
 ```
 
-Two recording formats are self-describing enough to read without this repository:
+The recording formats are self-describing enough to read without this repository:
 
-- **ENVI BIL** (fx10) — a segment is valid **iff its `.hdr` exists**; the header is
-  written last, and it carries the read-back exposure and frame rate, the AIE
-  state and which calibration pack applies.
+- **SBF** (asterx) — the receiver's own binary format, block for block as it
+  arrived (CRC-checked by the SDK, never re-serialised); RxTools / `sbf2rin`
+  read it directly. Blocks streamed before the warm-up gate opened live in
+  `prewarm/`, never in the accepted files.
+- **`jai-raw-seg`** (gox) — 12-bit packed Bayer payloads verbatim from the SDK
+  buffer behind a 96-byte CRC-protected frame header; `gox_driver/scripts/`
+  `inspect_raw.py` / `unpack_raw.py` are the reference readers, and the index
+  can be rebuilt from the headers alone.
+- **ENVI BIL** (fx10) — a segment is valid **iff its `.hdr` exists**; the header
+  is written last, and it carries the read-back exposure and frame rate, the AIE
+  state and which calibration pack applies. `.lines.csv` gives every line its
+  BlockID, raw camera tick and any gap/rejection event.
 - **`lms4xxx-h5`** (lms4xxx) — `/frames/*` per-scan metadata, `/channels/*` raw
   `[scan, point]` values with their scale factors, and `/telemetry/*` device
   health. HDF5 has no atomic rename, so a finished file is marked instead: **a
   file without the `closed_cleanly` root attribute is incomplete.** Flushes are
   `H5Fflush` + `fdatasync`, so the loss window really is `flush_interval_ms`.
-  `lms4xxx_driver/scripts/inspect_h5.py` is the reference reader
-  (`info` / `verify` / `csv`).
+  Scans are only written once the device clock is NTP-locked
+  (`docs/DEVICE_CONFIG.md`, "Time"). `lms4xxx_driver/scripts/inspect_h5.py` is
+  the reference reader (`info` / `verify` / `csv`).
+
+Every driver writes from a thread that is not the one talking to the device
+(AsteRx and LMS writer threads, the Go-X chunk queue + writer, the FX10 flush
+thread), so a stalling disk shows up as queue depth in the statistics — and as a
+fail-fast stop once a bounded budget is exhausted — never as a sensor that
+silently lost data because its socket was not being read.
 
 ## Health guards
 
@@ -240,28 +281,28 @@ of `config/config-main.yaml`:
 | Guard | What it watches | Default |
 |---|---|---|
 | Disk floor | Free space (GiB, `f_bavail`) on the filesystem holding the session folder — checked once before bring-up and once a second afterwards | warn below 20, stop below 5 |
-| No-data watchdog | `IDriverApp::MicrosSinceLastData()` per driver: how long that sensor has produced nothing | warn after 5 s, stop after 60 s |
+| No-data watchdog | `IDriverApp::MicrosSinceLastData()` per driver: how long that sensor has produced nothing | warn after 15 s, stop after 60 s |
 
 They are rig-wide because every driver writes under
 `<Output Directory>/<timestamp>/raw/` (one filesystem, one number), and because
 one dead sensor already makes the session incomplete. The abort default is 60 s
-rather than something snappier because AsteRx repairs its own 30 s SBF silence by
-reconnecting: a rig-wide abort at 30 s would race that and end a run the driver
-was about to fix. A driver that is
-*legitimately* quiet — an external trigger with no pulses, a receiver warm-up, a
-camera between reconnect attempts — reports `nullopt` and is simply not watched
-while that lasts; deciding *that* is the one part the drivers keep, because only
-they know it. A watchdog trip is logged as `<Driver> driver stopped: no data
-(...)`, which is what turns that sensor's GUI card red.
+rather than something snappier because AsteRx repairs a 30 s SBF silence *before
+recording* (warm-up) by reconnecting: a rig-wide abort at 30 s would race that.
+Once recording, that same silence timer is fatal (fail-fast). A driver that is
+*legitimately* quiet — an external trigger with no pulses, a receiver warm-up —
+reports `nullopt` and is simply not watched while that lasts; deciding *that* is
+the one part the drivers keep, because only they know it. A watchdog trip is
+logged as `<Driver> driver stopped: no data (...)`, which is what turns that
+sensor's GUI card red.
 
 On top of the two, each driver keeps the guards that are specific to its device:
 
 | Driver | Guards |
 |---|---|
-| asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME before any block is recorded; a 30 s SBF silence timer that **reconnects** (recovery is the driver's job; giving up is main's) |
-| gox | PTP offset/step guard, thermal warning, `Counter0` missed-trigger accounting, queue-depth shedding |
-| fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification |
-| lms4xxx | First-telegram content verification, NTP server probe, consecutive framing-error threshold, writer failure |
+| asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME before any block is recorded; a 30 s SBF silence timer that **reconnects before recording** and is **fatal while recording**; damaged blocks, link loss, a receiver reset and a full write queue while recording are fatal too (fail-fast) |
+| gox | PTP slave-status / clock-accuracy guard, thermal warning, `Counter0` missed-trigger accounting; the first dropped / lost / incomplete frame is fatal (fail-fast) |
+| fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
+| lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
 
 Any of these ends the whole rig's run — and says so in the exit status
 (`drivers.json` records `failed (<driver>)`, or `failed (disk)`).
@@ -273,8 +314,11 @@ capture budget.
 
 ## Logging conventions
 
-Every line is `[HH:MM:SS] [level] [Module]: msg`. On top of that, the drivers
-follow four rules.
+Every line is `[HH:MM:SS] [level] [Module]: msg`. The session log file is the
+complete record; the console copy on stderr is best-effort: when stderr is a
+pipe (the GUI, `docker exec`) the console sink is non-blocking and drops lines
+rather than letting a stalled reader block a driver thread, and the final log
+lines report how many were dropped. On top of that, the drivers follow four rules.
 
 **1. Module tags are two-layered.** Only `*_driver_app.cpp` logs under the App
 token (`AsteRxApp` / `FX10App` / `GoXApp` / `LMS4xxxApp` from
@@ -306,15 +350,16 @@ interleaved. The shutdown totals line is `[Statistics] [inst] Final: ...`.
 ```
 [FX10App]:    [Statistics] frames=1200  rate=50.0 Hz  fps=49.8  missed_triggers=0  temp_pcb=41.2  temp_fpga=52.7
 [GoX]:        [Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ok=1560  incomp=0  drop_q=0  ...
-[LMS4xxxApp]: [Statistics] [Front_Center_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=OK  frames=6000  ...  queued=600.0  temp=41.2  unexpected=0
-[AsteRx]:     [Statistics] blocks=48210  bytes=12.4 MB  files=1  crc_fail=0  len_fail=0  discarded=0  ...
+[LMS4xxxApp]: [Statistics] [Front_Center_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=OK  frames=6000  ...  unexpected=0  prelock=0  tstep_max_us=812
+[AsteRx]:     [Statistics] blocks=48210  bytes=12.4 MB  files=1  crc_fail=0  length_errors=0  discarded_bytes=0  ...  queue_pending=0  queue_max=4096
 ```
 
 `fps=` is a GUI contract: `app/services/driver_stats.py` parses it into the
 dashboard's per-sensor cards, and `tools/check_contracts.py` fails if either side
 renames it. AsteRx records a byte stream rather than frames, so it has no `fps=`;
 during the receiver warm-up its line carries `warmup=<up>/<min>  finetime=0|1`
-instead.
+instead. The lms4xxx `ntp=` token is `OFF`, `NO-LOCK` (streaming, device clock
+not yet plausible), `OK`, `NO-TS` or `UNREACH`.
 
 **4. Throwing is an app-layer decision.** `common::DriverLog` never throws by
 default; the explicit `g_log.Error(true, ...)` overload (log, then
@@ -323,7 +368,8 @@ driver code and is reserved for `*_driver_app.cpp`. Lower layers propagate
 failures upward instead — `std::error_code` returns (lms4xxx) or driver-internal
 exception types (`RecorderError`, `TransportError`, `SdkError`, …) that the app
 layer catches — and the app layer decides whether to abort.
-(`common::Log::LogAndThrow` remains, but only `main.cpp` and `common/` use it.)
+(`common::Log::LogAndThrow` remains, but only `main.cpp` and `common/` use it,
+and `main.cpp` turns every start-up failure into a logged exit code 1.)
 
 Lifecycle markers (`GoX driver initialized`, `LiDAR instance [x] initialized
 successfully`, …) are verbatim GUI contract strings. For lms4xxx the per-instance
@@ -378,13 +424,14 @@ driver's log flush (`err` and above immediately, the rest within 200 ms —
 `common/src/logger.cpp`), the tailer's `LOG_POLL_S`, and the page's
 `UI_TICK_S`/`TOOL_TICK_S` (`app/constants.py`). spdlog flushes nothing by default,
 so leaving that first stage out would strand the GUI a whole stdio buffer (~9 s at
-this project's log rate) behind reality.
+this project's log rate) behind reality. The GUI reads the session log *file*;
+the process's stderr pipe only feeds it until that file exists.
 
 ## Development
 
 ### Tests
 
-Unit tests are enabled in Debug builds and skipped in Release:
+Unit tests build in every configuration (`-DAMIGA_BUILD_TESTS=OFF` to skip them):
 
 ```bash
 docker exec -w /workspace amiga-drivers-dev bash -lc \
@@ -399,9 +446,11 @@ docker exec -w /workspace amiga-drivers-dev bash -lc \
 | `gox_tests`, `fx10_tests`, `asterx_tests`, `lms4xxx_tests` | doctest | one entry **per test file** (`--source-file=` filter) |
 
 All of them are **device-free**: protocol frames, parsers, config schemas,
-recorders and the on-disk formats are exercised against synthetic input, most of
-it built from the vendor manuals' own field tables rather than from the
-implementation.
+recorders, writer threads and the on-disk formats are exercised against synthetic
+input, most of it built from the vendor manuals' own field tables rather than
+from the implementation. The asterx session tests speak the real ASCII protocol
+to a fake receiver on localhost through the vendored SsnRx parser; the common
+tests fill a real pipe to prove the console sink never blocks.
 
 ### Contracts
 
@@ -424,32 +473,37 @@ regex, and that an error line reaches the file without an explicit flush.
 
 ```
 amiga_drivers/
-├── main.cpp                  # unified entry point: session folder, threads, exit status
-├── CMakeLists.txt            # top-level build
-├── Build.bash / Start.bash   # convenience wrappers (SDK install, setcap, run)
+├── main.cpp                  # unified entry point: session folder, guards, threads, exit status
+├── CMakeLists.txt            # top-level build (AMIGA_BUILD_TESTS, version + git SHA)
+├── Build.bash / Start.bash   # convenience wrappers (SDK install + build, setcap + run)
+├── .devcontainer/            # amiga-drivers-dev image + compose (host network, SYS_NICE)
 ├── cmake/                    # Dependencies.cmake (hdf5/spdlog/yaml-cpp/nlohmann) + FindeBUS.cmake
-├── 3rd_party/                # pinned FetchContent sources + vendored single-header libs
-├── config/config-main.yaml   # driver selection + output root
+├── 3rd_party/                # pinned FetchContent sources + vendored doctest
+├── config/config-main.yaml   # driver selection, guards, output root
+├── resource/                 # eBUS SDK .deb + devices_ip.yaml (rig addresses, time server)
 ├── common/                   # amiga_common + amiga_ebus + tests/
-├── asterx_driver/            # Qt/SsnRx session, SBF writer, live CSV sidecar, tests/
+├── asterx_driver/            # Qt/SsnRx session, SBF write queue, live CSV sidecar, tests/
 ├── fx10_driver/              # fx10_core (SDK-free) + fx10_ebus (eBUS glue) + tools/ + tests/
-├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + tools/ + tests/
+├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + scripts/ + tools/ + tests/
 ├── lms4xxx_driver/           # CoLa B driver, scan parser, HDF5 recorder, scripts/, tests/
-├── submodule/sensor_trigger/ # Teensy SensorSync-Logger host client (fx10 hardware trigger)
+├── submodule/sensor_trigger/ # Teensy SensorSync-Logger firmware + host client (fx10 timing)
 ├── app/                      # NiceGUI web GUI (host-side, uv-managed .venv)
-└── tools/                    # repo tooling (contract checker, …)
+├── tools/                    # repo tooling (contract checker, …)
+└── AGENTS.md                 # review protocol for automated reviewers
 ```
 
 ## Documentation
 
 | Document | Covers |
 |---|---|
-| [`asterx_driver/docs/DEVICE_CONFIG.md`](asterx_driver/docs/DEVICE_CONFIG.md) | Reset to `RxDefault` on every connect, account handling, the warm-up gate |
-| [`gox_driver/docs/DEVICE_CONFIG.md`](gox_driver/docs/DEVICE_CONFIG.md) | `UserSetLoad Default` on every bring-up, the ordered apply plan, the raw-feature audit |
-| [`fx10_driver/docs/DEVICE_CONFIG.md`](fx10_driver/docs/DEVICE_CONFIG.md) | Factory user set + calibration-ROI guard, the write-order plan, which parameters are exposed and why the rest stay at their factory values |
-| [`lms4xxx_driver/docs/DEVICE_CONFIG.md`](lms4xxx_driver/docs/DEVICE_CONFIG.md) | `mSCloadappdef` baseline, every telegram with its page number, `sAN` status-byte polarity, the shutdown handshake, the device self-report |
-| [`lms4xxx_driver/docs/FORMAT_H5.md`](lms4xxx_driver/docs/FORMAT_H5.md) | The `lms4xxx-h5` layout, durability and completeness semantics |
+| [`asterx_driver/docs/DEVICE_CONFIG.md`](asterx_driver/docs/DEVICE_CONFIG.md) | Reset to `RxDefault` on every connect, account handling, the warm-up gate, the write queue and the fail-fast rules while recording |
+| [`gox_driver/docs/DEVICE_CONFIG.md`](gox_driver/docs/DEVICE_CONFIG.md) | `UserSetLoad Default` on every bring-up, the ordered apply plan, the raw-feature audit, PTP (grandmaster = AsteRx, L2-domain prerequisite), fail-fast and the on-disk residue after a crash |
+| [`fx10_driver/docs/DEVICE_CONFIG.md`](fx10_driver/docs/DEVICE_CONFIG.md) | Factory user set + calibration-ROI guard, the write-order plan, which parameters are exposed and why the rest stay at their factory values, the recording policy (time source, fail-fast, off-thread durability) |
+| [`lms4xxx_driver/docs/DEVICE_CONFIG.md`](lms4xxx_driver/docs/DEVICE_CONFIG.md) | `mSCloadappdef` baseline, every telegram with its page number, `sAN` status-byte polarity, the shutdown handshake, the device self-report, "Time": NTP routing prerequisite, time lock and step check |
+| [`lms4xxx_driver/docs/FORMAT_H5.md`](lms4xxx_driver/docs/FORMAT_H5.md) | The `lms4xxx-h5` layout, durability and completeness semantics, what the timestamps mean |
 | [`lms4xxx_driver/docs/sopas_filter_polarity.md`](lms4xxx_driver/docs/sopas_filter_polarity.md) | Why two filter status bytes contradict the manual's tables |
+| [`resource/devices_ip.yaml`](resource/devices_ip.yaml) | Rig addresses, host NIC per device, the AsteRx as NTP/PTP server |
+| [`submodule/sensor_trigger/README.md`](submodule/sensor_trigger/README.md) | SensorSync-Logger protocol, session log format and offline post-processing |
 | [`TODO.md`](TODO.md) | Roadmap and the log of completed milestones |
 
 The device-config documents are the ones to read before changing anything that

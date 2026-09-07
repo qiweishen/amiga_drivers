@@ -118,6 +118,13 @@ namespace {
         QStringList extra_config_lines; // injected into the lstConfigFile listing
         QString capabilities_antennas{"Main+Aux1"};
         QString stray_prompt_before; // send a bare prompt before answering this command name
+
+        // Drop the TCP link from the receiver side (link loss while recording)
+        void CloseLink() {
+            if (socket_ != nullptr) {
+                socket_->disconnectFromHost();
+            }
+        }
         QString wrong_echo_before; // answer this command once with a foreign echo first
         std::function<void(const QString &)> after_command;
 
@@ -507,22 +514,71 @@ TEST_CASE("Session: DiskFailureDuringRecordingIsFatal") {
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("Session: RecoverableCrcErrorStillMarksTheRecordingIncomplete") {
-    const auto dir = Scratch("crc-integrity");
+TEST_CASE("Session: CrcErrorDuringRecordingIsFatal") {
+    // A damaged block is a lost block: fail-fast, the rig stops rather than
+    // recording on with a hole the operator only learns about at the end.
+    const auto dir = Scratch("crc-fatal");
     FakeReceiver rx;
     Harness h(MakeConfig(dir, rx.Port()));
     h.session.Start();
     REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
     REQUIRE_FALSE(h.fatal);
     auto damaged = ReceiverStatusFrame(1300, 1u << 6);
-    damaged[2] ^= 0x01; // bad CRC, valid framing; the parser must recover on the next block
+    damaged[2] ^= 0x01; // bad CRC, valid framing
     rx.SendSbf(damaged);
     rx.SendSbf(ReceiverStatusFrame(1301, 1u << 6));
-    REQUIRE(SpinUntil([&] { return h.session.RecordingIncomplete(); }));
-    CHECK_FALSE(h.fatal); // recording can continue, but its loss state is sticky
-    h.session.Shutdown();
-    CHECK(h.session.FinalStatistics().at("crc_errors").get<std::uint64_t>() >= 1);
+    REQUIRE(SpinUntil([&] { return h.fatal; }));
     CHECK(h.session.RecordingIncomplete());
+    const auto stats = h.session.FinalStatistics();
+    CHECK(stats.at("crc_errors").get<std::uint64_t>() >= 1);
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() >= 1);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: CrcErrorBeforeRecordingOnlyCountsAgainstThePrewarmContext") {
+    // Nothing accepted is lost while the gate is still closed, so the session
+    // keeps going and still opens the gate afterwards.
+    const auto dir = Scratch("crc-prewarm");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    Harness h(cfg);
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50); // the session reaches WarmingUp after the last reply
+    auto damaged = ReceiverStatusFrame(100, 1u << 6);
+    damaged[2] ^= 0x01;
+    rx.SendSbf(damaged);
+    Pump(200);
+    CHECK_FALSE(h.fatal);
+    CHECK_FALSE(h.session.RecordingIncomplete());
+    rx.SendSbf(ReceiverStatusFrame(1300, 1u << 6)); // the gate opens as usual
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
+    CHECK_FALSE(h.fatal);
+    h.session.Shutdown();
+    const auto stats = h.session.FinalStatistics();
+    CHECK(stats.at("crc_errors").get<std::uint64_t>() >= 1);
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() == 0);
+    CHECK_FALSE(h.session.RecordingIncomplete());
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: LinkLossDuringRecordingIsFatal") {
+    // No reconnect once recording: the observations across the gap are gone
+    // either way, and the rig must stop now (fail-fast).
+    const auto dir = Scratch("link-fatal");
+    FakeReceiver rx;
+    Harness h(MakeConfig(dir, rx.Port()));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    rx.SendSbf(ReceiverStatusFrame(1300, 1u << 6));
+    Pump(50);
+    rx.CloseLink();
+    REQUIRE(SpinUntil([&] { return h.fatal; }));
+    CHECK(h.session.RecordingIncomplete());
+    CHECK(h.session.FinalStatistics().at("recording_errors").get<std::uint64_t>() >= 1);
     std::filesystem::remove_all(dir);
 }
 

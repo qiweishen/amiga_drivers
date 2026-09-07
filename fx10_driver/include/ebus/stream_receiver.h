@@ -87,6 +87,11 @@ namespace fx10 {
 
         std::uint64_t FramesDelivered() const { return frames_delivered_.load(); }
 
+        // Fail-fast: true once the transport saw a lost or unusable buffer (RetrieveBuffer
+        // error, failed operation result, non-image payload, BlockID anomaly, requeue
+        // failure). The monitor thread stops the rig on the first event.
+        bool LossSeen() const { return loss_seen_.load(std::memory_order_acquire); }
+
         // Steady-clock micros of the last USABLE frame, or of the moment
         // acquisition started when none has arrived yet; nullopt while not
         // streaming. Feeds Main's no-data watchdog through Fx10DriverApp.
@@ -142,6 +147,7 @@ namespace fx10 {
         std::atomic<bool> acq_stop_sent_{false};
         std::atomic<FatalKind> fatal_kind_{FatalKind::kNone};
         std::atomic<std::uint64_t> frames_delivered_{0};
+        std::atomic<bool> loss_seen_{false};
         std::atomic<std::uint64_t> last_frame_us_{0}; // 0 = none since Start()
         std::atomic<std::uint64_t> stream_start_us_{0}; // watchdog reference before the first frame
         std::size_t queue_failures_ = 0; // acquisition thread only

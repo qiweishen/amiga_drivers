@@ -26,9 +26,13 @@ namespace asterx {
         }
 
         void ParseOutput(const YAML::Node &root, AppConfig &c) {
-            const YAML::Node n = OptionalMap(root, "", "output", {"file_prefix", "live_csv", "rotation"});
+            const YAML::Node n = OptionalMap(root, "", "output",
+                                             {"file_prefix", "live_csv", "rotation", "write_queue_mb"});
             ReadText(n, "output", "file_prefix", c.file_prefix);
             Read(n, "output", "live_csv", c.live_csv);
+            int write_queue_mb = static_cast<int>(c.write_queue_bytes >> 20);
+            ReadRange<int>(n, "output", "write_queue_mb", 16, 4096, write_queue_mb);
+            c.write_queue_bytes = static_cast<std::uint64_t>(write_queue_mb) << 20;
             const YAML::Node rot = OptionalMap(n, "output", "rotation", {"max_bytes", "max_interval_s"});
             // sbf2rin refuses SBF inputs of 2 GB or larger, so rotation is mandatory and capped
             ReadRange<std::uint64_t>(rot, "output.rotation", "max_bytes", 1, (2ull << 30) - 1, c.rotate_bytes);

@@ -3,11 +3,15 @@
 #include <sys/types.h>  // ssize_t (used in WriteHook)
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "accounting.h"
@@ -29,7 +33,13 @@
 // until an independent anchor is established; line index is not a trigger ID.
 //
 // Threading: all methods are called from the single acquisition thread
-// (write-in-retrieve-loop topology); nothing here is thread-safe by design.
+// (write-in-retrieve-loop topology); nothing here is thread-safe by design,
+// with one exception: the periodic durability flush. write(2) only lands in
+// the page cache, but fdatasync waits for the disk, and a slow disk must never
+// stall the acquisition thread (the SDK pool absorbs ~2 s, then frames are
+// lost). So WriteLine hands dup'd descriptors to a helper thread that runs the
+// fdatasync; the acquisition thread never waits on it. Flush failures are
+// counted on that thread and folded into the ledger when a segment finalizes.
 
 namespace fx10 {
     // Why a recording stopped (mapped to an exit code by the driver)
@@ -102,6 +112,15 @@ namespace fx10 {
         // for the periodic [Statistics] line's write rate.
         [[nodiscard]] std::uint64_t FramesWrittenTotal() const { return frames_written_.load(std::memory_order_relaxed); }
 
+        // Fail-fast: true once any frame was lost or not recorded (BlockID gap,
+        // rejected buffer, wrong geometry). Polled by the monitor thread, which
+        // stops the rig on the first event — the ledger keeps the details.
+        [[nodiscard]] bool LossSeen() const { return loss_seen_.load(std::memory_order_acquire); }
+
+        // Test seam: block until every queued periodic flush has run (the sync hook
+        // is called on the flusher thread, so cadence tests need a rendezvous).
+        void DrainPendingFlushesForTest() { DrainFlusher(); }
+
         // Test seam for injecting write failures (ENOSPC etc.). Signature of ::write.
         using WriteHook = std::function<ssize_t(int fd, const void *buf, std::size_t count)>;
         void SetWriteHookForTest(WriteHook hook) { write_hook_ = std::move(hook); }
@@ -137,6 +156,19 @@ namespace fx10 {
 
         void LatchError(const std::string &message, ErrorKind kind);
 
+        // Periodic durability off the acquisition thread (see the file header)
+        struct FlushRequest {
+            int data_fd;
+            int index_fd;
+        };
+
+        void StartFlusher(); // no thread when flush_interval_mb == 0
+        void StopFlusher(); // drains, then joins
+        void DrainFlusher(); // wait until every queued request has completed
+        void RequestFlush(); // dup the segment descriptors and queue them
+        void FoldFlushErrors(); // acquisition thread: flush_errors_ -> counters_.write_errors
+        void FlushLoop();
+
         RecordingConfig config_;
         Counters &counters_;
 
@@ -169,5 +201,16 @@ namespace fx10 {
 
         WriteHook write_hook_;
         SyncHook sync_hook_;
+
+        std::atomic<bool> loss_seen_{false};
+
+        std::thread flusher_;
+        std::mutex flush_mu_;
+        std::condition_variable flush_cv_;
+        std::deque<FlushRequest> flush_queue_; // guarded by flush_mu_
+        std::size_t flush_in_progress_ = 0; // taken but not completed; guarded by flush_mu_
+        bool flusher_stop_ = false; // guarded by flush_mu_
+        std::atomic<std::uint64_t> flush_errors_{0}; // flusher thread -> acquisition thread
+        std::uint64_t flush_errors_folded_ = 0; // already counted into counters_.write_errors
     };
 } // namespace fx10

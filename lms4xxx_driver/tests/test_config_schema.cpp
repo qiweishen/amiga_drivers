@@ -29,6 +29,8 @@ ntp:
     server: "10.95.2.102"
     sync_interval_s: 1
     check_status_s: 5
+    lock_timeout_s: 60
+    max_time_step_ms: 1000
 network:
     recv_buffer_bytes: 4194304
     ring_buffer_frames: 1024
@@ -93,6 +95,8 @@ TEST_CASE("The shipped-shape document loads and disabled entries are kept but no
     CHECK(d.device.ip == "10.95.76.101");
     CHECK(d.network.response_timeout_ms == 1000);
     CHECK_FALSE(d.ntp.enabled);
+    CHECK(d.ntp.lock_timeout_s == 60);
+    CHECK(d.ntp.max_time_step_ms == 1000);
 }
 
 TEST_CASE("The shipped config file itself loads") {
@@ -191,6 +195,9 @@ TEST_CASE("Every numeric bound is enforced and named") {
     SUBCASE("ntp intervals") {
         CHECK(Mentions(LoadError(With("    sync_interval_s: 1", "    sync_interval_s: 0")), "ntp.sync_interval_s"));
         CHECK(Mentions(LoadError(With("    check_status_s: 5", "    check_status_s: 3601")), "ntp.check_status_s"));
+        CHECK(Mentions(LoadError(With("    lock_timeout_s: 60", "    lock_timeout_s: 0")), "ntp.lock_timeout_s"));
+        CHECK(Mentions(LoadError(With("    max_time_step_ms: 1000", "    max_time_step_ms: 60001")),
+                       "ntp.max_time_step_ms"));
     }
     SUBCASE("port") {
         CHECK(Mentions(LoadError(With("            port: 2111", "            port: 0")), "lidar[0].device.port"));

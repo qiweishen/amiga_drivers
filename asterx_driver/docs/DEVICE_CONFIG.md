@@ -1,7 +1,8 @@
 # AsteRx receiver configuration
 
-On every connection (first start and every reconnect) the driver resets the
-receiver's running configuration to the factory defaults, applies exactly what
+On every connection (first start and every reconnect before recording) the
+driver resets the receiver's running configuration to the factory defaults,
+applies exactly what
 `config/config-asterx.yaml` lists, verifies it, and starts recording only once
 the receiver has warmed up. A setting left behind by a previous user can never
 influence a recording. Page numbers refer to the AsteRx RBi3 Pro+ Firmware
@@ -64,10 +65,28 @@ v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.p
   0.1 ms P99 only after 20 minutes, p.47) **and** `RxState` bit 6 FINETIME is
   set (receiver time synchronised to within the `setClockSyncThreshold` limit,
   p.45/p.374; sticky until the next reset). `init()` blocks until then.
-* **A failed disk write stops the driver.** `SbfWriter::write_block` reports
-  failure, the Session logs it at critical level, emits `fatalError` and the
+* **A failed disk write stops the driver.** `SbfWriter::WriteBlock` reports
+  failure, the Session logs it at critical level, emits `FatalError` and the
   rig shuts down. The .sbf file is the record of truth; a write that cannot
   land must never scroll past while the GUI still shows "recording".
+* **Recording runs on its own thread.** SsnRx parses the socket on the Qt
+  event thread; `Session::OnSbfBlock` only hands the block to
+  `SbfWriteQueue` (`include/sbf_write_queue.h`), whose thread feeds the
+  synchronous `SbfWriter`. A disk stall therefore never stops the socket
+  reader (which would make the receiver drop blocks or close the link). The
+  queue is bounded by `output.write_queue_mb` (256 MiB ≈ many minutes at the
+  receiver's rate); a block that does not fit is *refused*, never dropped, and
+  the run ends (`queue_pending=`/`queue_max=` in the status line show how far
+  the disk lags). Every accepted block reaches the disk before `Shutdown()`
+  returns.
+* **Fail-fast while recording.** Once the gate has opened, a link loss, a
+  damaged block (CRC/length), a receiver reset (`UpTime` going backwards) or a
+  write failure ends the whole rig at once — the `.sbf` would be incomplete
+  either way, and the operator restarts immediately. Reconnect and re-warm-up
+  only exist *before* recording, where nothing accepted can be lost; damaged
+  blocks in that phase are counted (`crc_errors`, `length_errors`) but only
+  touch the prewarm context. `recording_errors` in `drivers.json` is the
+  number of fatal events (0 or 1).
 
 ## Sequence
 
@@ -122,9 +141,9 @@ Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
 * `init()` blocks until the gate opens. `main.cpp` initialises the drivers
   sequentially with AsteRx first, so the whole rig's recording start waits for
   the receiver warm-up (up to 20 minutes after a cold start). Ctrl+C aborts.
-* A receiver reset normally drops the TCP session: the reconnect path
-  reconfigures and warms up again. An in-session drop of `UpTime` closes the
-  current `.sbf` segment and re-enters the warm-up as a safeguard.
+* A receiver reset before recording normally drops the TCP session: the
+  reconnect path reconfigures and warms up again. A drop of `UpTime` while
+  recording is fatal (fail-fast, see the rules above).
 * `receiver.warmup.min_uptime_s: 0` with `require_finetime: false` disables
   the gate (bench tests).
 

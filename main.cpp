@@ -178,8 +178,16 @@ int main(int argc, char *argv[]) {
     const bool run_gox = main_config.enable_gox;
     const bool run_lms4xxx = main_config.enable_lms4xxx;
 
+    // A configuration that cannot even be snapshotted ends the run before any
+    // driver is created: a logged failure and exit code 1, not an uncaught
+    // exception (abort, 134) that the GUI can only report as "crashed"
+    const auto config_failed = [&drivers_json]() {
+        drivers_json.Finalize("failed (configuration)");
+        return 1;
+    };
     if (!run_asterx && !run_fx10 && !run_gox && !run_lms4xxx) {
-        common::Log::LogAndThrow(kModule, "No drivers enabled in the main config");
+        common::Log::LogAndThrow(kModule, "No drivers enabled in the main config", "", /*throw_error=*/false);
+        return config_failed();
     }
     common::Log::LogMessage(spdlog::level::info, kModule,
                              std::string(common::Markers::kStartingDrivers) + std::string(run_asterx ? " [AsteRx]" : "")
@@ -200,23 +208,29 @@ int main(int argc, char *argv[]) {
 
     // Uniform bring-up per enabled driver
     // Snapshot the drivers' configs into <data_folder>/config/, then create the apps
-    const auto copy_config = [&main_config](const std::filesystem::path &src, std::string_view name) {
+    const auto copy_config = [&main_config](const std::filesystem::path &src, std::string_view name) -> bool {
         try {
             std::filesystem::copy_file(
                 src, main_config.data_folder_path /
                      fmt::format("config/config-{}_{}.yaml", name, main_config.timestamp),
                 std::filesystem::copy_options::none);
+            return true;
         } catch (const std::exception &e) {
-            // Terminate program
-            common::Log::LogAndThrow(kModule, fmt::format("Cannot copy {} config", name), e.what());
+            common::Log::LogAndThrow(kModule, fmt::format("Cannot copy {} config", name), e.what(),
+                                     /*throw_error=*/false);
+            return false;
         }
     };
 
-    copy_config(main_config_path, "main");
+    if (!copy_config(main_config_path, "main")) {
+        return config_failed();
+    }
 
     if (run_asterx) {
         // Currently we only support one AsteRx equipment
-        copy_config(main_config.asterx_config_path, "asterx");
+        if (!copy_config(main_config.asterx_config_path, "asterx")) {
+            return config_failed();
+        }
         drivers.push_back(
             {
                 std::make_unique<AsterxDriverApp>(main_config),
@@ -233,7 +247,9 @@ int main(int argc, char *argv[]) {
     if (run_fx10) {
         // Ordering vs gox is free: Fx10DriverApp::init runs its own idempotent
         // GenICam env bootstrap before the first eBUS SDK call
-        copy_config(main_config.fx10_config_path, "fx10");
+        if (!copy_config(main_config.fx10_config_path, "fx10")) {
+            return config_failed();
+        }
         drivers.push_back(
             {
                 std::make_unique<Fx10DriverApp>(main_config),
@@ -248,7 +264,9 @@ int main(int argc, char *argv[]) {
                                    "config/config-{}_{}.yaml", "fx10", main_config.timestamp));
     }
     if (run_gox) {
-        copy_config(main_config.gox_config_path, "gox");
+        if (!copy_config(main_config.gox_config_path, "gox")) {
+            return config_failed();
+        }
         drivers.push_back(
             {
                 std::make_unique<GoxDriverApp>(main_config),
@@ -264,12 +282,15 @@ int main(int argc, char *argv[]) {
     }
     if (run_lms4xxx) {
         const std::string lms4xxx_config_path = main_config.lms4xxx_config_path;
-        copy_config(lms4xxx_config_path, "lms4xxx");
+        if (!copy_config(lms4xxx_config_path, "lms4xxx")) {
+            return config_failed();
+        }
         lms4xxx::AppConfig lms4xxx_config;
         try {
             lms4xxx_config = lms4xxx::LoadAppConfig(lms4xxx_config_path);
         } catch (const lms4xxx::ConfigError &e) {
-            common::Log::LogAndThrow(kModule, "LMS4xxx config error", e.what());
+            common::Log::LogAndThrow(kModule, "LMS4xxx config error", e.what(), /*throw_error=*/false);
+            return config_failed();
         }
         for (const auto *lidar: lms4xxx_config.EnabledLidars()) {
             drivers.push_back(
@@ -538,6 +559,13 @@ int main(int argc, char *argv[]) {
         exit_code = 1;
     }
 
+    if (const auto dropped = common::Logger::ConsoleLinesDropped(); dropped > 0) {
+        // Console only: the session log file is complete regardless
+        common::Log::LogMessage(spdlog::level::warn, kModule,
+                                 fmt::format("{} console log line(s) were dropped because the stderr reader "
+                                             "(GUI / docker exec) did not keep up; the session log file is complete",
+                                             dropped));
+    }
     if (exit_code == 0) {
         common::Log::LogMessage(spdlog::level::info, kModule, common::Markers::kAllDriversShutDown);
     } else {

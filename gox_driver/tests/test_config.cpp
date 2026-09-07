@@ -49,7 +49,6 @@ TEST_CASE("config: minimal valid config fills every default") {
     CHECK_FALSE(cfg.ptp.enabled);
     CHECK(cfg.ptp.on_timeout == PtpOnTimeout::kAbort);
     CHECK(cfg.ptp.sync_timeout_s == doctest::Approx(60.0));
-    CHECK(cfg.ptp.offset_report_interval_s == doctest::Approx(60.0));
 
     REQUIRE(cfg.cameras.size() == 1u);
     const CameraConfig &cam = cfg.cameras[0];
@@ -105,7 +104,7 @@ TEST_CASE("config: invariants are rejected with the dotted key") {
         {DocWithTop("output: {max_frames: -1}"), "output.max_frames: must not be negative"},
         {DocWithTop("output: {max_duration_s: -5}"), "output.max_duration_s: must be in [0"},
         {DocWithTop("ptp: {sync_timeout_s: 0}"), "ptp.sync_timeout_s: must be > 0"},
-        {DocWithTop("ptp: {offset_report_interval_s: -1}"), "ptp.offset_report_interval_s"},
+        {DocWithTop("ptp: {offset_report_interval_s: 1}"), "ptp.offset_report_interval_s"}, // retired key (host-clock cross-check removed)
         {DocWithCamera("    network: {buffer_count: 2}"), "cameras[0].network.buffer_count: must be 0 (auto) or >= 4"},
         {DocWithCamera("    network: {buffer_count: -1}"), "cameras[0].network.buffer_count: must not be negative"},
         {DocWithCamera("    network: {packet_size: 100}"), "in [1476, 12036]"},

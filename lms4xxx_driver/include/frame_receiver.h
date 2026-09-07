@@ -36,13 +36,14 @@ namespace lms4xxx {
         // to classify these by substring-matching the reason text, which a
         // reworded message would have silently reassigned to the wrong counter.
         enum class FrameError {
-            kLengthOutOfRange, ///< the length field exceeds max_frame_size
+            kLengthOutOfRange, ///< the length field is zero or exceeds max_frame_size
             kChecksumMismatch, ///< XOR over the data part disagrees ("CRC" in the GUI stats)
             kGarbage, ///< bytes between frames that belong to no telegram
         };
 
-        // `consecutive` counts errors since the last GOOD frame, so the caller
-        // can tell one corrupted frame from a stream that is no longer CoLa B.
+        // `consecutive` counts rejected candidates and garbage spans since the
+        // last GOOD frame, excluding discarded tails of reported candidates.
+        // It is a resync fault metric, not a count of lost device scans.
         using ErrorCallback = std::function<void(FrameError error, std::uint64_t consecutive)>;
 
         // `tag`: instance log prefix
@@ -67,4 +68,3 @@ namespace lms4xxx {
         std::unique_ptr<Impl> impl_;
     };
 } // namespace lms4xxx
-

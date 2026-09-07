@@ -11,8 +11,10 @@ namespace fx10 {
 
         void ParseAcquisition(const YAML::Node &root, AcquisitionConfig &acq) {
             const YAML::Node n = OptionalMap(root, "", "acquisition",
-                                             {"spatial_binning", "spectral_binning", "pixel_format", "exposure_ms",
-                                              "frame_rate_hz", "status_line", "image_enhancement", "trigger", "mroi"});
+                                             {
+                                                 "spatial_binning", "spectral_binning", "pixel_format", "exposure_ms",
+                                                 "frame_rate_hz", "status_line", "image_enhancement", "trigger", "mroi"
+                                             });
             const std::string p = "acquisition";
             Read(n, p, "spatial_binning", acq.spatial_binning);
             Read(n, p, "spectral_binning", acq.spectral_binning);
@@ -24,25 +26,40 @@ namespace fx10 {
             if (Read(n, p, "frame_rate_hz", acq.frame_rate_hz) && !(acq.frame_rate_hz > 0.0)) {
                 Fail(p + ".frame_rate_hz", "must be > 0");
             }
+            const double period_ms = 900.0 / acq.frame_rate_hz;
+            if (acq.exposure_ms >= period_ms) {
+                Fail(p + ".exposure_ms/.frame_rate_hz", "exposure_ms (" + std::to_string(acq.exposure_ms) +
+                                            ") must be below the frame period 900/frame_rate_hz (" +
+                                            std::to_string(period_ms) + " ms); lower the exposure or the frame rate");
+            }
             Read(n, p, "status_line", acq.status_line);
             if (Read(n, p, "image_enhancement", acq.image_enhancement) && !acq.image_enhancement) {
                 // The manual never prints the GenICam node for AIE (only the Lumo name, p.39)
                 Fail(p + ".image_enhancement", "only true is supported (the AIE node name is unknown; "
-                                               "use features.raw to switch it off)");
+                     "use features.raw to switch it off)");
             }
 
             const YAML::Node t = OptionalMap(n, p, "trigger",
-                                             {"mode", "activation", "delay_ms", "exposure_control", "selector_entry",
-                                              "source_entry"});
+                                             {
+                                                 "mode", "activation", "delay_ms", "exposure_control", "selector_entry",
+                                                 "source_entry"
+                                             });
             const std::string tp = p + ".trigger";
-            ReadEnum<TriggerMode>(t, tp, "mode", {{"freerun", TriggerMode::kFreerun}, {"external", TriggerMode::kExternal}},
+            ReadEnum<TriggerMode>(t, tp, "mode",
+                                  {{"freerun", TriggerMode::kFreerun}, {"external", TriggerMode::kExternal}},
                                   acq.trigger.mode);
             ReadEnum<TriggerActivation>(t, tp, "activation",
-                                        {{"rising", TriggerActivation::kRising}, {"falling", TriggerActivation::kFalling}},
+                                        {
+                                            {"rising", TriggerActivation::kRising},
+                                            {"falling", TriggerActivation::kFalling}
+                                        },
                                         acq.trigger.activation);
             ReadRange<double>(t, tp, "delay_ms", 0.0, 419.0, acq.trigger.delay_ms);
             ReadEnum<ExposureControl>(t, tp, "exposure_control",
-                                      {{"camera", ExposureControl::kCamera}, {"pulse_width", ExposureControl::kPulseWidth}},
+                                      {
+                                          {"camera", ExposureControl::kCamera},
+                                          {"pulse_width", ExposureControl::kPulseWidth}
+                                      },
                                       acq.trigger.exposure_control);
             ReadText(t, tp, "selector_entry", acq.trigger.selector_entry);
             ReadText(t, tp, "source_entry", acq.trigger.source_entry);
@@ -62,7 +79,7 @@ namespace fx10 {
                 // Manual p.9, p.26: MROI requires 1 x 1 binning on BOTH axes
                 if (acq.spectral_binning != 1 || acq.spatial_binning != 1) {
                     Fail(p + ".mroi", "requires 1 x 1 binning: spatial_binning and spectral_binning must both be 1 "
-                                      "(manual p.9, p.26)");
+                         "(manual p.9, p.26)");
                 }
                 ParseMroiRegions(acq.mroi.multiband_string);
             }
@@ -75,12 +92,12 @@ namespace fx10 {
             ReadRange<int>(n, "sensor_trigger", "trigger_channel", 0, 64, st.trigger_channel);
             if (st.enabled && st.port.empty()) {
                 Fail("sensor_trigger.port", "is required when sensor_trigger.enabled "
-                                            "(a /dev/serial/by-id/... path survives USB re-enumeration)");
+                     "(a /dev/serial/by-id/... path survives USB re-enumeration)");
             }
             // The board rejects sub-1-Hz rates (#ERR,bad_freq) and keeps pulsing at the previous rate
             if (st.enabled && acq.trigger.mode == TriggerMode::kExternal && acq.frame_rate_hz < 1.0) {
                 Fail("acquisition.frame_rate_hz", "must be >= 1 when the sensor_trigger drives the external trigger "
-                                                  "(SensorSync board minimum)");
+                     "(SensorSync board minimum)");
             }
         }
 
@@ -120,8 +137,10 @@ namespace fx10 {
 
         void ParseNetwork(const YAML::Node &root, NetworkConfig &net) {
             const YAML::Node n = OptionalMap(root, "", "network",
-                                             {"packet_size", "socket_rx_buffer_mb", "buffer_count", "stall_budget_s",
-                                              "max_buffer_memory_mb", "retrieve_timeout_ms", "reconnect"});
+                                             {
+                                                 "packet_size", "socket_rx_buffer_mb", "buffer_count", "stall_budget_s",
+                                                 "max_buffer_memory_mb", "retrieve_timeout_ms"
+                                             });
             const std::string p = "network";
             ReadRange<int>(n, p, "packet_size", 0, 65535, net.packet_size);
             ReadRange<int>(n, p, "socket_rx_buffer_mb", 1, 1024, net.socket_rx_buffer_mb);
@@ -135,16 +154,14 @@ namespace fx10 {
             ReadRange<int>(n, p, "max_buffer_memory_mb", 1, 1024 * 1024, net.max_buffer_memory_mb);
             // The acquisition loop's poll period; it also bounds how long Stop() waits for that thread
             ReadRange<int>(n, p, "retrieve_timeout_ms", 1, 10000, net.retrieve_timeout_ms);
-            const YAML::Node r = OptionalMap(n, p, "reconnect", {"enabled", "max_attempts", "backoff_ms"});
-            Read(r, p + ".reconnect", "enabled", net.reconnect.enabled);
-            ReadRange<int>(r, p + ".reconnect", "max_attempts", 0, 1000000, net.reconnect.max_attempts);
-            ReadRange<int>(r, p + ".reconnect", "backoff_ms", 0, 3600000, net.reconnect.backoff_ms);
         }
 
         void ParseOutput(const YAML::Node &root, RecordingConfig &rec) {
             const YAML::Node n = OptionalMap(root, "", "output",
-                                             {"rotation", "flush_interval_mb", "on_gap", "wavelengths",
-                                              "max_duration_s", "max_frames"});
+                                             {
+                                                 "rotation", "flush_interval_mb", "on_gap", "wavelengths",
+                                                 "max_duration_s", "max_frames"
+                                             });
             const std::string p = "output";
             const YAML::Node rot = OptionalMap(n, p, "rotation", {"max_lines", "max_mb"});
             Read(rot, p + ".rotation", "max_lines", rec.rotation.max_lines);
@@ -153,11 +170,16 @@ namespace fx10 {
             ReadEnum<GapPolicy>(n, p, "on_gap", {{"record", GapPolicy::kRecord}, {"pad_zero", GapPolicy::kPadZero}},
                                 rec.on_gap);
 
-            const YAML::Node w = OptionalMap(n, p, "wavelengths", {"source", "file", "list", "grid", "fwhm_list", "calibration"});
+            const YAML::Node w = OptionalMap(n, p, "wavelengths", {
+                                                 "source", "file", "list", "grid", "fwhm_list", "calibration"
+                                             });
             const std::string wp = p + ".wavelengths";
             ReadEnum<WavelengthSource>(w, wp, "source",
-                                       {{"none", WavelengthSource::kNone}, {"file", WavelengthSource::kFile}, {"list", WavelengthSource::kList},
-                                        {"grid", WavelengthSource::kGrid}},
+                                       {
+                                           {"none", WavelengthSource::kNone}, {"file", WavelengthSource::kFile},
+                                           {"list", WavelengthSource::kList},
+                                           {"grid", WavelengthSource::kGrid}
+                                       },
                                        rec.wavelengths.source);
             Read(w, wp, "file", rec.wavelengths.file);
             ReadSequence(w, wp, "list", rec.wavelengths.list);
@@ -166,7 +188,10 @@ namespace fx10 {
             Read(g, wp + ".grid", "end_nm", rec.wavelengths.grid_end_nm);
             ReadSequence(w, wp, "fwhm_list", rec.wavelengths.fwhm_list);
             const YAML::Node cal = OptionalMap(w, wp, "calibration",
-                                               {"reference", "device_serial", "samples", "bands", "offset_x", "offset_y"});
+                                               {
+                                                   "reference", "device_serial", "samples", "bands", "offset_x",
+                                                   "offset_y"
+                                               });
             auto &profile = rec.wavelengths.calibration;
             Read(cal, wp + ".calibration", "reference", profile.reference);
             Read(cal, wp + ".calibration", "device_serial", profile.device_serial);
@@ -183,7 +208,9 @@ namespace fx10 {
         }
 
         AppConfig ParseRoot(const YAML::Node &root) {
-            CheckKeys(root, "", {"device", "acquisition", "sensor_trigger", "features", "output", "network", "logging"});
+            CheckKeys(root, "", {
+                          "device", "acquisition", "sensor_trigger", "features", "output", "network", "logging"
+                      });
             AppConfig c;
 
             const YAML::Node d = OptionalMap(root, "", "device", {"mac", "ip"});

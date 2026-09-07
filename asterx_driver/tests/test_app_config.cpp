@@ -41,6 +41,7 @@ receiver:
 output:
     file_prefix: asterx
     live_csv: true
+    write_queue_mb: 256
     rotation: { max_bytes: 1073741824, max_interval_s: 3600 }
 logging:
     stats_interval_s: 2.5
@@ -106,8 +107,8 @@ TEST_CASE("config: the shipped yaml loads and drives the real sequence") {
     const auto cfg = LoadAppConfig(std::string(ASTERX_CONFIG_DIR) + "/config-asterx.yaml");
     CHECK(cfg.receiver.time_system.pps.polarity == "Low2High");
     CHECK_FALSE(cfg.receiver.ntrip.enabled); // placeholders until credentials are filled in
-    CHECK(cfg.receiver.warmup.min_uptime_s == 0); // the gate ships off
-    CHECK_FALSE(cfg.receiver.warmup.require_finetime);
+    CHECK(cfg.receiver.warmup.min_uptime_s == 1200);
+    CHECK(cfg.receiver.warmup.require_finetime);
     CHECK(cfg.stats_period_ms == 2500);
     CHECK(cfg.rotate_bytes == 1073741824ull);
     CHECK(cfg.rotate_interval_seconds == 3600);
@@ -261,6 +262,11 @@ TEST_CASE("config: output and logging") {
     CHECK(Mentions(ErrorOf(Replaced("max_interval_s: 3600", "max_interval_s: 0")), "output.rotation.max_interval_s"));
     CHECK(Mentions(ErrorOf(Replaced("file_prefix: asterx", "file_prefix: \"\"")), "output.file_prefix: must not be blank"));
     CHECK_FALSE(LoadAppConfigText(Replaced("live_csv: true", "live_csv: false")).live_csv);
+
+    CHECK(LoadAppConfigText(kBase).write_queue_bytes == (256ull << 20));
+    CHECK(LoadAppConfigText(Replaced("write_queue_mb: 256", "write_queue_mb: 64")).write_queue_bytes == (64ull << 20));
+    CHECK(Mentions(ErrorOf(Replaced("write_queue_mb: 256", "write_queue_mb: 8")), "output.write_queue_mb"));
+    CHECK(Mentions(ErrorOf(Replaced("write_queue_mb: 256", "write_queue_mb: 5000")), "output.write_queue_mb"));
 }
 
 TEST_CASE("config: a missing file reports the path") {

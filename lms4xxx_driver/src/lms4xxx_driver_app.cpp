@@ -28,9 +28,24 @@ namespace {
                 return "NO-TS";
             case lms4xxx::DriverStatistics::NtpStatus::kUnreachable:
                 return "UNREACH";
+            case lms4xxx::DriverStatistics::NtpStatus::kNotLocked:
+                return "NO-LOCK";
             default:
                 return "OFF";
         }
+    }
+
+    // Fail-fast: the name of the first counter that proves the recording is no
+    // longer complete, or nullptr. Same predicate as the final verdict in Shutdown().
+    const char *FirstLoss(const lms4xxx::DriverStatistics::Snapshot &drv,
+                          const lms4xxx::ScanRecordWriter::Statistics &wr) {
+        if (drv.frames_dropped != 0) return "receive ring overflow";
+        if (wr.frames_dropped != 0) return "writer queue overflow";
+        if (drv.counter_gaps != 0) return "telegram counter gap";
+        if (drv.crc_errors != 0) return "frame checksum error";
+        if (drv.framing_errors != 0) return "framing error";
+        if (drv.parse_errors != 0) return "parse error";
+        return nullptr;
     }
 
     // DIST + ANGL + QLTY always; the remission channel follows scan.remission
@@ -81,6 +96,13 @@ bool Lms4xxxDriverApp::Init(const std::function<bool()> &external_stop) {
     if (data_folder_path_.empty()) {
         g_log.Error("[{}] Cannot set up the scan writer (empty data folder path)", instance_name_);
         return false;
+    }
+
+    if (!driver_config_.ntp.enabled) {
+        // Host time is never recorded on this platform; NTP is the LiDAR's only absolute time
+        g_log.Warn("[{}] ntp.enabled=false: scans carry NO absolute time (device uptime only, wraps every "
+                   "71.6 min); offline time association with the other sensors is impossible for this run",
+                   instance_name_);
     }
 
     auto ec = impl_->driver->Connect();
@@ -207,6 +229,21 @@ void Lms4xxxDriverApp::Run() {
             terminate_.store(true, std::memory_order_release);
             break;
         }
+        // Fail-fast: the first lost or damaged scan ends the whole rig now rather
+        // than marking the session failed at the end — an incomplete recording is
+        // worthless and the operator wants to restart immediately
+        {
+            const auto drv = impl_->driver->GetStatistics();
+            const lms4xxx::ScanRecordWriter::Statistics wr =
+                    impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
+            if (const char *what = FirstLoss(drv, wr); what != nullptr) {
+                MarkFailed();
+                g_log.Error("[{}] First data-loss event ({}) — terminating the run (fail-fast: the recording "
+                            "would be incomplete; see the warning above for the details)", instance_name_, what);
+                terminate_.store(true, std::memory_order_release);
+                break;
+            }
+        }
 
         const auto now = clock::now();
 
@@ -259,7 +296,7 @@ void Lms4xxxDriverApp::Run() {
             // sample). New fields are APPENDED, never interleaved.
             g_log.Info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
                        "drop_ring={}  gaps={}  crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  "
-                       "bytes={}  queued={:.1f}  temp={}  unexpected={}",
+                       "bytes={}  queued={:.1f}  temp={}  unexpected={}  prelock={}  tstep_max_us={}",
                        instance_name_, common::TimeUtil::HumanDuration(uptime_s), scan_hz, write_fps,
                        NtpStatusText(drv.ntp_status),
                        drv.frames_received, drv.frames_parsed, drv.frames_dropped, drv.counter_gaps, drv.crc_errors,
@@ -268,7 +305,7 @@ void Lms4xxxDriverApp::Run() {
                        impl_->last_telemetry.temperature_c
                            ? fmt::format("{:.1f}", *impl_->last_telemetry.temperature_c)
                            : "n/a",
-                       drv.unexpected_replies);
+                       drv.unexpected_replies, drv.prelock_scans_discarded, drv.max_time_step_us);
         }
     }
 
@@ -331,7 +368,9 @@ void Lms4xxxDriverApp::Shutdown() {
         {"framing_errors", drv.framing_errors}, {"parse_errors", drv.parse_errors},
         {"frames_queued", wr.frames_queued}, {"frames_written", wr.frames_written},
         {"dropped_writer", wr.frames_dropped}, {"bytes_written", wr.bytes_written},
-        {"files_created", wr.files_created}, {"recording_incomplete", HasFailed()}
+        {"files_created", wr.files_created}, {"ntp_status", NtpStatusText(drv.ntp_status)},
+        {"prelock_scans_discarded", drv.prelock_scans_discarded}, {"max_time_step_us", drv.max_time_step_us},
+        {"recording_incomplete", HasFailed()}
     };
     const auto duration_s = impl_->scan_start == std::chrono::steady_clock::time_point{}
                                 ? 0ull
@@ -340,11 +379,13 @@ void Lms4xxxDriverApp::Shutdown() {
                                     .count());
     g_log.Info("[Statistics] [{}] Final: duration={}  frames={}  parsed={}  delivery={:.1f}%  ntp={}  "
                "dropped_ring={}  counter_gaps={}  crc_errors={}  framing_errors={}  parse_errors={}  "
-               "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}",
+               "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}  prelock={}  "
+               "tstep_max_us={}",
                instance_name_, common::TimeUtil::HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
                drv.DeliveryRate(), NtpStatusText(drv.ntp_status), drv.frames_dropped, drv.counter_gaps,
                drv.crc_errors, drv.framing_errors, drv.parse_errors, drv.unexpected_replies,
-               wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created);
+               wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created,
+               drv.prelock_scans_discarded, drv.max_time_step_us);
 
     impl_->driver->Disconnect();
 

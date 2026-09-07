@@ -22,6 +22,10 @@ namespace lms4xxx {
         // telemetry answer. Non-zero means the link carries something the driver
         // does not model — the only visible symptom of a desynchronised stream.
         std::atomic<std::uint64_t> unexpected_replies{0};
+        // NTP time lock (parse thread): scans discarded before the first plausible device time
+        // stamp, and the largest |device-time step - uptime step| between recorded scans (us)
+        std::atomic<std::uint64_t> prelock_scans_discarded{0};
+        std::atomic<std::int64_t> max_time_step_us{0};
 
         // --- Timing (us) ---
         std::atomic<std::uint64_t> last_frame_time_us{0}; ///< Timestamp of last received frame
@@ -35,9 +39,10 @@ namespace lms4xxx {
         // previously synced device keeps near-correct time and masks a dead server)
         enum class NtpStatus : std::uint8_t {
             kOff = 0, ///< ntp.enabled = false
-            kOk = 2, ///< server answered a healthy SNTP response
+            kOk = 2, ///< server answered a healthy SNTP response (and, while scanning, the device time is locked)
             kNoTimestamp = 3, ///< device streams no timestamp block
             kUnreachable = 4, ///< server stopped answering (device clock free-running)
+            kNotLocked = 5, ///< scanning, but no plausible (NTP-synchronised) device time stamp seen yet
         };
 
         std::atomic<NtpStatus> ntp_status{NtpStatus::kOff};
@@ -53,6 +58,8 @@ namespace lms4xxx {
             std::uint64_t parse_errors;
             std::uint64_t counter_gaps;
             std::uint64_t unexpected_replies;
+            std::uint64_t prelock_scans_discarded;
+            std::int64_t max_time_step_us;
             std::uint64_t last_frame_time_us;
             std::uint32_t last_telegram_counter;
             std::uint32_t last_scan_counter;
@@ -77,6 +84,8 @@ namespace lms4xxx {
                 framing_errors.load(std::memory_order_relaxed), frames_parsed.load(std::memory_order_relaxed),
                 parse_errors.load(std::memory_order_relaxed), counter_gaps.load(std::memory_order_relaxed),
                 unexpected_replies.load(std::memory_order_relaxed),
+                prelock_scans_discarded.load(std::memory_order_relaxed),
+                max_time_step_us.load(std::memory_order_relaxed),
                 last_frame_time_us.load(std::memory_order_relaxed),
                 last_telegram_counter.load(std::memory_order_relaxed),
                 last_scan_counter.load(std::memory_order_relaxed),
@@ -95,6 +104,8 @@ namespace lms4xxx {
             parse_errors.store(0, std::memory_order_relaxed);
             counter_gaps.store(0, std::memory_order_relaxed);
             unexpected_replies.store(0, std::memory_order_relaxed);
+            prelock_scans_discarded.store(0, std::memory_order_relaxed);
+            max_time_step_us.store(0, std::memory_order_relaxed);
             last_frame_time_us.store(0, std::memory_order_relaxed);
             last_telegram_counter.store(0, std::memory_order_relaxed);
             last_scan_counter.store(0, std::memory_order_relaxed);

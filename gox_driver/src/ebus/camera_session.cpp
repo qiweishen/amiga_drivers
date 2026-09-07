@@ -86,8 +86,6 @@ namespace gox::ebus {
             throw std::runtime_error("GenICam apply: " + std::string(e.what()));
         }
 
-        // First PTP offset record (session-start baseline for drift reporting).
-        ptp_->RefreshOffset();
     }
 
     void CameraSession::StartStreaming() {
@@ -298,10 +296,14 @@ namespace gox::ebus {
         }
     }
 
-    void CameraSession::RefreshPtpOffset() {
-        if (started_ && !stopped_ && ptp_ && controller_ && controller_->Connected()) {
-            ptp_->RefreshOffset();
-        }
+    std::string CameraSession::FirstLossDescription() const {
+        const CameraStats::Snapshot s = stats_.GetSnapshot();
+        if (s.frames_dropped_queue != 0) return "frame queue overflow (" + std::to_string(s.frames_dropped_queue) + " dropped)";
+        if (s.frames_lost_gap != 0) return "BlockID gap (" + std::to_string(s.frames_lost_gap) + " frames missing)";
+        if (s.frames_incomplete != 0) return "incomplete frame (" + std::to_string(s.frames_incomplete) + ")";
+        if (s.frames_error_dropped != 0) return "buffer error (" + std::to_string(s.frames_error_dropped) + " dropped)";
+        if (s.stream_blocks_dropped != 0) return "stream-layer block drop (" + std::to_string(s.stream_blocks_dropped) + ")";
+        return {};
     }
 
     void CameraSession::WriteDeviceJson() {
@@ -343,9 +345,6 @@ namespace gox::ebus {
                     sample.ptp_status = ptp.status;
                     if (ptp.accuracy >= 0) {
                         sample.ptp_accuracy = ptp.accuracy;
-                    }
-                    if (ptp.have_offset) {
-                        sample.ptp_offset_ns = ptp.adjusted_offset_ns;
                     }
                 }
             }

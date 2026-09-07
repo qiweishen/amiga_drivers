@@ -18,8 +18,8 @@ device:
 # --- Receiver ---
 receiver:
     warmup:
-        min_uptime_s: 1200              # >= 0; 0 = no uptime gate (PTP reaches spec after ~20 min (1200), p.47)
-        require_finetime: true          # ReceiverStatus FINETIME bit (p.374)
+        min_uptime_s: 0              # >= 0; 0 = no uptime gate (PTP reaches spec after ~20 min (1200), p.47)
+        require_finetime: false          # ReceiverStatus FINETIME bit (p.374)
 
     ntrip:
         enabled: false
@@ -121,6 +121,7 @@ receiver:
 output:
     file_prefix: asterx                 # <prefix>_<seq>.sbf
     live_csv: true                      # per-block live_*.csv beside the .sbf (GUI live view)
+    write_queue_mb: 256                 # 16..4096; SBF blocks buffered for the writer thread; overflow ends the run
     rotation:
         max_bytes: 1073741824           # 1..2147483647 (sbf2rin refuses >= 2 GiB)
         max_interval_s: 3600            # > 0

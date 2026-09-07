@@ -55,7 +55,4 @@ network:
     stall_budget_s: 2.0                 # >= 0
     max_buffer_memory_mb: 512           # >= 1
     retrieve_timeout_ms: 1000           # 1..10000
-    reconnect:
-        enabled: true
-        max_attempts: 5
-        backoff_ms: 2000
+    # No reconnect block: a link loss ends the run (fail-fast)

@@ -102,7 +102,6 @@ namespace gox {
         bool enabled = false;
         double sync_timeout_s = 60.0; // budget to reach the "slave" state
         PtpOnTimeout on_timeout = PtpOnTimeout::kAbort;
-        double offset_report_interval_s = 60.0; // 0 = only at session start/end
     };
 
     struct AppConfig {

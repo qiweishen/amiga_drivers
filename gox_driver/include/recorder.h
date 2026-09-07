@@ -75,9 +75,9 @@ namespace gox {
 
         void FlushIndex(bool force);
 
-        void AppendSegmentSummary(bool clean);
+        void AppendSegmentSummary(bool clean) const;
 
-        void WriteIovAll(const struct iovec *iov, int iovcnt, size_t total);
+        void WriteIovAll(const struct iovec *iov, int iovcnt, size_t total) const;
 
         RecorderOptions opts_;
         CameraStats *stats_;

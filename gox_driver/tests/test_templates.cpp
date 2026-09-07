@@ -64,7 +64,9 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
 
     CHECK(cfg.stats_interval_s == doctest::Approx(2.5));
 
-    CHECK_FALSE(cfg.ptp.enabled);
+    // The acquisition template explicitly enables PTP; omitted-key defaults
+    // remain disabled and are covered separately in test_config.cpp.
+    CHECK(cfg.ptp.enabled);
     CHECK(cfg.ptp.on_timeout == PtpOnTimeout::kAbort);
 }
 

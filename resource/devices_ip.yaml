@@ -1,32 +1,37 @@
-CoolShark Auto66:
-    WebGUI IP: 10.95.76.188
-    PTP/NTP IP: 10.95.76.121
-    Ethernet Port: enp1s0f1
-    Subnetwork: 10.95.78.78
+# Rig network inventory (documentation only; the drivers read their own yaml).
+# Time: the Septentrio AsteRx RBi3 Pro+ is the rig's NTP and PTP server on its
+# own address (10.95.2.102), GPS timescale. No other time server exists on the
+# rig, and host time is never used as a time source.
 
-
-Septentrio AsteRx:
+Septentrio AsteRx RBi3 Pro+:
     IP: 10.95.2.102
     Ethernet Port: enp1s0f2
     Subnetwork: 10.95.2.1
+    Serves: NTP + PTP (GPS timescale)
 
 
-# GVSP needs MTU 9000 + net.core.rmem_max (see fx10_driver/docs/BRINGUP.md)
+# GVSP needs MTU 9000 + net.core.rmem_max (see fx10_driver/docs/DEVICE_CONFIG.md)
 Specim FX10e:
     IP: 10.95.0.100
     Ethernet Port: enp1s0f0
     Subnetwork: 10.95.0.1
 
 
+# PTP slave of the AsteRx: the grandmaster must be reachable on the camera's L2
+# domain (PTP multicast does not cross subnets) — see gox_driver/docs/DEVICE_CONFIG.md
 JAI Go-X:
     IP: 10.95.1.101
     Ethernet Port: enp1s0f1
     Subnetwork: 10.95.1.1
 
 
+# NTP clients of the AsteRx: the devices must be able to route to 10.95.2.102
+# (device gateway EIgate, factory 0.0.0.0) — see lms4xxx_driver/docs/DEVICE_CONFIG.md
 SICK LMS4xxx:
     Front Left Laser:
         IP: 10.95.76.101
+    Front Center Laser:
+        IP: 10.95.76.102
     Front Right Laser:
         IP: 10.95.76.103
     Ethernet Port: eno1

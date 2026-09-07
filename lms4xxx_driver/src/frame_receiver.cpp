@@ -35,9 +35,15 @@ namespace lms4xxx {
         // Linear accumulation buffer, sized for two max frames
         std::vector<std::uint8_t> buffer;
         std::size_t write_pos = 0;
+        // End offset of bytes already accounted for by a rejected candidate.
+        // Resync still searches inside that region for a recoverable frame,
+        // but discarding its remainder is not another garbage error. This
+        // survives Compact()/Feed() so splitting a bad frame cannot double-count it.
+        std::size_t error_covered_until = 0;
 
-        // Garbage resyncs four bytes at a time: log the first error per burst and then a periodic
-        // summary; the callback still fires for every error so the counters stay exact
+        // Log the first error per burst and then a periodic summary. The
+        // callback counts rejected candidates and unaccounted garbage spans,
+        // not a known number of lost device scans.
         std::uint64_t consecutive_framing_errors = 0;
         std::chrono::steady_clock::time_point last_framing_log{};
 
@@ -52,6 +58,14 @@ namespace lms4xxx {
                 last_framing_log = now;
                 g_log.Warn("[{}] {} ({}); resynchronising — {} consecutive framing error(s)", tag, detail, what,
                            consecutive_framing_errors);
+            }
+        }
+
+        void ReportGarbage(std::size_t begin, std::size_t end, const char *what) {
+            const auto unaccounted_begin = std::max(begin, error_covered_until);
+            if (end > unaccounted_begin) {
+                ReportFramingError(FrameReceiver::FrameError::kGarbage, what,
+                                   fmt::format("{} byte(s) discarded", end - unaccounted_begin));
             }
         }
 
@@ -81,6 +95,7 @@ namespace lms4xxx {
             if (offset == 0) {
                 return;
             }
+            error_covered_until = error_covered_until > offset ? error_covered_until - offset : 0;
             if (offset >= write_pos) {
                 write_pos = 0;
                 return;
@@ -101,11 +116,17 @@ namespace lms4xxx {
             std::uint32_t data_len = common::ByteUtil::LoadBigU32(buffer.data() + pos + kStxSize);
 
             if (data_len == 0 || data_len > max_frame_size) {
+                // An out-of-range length cannot justify skipping its claimed
+                // payload. Only its header is known; for length zero the sole
+                // remaining byte is the empty telegram's checksum.
+                const auto rejected_end = pos + kHeaderSize + (data_len == 0 ? 1u : 0u);
+                error_covered_until = std::max(error_covered_until, rejected_end);
                 ReportFramingError(FrameReceiver::FrameError::kLengthOutOfRange,
                                      "frame data length out of range",
                                      fmt::format("length {} not in 1..{}", data_len, max_frame_size));
-                // Resync past this STX
-                return kStxSize;
+                // STX can overlap this candidate (e.g. one stray 0x02 before
+                // a valid frame). Skipping all four bytes would lose it.
+                return 1;
             }
 
             std::size_t total_frame_size = kHeaderSize + data_len + 1;
@@ -120,15 +141,16 @@ namespace lms4xxx {
             std::uint8_t computed_cs = ColaBCodec::ComputeChecksum(data_start, data_len);
 
             if (computed_cs != received_cs) {
+                error_covered_until = std::max(error_covered_until, pos + total_frame_size);
                 // The manual calls this "CRC8" (p.66) but specifies XOR; the
                 // name is kept because the GUI statistics field is crc=.
                 ReportFramingError(FrameReceiver::FrameError::kChecksumMismatch, "checksum mismatch",
                                      fmt::format("computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs));
-                // Resync past this STX
-                return kStxSize;
+                return 1; // search every possible STX without charging its tail again
             }
 
             consecutive_framing_errors = 0; // a good frame ends the burst
+            error_covered_until = 0;
 
             RawFrame frame;
             frame.data.assign(data_start, data_start + data_len);
@@ -180,10 +202,7 @@ namespace lms4xxx {
                 // into a frame that was already delivered
                 if (impl_->write_pos > 3) {
                     const auto keep_from = std::max(scan_pos, impl_->write_pos - 3);
-                    if (keep_from > scan_pos) {
-                        impl_->ReportFramingError(FrameReceiver::FrameError::kGarbage, "no STX in received bytes",
-                                                  fmt::format("{} byte(s) discarded", keep_from - scan_pos));
-                    }
+                    impl_->ReportGarbage(scan_pos, keep_from, "no STX in received bytes");
                     scan_pos = keep_from;
                 }
                 break;
@@ -191,8 +210,7 @@ namespace lms4xxx {
 
             if (stx_pos > scan_pos) {
                 // Bytes between frames are not CoLa B: count them so a garbage stream trips the fault
-                impl_->ReportFramingError(FrameReceiver::FrameError::kGarbage, "bytes skipped before STX",
-                                            fmt::format("{} byte(s) discarded", stx_pos - scan_pos));
+                impl_->ReportGarbage(scan_pos, stx_pos, "bytes skipped before STX");
                 scan_pos = stx_pos;
             }
 

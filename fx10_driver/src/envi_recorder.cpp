@@ -155,7 +155,116 @@ namespace fx10 {
         // a failed start leaves no half-initialized state
         started_ = true;
         stopped_ = false;
+        StartFlusher();
         g_log.Info("[Writer] Recording to {}", session_dir_.string());
+    }
+
+
+    // --- periodic durability, off the acquisition thread ------------------------
+
+    void EnviRecorder::StartFlusher() {
+        if (config_.flush_interval_mb == 0 || flusher_.joinable()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(flush_mu_);
+            flusher_stop_ = false;
+        }
+        flusher_ = std::thread([this] { FlushLoop(); });
+    }
+
+
+    void EnviRecorder::StopFlusher() {
+        if (!flusher_.joinable()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(flush_mu_);
+            flusher_stop_ = true;
+        }
+        flush_cv_.notify_all();
+        flusher_.join(); // the loop drains what is queued before it exits
+    }
+
+
+    void EnviRecorder::DrainFlusher() {
+        if (!flusher_.joinable()) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(flush_mu_);
+        flush_cv_.wait(lock, [this] { return flush_queue_.empty() && flush_in_progress_ == 0; });
+    }
+
+
+    void EnviRecorder::RequestFlush() {
+        if (!flusher_.joinable()) {
+            return; // flush_interval_mb == 0 never gets here; a missing thread means Start() did not run
+        }
+        // Dup'd descriptors: fdatasync acts on the file, so the flusher can sync
+        // (and close its copies) even after this segment rotated away.
+        FlushRequest request{::dup(data_fd_), ::dup(index_fd_)};
+        if (request.data_fd < 0 || request.index_fd < 0) {
+            const int err = errno;
+            if (request.data_fd >= 0) ::close(request.data_fd);
+            if (request.index_fd >= 0) ::close(request.index_fd);
+            flush_errors_.fetch_add(1, std::memory_order_relaxed);
+            g_log.Warn("[Writer] Cannot dup descriptors for the periodic flush: {}", std::strerror(err));
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(flush_mu_);
+            flush_queue_.push_back(request);
+        }
+        flush_cv_.notify_one();
+    }
+
+
+    void EnviRecorder::FoldFlushErrors() {
+        const std::uint64_t total = flush_errors_.load(std::memory_order_acquire);
+        if (total > flush_errors_folded_) {
+            counters_.write_errors += total - flush_errors_folded_;
+            flush_errors_folded_ = total;
+        }
+    }
+
+
+    void EnviRecorder::FlushLoop() {
+        for (;;) {
+            FlushRequest request{};
+            {
+                std::unique_lock<std::mutex> lock(flush_mu_);
+                flush_cv_.wait(lock, [this] { return flusher_stop_ || !flush_queue_.empty(); });
+                if (flush_queue_.empty()) {
+                    return; // stop requested and nothing left to sync
+                }
+                request = flush_queue_.front();
+                flush_queue_.pop_front();
+                ++flush_in_progress_;
+            }
+            bool ok = true;
+            int err = 0;
+            if (Sync(request.data_fd) != 0) {
+                ok = false;
+                err = errno;
+            }
+            if (Sync(request.index_fd) != 0) {
+                ok = false;
+                err = errno;
+            }
+            ::close(request.data_fd);
+            ::close(request.index_fd);
+            if (!ok) {
+                // Not fatal: the data is in the page cache and the next flush or
+                // the segment finalize will try again.
+                flush_errors_.fetch_add(1, std::memory_order_release);
+                g_log.Warn("[Writer] Periodic fdatasync failed: {}", std::strerror(err));
+            }
+            {
+                std::lock_guard<std::mutex> lock(flush_mu_);
+                --flush_in_progress_;
+            }
+            flush_cv_.notify_all(); // DrainFlusher waiters
+        }
     }
 
 
@@ -209,6 +318,7 @@ namespace fx10 {
             if (frame.data == nullptr || frame.size != line_bytes_ || frame.width != init_.samples || frame.height != init_.bands || frame.
                 bytes_per_pixel != init_.bytes_per_pixel) {
                 ++counters_.size_mismatch_drops;
+                loss_seen_.store(true, std::memory_order_release);
                 OnRejected(frame.block_id, "layout-error");
                 g_log.Warn(
                     "[Writer] Dropping frame block_id={} with unexpected geometry {}x{}x{} ({} B, expected {} B)",
@@ -244,6 +354,7 @@ namespace fx10 {
         try {
             ++counters_.blockid_gap_events;
             counters_.frames_missed_rx += missing_count;
+            loss_seen_.store(true, std::memory_order_release);
             g_log.Warn("[Writer] BlockID gap: {} frame(s) missing starting at block_id={}", missing_count,
                        first_missing_block_id);
             if (!WriteIndex("gap", first_missing_block_id, missing_count)) {
@@ -276,6 +387,7 @@ namespace fx10 {
 
     void EnviRecorder::OnRejected(std::uint64_t block_id, const char *reason) {
         if (!started_ || stopped_ || failed_) return;
+        loss_seen_.store(true, std::memory_order_release);
         try {
             WriteIndex(reason, block_id, 1);
         } catch (const std::exception &e) {
@@ -318,16 +430,14 @@ namespace fx10 {
         ++lines_this_segment_;
         ++global_line_index_;
         data_bytes_this_segment_ += line_bytes_;
-        // Bound the loss on a power cut (a segment without its .hdr is invalid as a whole)
+        // Bound the loss on a power cut (a segment without its .hdr is invalid as a
+        // whole). The fdatasync itself runs on the flusher thread: the acquisition
+        // thread must never wait on the disk.
         const std::uint64_t flush_bytes = static_cast<std::uint64_t>(config_.flush_interval_mb) * 1024ull * 1024ull;
         if (flush_bytes > 0 && data_bytes_this_segment_ - last_flush_bytes_ >= flush_bytes) {
             last_flush_bytes_ = data_bytes_this_segment_;
-            if (data_fd_ >= 0 && (Sync(data_fd_) != 0 || Sync(index_fd_) != 0)) {
-                // Not fatal: the data is in the page cache and the next flush or
-                // the segment finalize will try again.
-                ++counters_.write_errors;
-                g_log.Warn("[Writer] Periodic fdatasync failed on '{}': {}", data_part_path_.string(),
-                           std::strerror(errno));
+            if (data_fd_ >= 0) {
+                RequestFlush();
             }
         }
         // The line itself is on disk; a failure inside rotation (reopening the next
@@ -435,6 +545,11 @@ namespace fx10 {
             RemoveEmptySegment();
             return;
         }
+
+        // Every queued periodic flush of this segment completes before the final
+        // one, and its failures reach the ledger here (single-writer rule).
+        DrainFlusher();
+        FoldFlushErrors();
 
         // Cut the file back to the last complete line on the error path, then make
         // the data durable
@@ -563,6 +678,7 @@ namespace fx10 {
         }
         stopped_ = true;
         FinalizeSegment();
+        StopFlusher();
         g_log.Info("[Writer] Session stopped ({}): status={} frames_written={} bytes_written={} segments={}",
                    reason.empty() ? "unspecified" : reason,
                    failed_ ? "FAILED" : ToString(Classify(counters_)),

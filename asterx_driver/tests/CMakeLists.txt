@@ -6,6 +6,7 @@ set(ASTERX_TEST_SOURCES
         test_commands.cpp
         test_sbf_live_recorder.cpp
         test_sbf_parsers.cpp
+        test_sbf_write_queue.cpp
         test_sbf_writer.cpp
         test_session.cpp
         test_warmup_gate.cpp

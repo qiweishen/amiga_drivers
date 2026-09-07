@@ -29,8 +29,11 @@ namespace gox {
     constexpr double kThermalLimitC = 72.0;
     constexpr double kThermalRearmC = 67.0;
 
-    // Assumed grandmaster timescale (the manual, p.121, only states a 1970-01-01 origin)
-    constexpr int64_t kAssumedTaiUtcOffsetS = 37;
+    // What device.json says about the PTP timescale. The manual (p.121) only states a 1970-01-01
+    // origin; the grandmaster's timescale is a rig property the driver does not verify (no host
+    // clock is consulted on this platform)
+    constexpr const char *kPtpTimescaleNote =
+            "not verified by the driver (rig: AsteRx RBi3 Pro+ PTP server, GPS timescale per configuration)";
 
     // --- Applied writes -------------------------------------------------------
     // One entry per FeatureWrite the apply plan carried out, in plan order.
@@ -110,11 +113,6 @@ namespace gox {
         std::string status; // last GevIEEE1588Status text
         int64_t accuracy = -1; // last GevIEEE1588ClockAccuracy, -1 = never read
         uint64_t lock_wait_ms = 0;
-        bool have_offset = false;
-        int64_t raw_offset_ns = 0; // host CLOCK_REALTIME - device timestamp
-        int64_t adjusted_offset_ns = 0; // raw, with the TAI-UTC assumption removed
-        int64_t drift_ns = 0; // adjusted - first adjusted offset
-        bool tai_detected = false;
     };
 
     // What the driver resolved at runtime ("auto" values in the config)
@@ -161,7 +159,6 @@ namespace gox {
         std::optional<int64_t> pause_rx; // aPAUSEMACCtrlFramesReceived (p.130)
         std::optional<std::string> ptp_status;
         std::optional<int64_t> ptp_accuracy;
-        std::optional<int64_t> ptp_offset_ns;
     };
 
     // One JSONL row, without the trailing newline.

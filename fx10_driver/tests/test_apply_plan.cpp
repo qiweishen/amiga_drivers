@@ -240,6 +240,17 @@ TEST_CASE("plan: raw features come last, in order, with their own type") {
     }
 }
 
+TEST_CASE("plan: a direct LineSource write keeps validation without inventing a selector") {
+    const std::vector<RawFeature> raw = {{"LineSource", "enum", "ExposureActive", 0, 0.0, false}};
+    const auto plan = BuildApplyPlan(AcquisitionConfig{}, raw);
+    CHECK(IndexOf(plan, "LineSelector") == -1);
+    REQUIRE(CountOf(plan, "LineSource") == 1);
+    CHECK(plan.back().node == "LineSource");
+    CHECK(plan.back().kind == WriteKind::kEnum);
+    CHECK(plan.back().text == "ExposureActive");
+    CHECK(plan.back().required); // a missing LineSource still fails during SDK application
+}
+
 TEST_CASE("plan: every structured write is strict and required except the counter") {
     AcquisitionConfig acq;
     acq.trigger.mode = TriggerMode::kExternal;

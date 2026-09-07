@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string>
@@ -16,6 +17,11 @@ namespace common {
         };
 
         void Init(const Config &config, const std::string &logger_name = "AmigaDriver");
+
+        // Console (stderr) messages dropped because the pipe reader did not keep up.
+        // Only ever non-zero when stderr is not a terminal (nonblocking_stderr_sink.h);
+        // the file log is always complete
+        std::uint64_t ConsoleLinesDropped();
     } // namespace Logger
 
 

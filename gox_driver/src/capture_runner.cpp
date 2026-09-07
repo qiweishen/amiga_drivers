@@ -104,9 +104,7 @@ namespace gox {
         // max_duration_s measures CAPTURE time
         capture_start_mono_ = common::TimeUtil::MonotonicNowNs();
         const double stats_interval_s = cfg_.stats_interval_s;
-        const double offset_interval_s = cfg_.ptp.offset_report_interval_s;
         uint64_t last_stats_mono = capture_start_mono_;
-        uint64_t last_offset_mono = capture_start_mono_;
         uint64_t last_device_poll_mono = capture_start_mono_;
         while (!stop_->StopRequested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -131,11 +129,23 @@ namespace gox {
                     g_log.Info("{}", s->Reporter().PeriodicLine(actual, uptime_s));
                 }
             }
-            if (offset_interval_s > 0 && static_cast<double>(now_mono - last_offset_mono) >= offset_interval_s * 1e9) {
-                last_offset_mono = now_mono;
-                for (auto &s: sessions_) {
-                    s->RefreshPtpOffset();
+            // Fail-fast: the first dropped, lost or incomplete frame ends the whole
+            // rig now rather than marking the session failed at the end - an
+            // incomplete recording is worthless and the operator restarts at once.
+            // Stream-layer counters live in the SDK, so refresh them first.
+            bool loss = false;
+            for (auto &s: sessions_) {
+                s->PollStreamStats();
+                if (const std::string what = s->FirstLossDescription(); !what.empty()) {
+                    last_error_ = "[" + s->id() + "] first data-loss event: " + what;
+                    g_log.Error("{} - stopping the rig (fail-fast: the recording would be incomplete)", last_error_);
+                    stop_->RequestStop(StopReason::kError);
+                    loss = true;
+                    break;
                 }
+            }
+            if (loss) {
+                break;
             }
             // Device poll. Two jobs on one tick, guard first so the telemetry
             // row carries the status the guard just read:
@@ -144,8 +154,9 @@ namespace gox {
             //     traceable to the grandmaster and the recording is no longer
             //     what it claims.
             //  2. telemetry.jsonl - temperatures, Counter0, PAUSE frames.
-            // The ptp.enabled gate sits on the guard call, not on the tick: the
-            // shipped configuration has PTP off, and telemetry must still run.
+            // The ptp.enabled gate sits on the guard call, not on the tick:
+            // ptp.enabled=false is a warned configuration (no absolute time), and
+            // telemetry must still run under it.
             if (static_cast<double>(now_mono - last_device_poll_mono) >= kDevicePollIntervalS * 1e9) {
                 last_device_poll_mono = now_mono;
                 for (auto &s: sessions_) {

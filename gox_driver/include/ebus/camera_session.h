@@ -69,7 +69,9 @@ namespace gox::ebus {
         // Main-thread periodic hooks.
         void PollStreamStats();
 
-        void RefreshPtpOffset();
+        // Fail-fast: the first non-zero loss counter, named, or "" while the capture is clean.
+        // Reads the atomics only; call after PollStreamStats() so SDK-level drops are included
+        std::string FirstLossDescription() const;
 
         // PTP guard (PtpManager::CheckHealth). False = synchronization was lost
         // and the session must stop. True when PTP is off or still healthy.

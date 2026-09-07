@@ -174,13 +174,13 @@ directory and before `AcquisitionStart`):
 | `derived` | `exposure_time_us` read back, `exposure_offset_us` = 2.45 (p.38/p.171 — note p.164's chunk formula prints 2 µs), their sum, the black-level strings verbatim from p.172 with the 12-bit figure flagged `derived_by_driver`, and the thermal limit |
 | `transport` | `PayloadSize`, `GevSCPSPacketSize`, `GevSCPD`, the throughput margin and the frame rate, with the frame rate's node min/max |
 | `runtime` | what "auto" resolved to: buffer count, queue frames, socket RX requested vs effective, negotiated packet size, whether Counter0 bound |
-| `ptp` | enable result, lock time, last status/accuracy, and the timestamp cross-check as **both** `raw_offset_ns` and `adjusted_offset_ns`, with `assumed_tai_utc_offset_s: 37` marked `driver_assumption: true` — p.121 only documents a 1 ns count with a 1970 origin, not the grandmaster's timescale |
+| `ptp` | enable result, lock time, last status/accuracy, and a `timescale` note: the grandmaster's timescale is a rig property the driver does not verify (p.121 only documents a 1 ns count with a 1970 origin), and no host clock is consulted to guess it |
 
 `<cam>/telemetry.jsonl`, one JSON object per device-poll tick (5 s) plus a
 first and a last row: `hrt` (host CLOCK_REALTIME ns, the same key `idx.jsonl`
 uses), the three `DeviceTemperature` readings (p.125), `trig`/`trig_overflow`
 (Counter0), `pause_rx` (`aPAUSEMACCtrlFramesReceived`, p.130) and the PTP
-status/accuracy/offset the guard read on the same tick. Unavailable values are
+status/accuracy the guard read on the same tick. Unavailable values are
 `null`; the row shape never changes. p.173 caution: the internal temperature
 must stay below 72 °C, and about 30 min of warm-up is needed for the specified
 performance — an excursion warns once (re-armed at 67 °C) and never stops the
@@ -204,6 +204,19 @@ The GO-X is a slave-only PTP node with exactly one feature pair,
 driver targets those two names directly. Time synchronization is performed but
 **no frequency tuning**, and the timestamp tick frequency is fixed at 1 GHz
 (p.121).
+
+PTP is the camera's **only** absolute time: no host time is used as a time
+source anywhere on this platform (the host clock is not trusted), so the
+shipped configuration enables it and `ptp.enabled: false` is a warned
+configuration — the frames then carry free-running ticks that cannot be
+associated with anything offline. The grandmaster is the AsteRx RBi3 Pro+
+(its own address, GPS timescale per the rig configuration); the driver records
+that as an unverified note in `device.json` rather than measuring it against
+the host clock (the former host/device cross-check and its 37 s TAI
+assumption are gone). Prerequisite, not verified on hardware: the grandmaster
+must share the camera's L2 domain — PTP multicast does not cross subnets, and
+with one host NIC per device subnet that means a common switch or host-side
+bridging.
 
 While synchronized, the capture loop calls `PtpManager::check_health()` on the
 **5 s device-poll tick** (`kDevicePollIntervalS` in `src/capture_runner.cpp`,
@@ -232,6 +245,21 @@ failure: the accuracy half of the guard simply never runs and every recorded
 > slaved, the guard will trip right after the first sync — in that case either
 > the threshold or the guard's scope needs revisiting against the observed
 > values.
+
+## Fail-fast and on-disk residue
+
+* Every counter that would make the session's final verdict "not clean"
+  (queue overflow, BlockID gap, incomplete frame, buffer error, stream-layer
+  block drop) is checked on the 200 ms monitor tick, and the first non-zero
+  one stops the whole rig at once. An incomplete recording is worthless to the
+  platform; the operator restarts immediately instead of discovering the loss
+  at the end.
+* `Recorder` preallocates each segment (`fallocate`, 2 GiB, `KEEP_SIZE`) and
+  releases the unused tail with `ftruncate` when the segment closes. After a
+  crash (kill -9, power cut) the last segment of every camera can keep up to
+  2 GiB of preallocated-but-unused blocks: `ls -l` shows the written size while
+  `du` shows the allocation. The data is intact; the space is reclaimed when
+  the file is rewritten or removed.
 
 ## Not done, and why
 

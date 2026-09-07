@@ -19,12 +19,6 @@ namespace fx10 {
         std::string ip; // direct connect; used when mac is empty
     };
 
-    struct ReconnectConfig {
-        bool enabled = true;
-        int max_attempts = 5;
-        int backoff_ms = 2000;
-    };
-
     struct NetworkConfig {
         int packet_size = 0; // 0 = NegotiatePacketSize
         int socket_rx_buffer_mb = 32; // PvStreamGEV::SetUserModeSocketRxBufferSize
@@ -32,7 +26,6 @@ namespace fx10 {
         double stall_budget_s = 2.0; // disk-stall absorption target for auto sizing
         int max_buffer_memory_mb = 512; // clamp for the auto-sized pool
         int retrieve_timeout_ms = 1000;
-        ReconnectConfig reconnect;
     };
 
     enum class TriggerMode { kExternal, kFreerun };

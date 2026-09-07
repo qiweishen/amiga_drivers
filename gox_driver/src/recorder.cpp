@@ -27,13 +27,15 @@ namespace gox {
         // the common case; larger pads loop).
         const uint8_t kZeros[4096] = {};
 
+
         [[noreturn]] void throw_errno(const std::string &what) {
             throw IoError(what + ": " + std::strerror(errno));
         }
 
+
         void WriteAll(int fd, const void *data, size_t size, const char *what,
                       const Recorder::IndexWriteHook &hook = {}) {
-            const uint8_t *p = static_cast<const uint8_t *>(data);
+            const auto *p = static_cast<const uint8_t *>(data);
             while (size > 0) {
                 ssize_t n = hook ? hook(fd, p, size) : ::write(fd, p, size);
                 if (n < 0) {
@@ -52,8 +54,10 @@ namespace gox {
         }
     } // namespace
 
+
     Recorder::Recorder(RecorderOptions opts, CameraStats *stats) : opts_(std::move(opts)), stats_(stats) {
     }
+
 
     Recorder::~Recorder() {
         try {
@@ -62,6 +66,7 @@ namespace gox {
             g_log.Error("[{}] [Writer] close failed in destructor: {}", opts_.camera_id, e.what());
         }
     }
+
 
     void Recorder::Open() {
         if (opened_) {
@@ -86,6 +91,7 @@ namespace gox {
         opened_ = true;
         OpenSegment();
     }
+
 
     void Recorder::OpenSegment() {
         ++segment_index_;
@@ -155,8 +161,9 @@ namespace gox {
         if (stats_) {
             stats_->segments_created.fetch_add(1, std::memory_order_relaxed);
         }
-        g_log.Debug("[{}] [Writer] opened segment {}", opts_.camera_id, seg_path);
+        g_log.Trace("[{}] [Writer] opened segment {}", opts_.camera_id, seg_path);
     }
+
 
     void Recorder::WriteFrame(const FrameMeta &meta, const uint8_t *data, size_t size) {
         if (!opened_ || closed_) {
@@ -276,7 +283,8 @@ namespace gox {
         }
     }
 
-    void Recorder::WriteIovAll(const struct iovec *iov, int iovcnt, size_t total) {
+
+    void Recorder::WriteIovAll(const struct iovec *iov, int iovcnt, size_t total) const {
         struct iovec local[3];
         for (int i = 0; i < iovcnt; ++i) {
             local[i] = iov[i];
@@ -311,7 +319,8 @@ namespace gox {
         }
     }
 
-    void Recorder::FlushIndex(bool force) {
+
+    void Recorder::FlushIndex(const bool force) {
         bool due = force || idx_buf_.size() >= kIdxBufFlushBytes || idx_frames_pending_ >= kIdxFlushFrames;
         if (!due) {
             uint64_t now = common::TimeUtil::MonotonicNowNs();
@@ -336,7 +345,8 @@ namespace gox {
         idx_last_flush_mono_ns_ = common::TimeUtil::MonotonicNowNs();
     }
 
-    void Recorder::AppendSegmentSummary(bool clean) {
+
+    void Recorder::AppendSegmentSummary(bool clean) const {
         char name[32];
         snprintf(name, sizeof(name), "seg_%05u.raw", segment_index_);
         char line[512];
@@ -355,6 +365,7 @@ namespace gox {
             throw IoError("segment summary serialization failed");
         }
     }
+
 
     void Recorder::CloseSegment(bool clean) {
         if (seg_fd_ < 0) {
@@ -390,6 +401,7 @@ namespace gox {
             throw_errno("fdatasync segments.jsonl");
         }
     }
+
 
     void Recorder::close(bool clean) {
         if (!opened_ || closed_) {

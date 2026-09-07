@@ -23,10 +23,10 @@ public:
     void Shutdown() override;
 
     // Silence since the last frame the transport delivered, for Main's no-data
-    // watchdog. nullopt while no session is Streaming (bring-up, the delay
-    // between reconnect attempts, teardown) and for the whole session under an
-    // external trigger not controlled by this process. SensorSync-commanded
-    // periodic pulses are covered by the watchdog as well.
+    // watchdog. nullopt while no session is Streaming (bring-up, teardown) and
+    // for the whole session under an external trigger not controlled by this
+    // process. SensorSync-commanded periodic pulses are covered by the watchdog
+    // as well.
     std::optional<std::uint64_t> MicrosSinceLastData() const override;
 
 private:
@@ -39,8 +39,6 @@ private:
     void MonitorLoop(); // 200 ms stop-condition poll + periodic stats
     void TeardownSession(); // stop -> classify -> finalize -> disconnect
     bool StopRequested() const;
-
-    void SleepInterruptible(int total_ms) const; // 100 ms slices, aborts on StopRequested()
 
     std::filesystem::path config_path_;
     std::filesystem::path data_folder_path_;
