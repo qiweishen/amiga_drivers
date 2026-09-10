@@ -3,7 +3,6 @@
 #include <sys/stat.h>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
 
 #include "log_growth_tracker.h"
 #include "logger.h"
@@ -52,12 +51,17 @@ namespace fx10 {
 
 
     void SensorTriggerLog::Open() {
-        if (!impl_->session.open(port_.c_str())) {
-            const int err = impl_->session.lastErrno();
-            throw TriggerLogError(fmt::format("[TriggerLog] Cannot open sensor trigger port '{}': {} (errno {}){}",
-                                              port_, std::strerror(err), err, OpenErrnoHint(err)));
+        const bool opened = impl_->session.open(port_.c_str());
+        if (!impl_->session.startupLog().empty()) {
+            g_log.Info("[TriggerLog] Pre-session serial synchronization (not capture data):\n{}",
+                       impl_->session.startupLog());
         }
-        g_log.Info("[TriggerLog] Sensor trigger port '{}' open", port_);
+        if (!opened) {
+            const int err = impl_->session.lastErrno();
+            throw TriggerLogError(fmt::format("[TriggerLog] Cannot prepare sensor trigger port '{}': {} (errno {}){}",
+                                              port_, impl_->session.lastError(), err, OpenErrnoHint(err)));
+        }
+        g_log.Info("[TriggerLog] Sensor trigger port '{}' open; startup synchronization confirmed idle", port_);
     }
 
 
@@ -67,8 +71,8 @@ namespace fx10 {
             throw TriggerLogError("[TriggerLog] Trigger log session already running");
         }
         if (!impl_->session.start(log_path.string(), channel_freqs_hz)) {
-            throw TriggerLogError("[TriggerLog] Cannot start the trigger log session (failed to create '" +
-                                  log_path.string() + "' or to command the board)");
+            throw TriggerLogError(fmt::format("[TriggerLog] Cannot start the trigger log session '{}': {}",
+                                              log_path.string(), impl_->session.lastError()));
         }
         log_path_ = log_path;
         // Seed the stall baseline unconditionally, so a transient stat failure

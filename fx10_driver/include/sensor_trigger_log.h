@@ -31,7 +31,9 @@ namespace fx10 {
 
         SensorTriggerLog &operator=(const SensorTriggerLog &) = delete;
 
-        // Open + configure the serial port (raw 115200 8N1). Throws TriggerLogError.
+        // Open + configure raw 115200 8N1, resynchronize command framing, send
+        // STOP and confirm idle. Call before arming the camera, with exclusive
+        // control of the board. Throws TriggerLogError; logs startup diagnostics.
         void Open();
 
         // Begin a board session: counters restart from 0 and the event stream is
@@ -39,7 +41,7 @@ namespace fx10 {
         // for this Run ({ch, hz}; hz <= 0 switches the channel off, omitted
         // channels keep their config.h rates; the board requires hz >= 1 and
         // echoes the EFFECTIVE rates in the log's #TRIG header). The rates ride
-        // inside the START command, so a watchdog re-START restores them.
+        // inside the START command. A failure ends the session; no automatic restart.
         // Throws TriggerLogError.
         void Start(const std::filesystem::path &log_path,
                    const std::vector<std::pair<int, double> > &channel_freqs_hz = {});

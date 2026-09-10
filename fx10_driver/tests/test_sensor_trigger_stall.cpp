@@ -14,6 +14,55 @@
 using fx10::LogGrowthTracker;
 using Clock = LogGrowthTracker::Clock;
 
+TEST_CASE("SensorSyncStartupProtocol: FreshBarrierThenIdleSeparatesOldReplies") {
+    SensorSyncStartupProtocol p{"#ERR,unknown_command,fresh-token", "#ERR,unknown_command,fresh-token_DONE"};
+    for (const char *old : {"#ERR,unknown_command,# SensorSync-logg", "#IDLE,up=1",
+                            "#SESSION,STOP,previous-run", "#ERR,unknown_command,old-token"}) {
+        p.observe(old);
+        CHECK_FALSE(p.barrier_received);
+        CHECK_FALSE(p.idle_received);
+        CHECK_FALSE(p.failed);
+    }
+    p.observe("#ERR,unknown_command,fresh-token");
+    CHECK(p.barrier_received);
+    CHECK_FALSE(p.idle_received);
+    p.observe(""); // CRLF separators are harmless
+    p.observe("#IDLE,up=1726292");
+    CHECK(p.idle_received);
+    CHECK_FALSE(p.completed);
+    p.observe("#ERR,unknown_command,fresh-token_DONE");
+    CHECK(p.completed);
+    CHECK_FALSE(p.failed);
+}
+
+TEST_CASE("SensorSyncStartupProtocol: BarrierDoesNotMaskNonIdleOrMalformedReplies") {
+    for (const char *reply : {"#IDLE,up=", "#IDLE,up=-1", "#IDLE,up=1junk",
+                              "#IDLE,up=18446744073709551616", "#H up=1 en=1",
+                              "#SESSION,START,unexpected", "#ERR,bad_freq,0:50",
+                              "#ERR,unknown_command,fresh-token"}) {
+        SensorSyncStartupProtocol p{"#ERR,unknown_command,fresh-token", "#ERR,unknown_command,fresh-token_DONE"};
+        p.observe("#ERR,unknown_command,fresh-token");
+        p.observe(reply);
+        CHECK(p.failed);
+        CHECK_FALSE(p.idle_received);
+    }
+}
+
+TEST_CASE("SensorSyncStartupProtocol: CompletionRequiresIdleAndCannotRepeat") {
+    SensorSyncStartupProtocol missing_idle{"#ERR,unknown_command,begin", "#ERR,unknown_command,end"};
+    missing_idle.observe("#ERR,unknown_command,begin");
+    missing_idle.observe("#ERR,unknown_command,end");
+    CHECK(missing_idle.failed);
+    CHECK_FALSE(missing_idle.completed);
+
+    SensorSyncStartupProtocol repeated{"#ERR,unknown_command,begin", "#ERR,unknown_command,end"};
+    repeated.observe("#ERR,unknown_command,begin");
+    repeated.observe("#IDLE,up=2");
+    repeated.observe("#ERR,unknown_command,end");
+    repeated.observe("#ERR,unknown_command,end");
+    CHECK(repeated.failed);
+}
+
 TEST_CASE("SensorSyncProtocol: StartStopErrorsRestartsAndLossAreDistinguished") {
     SensorSyncProtocol p;
     p.observe("#SESSION,START,run", false);
