@@ -162,10 +162,10 @@ namespace {
                 CheckCancelled();
                 const double hz = cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal
                                     ? cfg.acquisition.frame_rate_hz : 0.0;
-                // The bundled SensorSync host protocol supports channels 0..3.
-                // A reference operation must not start pulses for other cameras.
-                std::vector<std::pair<int, double>> rates{{0, 0}, {1, 0}, {2, 0}, {3, 0}};
-                rates.at(static_cast<std::size_t>(cfg.sensor_trigger.trigger_channel)).second = hz;
+                // Protocol v2 couples each pair. Disable the other PWM group;
+                // the selected output's partner necessarily pulses with it.
+                std::vector<std::pair<int, double>> rates{{0, 0}, {2, 0}};
+                rates.at(static_cast<std::size_t>(cfg.sensor_trigger.trigger_channel / 2)).second = hz;
                 trigger->Start(recorder.SessionDir() / "sensor_trigger.log", rates);
             }
             // A steady-clock interval, not an estimated frame count. Setup and finalization are

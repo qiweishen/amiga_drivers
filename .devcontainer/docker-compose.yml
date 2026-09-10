@@ -58,12 +58,12 @@ services:
             # Software rendering (set 0 for GPU acceleration)
             LIBGL_ALWAYS_SOFTWARE: 1
 
-        devices:
-            # Teensy trigger board
-            - /dev/ttyACM0:/dev/ttyACM0
-
-        group_add:
-            - "20" # dialout
+#        devices:
+#            # Teensy trigger board
+#            - /dev/ttyACM0:/dev/ttyACM0
+#
+#        group_add:
+#            - "20" # dialout
 
         volumes:
             - ..:/workspace

@@ -83,7 +83,8 @@ namespace fx10 {
         started_ = true;
         std::string rates;
         for (const auto &[ch, hz]: channel_freqs_hz) {
-            rates += fmt::format("{}trig[{}]={}", rates.empty() ? "" : ", ", ch,
+            rates += fmt::format("{}{}={}", rates.empty() ? "" : ", ",
+                                 ch < 2 ? "FX pair [0,1]" : "JAI pair [2,3]",
                                  hz > 0.0 ? fmt::format("{:g} Hz", hz) : "off");
         }
         g_log.Info("[TriggerLog] Trigger pulses running ({}); timing log recording to {}",

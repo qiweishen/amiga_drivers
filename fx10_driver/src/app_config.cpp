@@ -1,4 +1,5 @@
 #include "app_config.h"
+#include "trigger_groups.h"
 
 #include <cmath>
 #include <sstream>
@@ -90,15 +91,18 @@ namespace fx10 {
             const YAML::Node n = OptionalMap(root, "", "sensor_trigger", {"enabled", "port", "trigger_channel"});
             Read(n, "sensor_trigger", "enabled", st.enabled);
             Read(n, "sensor_trigger", "port", st.port);
-            ReadRange<int>(n, "sensor_trigger", "trigger_channel", 0, 64, st.trigger_channel);
+            ReadRange<int>(n, "sensor_trigger", "trigger_channel", 0, 3, st.trigger_channel);
             if (st.enabled && st.port.empty()) {
                 Fail("sensor_trigger.port", "is required when sensor_trigger.enabled "
                      "(a /dev/serial/by-id/... path survives USB re-enumeration)");
             }
-            // The board rejects sub-1-Hz rates (#ERR,bad_freq) and keeps pulsing at the previous rate
-            if (st.enabled && acq.trigger.mode == TriggerMode::kExternal && acq.frame_rate_hz < 1.0) {
-                Fail("acquisition.frame_rate_hz", "must be >= 1 when the sensor_trigger drives the external trigger "
-                     "(SensorSync board minimum)");
+            // Protocol v2 drives paired outputs: 0/1 = FX, 2/3 = JAI.
+            const auto group = static_cast<trigger::Group>(st.trigger_channel / 2);
+            if (st.enabled && acq.trigger.mode == TriggerMode::kExternal &&
+                !trigger::validRate(group, acq.frame_rate_hz)) {
+                Fail("acquisition.frame_rate_hz", group == trigger::Group::FX
+                    ? "must be >= 20 Hz for the SensorSync FX group (outputs 0/1)"
+                    : "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
             }
         }
 

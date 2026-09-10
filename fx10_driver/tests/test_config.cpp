@@ -250,9 +250,17 @@ TEST_CASE("config: sensor trigger") {
     CHECK_FALSE(LoadAppConfigText("sensor_trigger: { enabled: false }").sensor_trigger.enabled);
     CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: -1 }"),
                    "sensor_trigger.trigger_channel"));
-    // The board rejects sub-1-Hz rates, but only external mode drives it
+    // Group-specific v2 limits apply only when the board drives external pulses.
     CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 0.5 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0 }"),
-                   "acquisition.frame_rate_hz: must be >= 1"));
+                   "acquisition.frame_rate_hz: must be >= 20"));
+    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 4 }"),
+                   "sensor_trigger.trigger_channel"));
+    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 50 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 2 }"),
+                   "must be within [1, 10]"));
+    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 20 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 1 }")
+          .acquisition.frame_rate_hz == doctest::Approx(20));
+    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 5 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 3 }")
+          .acquisition.frame_rate_hz == doctest::Approx(5));
     const AppConfig freerun = LoadAppConfigText(
         "acquisition: { frame_rate_hz: 0.5, trigger: { mode: freerun } }\n"
         "sensor_trigger: { enabled: true, port: /dev/ttyACM0 }");

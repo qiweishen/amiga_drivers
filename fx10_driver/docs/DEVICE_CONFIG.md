@@ -219,9 +219,10 @@ with their original per-line timing observations, so the saved data do not asser
 an exact physical exposure span equal to the requested duration. Shutter write acknowledgement still
 does not verify position or settling; no undocumented wait is assumed.
 
-For external mode with SensorSync enabled, only the configured trigger channel
-is enabled (the bundled host protocol supports channels 0..3); other outputs
-are explicitly disabled for this operation. Pulses start after `AcquisitionStart`
+For external mode with SensorSync enabled, the configured channel's PWM pair
+is enabled: channels 0/1 share FX and channels 2/3 share JAI. Both outputs of that
+pair pulse together; the other pair is explicitly disabled for this operation.
+Pulses start after `AcquisitionStart`
 and stop before disarming the camera. In freerun all SensorSync trigger outputs
 are disabled while its timing log records observations. With SensorSync disabled,
 external mode needs the independently supplied trigger configured by the operator;

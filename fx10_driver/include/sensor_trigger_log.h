@@ -38,9 +38,10 @@ namespace fx10 {
 
         // Begin a board session: counters restart from 0 and the event stream is
         // captured into `log_path`. `channel_freqs_hz` retunes trigger channels
-        // for this Run ({ch, hz}; hz <= 0 switches the channel off, omitted
-        // channels keep their config.h rates; the board requires hz >= 1 and
-        // echoes the EFFECTIVE rates in the log's #TRIG header). The rates ride
+        // for this Run. Protocol v2 pairs 0/1 = FX (>=20 Hz), 2/3 = JAI (1..10 Hz).
+        // {ch, 0} disables its pair; omitted groups retain their previous rates.
+        // Conflicting rates within a pair fail. #GROUP/#TRIG record effective
+        // rates and #READY confirms hardware start. The rates ride
         // inside the START command. A failure ends the session; no automatic restart.
         // Throws TriggerLogError.
         void Start(const std::filesystem::path &log_path,

@@ -48,7 +48,7 @@ reference:
 sensor_trigger:
     enabled: true
     port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"    # required when enabled
-    trigger_channel: 0                  # >= 0; Teensy trig[N] wired to the camera
+    trigger_channel: 0                  # 0..3 physical ID; v2 drives 0/1 together (FX, >=20 Hz), 2/3 together (JAI, 1..10 Hz)
 
 
 # =============================================================

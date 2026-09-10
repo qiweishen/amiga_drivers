@@ -51,7 +51,7 @@ namespace fx10 {
     struct SensorTriggerConfig {
         bool enabled = false;
         std::string port; // /dev/serial/by-id/...; required when enabled
-        int trigger_channel = 0; // Teensy trig[N] wired to the camera
+        int trigger_channel = 0; // physical log ID; v2 pairs 0/1 = FX, 2/3 = JAI
     };
 
     struct AcquisitionConfig {

@@ -1,5 +1,6 @@
 #include "../include/log_growth_tracker.h"
 #include "../../3rd_party/External/sensor_trigger/session_protocol.h"
+#include "../../3rd_party/External/sensor_trigger/session_rates.h"
 
 #include <doctest/doctest.h>
 
@@ -13,6 +14,75 @@
 
 using fx10::LogGrowthTracker;
 using Clock = LogGrowthTracker::Clock;
+
+TEST_CASE("SensorSync rates: physical channels encode firmware v2 group names") {
+    std::string spec, error;
+    CHECK(sensorsync::BuildFrequencySpec({{0, 50}}, spec, error));
+    CHECK(spec == "FX:50");
+    CHECK(sensorsync::BuildFrequencySpec({{1, 25}, {3, 5}}, spec, error));
+    CHECK(spec == "FX:25,JAI:5");
+    CHECK(sensorsync::BuildFrequencySpec({{0, 50}, {1, 50}, {2, 0}, {3, 0}}, spec, error));
+    CHECK(spec == "FX:50,JAI:0");
+    trigger::Rates parsed;
+    CHECK(trigger::parseRates(spec.c_str(), parsed)); // actual firmware grammar
+    CHECK(parsed.hz[0] == 50);
+    CHECK(parsed.hz[1] == 0);
+    CHECK(sensorsync::BuildFrequencySpec({}, spec, error));
+    CHECK(spec.empty()); // retain groups, never emit an explicitly empty freq=
+}
+
+TEST_CASE("SensorSync rates: conflicts and invalid group ranges fail before START") {
+    std::string spec, error;
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{0, 50}, {1, 0}}, spec, error));
+    CHECK(error.find("conflicting") != std::string::npos);
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{2, 5}, {3, 7}}, spec, error));
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{0, 19}}, spec, error));
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{2, 11}}, spec, error));
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{4, 50}}, spec, error));
+    CHECK_FALSE(sensorsync::BuildFrequencySpec({{0, std::numeric_limits<double>::infinity()}}, spec, error));
+    CHECK(spec.empty());
+    const double hz = 50.12345678912345;
+    CHECK(sensorsync::BuildFrequencySpec({{0, hz}}, spec, error));
+    trigger::Rates decoded;
+    CHECK(trigger::parseRates(spec.c_str(), decoded));
+    CHECK(decoded.hz[0] == hz); // no %g six-digit narrowing of the requested rate
+}
+
+TEST_CASE("SensorSync v2: READY acknowledges hardware start and final counters match cuts") {
+    SensorSyncProtocol p;
+    p.observe("#SESSION,START,run", false);
+    p.observe("#LOG,SensorSync-logger,2,tick_hz=75000000", false);
+    CHECK_FALSE(p.ready);
+    p.observe("#READY", false);
+    CHECK(p.ready);
+    p.observe("#H ppsdrops=0 todtrunc=0 tdrops=0 sdrops=0 host=0 pwmerr=0 trunc=0", false);
+    p.observe("#TRUNC,0,1,75000000", true);
+    p.observe("#HFINAL ppsdrops=0 todtrunc=0 tdrops=0 sdrops=0 host=0 pwmerr=0 trunc=1", true);
+    p.observe("#SESSION,STOP,run", true);
+    CHECK(p.stop_received);
+    CHECK(p.truncations == 1);
+    CHECK_FALSE(p.failed);
+}
+
+TEST_CASE("SensorSync v2: PWM errors and incomplete stop audits fail") {
+    for (const char *bad : {"#READY", "#Ht 0 FX10 n=1 pwmerr=1",
+                           "#H ppsdrops=0 todtrunc=0 tdrops=0 sdrops=0 host=0 pwmerr=1",
+                           "#HFINAL ppsdrops=0 todtrunc=0 tdrops=0 sdrops=0 host=0 skip=0 stall=0",
+                           "#HFINAL ppsdrops=0 todtrunc=0 tdrops=0 sdrops=0 host=0 pwmerr=0 trunc=1",
+                           "#TRUNC,2,1,1", "#TRUNC,0,2,1", "#TRUNC,0,1,1,junk"}) {
+        SensorSyncProtocol p;
+        p.observe("#SESSION,START,run", false);
+        p.observe("#LOG,SensorSync-logger,2,tick_hz=75000000", false);
+        p.observe("#READY", false);
+        p.observe(bad, true);
+        CHECK(p.failed);
+    }
+    SensorSyncProtocol no_header;
+    no_header.observe("#SESSION,START,run", false);
+    no_header.observe("#READY", false);
+    CHECK(no_header.failed);
+    CHECK_FALSE(no_header.ready);
+}
 
 TEST_CASE("SensorSyncStartupProtocol: FreshBarrierThenIdleSeparatesOldReplies") {
     SensorSyncStartupProtocol p{"#ERR,unknown_command,fresh-token", "#ERR,unknown_command,fresh-token_DONE"};
