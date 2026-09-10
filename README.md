@@ -597,7 +597,7 @@ selection. Do not set `AMIGA_CONTROLLER_URL` on the controller itself.
 
 | Setting | Default / purpose |
 | --- | --- |
-| `AMIGA_GUI_HOST`, `AMIGA_GUI_PORT` | Bare GUI bind: `0.0.0.0:8619`; the quick-start example explicitly binds localhost. |
+| `AMIGA_GUI_HOST`, `AMIGA_GUI_PORT` | GUI and combined Compose default to `0.0.0.0:8619`, accepting connections through localhost, LAN and Tailscale IPv4 addresses. Set `AMIGA_GUI_HOST` to restrict the listening address. |
 | `AMIGA_CONTROLLER_HOST`, `AMIGA_CONTROLLER_PORT` | Standalone API bind: `127.0.0.1:8620`; production Compose overrides the host binding. |
 | `AMIGA_CONTROLLER_URL` | Unset: integrated mode. Set to the controller's base HTTP URL for remote mode. |
 | `AMIGA_CONTROLLER_TOKEN_FILE` | Existing shared secret file for controller and remote GUI; preferred over `AMIGA_CONTROLLER_TOKEN`. Token: 32–4096 printable ASCII characters without spaces. |
@@ -650,7 +650,8 @@ both services. `amiga-drivers-dev` retains the existing C++/SDK development
 environment and runs the controller API; `gui` runs NiceGUI with read-only
 project/data mounts. Both use the existing project configuration and shared
 disk, and communicate over `127.0.0.1:8620` using Linux host networking. The GUI
-binds to `127.0.0.1:8619`. Only the driver container retains device access.
+defaults to `0.0.0.0:8619`; `AMIGA_GUI_HOST` selects another listening address.
+Only the driver container retains device access.
 
 One Dockerfile provides separate `drivers` and `gui` targets sharing a Python
 dependency layer. On an operator-initiated build it prepares `/opt/venv` from
@@ -673,6 +674,51 @@ the GUI can report missing binaries before acquisition is available. IDE
 integration starts both services and preserves the controller command.
 See [.devcontainer/README.md](.devcontainer/README.md) for details and the static
 validation boundary; these images/services have not been built or run here.
+
+### Remote GUI access over Tailscale
+
+The GUI now defaults to `0.0.0.0:8619`, accepting connections through the server's
+localhost, LAN and Tailscale IPv4 addresses. No Tailscale-specific bind setting is
+required. An existing `AMIGA_GUI_HOST` environment value takes precedence over
+this default. With Linux host networking, Docker port mappings are not used.
+See [Docker host networking](https://docs.docker.com/engine/network/drivers/host/).
+
+Optionally, to restrict GUI access to the Tailscale interface, run from the
+remote Linux server's project root with Tailscale already connected:
+
+```bash
+export AMIGA_GUI_HOST="$(tailscale ip -4)"
+# Check that this is the remote server's Tailscale IPv4 address:
+printf '%s\n' "$AMIGA_GUI_HOST"
+docker compose -f .devcontainer/docker-compose.yml up -d --no-build --no-deps --force-recreate gui
+```
+
+Open `http://<remote-server-tailscale-ip>:8619/` from your other Tailscale device.
+The GUI binds specifically to that address; use the same address for server-side
+curl checks instead of `localhost`. The health check runs
+[`.devcontainer/gui_healthcheck.py`](.devcontainer/gui_healthcheck.py), follows the
+selected bind address and requires `/healthz` to report `ready: true`, while
+controller communication remains at `127.0.0.1:8620`. Only the GUI
+container is recreated; no image build or controller restart is needed.
+The [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli) documents
+`tailscale ip -4`; [Compose up](https://docs.docker.com/reference/cli/docker/compose/up/)
+documents the service recreation flags.
+
+Keep this setting for future Compose invocations. For persistence, place
+`AMIGA_GUI_HOST=<remote-server-tailscale-ip>` in a local `.devcontainer/.env` file
+and use `docker compose --env-file .devcontainer/.env -f .devcontainer/docker-compose.yml ...`.
+An invocation without the setting reverts to the all-interface default when it
+recreates the GUI. Tailscale must have assigned the address before GUI startup.
+
+Setting `AMIGA_GUI_HOST=0.0.0.0` explicitly restores the default on all IPv4
+interfaces. The GUI has no browser login, and its server-side API token does not
+authenticate browser users; select the listening scope appropriate to the deployment.
+
+If access still fails, compare a server-side request to its Tailscale IP with a
+request from the client. If the server succeeds but the client fails, inspect
+Tailscale connectivity/access policy and the host firewall for TCP 8619. Do not
+change the controller's 8620 binding to solve a GUI connectivity issue. These
+remote network checks have not been performed from this workspace.
 
 ### Optional standalone production recipe
 

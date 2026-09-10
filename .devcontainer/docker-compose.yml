@@ -110,8 +110,8 @@ services:
         read_only: true
         cap_drop: [ALL]
         security_opt: [no-new-privileges:true]
-        # Both services use Linux host networking so the API stays on loopback.
-        # No published ports, Docker socket or device mounts are needed by GUI.
+        # Linux host networking: AMIGA_GUI_HOST selects the listening interface.
+        # Controller API stays on loopback; no port mappings are needed.
         network_mode: host
         depends_on:
             amiga-drivers-dev:
@@ -128,7 +128,8 @@ services:
             AMIGA_DATA_ROOT: /workspace
             AMIGA_RUNTIME_DIR: /tmp/amiga-gui
             AMIGA_PYTHON: /opt/venv/bin/python
-            AMIGA_GUI_HOST: 127.0.0.1
+            # Listen on all IPv4 interfaces; override to restrict the bind address.
+            AMIGA_GUI_HOST: ${AMIGA_GUI_HOST:-0.0.0.0}
             AMIGA_GUI_PORT: "8619"
             NICEGUI_STORAGE_PATH: /tmp/nicegui
             PYTHONDONTWRITEBYTECODE: "1"
@@ -146,7 +147,7 @@ services:
               read_only: true
               bind: {create_host_path: false}
         healthcheck:
-            test: [CMD, /opt/venv/bin/python, -I, -B, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8619/healthz', timeout=2).close()"]
+            test: [CMD, /opt/venv/bin/python, -I, -B, /workspace/.devcontainer/gui_healthcheck.py]
             interval: 15s
             timeout: 3s
             retries: 3
