@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
-from . import camera_operations, fx10_tools, gox_tools, runtime
+from . import camera_operations, fx10_tools, gox_tools, runtime, tool_jobs, control_client, wire
 
 SET_IP_TOOL = "ebus_set_ip"
 # GUI-side hard timeout; the tool's own budget is discovery (4 s) + the
@@ -92,10 +92,17 @@ def guard_reason_for(kind: str) -> str | None:
 
 
 async def discover(timeout_ms: int = 1500) -> DiscoverResult:
-    res = await runtime.exec_(
-        [runtime.exec_path(BIN_EBUS_DISCOVER), "--timeout", str(timeout_ms), "--json"],
-        timeout=timeout_ms / 1000 + 15,
-    )
+    if control_client.enabled():
+        return wire.restore(DiscoverResult, await control_client.call("camera.discover", timeout_ms))
+    return await camera_operations.run("discovery", lambda: _discover(timeout_ms), kind="discover")
+
+
+async def _discover(timeout_ms: int) -> DiscoverResult:
+    if type(timeout_ms) is not int or not 100 <= timeout_ms <= 10000:
+        raise ValueError("Discovery timeout must be between 100 and 10000 ms")
+    proc = await tool_jobs.spawn([runtime.exec_path(BIN_EBUS_DISCOVER), "--timeout", str(timeout_ms), "--json"])
+    out, err = await tool_jobs.communicate(proc, timeout_ms / 1000 + 15)
+    res = runtime.ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
     raw = (res.stdout + ("\n--- stderr ---\n" + res.stderr if res.stderr.strip() else "")).strip()
     if not res.ok:
         return DiscoverResult(raw_output=raw, error=f"ebus_discover failed (exit {res.code}): {res.stderr.strip()}")
@@ -137,9 +144,12 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
 async def set_ip(mac: str, ip: str, subnet_mask: str, gateway: str = "0.0.0.0",
                  allow_foreign_subnet: bool = False, *, kind: str) -> SetIpResult:
     """Recheck recording ownership after dialogs and reserve before any await."""
+    if control_client.enabled():
+        return wire.restore(SetIpResult, await control_client.call("camera.set_ip", mac, ip, subnet_mask,
+                                                                   gateway, allow_foreign_subnet, kind=kind))
     driver = {"GoX": "gox", "FX10": "fx10"}.get(kind)
     return await camera_operations.run(
-        driver, lambda: _set_ip(mac, ip, subnet_mask, gateway, allow_foreign_subnet))
+        driver, lambda: _set_ip(mac, ip, subnet_mask, gateway, allow_foreign_subnet), kind="set-ip")
 
 
 async def _set_ip(mac: str, ip: str, subnet_mask: str, gateway: str,
@@ -150,19 +160,10 @@ async def _set_ip(mac: str, ip: str, subnet_mask: str, gateway: str,
             "--gateway", gateway, "--json"]
     if allow_foreign_subnet:
         args.append("--allow-foreign-subnet")
-    proc = await runtime.popen(args)
+    proc = await tool_jobs.spawn(args)
     try:
-        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=SET_IP_TIMEOUT_S)
+        out_b, err_b = await tool_jobs.communicate(proc, SET_IP_TIMEOUT_S)
     except asyncio.TimeoutError:
-        # In docker mode killing the exec client does not touch the remote
-        # tool — a hung ebus_set_ip would hold the camera's control channel;
-        # pkill works identically on both backends.
-        await runtime.pkill(SET_IP_TOOL, "TERM")
-        await asyncio.sleep(3)
-        if await runtime.pgrep(SET_IP_TOOL):
-            await runtime.pkill(SET_IP_TOOL, "KILL")
-        proc.kill()
-        await proc.wait()
         return SetIpResult(False, message=f"Timed out (>{SET_IP_TIMEOUT_S:.0f}s) — ebus_set_ip was terminated; "
                                           "power-cycle the camera if it is no longer reachable",
                            elapsed_s=time.monotonic() - t0)

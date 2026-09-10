@@ -21,7 +21,7 @@ from ..constants import (
     FX10_SNAPSHOT_DIR,
     SNAPSHOT_KEEP,
 )
-from . import camera_operations, config_store, runtime
+from . import camera_operations, config_store, runtime, tool_jobs, control_client, wire
 
 SNAPSHOT_TOOL = "fx10_snapshot"
 # Freerun rate forced inside the tool: min(its --fps default, 1000/exposure_ms)
@@ -76,6 +76,9 @@ def guard_reason() -> str | None:
 async def snapshot(ip: str, exposure_ms: float,
                    spatial_binning: int | None = None,
                    spectral_binning: int | None = None) -> SnapshotResult:
+    if control_client.enabled():
+        return wire.restore(SnapshotResult, await control_client.call("fx10.snapshot", ip, exposure_ms,
+                                                                     spatial_binning, spectral_binning))
     request = SnapshotRequest(ip, exposure_ms, spatial_binning, spectral_binning)
 
     async def capture() -> SnapshotResult:
@@ -84,7 +87,7 @@ async def snapshot(ip: str, exposure_ms: float,
         result.request = request
         return result
 
-    return await camera_operations.run("fx10", capture)
+    return await camera_operations.run("fx10", capture, kind="fx10-snapshot")
 
 
 async def _snapshot(ip: str, exposure_ms: float,
@@ -118,25 +121,19 @@ async def _snapshot(ip: str, exposure_ms: float,
         argv += ["--spatial-binning", str(spatial_binning)]
     if spectral_binning is not None:
         argv += ["--spectral-binning", str(spectral_binning)]
-    proc = await runtime.popen(argv)
+    proc = await tool_jobs.spawn(argv)
     try:
-        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        out_b, err_b = await tool_jobs.communicate(proc, timeout_s)
     except asyncio.TimeoutError:
-        # In docker mode killing the exec client does not touch the remote
-        # tool — a hung fx10_snapshot would hold the camera's control channel
-        # forever; pkill works identically on both backends.
-        await runtime.pkill(SNAPSHOT_TOOL, "TERM")
-        await asyncio.sleep(3)
-        if await runtime.pgrep(SNAPSHOT_TOOL):
-            await runtime.pkill(SNAPSHOT_TOOL, "KILL")
-        proc.kill()
-        await proc.wait()
         return SnapshotResult(False, reason=f"Timed out (>{timeout_s:.0f}s) — fx10_snapshot was terminated",
                               elapsed_s=time.monotonic() - t0)
 
     stdout = out_b.decode(errors="replace")
     stderr = err_b.decode(errors="replace")
     raw_output = (stdout + "\n--- stderr ---\n" + stderr).strip()
+    if proc.returncode != 0:
+        return SnapshotResult(False, reason=f"Snapshot tool exited with code {proc.returncode}",
+                              raw_output=raw_output, elapsed_s=time.monotonic() - t0)
 
     marker = next((ln for ln in reversed(stdout.splitlines()) if ln.startswith("SNAPSHOT: ")), None)
     if marker is None:

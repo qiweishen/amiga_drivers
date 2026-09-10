@@ -2,6 +2,8 @@
     "name": "Amiga Drivers Dev",
     "dockerComposeFile": "./docker-compose.yml",
     "service": "amiga-drivers-dev",
+    "runServices": ["amiga-drivers-dev", "gui"],
+    "overrideCommand": false,
     "workspaceFolder": "/workspace",
 
     // Container user settings

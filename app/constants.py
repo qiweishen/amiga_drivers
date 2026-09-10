@@ -11,7 +11,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Docker ------------------------------------------------------------------
 CONTAINER = "amiga-drivers-dev"
-COMPOSE_FILE = REPO_ROOT / ".devcontainer" / "docker-compose.yml"
 
 # Host path <-> container path. Order matters: longest host prefix first.
 # Only paths under one of these mounts are visible on both sides.
@@ -61,8 +60,8 @@ BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 BIN_FX10_REFERENCE = BUILD_BIN / "fx10_reference"
 
-MAIN_CONFIG = REPO_ROOT / "config" / "config-main.yaml"
-SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml"
+MAIN_CONFIG = Path(os.environ.get("AMIGA_MAIN_CONFIG", str(REPO_ROOT / "config" / "config-main.yaml")))
+SNAPSHOT_CONFIG = Path(os.environ.get("AMIGA_SNAPSHOT_CONFIG", str(REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml")))
 
 # --- GUI ---------------------------------------------------------------------
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
@@ -103,13 +102,13 @@ UI_TICK_S = 0.25  # pages showing live sensor/session state (Overview, headers)
 TOOL_TICK_S = 0.5  # tool pages whose tick only mirrors process state
 
 
-RUNTIME_DIR = REPO_ROOT / "app" / "_runtime"
+RUNTIME_DIR = Path(os.environ.get("AMIGA_RUNTIME_DIR", str(REPO_ROOT / "app" / "_runtime")))
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs
 
 UNPACK_SCRIPT = REPO_ROOT / "gox_driver" / "scripts" / "unpack_raw.py"
-VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+VENV_PYTHON = Path(os.environ.get("AMIGA_PYTHON", str(REPO_ROOT / ".venv" / "bin" / "python")))
 
 SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 
@@ -125,7 +124,7 @@ class ConfigFile:
 CONFIG_FILES: dict[str, ConfigFile] = {
     c.id: c
     for c in [
-        ConfigFile("main", "Main (config-main.yaml)", REPO_ROOT / "config" / "config-main.yaml"),
+        ConfigFile("main", "Main (config-main.yaml)", MAIN_CONFIG),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),

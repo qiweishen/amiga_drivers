@@ -1,8 +1,37 @@
 ARG UBUNTU_TAG=22.04
-FROM docker.io/ubuntu:${UBUNTU_TAG}
+ARG UV_VERSION=0.11.15
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM docker.io/ubuntu:${UBUNTU_TAG} AS python-runtime
 
-# Prevent interactive prompts during package installation
-ENV DEBIAN_FRONTEND=noninteractive
+# Shared Python runtime for the GUI and the controller inside the driver image
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AMIGA_PYTHON=/opt/venv/bin/python \
+    PATH="/opt/venv/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libglib2.0-0 libgl1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/uv
+ARG PYTHON_VERSION=3.12.13
+WORKDIR /opt/amiga-python
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project --python ${PYTHON_VERSION}
+
+FROM python-runtime AS gui
+ARG USER_UID=1000
+ARG USER_GID=${USER_UID}
+ENV HOME=/tmp NICEGUI_STORAGE_PATH=/tmp/nicegui
+WORKDIR /workspace
+USER ${USER_UID}:${USER_GID}
+CMD ["/opt/venv/bin/python", "-B", "-m", "app.main"]
+
+FROM python-runtime AS drivers
 
 # =============================================================
 # Base development tools
@@ -25,6 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     ca-certificates \
+    procps \
+    iproute2 \
     sudo \
     locales \
     # ----- 3rd_party libraries ----- \
@@ -93,3 +124,6 @@ WORKDIR /workspace
 RUN chown ${USERNAME}:${USERNAME} /workspace
 
 USER ${USERNAME}
+
+# The API keeps the development container alive
+CMD ["/opt/venv/bin/python", "-B", "-m", "app.controller"]

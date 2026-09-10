@@ -65,6 +65,8 @@ class HealthMonitor:
     # -- the transition table ------------------------------------------------
 
     def on_line(self, line: LogLine) -> None:
+        if STATE.status_source == "amiga-run-v1":
+            return  # Structured lifecycle owns device state; logs remain diagnostic.
         msg, module = line.msg, line.module
 
         if module == markers.MODULE_LMS4XXX:

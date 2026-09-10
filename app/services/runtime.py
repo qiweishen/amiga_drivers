@@ -6,8 +6,9 @@ Mode selection (once, at GUI startup):
   AMIGA_GUI_MODE=docker|native forces a backend;
   auto (default): if the docker CLI can see the amiga-drivers-dev container
   (running or stopped) -> docker, otherwise -> native.
-So a dev machine with the devcontainer keeps working unchanged, and a rig
-without Docker (or without the container) transparently runs natively.
+Integrated Docker mode is for containers without an independent controller.
+The combined Compose stack runs this module natively inside the driver service
+and configures its separate GUI as a remote client.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..constants import CONTAINER, REPO_ROOT, to_container, to_host
+from ..constants import CONTAINER, REPO_ROOT, RUNTIME_DIR, to_container, to_host
 from .docker_runner import ExecResult
 from . import docker_runner
 
@@ -66,7 +67,14 @@ async def detect_mode() -> str:
             return _mode
 
         forced = os.environ.get("AMIGA_GUI_MODE", "auto").strip().lower()
-        _mode = forced if forced in ("docker", "native") else await _probe_docker()
+        if os.environ.get("AMIGA_CONTROLLER_URL", "").strip():
+            _mode = "remote"
+        elif forced in ("docker", "native"):
+            _mode = forced
+        elif forced == "auto":
+            _mode = await _probe_docker()
+        else:
+            raise ValueError("AMIGA_GUI_MODE must be auto, native or docker")
         _resolved = True
         return _mode
 
@@ -107,6 +115,7 @@ def _sudo_prefix() -> list[str]:
 
 async def exec_(args: list[str], *, root: bool = False, timeout: float | None = None) -> ExecResult:
     """Run a command to completion in the execution environment."""
+    _require_local_execution()
     if is_docker():
         return await docker_runner.exec_(args, user="root" if root else None, timeout=timeout)
     argv = (_sudo_prefix() + args) if root else args
@@ -136,11 +145,15 @@ async def spawn(args: list[str]) -> asyncio.subprocess.Process:
     GUI's terminal process group so Ctrl+C on (or death of) the GUI does not
     take the acquisition down — matching the docker-exec semantics that the
     reattach story depends on."""
+    _require_local_execution()
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    status_file = exec_path(RUNTIME_DIR / "acquisition.json")
     if is_docker():
-        return await docker_runner.spawn(args)
+        return await docker_runner.spawn(args, environment={"AMIGA_STATUS_FILE": status_file})
     return await asyncio.create_subprocess_exec(
         *args, cwd=str(REPO_ROOT),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "AMIGA_STATUS_FILE": status_file},
         start_new_session=True,
     )
 
@@ -148,6 +161,7 @@ async def spawn(args: list[str]) -> asyncio.subprocess.Process:
 async def popen(args: list[str]) -> asyncio.subprocess.Process:
     """Short-lived tool launch with BOTH pipes captured (jai_snapshot marker
     parsing needs stdout)."""
+    _require_local_execution()
     if is_docker():
         return await asyncio.create_subprocess_exec(
             "docker", "exec", "-w", "/workspace", CONTAINER, *args,
@@ -156,6 +170,19 @@ async def popen(args: list[str]) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *args, cwd=str(REPO_ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def gated_tool(args: list[str]) -> asyncio.subprocess.Process:
+    _require_local_execution()
+    gate = 'printf "%s\\n" "$$"; IFS= read -r permit && [ "$permit" = GO ] && exec "$@"'
+    argv = ["/bin/sh", "-c", gate, "amiga-tool", *args]
+    if is_docker():
+        argv = ["docker", "exec", "-i", "-w", "/workspace", CONTAINER, *argv]
+    return await asyncio.create_subprocess_exec(
+        *argv, cwd=str(REPO_ROOT), stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
 
 
@@ -185,6 +212,10 @@ async def _identity(pid: int) -> ProcessIdentity:
     if fields[0] in ("Z", "X"):
         raise ProcessLookupError("The acquisition process has exited")
     return ProcessIdentity(pid, fields[19], boot.stdout.strip())
+
+
+async def process_identity(pid: int) -> ProcessIdentity:
+    return await _identity(pid)
 
 
 async def running_process(name: str) -> ProcessIdentity | None:
@@ -218,10 +249,12 @@ async def is_process_alive(ref: ProcessIdentity) -> bool:
         raise
 
 
-async def signal_process(ref: ProcessIdentity) -> ExecResult:
+async def signal_process(ref: ProcessIdentity, *, signal: str = "TERM") -> ExecResult:
+    if signal not in ("TERM", "KILL"):
+        raise ValueError("Unsupported stop signal")
     if not await is_process_alive(ref):
         return ExecResult(1, "", "Acquisition process has already exited")
-    return await exec_(["kill", "-TERM", "--", str(ref.pid)], timeout=5)
+    return await exec_(["kill", f"-{signal}", "--", str(ref.pid)], timeout=5)
 
 
 async def process_files(ref: ProcessIdentity) -> list[str]:
@@ -258,7 +291,15 @@ async def binary_exists(host_path: Path | str) -> bool:
 async def env_check() -> tuple[bool, str]:
     """(ok, detail). Docker: the container must be running. Native: always ok
     (missing binaries are caught by preflight per-binary checks)."""
+    if mode() == "remote":
+        from ..state import STATE
+        return STATE.env_ok, STATE.env_detail
     if is_docker():
         up = await docker_runner.is_container_up()
         return up, "" if up else f"Container {CONTAINER} is not running"
     return True, ""
+
+
+def _require_local_execution() -> None:
+    if os.environ.get("AMIGA_CONTROLLER_URL", "").strip():
+        raise RuntimeError("The remote GUI cannot execute local device commands")

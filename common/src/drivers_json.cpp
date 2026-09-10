@@ -2,7 +2,10 @@
 
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -71,6 +74,21 @@ namespace common {
 
 
     DriversJson::DriversJson(std::string path) : path_(std::move(path)), start_(std::chrono::steady_clock::now()) {
+        if (const char *value = std::getenv("AMIGA_STATUS_FILE"); value && *value) {
+            control_path_ = value;
+        }
+        std::string stat, boot, ticks;
+        std::ifstream stat_file("/proc/self/stat"), boot_file("/proc/sys/kernel/random/boot_id");
+        std::getline(stat_file, stat);
+        std::getline(boot_file, boot);
+        if (const auto end = stat.rfind(')'); end != std::string::npos) {
+            std::istringstream fields(stat.substr(end + 1));
+            for (int field = 3; field <= 22 && fields; ++field) fields >> ticks;
+        }
+        doc_["status_schema"] = "amiga-run-v1";
+        doc_["process"] = {{"pid", ::getpid()}, {"start_ticks", ticks}, {"boot_id", boot}};
+        doc_["lifecycle"] = {{"phase", "initializing"}, {"configuration_read", false},
+                              {"sensors", nlohmann::ordered_json::object()}, {"revision", 0}};
         doc_["run"] = nlohmann::ordered_json{
             {"started", TimeUtil::Iso8601UtcSec(NowRealtimeNs())},
             {"status", "running"}
@@ -96,6 +114,7 @@ namespace common {
     void DriversJson::SetRun(const std::string &timestamp, const std::string &output_directory) {
         doc_["run"]["timestamp"] = timestamp;
         doc_["run"]["output_directory"] = output_directory;
+        doc_["run"]["session_directory"] = std::filesystem::path(path_).parent_path().parent_path().string();
     }
 
 
@@ -120,7 +139,19 @@ namespace common {
     }
 
 
+    bool DriversJson::UpdateLifecycle(const std::string &phase, bool configuration_read,
+                                      const nlohmann::ordered_json &sensors) {
+        doc_["lifecycle"]["phase"] = phase;
+        doc_["lifecycle"]["configuration_read"] = configuration_read;
+        doc_["lifecycle"]["sensors"] = sensors;
+        doc_["lifecycle"]["revision"] = doc_["lifecycle"]["revision"].get<unsigned>() + 1;
+        return Write_();
+    }
+
+
     bool DriversJson::Finalize(const std::string &status) {
+        doc_["lifecycle"]["phase"] = "finished";
+        doc_["lifecycle"]["revision"] = doc_["lifecycle"]["revision"].get<unsigned>() + 1;
         doc_["run"]["status"] = status;
         doc_["run"]["recording_failed"] = status.rfind("failed", 0) == 0;
         doc_["run"]["ended"] = TimeUtil::Iso8601UtcSec(NowRealtimeNs());
@@ -133,6 +164,10 @@ namespace common {
     bool DriversJson::Write_() {
         try {
             WriteJsonAtomic(path_, doc_);
+            // Optional controller rendezvous. Contains the same process identity
+            // and session metadata as the canonical manifest, so recovery does
+            // not depend on log wording, open file descriptors or directory age.
+            if (!control_path_.empty()) WriteJsonAtomic(control_path_, doc_);
             return true;
         } catch (const std::exception &e) {
             g_log.Warn("cannot write {}: {}", path_, e.what());

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
+import json
 
 from nicegui import ui
 
 from ..constants import DRIVERS, UI_TICK_S
-from ..services import config_store, process
+from ..services import config_store, config_actions, process
 from ..state import STATE, ProcState
 from . import components, layout
 
@@ -25,6 +26,17 @@ def dashboard_page() -> None:
             stop_btn = ui.button("Stop recording", icon="stop", color="negative", on_click=_confirm_stop)
             session_label = ui.label().classes("text-sm text-gray-600")
         ui.label("Note: closing the GUI does not stop recording; reopening it reattaches automatically.").classes("text-xs text-gray-500")
+        with ui.expansion("Recent control commands", icon="history").classes("w-full"):
+            ui.label("A disconnected request can still have executed. Use its ID and current device state before retrying.").classes("text-xs text-gray-600")
+            commands = ui.table(columns=[{"name": name, "label": name.replace("_", " ").title(),
+                                           "field": name, "align": "left"}
+                                          for name in ("id", "action", "state", "error")],
+                                rows=[], row_key="id", pagination=8).classes("w-full")
+        shown_commands = [None]
+        with ui.expansion("Recorded run result and final driver counters", icon="description").classes("w-full"):
+            ui.label("These are the acquisition's recorded values; they do not constitute an independent integrity audit.").classes("text-xs text-gray-600")
+            run_result = ui.label().classes("text-xs font-mono whitespace-pre-wrap max-h-80 overflow-auto w-full")
+        shown_result = [None]
 
         # --- enable switches -------------------------------------------------
         ui.separator()
@@ -79,12 +91,24 @@ def dashboard_page() -> None:
         refresh_cards()
 
         def refresh() -> None:
+            if shown_result[0] != STATE.run_result:
+                run_result.set_text(json.dumps(STATE.run_result, indent=2, ensure_ascii=False) if STATE.run_result else "No recorded result available")
+                shown_result[0] = STATE.run_result
+            recent = STATE.recent_commands or ([{
+                "id": STATE.tool_operation.get("id", ""), "action": STATE.tool_operation.get("kind", ""),
+                "state": STATE.tool_operation.get("state", ""), "error": STATE.tool_operation.get("error", "")
+            }] if STATE.tool_operation else [])
+            if shown_commands[0] != recent:
+                commands.rows = recent
+                commands.update()
+                shown_commands[0] = recent
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
-            start_btn.set_enabled(STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy
+            start_btn.set_enabled(STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy and not STATE.tool_uncertain
                                   and not running and STATE.process_state is not ProcState.STOPPING)
-            stop_btn.set_enabled(running)
+            stop_btn.set_enabled(STATE.env_ok and running)
             for sw in switches.values():
-                sw.set_enabled(not STATE.config_locked and not STATE.control_uncertain)
+                sw.set_enabled(STATE.env_ok and not STATE.config_locked and not STATE.control_uncertain
+                               and not STATE.snapshot_busy and not STATE.tool_uncertain)
             if STATE.active_session is not None:
                 started = STATE.session_started_at or 0
                 elapsed = max(0, int(time.time() - started))
@@ -120,7 +144,7 @@ def dashboard_page() -> None:
         ui.timer(5.0, refresh_switches)
 
 
-def _on_toggle(driver: str, value: bool) -> None:
+async def _on_toggle(driver: str, value: bool) -> None:
     try:
         current = config_store.main_settings()["enables"].get(driver, False)
         if current == value:
@@ -130,7 +154,7 @@ def _on_toggle(driver: str, value: bool) -> None:
             # the binary load a config the GUI did not capture.
             ui.notify("Starting — please change sensor enables after startup finishes", type="warning")
             return
-        config_store.set_enable(driver, value)
+        await config_actions.change("set_enable", driver, value)
         if STATE.process_state is ProcState.RUNNING:
             STATE.pending_config_notice = True
             ui.notify("Saved — takes effect on the next recording start", type="info")
@@ -176,16 +200,19 @@ async def _on_start() -> None:
 
 
 async def _confirm_stop() -> None:
-    generation = STATE.session_generation
+    generation = STATE.controller_id, STATE.session_generation
     with ui.dialog() as dialog, ui.card():
         ui.label("Stop recording? All sensors shut down together in order.")
         with ui.row():
             ui.button("Stop", color="negative", on_click=lambda: dialog.submit(True))
             ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
     if await dialog:
-        if generation != STATE.session_generation:
+        if generation != (STATE.controller_id, STATE.session_generation):
             ui.notify("The recording changed while this dialog was open; review the current session first",
                       type="warning")
             return
-        await process.stop()
-        ui.notify("Stop requested — waiting for the acquisition to shut down", type="info")
+        try:
+            await process.stop()
+            ui.notify("Stop requested — waiting for the acquisition to shut down", type="info")
+        except Exception as exc:
+            ui.notify(f"Stop request is not confirmed: {exc}", type="negative", multi_line=True)

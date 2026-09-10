@@ -26,7 +26,7 @@ import ipaddress
 from nicegui import app, ui
 
 from ..constants import TOOL_TICK_S
-from ..services import config_store, ebus_tools, fx10_tools, gox_tools
+from ..services import config_store, config_actions, ebus_tools, fx10_tools, gox_tools
 from ..state import STATE, ProcState
 from . import layout
 
@@ -370,7 +370,7 @@ def camera_page() -> None:
                 ui.notify(result.message, type="positive", multi_line=True)
                 if writeback:
                     try:
-                        summary = config_store.apply_device_ip(kind, row.get("ip", ""), row.get("mac", ""), new_ip)
+                        summary = await config_actions.change("apply_device_ip", kind, row.get("ip", ""), row.get("mac", ""), new_ip)
                     except Exception as e:
                         ui.notify(f"Camera re-addressed, but the config write failed: {e}",
                                   type="negative", multi_line=True)
@@ -435,13 +435,13 @@ def camera_page() -> None:
             )
             gox_warn.set_text("Incomplete frame (packet loss? check MTU/rmem)" if result.incomplete else "")
 
-        def _gox_apply() -> None:
+        async def _gox_apply() -> None:
             ip, mac = _gox_target()
             if not ip and not mac:
                 ui.notify("Select a target GoX camera first", type="warning")
                 return
             try:
-                summary = config_store.apply_gox_acquisition(
+                summary = await config_actions.change("apply_gox_acquisition",
                     ip, mac, float(gox_exposure.value), float(gox_gain.value))
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
@@ -497,9 +497,9 @@ def camera_page() -> None:
                 f"mean {result.mean_pct:.1f}% · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
             )
 
-        def _fx10_apply() -> None:
+        async def _fx10_apply() -> None:
             try:
-                summary = config_store.apply_fx10_acquisition(
+                summary = await config_actions.change("apply_fx10_acquisition",
                     float(fx10_exposure.value), int(fx10_spatial.value), int(fx10_spectral.value))
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)

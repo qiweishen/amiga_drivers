@@ -8,7 +8,7 @@ from collections import deque
 
 from ..constants import BIN_AMIGA, MAIN_CONFIG
 from ..state import STATE, ProcState, SensorState
-from . import config_store, runtime, session_info
+from . import config_store, runtime, session_info, tool_jobs, control_owner, run_status, control_client
 from .asterx_live import LIVE as ASTERX_LIVE
 from .driver_stats import STATS
 from .health import MONITOR
@@ -57,6 +57,9 @@ def _reset_run() -> int:
     STATE.enables_at_start = {}
     STATE.exit_code = None
     STATE.last_error = ""
+    STATE.status_source = "unknown"
+    STATE.status_detail = "Waiting for session metadata"
+    STATE.run_result = {}
     TAILER.stop()
     ASTERX_LIVE.stop()
     BUFFER.clear()
@@ -67,17 +70,31 @@ def _reset_run() -> int:
 
 
 def _finish(code: int | None, *, clean: bool) -> None:
+    if STATE.active_session is not None:
+        try:
+            doc = run_status.read_json(STATE.active_session / "raw" / "drivers.json")
+            STATE.run_result = {"run": doc["run"], "driver_results": doc.get("driver_results", [])}
+        except Exception:
+            clean = False
+            STATE.run_result = {}
     STATE.exit_code = code
     STATE.process_state = ProcState.EXITED if clean else ProcState.FAILED
     STATE.config_locked = False
     STATE.control_uncertain = False
     STATE.stop_requested = False
+    STATE.status_detail = "Final recording result verified" if clean and STATE.active_session else (
+        "Cancelled before launch" if clean else "Recording failed or final result unavailable")
+    if clean:
+        STATE.last_error = ""
     if not clean:
         err = BUFFER.last_error_line()
         _report(err.raw if err else "Recording failed or its final integrity result is unavailable")
 
 
 async def preflight() -> tuple[list[str], list[str]]:
+    if control_client.enabled():
+        result = await control_client.call("recording.preflight")
+        return result[0], result[1]
     errors: list[str] = []
     warnings: list[str] = []
     try:
@@ -88,8 +105,7 @@ async def preflight() -> tuple[list[str], list[str]]:
             errors.append("build/bin/AmigaDrivers not found in the execution environment")
         if await runtime.pgrep(PROCESS_NAME):
             errors.append("AmigaDrivers is already running")
-        if await runtime.pgrep("fx10_reference"):
-            errors.append("FX10 reference collection is still running")
+        await tool_jobs.check_idle()
         settings = config_store.main_settings()
         for driver, enabled in settings["enables"].items():
             if enabled:
@@ -101,7 +117,7 @@ async def preflight() -> tuple[list[str], list[str]]:
             warnings.append("Logging is disabled: session recovery and health monitoring may be unavailable")
         if not any(settings["enables"].values()):
             errors.append("No sensor is enabled")
-        if STATE.snapshot_busy:
+        if STATE.snapshot_busy or STATE.tool_uncertain:
             errors.append("A camera tool is in progress; wait for it to finish")
     except Exception as e:
         errors.append(f"Preflight failed: {e}")
@@ -111,7 +127,10 @@ async def preflight() -> tuple[list[str], list[str]]:
 async def start() -> bool:
     """Reserve startup synchronously; page cancellation cannot abandon the launch."""
     global _start_task
-    if (STATE.process_state in _ACTIVE or STATE.snapshot_busy or STATE.control_uncertain
+    if control_client.enabled():
+        return bool(await control_client.call("recording.start"))
+    control_owner.require()
+    if (STATE.process_state in _ACTIVE or STATE.snapshot_busy or STATE.tool_uncertain or STATE.control_uncertain
             or _adopting or (_start_task is not None and not _start_task.done())):
         return False
     generation = _reset_run()
@@ -136,13 +155,8 @@ async def _launch(generation: int) -> bool:
         settings = config_store.main_settings()
         STATE.enables_at_start = dict(settings["enables"])
         MONITOR.reset(settings["enables"], config_store.lms_instance_names())
-        res = await runtime.exec_(
-            ["setcap", "cap_sys_nice+ep", runtime.exec_path(BIN_AMIGA)],
-            root=True, timeout=10,
-        )
-        if not res.ok:
-            BUFFER.append(parse_line(f"setcap failed (realtime scheduling may be degraded): {res.stderr.strip()}",
-                                     fallback_module="gui"))
+        # Runtime privileges are provisioned by the deployment, never mutated
+        # as a side effect of pressing Start.
         if STATE.stop_requested:
             _finish(None, clean=True)
             return False
@@ -184,10 +198,22 @@ async def _observe_session(ref: runtime.ProcessIdentity, generation: int) -> Non
         STATE.ownership_verified = True
         MONITOR.reset(info.enables, info.lms_names)
         STATS.reset()
+        initial_status = run_status.read_session(info.path, ref)
+        STATE.status_source = run_status.SCHEMA if initial_status is not None else "legacy-log"
         # Initialization can have advanced before recovery; replay its markers.
-        TAILER.start(info.path / "raw" / f"log_{info.path.name}.log", replay=True)
+        TAILER.start(info.path / "raw" / f"log_{info.path.name}.log", replay=True, markers=initial_status is None)
         ASTERX_LIVE.start(info.path, replay=True)
         STATE.last_error = ""
+    doc = run_status.read_session(STATE.active_session, ref)
+    if doc is not None:
+        run_status.apply(doc)
+        STATE.control_uncertain = False
+        if STATE.last_error.startswith("Waiting for verified session metadata:"):
+            STATE.last_error = ""
+        return
+    STATE.status_source = "legacy-log"
+    STATE.status_detail = "Compatibility mode: lifecycle inferred from log markers"
+    STATE.control_uncertain = False
     # A directory/manifest appears BEFORE Init() reads every driver config.
     # Keep saves locked until all enabled instances reported initialization.
     enabled = [st for st in STATE.sensors.values() if st.state is not SensorState.DISABLED]
@@ -225,6 +251,9 @@ async def _watch(proc: asyncio.subprocess.Process, generation: int) -> None:
                     await _observe_session(_ref, generation)
             except Exception as e:
                 if generation == STATE.session_generation:
+                    STATE.control_uncertain = True
+                    STATE.config_locked = True
+                    STATE.status_detail = "Status not verified"
                     _report(f"Waiting for verified session metadata: {e}")
             await asyncio.sleep(0.5)
         if generation != STATE.session_generation:
@@ -253,7 +282,12 @@ async def _watch(proc: asyncio.subprocess.Process, generation: int) -> None:
                 STATE.control_uncertain = False
                 _exit_poll_task = _background(_poll_detached(remaining, generation))
                 return
-        _finish(code, clean=code == 0)
+        clean = code == 0
+        if STATE.active_session is not None:
+            clean = clean and session_info.finished_cleanly(STATE.active_session)
+        elif code == 0:
+            clean = False  # No identified session means there is no verifiable final result.
+        _finish(code, clean=clean)
     except Exception as e:
         if generation != STATE.session_generation:
             return
@@ -294,6 +328,10 @@ async def _recover_after_disconnect(generation: int) -> None:
 async def stop(term_timeout: float = 60.0) -> None:
     """Latch the request immediately; retain it across every launch await."""
     global _stop_task
+    if control_client.enabled():
+        await control_client.call("recording.stop", term_timeout)
+        return
+    control_owner.require()
     if STATE.process_state not in _ACTIVE:
         return
     STATE.stop_requested = True
@@ -392,6 +430,8 @@ async def _poll_detached(ref: runtime.ProcessIdentity, generation: int) -> None:
         try:
             await _observe_session(ref, generation)
         except Exception as e:
+            STATE.control_uncertain = True
+            STATE.config_locked = True
             _report(f"Waiting for verified session metadata: {e}")
         await asyncio.sleep(1.0)
     if generation != STATE.session_generation:

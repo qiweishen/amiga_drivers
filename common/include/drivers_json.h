@@ -27,6 +27,11 @@ namespace common {
         // Writes the document with run.status = "running"
         bool WriteRunning();
 
+        // Versioned operational state, written only on lifecycle transitions.
+        // Main owns this object; never call from driver receive/write threads.
+        bool UpdateLifecycle(const std::string &phase, bool configuration_read,
+                             const nlohmann::ordered_json &sensors);
+
         // Sets run.status / run.ended / run.duration_s and writes the final
         // document. status: "completed" | "interrupted (signal N)" | ...
         bool Finalize(const std::string &status);
@@ -35,6 +40,7 @@ namespace common {
         bool Write_();
 
         std::string path_;
+        std::string control_path_;
         nlohmann::ordered_json doc_;
         std::chrono::steady_clock::time_point start_;
     };

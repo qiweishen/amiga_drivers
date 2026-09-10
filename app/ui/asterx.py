@@ -23,7 +23,7 @@ _FRD_AXES = (("F", "#e53935"), ("R", "#43a047"), ("D", "#1e88e5"))
 
 
 def _is_live() -> bool:
-    return (STATE.process_state is ProcState.RUNNING and STATE.ownership_verified
+    return (STATE.env_ok and STATE.process_state is ProcState.RUNNING and STATE.ownership_verified
             and not STATE.control_uncertain and STATE.enables_at_start.get("asterx", False)
             and LIVE.session_dir is not None and LIVE.session_dir == STATE.active_session)
 
@@ -131,9 +131,9 @@ def _kv_card(title: str, keys: list[str]) -> tuple[ui.card, ui.label, dict[str, 
 
 
 @ui.page("/asterx")
-def asterx_page() -> None:
+def asterx_page(session: str = "") -> None:
     player = HistoryPlayer()
-    page = {"alive": True}
+    page = {"alive": True, "scrubbing": False}
 
     def close() -> None:
         page["alive"] = False
@@ -142,18 +142,19 @@ def asterx_page() -> None:
     ui.context.client.on_delete(close)
     with layout.frame("AsteRx · Live & History"):
         with ui.row().classes("items-center gap-4"):
-            source_mode = ui.toggle({"live": "Live", "history": "History replay"}, value="live",
+            source_mode = ui.toggle({"live": "Live", "history": "History replay"}, value="history" if session else "live",
                                     on_change=lambda _: _mode_changed())
             source_badge = ui.badge("LIVE").props('color="blue-grey"')
         guard_label = ui.label("").classes("text-sm text-amber-700")
 
         with ui.column().classes("w-full gap-2 border rounded p-3") as history_controls:
-            ui.label("Replay a completed recording").classes("font-bold")
+            ui.label("Replay a finalized recording").classes("font-bold")
             ui.label("Enter a path on the GUI server: a session directory, raw/asterx directory, or a single CSV. "
                      "A directory loads both live_insnavgeod.csv and live_receiverstatus.csv when available."
                      ).classes("text-sm text-gray-600")
             with ui.row().classes("w-full items-center gap-2"):
                 history_path = ui.input("Session directory or CSV path",
+                                        value=session,
                                         placeholder="recordings/<session>/raw/asterx").classes("flex-1")
                 load_btn = ui.button("Load history", icon="folder_open", on_click=lambda: _load())
                 cancel_btn = ui.button("Cancel read", icon="close", on_click=player.cancel_read).props("flat")
@@ -169,6 +170,11 @@ def asterx_page() -> None:
                 seek_btn = ui.button("Jump", icon="skip_next",
                                      on_click=lambda: _seek(seek_position.value)).props("outline")
             progress = ui.linear_progress(value=0.0, show_value=False).classes("w-full")
+            timeline = ui.slider(min=0, max=1, step=0.01, value=0).props("label").classes("w-full")
+            timeline.on("pan", lambda e: page.__setitem__("scrubbing", e.args["phase"] == "start"), ["phase"])
+            timeline.on("change", lambda e: _seek(e.args), [None])
+            index_progress = ui.label().classes("text-xs text-gray-600")
+            gap_label = ui.label().classes("text-xs text-amber-700 whitespace-pre-line")
             playback_label = ui.label("").classes("text-sm font-mono")
             history_info = ui.label("").classes("text-xs text-gray-600 whitespace-pre-line break-all")
             history_error = ui.label("").classes("text-sm text-red-700 whitespace-pre-line")
@@ -323,12 +329,24 @@ def asterx_page() -> None:
             speed.set_enabled(not player.busy)
             loading.set_visibility(player.busy)
             history_error.set_text(player.error)
+            name, done, total = player.progress
+            index_progress.set_text(f"Indexing {name}: {done / total:.0%} ({done:,} / {total:,} bytes)"
+                                    if player.busy and not ready and total else "")
+            timeline.set_enabled(ready and not player.busy)
             if not ready:
                 progress.set_value(0.0)
                 playback_label.set_text("Loading…" if player.busy else "No history loaded")
                 history_info.set_text("")
+                gap_label.set_text("")
                 return
             index = player.index
+            timeline.props(f"max={max(0.01, index.duration_s)}")
+            if not page["scrubbing"]:
+                timeline.set_value(player.position_s)
+            gap_label.set_text(f"{index.gap_count} stream gaps longer than 2 s; showing up to 512 intervals.\n" +
+                               "\n".join(f"{name}: {(start - index.first_ns) / 1e9:.1f}–{(end - index.first_ns) / 1e9:.1f} s"
+                                         for name, start, end in index.gaps if start <= (player.timestamp_ns or 0) < end)
+                               if index.gap_count else "No stream gaps longer than 2 s")
             status = "Playing" if player.playing else "End" if player.position_s >= index.duration_s else "Paused"
             progress.set_value(min(1.0, player.position_s / index.duration_s) if index.duration_s else 1.0)
             playback_label.set_text(f"{status} · {player.position_s:.1f} / {index.duration_s:.1f} s · {_stamp(player.timestamp_ns)}")
@@ -366,6 +384,7 @@ def asterx_page() -> None:
             _render()
 
         async def _seek(seconds) -> bool:
+            page["scrubbing"] = False
             try:
                 await player.seek(float(seconds))
             except Exception as e:
@@ -400,4 +419,6 @@ def asterx_page() -> None:
             _render()
 
         ui.timer(TOOL_TICK_S, _refresh)
+        if session:
+            ui.timer(0.1, _load, once=True)
         _render()

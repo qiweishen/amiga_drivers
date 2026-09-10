@@ -50,21 +50,21 @@ class SessionTailer:
             self._task.cancel()
             self._task = None
 
-    def start(self, log_path: Path, *, replay: bool) -> None:
+    def start(self, log_path: Path, *, replay: bool, markers: bool = True) -> None:
         """(Re)start tailing. `replay=True` rebuilds state from existing content
         (bounded), then follows; `replay=False` follows from the start of the
         file (fresh session — the file is empty or tiny)."""
         self.stop()
-        self._task = asyncio.get_running_loop().create_task(self._run(log_path, replay))
+        self._task = asyncio.get_running_loop().create_task(self._run(log_path, replay, markers))
 
-    async def _run(self, log_path: Path, replay: bool) -> None:
+    async def _run(self, log_path: Path, replay: bool, replay_markers: bool) -> None:
         # The session dir appears before the log file — wait for the file.
         while not log_path.exists():
             await asyncio.sleep(LOG_POLL_S)
 
         offset = 0
         if replay:
-            markers, tail, offset = await asyncio.to_thread(self._scan_existing, log_path)
+            markers, tail, offset = await asyncio.to_thread(self._scan_existing, log_path, replay_markers)
             tail_raws = set(tail)
             for raw in markers:
                 if raw not in tail_raws:  # avoid double-feeding markers inside the tail
@@ -77,7 +77,7 @@ class SessionTailer:
             try:
                 with open(log_path, "rb") as f:
                     f.seek(offset)
-                    chunk = f.read()
+                    chunk = f.read(256 * 1024)
                 self.ready = True
             except OSError:
                 self.ready = False
@@ -95,12 +95,21 @@ class SessionTailer:
             await asyncio.sleep(LOG_POLL_S)
 
     @staticmethod
-    def _scan_existing(log_path: Path) -> tuple[list[str], list[str], int]:
+    def _scan_existing(log_path: Path, replay_markers: bool = True) -> tuple[list[str], list[str], int]:
         """Streaming scan (worker thread): marker lines + last-N tail + EOF offset."""
         markers: list[str] = []
         tail: deque[str] = deque(maxlen=REPLAY_TAIL_LINES)
         offset = 0
         with open(log_path, "rb") as f:
+            if not replay_markers:
+                f.seek(0, 2)
+                size = f.tell()
+                if size > 512 * 1024:
+                    f.seek(size - 512 * 1024)
+                    f.readline()  # discard the partial first line
+                else:
+                    f.seek(0)
+                offset = f.tell()
             for bline in f:
                 if not bline.endswith(b"\n"):
                     # Partial trailing line still being written: leave offset
@@ -108,7 +117,7 @@ class SessionTailer:
                     break
                 offset += len(bline)
                 raw = bline.decode(errors="replace").rstrip("\n")
-                if is_marker(raw):
+                if replay_markers and is_marker(raw):
                     markers.append(raw)
                 tail.append(raw)
         return markers, list(tail), offset

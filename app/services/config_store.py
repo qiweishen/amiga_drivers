@@ -14,7 +14,7 @@ import yaml
 
 from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile, to_host
 from ..state import STATE
-from . import runtime
+from . import runtime, control_owner
 
 
 class ConflictError(Exception):
@@ -42,10 +42,17 @@ class LoadedConfig:
     mtime: int  # nanoseconds, for conflict detection
 
 
+def _checked_config(file: ConfigFile) -> ConfigFile:
+    root = os.environ.get("AMIGA_CONFIG_ROOT", "")
+    if root and not file.path.resolve().is_relative_to(Path(root).resolve()):
+        raise ValueError(f"Configuration must remain inside {root}: {file.path}")
+    return file
+
+
 def get(config_id: str) -> ConfigFile:
     template = CONFIG_FILES[config_id]
     if config_id == "main":
-        return ConfigFile(template.id, template.label, template.path.resolve())
+        return _checked_config(ConfigFile(template.id, template.label, template.path.resolve()))
     general = _main_document().get("General") or {}
     default = template.path.relative_to(REPO_ROOT).as_posix()
     raw = general.get(_PATH_KEYS[config_id], default)
@@ -54,11 +61,11 @@ def get(config_id: str) -> ConfigFile:
     path = resolve_output_dir(raw)
     if path is None:
         raise ValueError(f"{_PATH_KEYS[config_id]} is outside the GUI's shared mounts: {raw}")
-    return ConfigFile(template.id, template.label, path.resolve())
+    return _checked_config(ConfigFile(template.id, template.label, path.resolve()))
 
 
 def _main_document() -> dict:
-    doc = yaml.safe_load(CONFIG_FILES["main"].path.read_text(encoding="utf-8"))
+    doc = yaml.safe_load(get("main").path.read_text(encoding="utf-8"))
     if doc is None:
         doc = {}
     if not isinstance(doc, dict) or (doc.get("General") is not None and not isinstance(doc["General"], dict)):
@@ -103,6 +110,9 @@ def save(config_id: str, text: str, expected_mtime: int | None, *,
     """
     # Every editor, Apply action and enable switch ends here. Check at commit,
     # including after a conflict/validation dialog has yielded to another page.
+    control_owner.require()
+    if STATE.snapshot_busy or STATE.tool_uncertain:
+        raise ConfigBusyError("Configuration is locked while a device tool is running or its exit is unknown")
     if STATE.control_uncertain:
         raise ConfigBusyError("Configuration is locked until the acquisition process can be verified")
     if STATE.config_locked:
@@ -122,6 +132,7 @@ def save(config_id: str, text: str, expected_mtime: int | None, *,
     tmp = cf.path.with_suffix(cf.path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(cf.path)  # atomic within the same directory
+    STATE.pending_config_notice = STATE.process_state.value in ("starting", "running", "stopping")
     return cf.path.stat().st_mtime_ns
 
 
@@ -166,7 +177,11 @@ def resolve_output_dir(raw: str) -> Path | None:
 
 def output_dir_problems(raw: str) -> list[str]:
     """Start-preflight checks for the Output Directory value."""
-    if resolve_output_dir(raw) is not None:
+    path = resolve_output_dir(raw)
+    root = os.environ.get("AMIGA_DATA_ROOT", "")
+    if path is not None and root and not path.resolve().is_relative_to(Path(root).resolve()):
+        return [f"Output Directory must remain inside the shared recording mount {root}"]
+    if path is not None:
         return []
     return [
         f"Output Directory ({raw}) is outside the container mounts. Accepted forms: a repo-relative "

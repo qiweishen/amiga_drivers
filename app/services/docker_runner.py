@@ -1,11 +1,11 @@
-"""Async wrappers around the docker CLI (the GUI's only channel into the container)."""
+"""Docker CLI wrappers for the legacy integrated backend (no standalone API)."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
 
-from ..constants import COMPOSE_FILE, CONTAINER
+from ..constants import CONTAINER
 
 
 @dataclass
@@ -48,15 +48,18 @@ async def exec_(args: list[str], *, workdir: str = "/workspace", user: str | Non
     return await _run(*argv, timeout=timeout)
 
 
-async def spawn(args: list[str], *, workdir: str = "/workspace") -> asyncio.subprocess.Process:
+async def spawn(args: list[str], *, workdir: str = "/workspace", environment: dict[str, str] | None = None) -> asyncio.subprocess.Process:
     """Attached docker exec: returns the live client process.
 
     stdout is discarded (only ActivitySpinner \\r noise lives there); stderr is
     piped for the caller to drain. NOTE: killing this client process does NOT
-    kill the remote process — stopping requires a separate `pkill` exec.
+    kill the remote process — acquisition stop uses its verified process identity.
     """
+    argv = ["docker", "exec", "-w", workdir]
+    for key, value in (environment or {}).items():
+        argv += ["-e", f"{key}={value}"]
     return await asyncio.create_subprocess_exec(
-        "docker", "exec", "-w", workdir, CONTAINER, *args,
+        *argv, CONTAINER, *args,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -65,13 +68,6 @@ async def spawn(args: list[str], *, workdir: str = "/workspace") -> asyncio.subp
 async def is_container_up() -> bool:
     res = await _run("docker", "inspect", "-f", "{{.State.Running}}", CONTAINER, timeout=5)
     return res.ok and res.stdout.strip() == "true"
-
-
-async def compose_up() -> ExecResult:
-    """Bring the devcontainer up (first run may build the image — long timeout)."""
-    return await _run(
-        "docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", timeout=600,
-    )
 
 
 async def pgrep(name: str) -> bool:

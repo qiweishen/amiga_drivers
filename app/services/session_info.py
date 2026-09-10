@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from ..constants import DRIVERS
-from . import runtime
+from . import runtime, run_status
 
 _LOG = re.compile(r"/(\d{8}_\d{6})/raw/log_\1\.log$")
 
@@ -25,6 +25,12 @@ class SessionInfo:
 
 
 async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
+    session = run_status.control_session(ref)
+    if session is not None:
+        info = read(session)
+        if not await runtime.is_process_alive(ref):
+            raise ValueError("Acquisition exited while its status was being read")
+        return info
     candidates = {
         runtime.to_host_path(path).parent.parent
         for path in await runtime.process_files(ref)
@@ -40,7 +46,7 @@ async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
 
 
 def read(session: Path) -> SessionInfo:
-    doc = json.loads((session / "raw" / "drivers.json").read_text(encoding="utf-8"))
+    doc = run_status.read_json(session / "raw" / "drivers.json")
     run = doc["run"]
     output_dir = runtime.to_host_path(run["output_directory"])
     if run["timestamp"] != session.name or output_dir.resolve() != session.parent.resolve():

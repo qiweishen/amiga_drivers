@@ -1,11 +1,21 @@
 services:
     amiga-drivers-dev:
         container_name: amiga-drivers-dev
+        image: amiga-drivers-dev:local
         build:
             context: ..
             dockerfile: .devcontainer/Dockerfile
+            target: drivers
+            args:
+                USER_UID: ${AMIGA_UID:-1000}
+                USER_GID: ${AMIGA_GID:-1000}
 
-        # Keep container running for interactive use
+        # Controller owns acquisition; interactive IDE/docker exec access remains.
+        init: true
+        restart: unless-stopped
+        command: ["/opt/venv/bin/python", "-B", "-m", "app.controller"]
+        stop_signal: SIGTERM
+        stop_grace_period: 180s
         stdin_open: true
         tty: true
 
@@ -17,11 +27,25 @@ services:
         cap_add:
             - NET_ADMIN
             - NET_RAW
-            # AmigaDrivers carries file caps cap_net_raw,cap_sys_nice+ep (Start.bash / GUI setcap)
+            # Required file/effective capabilities must be provisioned separately;
+            # starting the controller or using GUI Start does not run setcap.
             - SYS_NICE
 
         environment:
             PYTHONUNBUFFERED: 1
+            PYTHONDONTWRITEBYTECODE: 1
+            AMIGA_GUI_MODE: native
+            AMIGA_CONTROLLER_HOST: 127.0.0.1
+            AMIGA_CONTROLLER_PORT: "8620"
+            AMIGA_CONTROLLER_TOKEN_FILE: /workspace/app/_runtime/controller-token
+            AMIGA_CONTROLLER_BOOTSTRAP_TOKEN: "1"
+            AMIGA_MAIN_CONFIG: /workspace/config/config-main.yaml
+            AMIGA_SNAPSHOT_CONFIG: /workspace/gox_driver/config/config-gox-snapshot.yaml
+            AMIGA_CONFIG_ROOT: /workspace
+            AMIGA_DATA_ROOT: /workspace
+            AMIGA_RUNTIME_DIR: /workspace/app/_runtime
+            AMIGA_CONTROL_LOCK: /workspace/app/_runtime/controller.lock
+            AMIGA_PYTHON: /opt/venv/bin/python
             # Xorg on Ubuntu 22.04, or XWayland on a Wayland desktop (22.04/26.04).
             # Inherit the active host session; do not invent :0 for headless sessions.
             DISPLAY: ${DISPLAY:-}
@@ -65,3 +89,65 @@ services:
             - /dev:/dev
 
         working_dir: /workspace
+        healthcheck:
+            test: [CMD, /opt/venv/bin/python, -I, -B, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8620/healthz', timeout=2).close()"]
+            interval: 5s
+            timeout: 3s
+            retries: 6
+            start_period: 30s
+
+    gui:
+        image: amiga-gui:dev
+        build:
+            context: ..
+            dockerfile: .devcontainer/Dockerfile
+            target: gui
+            args:
+                USER_UID: ${AMIGA_UID:-1000}
+                USER_GID: ${AMIGA_GID:-1000}
+        init: true
+        restart: unless-stopped
+        read_only: true
+        cap_drop: [ALL]
+        security_opt: [no-new-privileges:true]
+        # Both services use Linux host networking so the API stays on loopback.
+        # No published ports, Docker socket or device mounts are needed by GUI.
+        network_mode: host
+        depends_on:
+            amiga-drivers-dev:
+                condition: service_healthy
+        command: ["/opt/venv/bin/python", "-B", "-m", "app.main"]
+        working_dir: /workspace
+        stop_grace_period: 15s
+        environment:
+            AMIGA_CONTROLLER_URL: http://127.0.0.1:8620
+            AMIGA_CONTROLLER_TOKEN_FILE: /workspace/app/_runtime/controller-token
+            AMIGA_MAIN_CONFIG: /workspace/config/config-main.yaml
+            AMIGA_SNAPSHOT_CONFIG: /workspace/gox_driver/config/config-gox-snapshot.yaml
+            AMIGA_CONFIG_ROOT: /workspace
+            AMIGA_DATA_ROOT: /workspace
+            AMIGA_RUNTIME_DIR: /tmp/amiga-gui
+            AMIGA_PYTHON: /opt/venv/bin/python
+            AMIGA_GUI_HOST: 127.0.0.1
+            AMIGA_GUI_PORT: "8619"
+            NICEGUI_STORAGE_PATH: /tmp/nicegui
+            PYTHONDONTWRITEBYTECODE: "1"
+            PYTHONUNBUFFERED: "1"
+        tmpfs: [/tmp]
+        volumes:
+            - type: bind
+              source: ..
+              target: /workspace
+              read_only: true
+              bind: {create_host_path: false}
+            - type: bind
+              source: /mnt/SharedData/Post_Processing_Data
+              target: /workspace/dataset
+              read_only: true
+              bind: {create_host_path: false}
+        healthcheck:
+            test: [CMD, /opt/venv/bin/python, -I, -B, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8619/healthz', timeout=2).close()"]
+            interval: 15s
+            timeout: 3s
+            retries: 3
+            start_period: 30s

@@ -14,7 +14,7 @@ import yaml
 
 from ..constants import BIN_FX10_REFERENCE
 from ..state import STATE
-from . import camera_operations, config_store, runtime
+from . import camera_operations, config_store, runtime, tool_jobs, control_client, wire
 from .fx10_reference_preview import ReferenceSpectrum, read_spectrum
 
 TOOL_NAME = "fx10_reference"
@@ -107,50 +107,13 @@ def _validate_result(emitted: str, output_root: Path, duration_s: float) -> tupl
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
-    """Stop the tool, including its actual container process, then reap the client."""
-    try:
-        if runtime.is_docker():
-            identity = await runtime.running_process(TOOL_NAME)
-            if identity is not None:
-                response = await runtime.signal_process(identity)
-                if not response.ok and await runtime.is_process_alive(identity):
-                    raise RuntimeError("Cannot terminate reference collector")
-                deadline = time.monotonic() + 15
-                while await runtime.is_process_alive(identity) and time.monotonic() < deadline:
-                    await asyncio.sleep(0.1)
-                if await runtime.is_process_alive(identity):
-                    response = await runtime.exec_(["kill", "-KILL", "--", str(identity.pid)], timeout=5)
-                    if not response.ok:
-                        raise RuntimeError("Cannot kill stalled reference collector")
-                    deadline = time.monotonic() + 5
-                    while await runtime.is_process_alive(identity) and time.monotonic() < deadline:
-                        await asyncio.sleep(0.1)
-                    if await runtime.is_process_alive(identity):
-                        raise RuntimeError("Reference collector is still running")
-        elif proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=15)
-            except asyncio.TimeoutError:
-                proc.kill()
-        if proc.returncode is None:
-            # The remote child is known to have ended; reap any remaining exec client.
-            if runtime.is_docker():
-                proc.kill()
-            await asyncio.wait_for(proc.wait(), timeout=5)
-    except ProcessLookupError:
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except Exception:
-            STATE.control_uncertain = True
-            raise
-    except Exception:
-        STATE.control_uncertain = True
-        raise
+    await tool_jobs.terminate(proc)
 
 
 async def collect_reference() -> ReferenceResult:
-    return await camera_operations.run(None, _collect)
+    if control_client.enabled():
+        return wire.restore(ReferenceResult, await control_client.call("fx10.reference"))
+    return await camera_operations.run(None, _collect, kind="fx10-reference")
 
 
 async def _collect() -> ReferenceResult:
@@ -182,7 +145,7 @@ async def _collect() -> ReferenceResult:
             raise ValueError("The configured output directory is outside the shared mounts")
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
-        proc = await runtime.popen([
+        proc = await tool_jobs.spawn([
             runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config.path),
             "--out", runtime.exec_path(output_root),
         ])
@@ -241,6 +204,7 @@ async def _collect() -> ReferenceResult:
             except Exception:
                 pass
             raise
+        await tool_jobs.confirm_exit(proc)
         if proc.returncode != 0 or failure or not success_path:
             raise RuntimeError(failure or f"Reference collector exited without a complete pair (exit {proc.returncode})")
         if duration_s is None:

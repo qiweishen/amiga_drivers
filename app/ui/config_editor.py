@@ -5,7 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from ..constants import CONFIG_FILES
-from ..services import config_store
+from ..services import config_store, config_actions
 from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
 from . import layout
@@ -40,7 +40,7 @@ def _editor_panel(config_id: str) -> None:
         ui.label("Check the driver path in Main, save it, then reload this page.")
         ui.link("Reload configuration page", "/config")
         return
-    state = {"mtime": loaded.mtime, "saved_text": loaded.text, "path": loaded.file.path}
+    state = {"mtime": loaded.mtime, "saved_text": loaded.text, "path": loaded.file.path, "saving": False}
 
     path_label = ui.label(str(loaded.file.path)).classes("text-xs text-gray-800 font-mono")
     path_warning = ui.label("").classes("text-sm text-amber-700")
@@ -66,6 +66,8 @@ def _editor_panel(config_id: str) -> None:
         return True
 
     async def _save(force: bool = False) -> None:
+        if state["saving"]:
+            return
         if config_store.validate(config_id, editor.value):
             with ui.dialog() as dialog, ui.card():
                 ui.label("Syntax check failed — save anyway?")
@@ -74,11 +76,15 @@ def _editor_panel(config_id: str) -> None:
                     ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
             if not await dialog:
                 return
+        if state["saving"]:
+            return
         try:
-            state["mtime"] = config_store.save(
-                config_id, editor.value, None if force else state["mtime"], expected_path=state["path"]
+            state["saving"] = True
+            submitted = editor.value
+            state["mtime"] = await config_actions.change(
+                "save", config_id, submitted, None if force else state["mtime"], expected_path=state["path"]
             )
-            state["saved_text"] = editor.value
+            state["saved_text"] = submitted
             _mark_dirty()
             if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING):
                 STATE.pending_config_notice = True
@@ -94,13 +100,20 @@ def _editor_panel(config_id: str) -> None:
                     ui.button("Cancel", on_click=lambda: dialog.submit("cancel")).props("flat")
             choice = await dialog
             if choice == "reload":
+                state["saving"] = False
                 _revert()
             elif choice == "force":
+                state["saving"] = False
                 await _save(force=True)
         except Exception as e:
             ui.notify(f"Config was not saved: {e}", type="negative", multi_line=True)
+        finally:
+            state["saving"] = False
 
     def _revert() -> None:
+        if state["saving"]:
+            ui.notify("Wait for the pending save to finish before reloading", type="warning")
+            return
         try:
             fresh = config_store.read(config_id)
         except Exception as e:

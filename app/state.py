@@ -69,6 +69,14 @@ class AppState:
     sensors: dict[str, SensorStatus] = field(default_factory=dict)
     storage: StorageStatus = field(default_factory=StorageStatus)
     snapshot_busy: bool = False
+    tool_uncertain: bool = True
+    tool_operation: dict = field(default_factory=dict)
+    status_source: str = "unknown"
+    status_detail: str = ""
+    run_result: dict = field(default_factory=dict)
+    controller_connected: bool = False
+    controller_id: str = ""
+    recent_commands: list[dict] = field(default_factory=list)
     stop_requested: bool = False
     config_locked: bool = False  # held until initialization finishes, including a stop during startup
     ownership_verified: bool = False

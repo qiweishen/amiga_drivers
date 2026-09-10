@@ -203,6 +203,7 @@ int main(int argc, char *argv[]) {
         std::string_view init_failed; // common::Markers::k*InitFailed
         std::string_view run_exception; // common::Markers::k*RunException
         std::thread thread;
+        std::string key{}; // stable GUI identity, including the configured LiDAR id
     };
     std::vector<DriverSlot> drivers;
 
@@ -243,6 +244,7 @@ int main(int argc, char *argv[]) {
         drivers_json.AddDriver("asterx", true,
                                main_config.data_folder_path / fmt::format(
                                    "config/config-{}_{}.yaml", "asterx", main_config.timestamp));
+        drivers.back().key = "asterx";
     }
     if (run_fx10) {
         // Ordering vs gox is free: Fx10DriverApp::init runs its own idempotent
@@ -262,6 +264,7 @@ int main(int argc, char *argv[]) {
         drivers_json.AddDriver("fx10", true,
                                main_config.data_folder_path / fmt::format(
                                    "config/config-{}_{}.yaml", "fx10", main_config.timestamp));
+        drivers.back().key = "fx10";
     }
     if (run_gox) {
         if (!copy_config(main_config.gox_config_path, "gox")) {
@@ -279,6 +282,7 @@ int main(int argc, char *argv[]) {
         drivers_json.AddDriver("gox", true,
                                main_config.data_folder_path / fmt::format(
                                    "config/config-{}_{}.yaml", "gox", main_config.timestamp));
+        drivers.back().key = "gox";
     }
     if (run_lms4xxx) {
         const std::string lms4xxx_config_path = main_config.lms4xxx_config_path;
@@ -302,6 +306,7 @@ int main(int argc, char *argv[]) {
                     {}
                 }
             );
+            drivers.back().key = "lms:" + lidar->id;
         }
         drivers_json.AddDriver("lms4xxx", true,
                                main_config.data_folder_path / fmt::format(
@@ -334,6 +339,21 @@ int main(int argc, char *argv[]) {
                std::ranges::any_of(drivers, [](const DriverSlot &d) { return d.app->HasFailed(); });
     };
     std::size_t initialized = 0;
+    bool lifecycle_ok = true;
+    auto sensor_states = nlohmann::ordered_json::object();
+    for (const auto &d : drivers) sensor_states[d.key] = {{"state", "waiting"}, {"error", ""}};
+    const auto publish_lifecycle = [&](const char *phase, bool configuration_read) {
+        for (const auto &d : drivers) {
+            if (d.app->HasFailed()) {
+                sensor_states[d.key] = {{"state", "failed"}, {"error", "Driver reported a failure; see session log"}};
+            }
+        }
+        if (!drivers_json.UpdateLifecycle(phase, configuration_read, sensor_states)) {
+            lifecycle_ok = false;
+            g_terminate.store(true, std::memory_order_release);
+        }
+    };
+    publish_lifecycle("initializing", false);
     for (auto &d: drivers) {
         if (external_stop()) {
             g_terminate.store(true, std::memory_order_release);
@@ -359,6 +379,8 @@ int main(int argc, char *argv[]) {
             break; // all partial and initialized drivers are shut down below
         }
         ++initialized;
+        sensor_states[d.key]["state"] = "running";
+        publish_lifecycle("initializing", initialized == drivers.size());
     }
 
     // LMS4xxx maps one app per LiDAR instance; the driver-level lifecycle
@@ -421,6 +443,7 @@ int main(int argc, char *argv[]) {
     }
     std::string_view first_to_terminate;
     bool driver_requested_stop = false;
+    if (!g_terminate.load(std::memory_order_acquire)) publish_lifecycle("running", true);
     auto next_disk_check = std::chrono::steady_clock::now();
     auto next_disk_report = next_disk_check; // first tick logs, then once a minute
     while (!g_terminate.load(std::memory_order_acquire)) {
@@ -493,6 +516,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Propagate termination to all drivers
+    publish_lifecycle("stopping", initialized == drivers.size());
     for (auto &d: drivers) {
         d.app->TerminateFlag().store(true, std::memory_order_release);
     }
@@ -516,6 +540,8 @@ int main(int argc, char *argv[]) {
             common::Log::LogMessage(spdlog::level::err, kModule,
                                    fmt::format("{} shutdown failed: {}", driver.name, e.what()));
         }
+        sensor_states[driver.key]["state"] = driver.app->HasFailed() ? "failed" : "stopped";
+        publish_lifecycle("stopping", initialized == drivers.size());
     }
     std::string failed_at_shutdown;
     for (const auto &driver: drivers) {
@@ -538,7 +564,10 @@ int main(int argc, char *argv[]) {
     //     - and reaching the end with neither is a completed Run (0).
     int exit_code = 0;
     bool manifest_ok = false;
-    if (!failed_at_shutdown.empty()) {
+    if (!lifecycle_ok) {
+        manifest_ok = drivers_json.Finalize("failed (status persistence)");
+        exit_code = 1;
+    } else if (!failed_at_shutdown.empty()) {
         manifest_ok = drivers_json.Finalize(fmt::format("failed ({})", failed_at_shutdown));
         common::Log::LogMessage(spdlog::level::err, kModule,
                                fmt::format("Run is INCOMPLETE: {} reported a failure during recording or shutdown",

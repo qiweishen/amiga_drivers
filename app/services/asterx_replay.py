@@ -11,6 +11,7 @@ import asyncio
 import bisect
 import math
 import os
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -89,16 +90,22 @@ class HistoryIndex:
     first_ns: int
     last_ns: int
     track: tuple[tuple[int, float, float], ...]  # bounded route overview
+    gaps: tuple[tuple[str, int, int], ...] = ()
+    gap_count: int = 0
 
     @property
     def duration_s(self) -> float:
         return (self.last_ns - self.first_ns) / 1e9
 
 
-def _index(value: str, cancel: threading.Event) -> HistoryIndex:
+def _index(value: str, cancel: threading.Event, report=lambda value: None) -> HistoryIndex:
     streams = []
     track = []
-    for path in _sources(value):
+    gaps, gap_count = [], 0
+    paths = _sources(value)
+    total_bytes = sum(path.stat().st_size for path in paths)
+    processed = 0
+    for path in paths:
         _check_cancel(cancel)
         with path.open("rb") as stream:
             before = _fingerprint(os.fstat(stream.fileno()))
@@ -110,9 +117,13 @@ def _index(value: str, cancel: threading.Event) -> HistoryIndex:
             stride = 4096
             rows = skipped = partial = 0
             first = last = 0
+            next_report = 0
             while True:
                 _check_cancel(cancel)
                 offset = stream.tell()
+                if offset >= next_report:
+                    report((path.name, processed + offset, total_bytes))
+                    next_report = offset + 1024 * 1024
                 raw = stream.readline(MAX_ROW_BYTES + 1)
                 if not raw:
                     break
@@ -129,6 +140,10 @@ def _index(value: str, cancel: threading.Event) -> HistoryIndex:
                 if rows and stamp < last:
                     raise ValueError(f"{path.name}: recorded host time moves backwards at byte {offset}; "
                                      "automatic time-based playback is unavailable")
+                if rows and stamp - last > 2_000_000_000:
+                    gap_count += 1
+                    if len(gaps) < 512:
+                        gaps.append((path.name, last, stamp))
                 if rows % stride == 0:
                     checkpoints.append((stamp, offset))
                     if len(checkpoints) > _MAX_CHECKPOINTS:
@@ -153,10 +168,13 @@ def _index(value: str, cancel: threading.Event) -> HistoryIndex:
             if before != _fingerprint(os.fstat(stream.fileno())) or before != _fingerprint(path.stat()):
                 raise ValueError(f"{path.name}: file changed during indexing; choose a completed recording")
         streams.append(StreamIndex(path, before, columns, tuple(checkpoints), first, last, rows, skipped, partial))
+        processed += before[2]
+        report((path.name, processed, total_bytes))
     valid = [stream for stream in streams if stream.rows]
     if not valid:
         raise ValueError("No complete rows with valid host timestamps were found")
-    return HistoryIndex(tuple(streams), min(s.first_ns for s in valid), max(s.last_ns for s in valid), tuple(track))
+    return HistoryIndex(tuple(streams), min(s.first_ns for s in valid), max(s.last_ns for s in valid),
+                        tuple(track), tuple(sorted(gaps, key=lambda item: item[1])), gap_count)
 
 
 @dataclass(frozen=True)
@@ -228,6 +246,23 @@ class HistoryPlayer:
         self._cursors: dict[Path, _Cursor] = {}
         self._anchor_s = 0.0
         self._anchor_mono = 0.0
+        self._progress_queue = queue.Queue(maxsize=1)
+        self._progress = ("", 0, 0)
+
+    def _report_progress(self, value) -> None:
+        try:
+            self._progress_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self._progress_queue.put_nowait(value)
+
+    @property
+    def progress(self) -> tuple[str, int, int]:
+        try:
+            self._progress = self._progress_queue.get_nowait()
+        except queue.Empty:
+            pass
+        return self._progress
 
     @property
     def timestamp_ns(self) -> int | None:
@@ -324,7 +359,8 @@ class HistoryPlayer:
         self.error = ""
 
         def read(cancel):
-            index = _index(value, cancel)
+            self._report_progress(("Indexing", 0, 0))
+            index = _index(value, cancel, self._report_progress)
             return index, _frame(index, index.first_ns, {}, cancel)
 
         await self._io(read, lambda result: self._publish(result[0], result[0].first_ns, result[1]))

@@ -22,7 +22,7 @@ from ..constants import (
     UNPACK_SCRIPT,
     VENV_PYTHON,
 )
-from . import camera_operations, runtime
+from . import camera_operations, runtime, tool_jobs, control_client, wire
 
 SNAPSHOT_TOOL = "jai_snapshot"
 # GUI-side hard timeout; must stay strictly greater than the in-tool
@@ -66,6 +66,8 @@ def guard_reason() -> str | None:
 
 
 async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
+    if control_client.enabled():
+        return wire.restore(SnapshotResult, await control_client.call("gox.snapshot", ip, exposure_ms, gain))
     request = SnapshotRequest(ip, exposure_ms, gain)
 
     async def capture() -> SnapshotResult:
@@ -73,7 +75,7 @@ async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
         result.request = request
         return result
 
-    return await camera_operations.run("gox", capture)
+    return await camera_operations.run("gox", capture, kind="gox-snapshot")
 
 
 async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
@@ -84,7 +86,7 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
     if out_host.exists():  # same-second collision on rapid consecutive shots
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = SNAPSHOT_DIR / sid
-    proc = await runtime.popen([
+    proc = await tool_jobs.spawn([
         runtime.exec_path(BIN_SNAPSHOT),
         "--config", runtime.exec_path(SNAPSHOT_CONFIG),
         "--out", runtime.exec_path(out_host),
@@ -93,23 +95,17 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
         "--gain", str(gain),
     ])
     try:
-        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=SNAPSHOT_TIMEOUT_S)
+        out_b, err_b = await tool_jobs.communicate(proc, SNAPSHOT_TIMEOUT_S)
     except asyncio.TimeoutError:
-        # In docker mode killing the exec client does not touch the remote
-        # tool — a hung jai_snapshot would hold the camera's control channel
-        # forever; pkill works identically on both backends.
-        await runtime.pkill(SNAPSHOT_TOOL, "TERM")
-        await asyncio.sleep(3)
-        if await runtime.pgrep(SNAPSHOT_TOOL):
-            await runtime.pkill(SNAPSHOT_TOOL, "KILL")
-        proc.kill()
-        await proc.wait()
         return SnapshotResult(False, reason=f"Timed out (>{SNAPSHOT_TIMEOUT_S:.0f}s) — jai_snapshot was terminated",
                               elapsed_s=time.monotonic() - t0)
 
     stdout = out_b.decode(errors="replace")
     stderr = err_b.decode(errors="replace")
     raw_output = (stdout + "\n--- stderr ---\n" + stderr).strip()
+    if proc.returncode != 0:
+        return SnapshotResult(False, reason=f"Snapshot tool exited with code {proc.returncode}",
+                              raw_output=raw_output, elapsed_s=time.monotonic() - t0)
 
     marker = next((ln for ln in reversed(stdout.splitlines()) if ln.startswith("SNAPSHOT: ")), None)
     if marker is None:
@@ -139,7 +135,8 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
             capture_output=True, text=True, timeout=UNPACK_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as e:
-        partial = ((e.stdout or "") + (e.stderr or "")).strip()
+        partial = "\n".join(value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+                            for value in (e.stdout, e.stderr)).strip()
         return SnapshotResult(False, reason=f"Decode timed out (>{UNPACK_TIMEOUT_S:.0f}s)",
                               raw_output=raw_output + "\n--- unpack (timeout) ---\n" + partial,
                               elapsed_s=time.monotonic() - t0)
