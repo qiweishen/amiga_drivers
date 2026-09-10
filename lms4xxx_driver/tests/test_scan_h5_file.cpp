@@ -324,32 +324,17 @@ TEST_CASE("ScanH5File gzip round trip") {
 }
 
 
-TEST_CASE("ScanH5File SWMR mode writes a readable file") {
+TEST_CASE("ScanH5File rejects SWMR before creating the incompatible v3 layout") {
     const auto dir = MakeTempDir("swmr");
     const auto path = dir / "scan_unit_20260101_000000_000.h5";
     auto opts = BaseOptions(path);
     opts.swmr = true;
 
-    std::vector<lms4xxx::ScanRecord> records;
-    for (std::uint32_t i = 0; i < 12; ++i) {
-        records.push_back(MakeRecord(i));
-    }
-
-    {
-        lms4xxx::ScanH5File file;
-        REQUIRE_MESSAGE(file.Open(opts), file.LastError());
-        REQUIRE_MESSAGE(file.Append(records.data(), 8), file.LastError());
-        REQUIRE_MESSAGE(file.Flush(), file.LastError());
-        REQUIRE_MESSAGE(file.Append(records.data() + 8, 4), file.LastError());
-        file.Close();
-    }
-
-    Id file{H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT), H5Fclose};
-    REQUIRE(file.id >= 0);
-    CHECK(ReadScalarAttr<std::uint8_t>(file.id, "swmr", H5T_NATIVE_UINT8) == 1);
-    CHECK(Dims(file.id, "/channels/dist") == std::vector<hsize_t>{12, 841});
-    const auto scan_counter = ReadAll<std::uint16_t>(file.id, "/frames/scan_counter", H5T_NATIVE_UINT16);
-    CHECK(scan_counter[11] == 11);
+    lms4xxx::ScanH5File file;
+    CHECK_FALSE(file.Open(opts));
+    CHECK_FALSE(file.IsOpen());
+    CHECK(file.LastError().find("SWMR") != std::string::npos);
+    CHECK_FALSE(fs::exists(path));
 
     fs::remove_all(dir);
 }
@@ -499,14 +484,15 @@ TEST_CASE("An unfinished file has no completeness marker") {
     {
         lms4xxx::ScanH5File file;
         auto opts = BaseOptions(path);
-        opts.swmr = true; // so a concurrent reader can open it at all
+        // A second handle in this same process inspects the open file. This
+        // does not claim that an external non-SWMR reader can open a live file.
         REQUIRE(file.Open(opts));
         const auto record = MakeRecord(0);
         REQUIRE(file.Append(&record, 1));
         REQUIRE(file.Flush());
 
         Id h5{
-            H5Fopen(path.string().c_str(), H5F_ACC_RDONLY | H5F_ACC_SWMR_READ, H5P_DEFAULT),
+            H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT),
             H5Fclose
         };
         REQUIRE(h5.id >= 0);

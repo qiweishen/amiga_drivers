@@ -22,9 +22,9 @@ namespace fx10 {
     struct NetworkConfig {
         int packet_size = 0; // 0 = NegotiatePacketSize
         int socket_rx_buffer_mb = 32; // PvStreamGEV::SetUserModeSocketRxBufferSize
-        int buffer_count = 0; // 0 = auto: ceil(fps * stall_budget_s) + 16
-        double stall_budget_s = 2.0; // disk-stall absorption target for auto sizing
-        int max_buffer_memory_mb = 512; // clamp for the auto-sized pool
+        int buffer_count = 0; // 0 = 16 SDK receive buffers; explicit count remains subject to hard caps
+        double stall_budget_s = 2.0; // owned application queue target: ceil(fps * budget), at least one frame
+        int max_buffer_memory_mb = 512; // combined SDK/application payload buffers + unpack scratch; excludes bookkeeping
         int retrieve_timeout_ms = 1000;
     };
 
@@ -55,8 +55,8 @@ namespace fx10 {
     };
 
     struct AcquisitionConfig {
-        int spatial_binning = 1; // 1|2|4|8 -> 1024/512/256/128 samples
-        int spectral_binning = 2; // 1|2|4|8 -> 448/224/112/56 bands
+        int spatial_binning = 1; // 1|2|4|8; actual width comes from device readback
+        int spectral_binning = 2; // 1|2|4|8; actual height comes from device readback, not the optical-band estimate
         std::string pixel_format = "Mono12Packed";
         double exposure_ms = 5.0;
         double frame_rate_hz = 50.0; // freerun rate; expected pulse rate under external trigger
@@ -123,6 +123,10 @@ namespace fx10 {
         double stats_interval_s = 2.5; // 0 = off
     };
 
+    struct ReferenceConfig {
+        double duration_s = 5.0; // per phase (white and dark), 0.1..3600 seconds
+    };
+
     struct AppConfig {
         DeviceConfig device;
         NetworkConfig network;
@@ -131,6 +135,7 @@ namespace fx10 {
         RecordingConfig recording; // yaml section `output`
         FeatureConfig features;
         LogConfig logging;
+        ReferenceConfig reference; // used only by fx10_reference
     };
 
     // Throws ConfigError.

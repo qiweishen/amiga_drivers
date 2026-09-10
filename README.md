@@ -107,9 +107,10 @@ seconds into a two-hour session was indistinguishable from one that finished.
 
 | Target | Description |
 |--------|-------------|
-| `AmigaDrivers` | The unified executable — the only acquisition entry point |
+| `AmigaDrivers` | The unified executable for multi-sensor recording |
 | `ebus_discover` / `ebus_set_ip` | GigE Vision enumeration for both camera drivers / camera re-addressing (FORCEIP + persistent IP); both live in `common/` and are used by the web GUI |
 | `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
+| `fx10_reference` | Collect Reference page: white then dark, each for `reference.duration_s` (default 5 s), with separate spectral plots and a persistent `reference_<UTC>` session using the FX10 ENVI recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
 | `asterx_lib`, `fx10_lib`, `gox_lib`, `lms4xxx_lib` | Per-driver static libraries |
 | `amiga_common` | Shared infrastructure: logging (file + non-blocking console sink), config schema helpers, signal handling, SPSC ring buffer, bounded queue, rotating file writer, rig guards, `drivers.json`, GUI marker contract |
 | `amiga_ebus` | The eBUS-SDK-dependent layer shared by gox and fx10 (`common/include/ebus`): GenICam env bootstrap, PvResult errors, discovery, device IP configuration |
@@ -131,12 +132,6 @@ seconds into a two-hour session was indistinguishable from one that finished.
 ## Quick start
 
 ### Prerequisites
-
-```bash
-git clone --recurse-submodules <repo>          # submodule/sensor_trigger is REQUIRED:
-cd amiga_drivers                               # fx10_core fails to configure without it
-git submodule update --init                    # ...or this, on an existing clone
-```
 
 The C++ side builds inside the `amiga-drivers-dev` devcontainer
 (`.devcontainer/`, repo mounted at `/workspace`), which brings the eBUS SDK,
@@ -240,6 +235,7 @@ Each run creates one session folder; everything the run produces sits under
     ├── gox/<cam>/                    # seg_NNNNN.raw (jai-raw-seg) + seg_NNNNN.idx.jsonl + segments.jsonl
     │                                 #   + device.json (one-shot audit) + telemetry.jsonl + stream_stats.txt
     ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv + sensor_trigger.log
+    │                                #   + device.json + telemetry.jsonl + stream_stats.txt + segments.jsonl
     └── lms4xxx/                      # scan_<instance>_<ts>_NNN.h5
 ```
 

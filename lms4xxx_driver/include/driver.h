@@ -1,4 +1,5 @@
 #pragma once
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -54,24 +55,24 @@ namespace lms4xxx {
 
         void SetErrorCallback(ErrorCallback callback);
 
-        bool IsScanning() const;
+        [[nodiscard]] bool IsScanning() const;
 
         // Microseconds since the last scan telegram arrived; 0 before the first
         // one. The owner uses it as the stall watchdog: a device that keeps the
         // TCP connection open but stops streaming is otherwise indistinguishable
         // from an idle one, and the run would never end.
-        std::uint64_t MicrosSinceLastFrame() const;
+        [[nodiscard]] std::uint64_t MicrosSinceLastFrame() const;
 
         // Fatal fault (first-scan verification, NTP, receive channel); the owner
         // polls it and stops the run — teardown stays on the owner's thread
-        bool HasFault() const;
+        [[nodiscard]] bool HasFault() const;
 
-        DriverStatistics::Snapshot GetStatistics() const;
+        [[nodiscard]] DriverStatistics::Snapshot GetStatistics() const;
 
-        const DeviceIdentity &GetDeviceIdentity() const;
+        [[nodiscard]] const DeviceIdentity &GetDeviceIdentity() const;
 
         // Filled at the end of Configure(); empty fields = the device did not answer
-        const DeviceAudit &GetDeviceAudit() const;
+        [[nodiscard]] const DeviceAudit &GetDeviceAudit() const;
 
         // Ask the device for one telemetry round WHILE STREAMING. Control and
         // data share one TCP connection and the receive thread owns the socket,

@@ -123,10 +123,10 @@ namespace lms4xxx {
         double stats_interval_s = 2.5; // 0 = off
 
         // Enabled entries only
-        std::vector<const LidarConfig *> EnabledLidars() const;
+        [[nodiscard]] std::vector<const LidarConfig *> EnabledLidars() const;
 
         // Per-device view handed to Lms4xxxDriver
-        DriverConfig DriverConfigFor(const LidarConfig &lidar) const;
+        [[nodiscard]] DriverConfig DriverConfigFor(const LidarConfig &lidar) const;
     };
 
     // Strict schema: unknown keys are errors, omitted keys keep the defaults. Throws ConfigError.

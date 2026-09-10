@@ -64,7 +64,7 @@ namespace gox::format {
         uint32_t frame_magic; // "FRAM"; resync anchor for crash recovery
         uint32_t header_size; // = 96; readers skip unknown trailing fields if larger
         uint64_t block_id; // GVSP BlockID (64-bit extended ID)
-        uint64_t device_ts_ns; // camera timestamp; PTP (TAI) nanoseconds when synced
+        uint64_t device_ts_ns; // legacy name: unscaled SDK timestamp; unit/epoch unverified
         uint64_t host_realtime_ns; // host CLOCK_REALTIME right after RetrieveBuffer
         uint64_t host_monotonic_ns; // host CLOCK_MONOTONIC, same instant
         uint32_t pixel_format; // GenICam PFNC 32-bit code

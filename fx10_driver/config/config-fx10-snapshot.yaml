@@ -28,6 +28,11 @@ acquisition:
         multiband_string: ""
 
 
+# Mechanical shutter: every snapshot writes MotorShutter_PulseRev = 255
+# after applying config and before AcquisitionStart, using the same driver step
+# as normal acquisition. The stored pulse value is not a shutter-state readback.
+
+
 # =============================================================
 # ADVANCED: do not change without a reason
 # =============================================================
@@ -51,8 +56,8 @@ output:
 network:
     packet_size: 0                      # 0 = negotiate
     socket_rx_buffer_mb: 32             # 1..1024
-    buffer_count: auto                  # auto (= 0) | >= 1
-    stall_budget_s: 2.0                 # >= 0
-    max_buffer_memory_mb: 512           # >= 1
+    buffer_count: auto                  # auto (= 0): 16 SDK buffers; explicit >= 1 (subject to SDK/memory caps)
+    stall_budget_s: 2.0                 # >= 0; sizes the owned application frame queue
+    max_buffer_memory_mb: 512           # >= 1; combined SDK + application payload buffers + unpack scratch
     retrieve_timeout_ms: 1000           # 1..10000
     # No reconnect block: a link loss ends the run (fail-fast)

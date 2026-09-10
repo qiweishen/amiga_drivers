@@ -181,12 +181,16 @@ namespace gox {
             ParseNetwork(n, path, c.network);
 
             const auto &acq = c.acquisition;
-            if (acq.exposure_ms && acq.frame_rate_hz) {
-                const double period_ms = 900.0 / *acq.frame_rate_hz;
-                if (*acq.exposure_ms >= period_ms) {
+            // Preserve the driver's 10% freerun timing margin. In external
+            // mode frame_rate_hz does not program AcquisitionFrameRate, so it
+            // cannot impose a limit on the external pulse train's exposure.
+            if (acq.trigger.mode == TriggerMode::kFreerun && acq.exposure_ms && acq.frame_rate_hz) {
+                const double exposure_limit_ms = 900.0 / *acq.frame_rate_hz;
+                if (*acq.exposure_ms >= exposure_limit_ms) {
                     Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*acq.exposure_ms) +
-                                                ") must be below the frame period 900/frame_rate_hz (" +
-                                                std::to_string(period_ms) + " ms); lower the exposure or the frame rate");
+                                                ") must be below the freerun exposure limit 900/frame_rate_hz (" +
+                                                std::to_string(exposure_limit_ms) +
+                                                " ms; 10% frame-period margin); lower the exposure or the frame rate");
                 }
             }
             g_log.Trace("Loaded camera instance [{}] ({})", c.id, c.device.mac.empty() ? c.device.ip : c.device.mac);

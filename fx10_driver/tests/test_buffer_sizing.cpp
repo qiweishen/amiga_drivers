@@ -60,3 +60,24 @@ TEST_CASE("BufferSizing: HardCapsWinOverFloor") {
     CHECK(plan.count == 4u); // floor of 8 must NOT override the stream limit
     CHECK(plan.clamped_by_stream);
 }
+
+TEST_CASE("RecordingBufferSizing: SDK queue limit does not cap the disk stall queue") {
+    NetworkConfig net;
+    const auto plan = fx10::PlanRecordingBuffers(net, 50.0, 1064960, 1419584, 64);
+    CHECK(plan.sdk_buffers <= 64);
+    CHECK(plan.queue_frames >= 100); // a 2 s stall at 50 lines/s
+    CHECK(plan.achievable_stall_s >= 2.0);
+    CHECK(plan.sdk_bytes + plan.application_bytes + plan.canonical_bytes <= 512ull * 1024 * 1024);
+}
+
+TEST_CASE("RecordingBufferSizing: low memory never exceeds the payload budget") {
+    NetworkConfig net;
+    net.max_buffer_memory_mb = 8;
+    const auto plan = fx10::PlanRecordingBuffers(net, 50.0, 1064960, 1419584, 64);
+    CHECK(plan.sdk_buffers >= 1);
+    CHECK(plan.queue_frames >= 1);
+    CHECK(plan.clamped_by_memory);
+    CHECK(plan.sdk_bytes + plan.application_bytes + plan.canonical_bytes <= 8ull * 1024 * 1024);
+    net.max_buffer_memory_mb = 4;
+    CHECK(fx10::PlanRecordingBuffers(net, 50.0, 1064960, 1419584, 64).queue_frames == 0);
+}

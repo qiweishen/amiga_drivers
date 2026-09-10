@@ -173,6 +173,7 @@ def camera_page() -> None:
             fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props("outline")
             fx10_busy = ui.spinner(size="sm").classes("hidden")
             fx10_meta = ui.label("").classes("text-sm text-gray-600")
+        ui.link("Collect white and dark references on the Collect Reference page", "/reference").classes("text-sm")
         # Per-band statistics over ~1 s of frames: x = wavelength, y = % of full scale
         fx10_chart = ui.echart({
             "xAxis": {"type": "value", "name": "Wavelength (nm)", "nameLocation": "middle",
@@ -232,9 +233,10 @@ def camera_page() -> None:
                                    and ebus_tools.guard_reason_for(row.get("kind", "")) is None)
             gox_snap_btn.set_enabled(gox_reason is None and STATE.env_ok and not busy and bool(gox_ip))
             fx10_snap_btn.set_enabled(fx10_reason is None and STATE.env_ok and not busy and bool(fx10_ip))
-            # Apply only edits a file — it never touches the camera, so it stays
-            # available while recording (it takes effect on the next start).
-            gox_apply_btn.set_enabled(bool(gox_ip))
+            # Once initialization finishes, Apply edits the next run's config.
+            config_writable = not STATE.config_locked and not STATE.control_uncertain
+            gox_apply_btn.set_enabled(bool(gox_ip) and config_writable)
+            fx10_apply_btn.set_enabled(config_writable)
             gox_target_label.set_text(
                 f"Target camera: {gox_ip or '(Scan and select a GoX camera first)'}")
             fx10_target_label.set_text(
@@ -322,7 +324,7 @@ def camera_page() -> None:
                 writeback_cb = None
                 if kind in _CONFIG_KINDS:
                     writeback_cb = ui.checkbox(
-                        f"Also update device.ip in config-{_CONFIG_KINDS[kind]}.yaml", value=True)
+                        f"Also update device.ip in the selected {kind} driver config", value=True)
                 ui.label("Two steps: FORCEIP (immediate, lost on power cycle), then the persistent-IP nodes "
                          "(kept across power cycles). Never run this on a camera that is recording."
                          ).classes("text-xs text-gray-500")
@@ -351,13 +353,15 @@ def camera_page() -> None:
             if STATE.snapshot_busy:
                 return
             kind = row.get("kind", "")
-            STATE.snapshot_busy = True  # same single-flight guard as a snapshot; preflight refuses to start
             set_ip_busy.classes(remove="hidden")
             refresh_guard()
             try:
-                result = await ebus_tools.set_ip(row.get("mac", ""), new_ip, mask, gateway, allow_foreign)
+                result = await ebus_tools.set_ip(row.get("mac", ""), new_ip, mask, gateway, allow_foreign,
+                                                kind=kind)
+            except Exception as e:
+                ui.notify(f"Set IP was not completed: {e}", type="negative", multi_line=True)
+                return
             finally:
-                STATE.snapshot_busy = False
                 set_ip_busy.classes(add="hidden")
                 refresh_guard()
             _show_raw(result.raw_output)
@@ -398,7 +402,6 @@ def camera_page() -> None:
             if reason or not ip:
                 ui.notify(reason or "Select a target GoX camera first", type="warning")
                 return
-            STATE.snapshot_busy = True
             gox_busy.classes(remove="hidden")
             refresh_guard()
             try:
@@ -406,8 +409,9 @@ def camera_page() -> None:
                 app.storage.general["gox_gain"] = gox_gain.value
                 result = await gox_tools.snapshot(ip, float(gox_exposure.value), float(gox_gain.value))
                 _gox_show(result)
+            except Exception as e:
+                ui.notify(f"Snapshot was not completed: {e}", type="negative", multi_line=True)
             finally:
-                STATE.snapshot_busy = False
                 gox_busy.classes(add="hidden")
                 refresh_guard()
 
@@ -421,8 +425,11 @@ def camera_page() -> None:
             gox_chart.options["series"][0]["data"] = result.histogram
             gox_chart.options["xAxis"]["data"] = list(range(len(result.histogram)))
             gox_chart.update()
+            request = result.request
+            requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
+                         f"gain x{request.gain:g} · " if request else "request metadata unavailable · ")
             gox_meta.set_text(
-                f"{result.decode_name} · exposure {gox_exposure.value:g}ms · gain x{gox_gain.value:.1f} · "
+                f"{result.decode_name} · {requested}"
                 f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · "
                 f"{result.elapsed_s:.1f}s"
             )
@@ -439,7 +446,7 @@ def camera_page() -> None:
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return
-            _after_apply(f"config-gox.yaml · {summary}")
+            _after_apply(summary)
 
         # ----------------------------------------------------------- FX10 glue
         async def _fx10_snap() -> None:
@@ -450,7 +457,6 @@ def camera_page() -> None:
             if reason or not ip:
                 ui.notify(reason or "Select a target FX10 camera first", type="warning")
                 return
-            STATE.snapshot_busy = True
             fx10_busy.classes(remove="hidden")
             refresh_guard()
             try:
@@ -461,8 +467,9 @@ def camera_page() -> None:
                     ip, float(fx10_exposure.value),
                     int(fx10_spatial.value), int(fx10_spectral.value))
                 _fx10_show(result)
+            except Exception as e:
+                ui.notify(f"Snapshot was not completed: {e}", type="negative", multi_line=True)
             finally:
-                STATE.snapshot_busy = False
                 fx10_busy.classes(add="hidden")
                 refresh_guard()
 
@@ -480,9 +487,13 @@ def camera_page() -> None:
                 for name, values in result.spectrum_pct.items()
             ]
             fx10_chart.update()
+            request = result.request
+            requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
+                         f"binning {request.spatial_binning}×{request.spectral_binning} · "
+                         if request else "request metadata unavailable · ")
             fx10_meta.set_text(
                 f"{result.lines} frames (~1s) · {result.bands} bands · {result.samples} px/line · "
-                f"exposure {fx10_exposure.value:.1f}ms · binning {fx10_spatial.value}×{fx10_spectral.value} · "
+                f"{requested}"
                 f"mean {result.mean_pct:.1f}% · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
             )
 
@@ -493,7 +504,7 @@ def camera_page() -> None:
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return
-            _after_apply(f"config-fx10.yaml · {summary}")
+            _after_apply(summary)
 
         def _after_apply(summary: str) -> None:
             """Same contract as the dashboard's Enable switches: the running

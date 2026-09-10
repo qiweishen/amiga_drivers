@@ -60,7 +60,7 @@ output:
     chunk_frames: 64                    # 1..4096
     flush_interval_ms: 1000             # 1..60000
     compression_level: 0                # 0..9; 0 = off
-    swmr: false                         # HDF5 single-writer/multiple-reader (local POSIX FS only)
+    swmr: false                         # must remain false: v3 string datasets do not support SWMR append
 
 
 # --- Network ---

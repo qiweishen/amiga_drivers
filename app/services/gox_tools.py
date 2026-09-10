@@ -22,8 +22,7 @@ from ..constants import (
     UNPACK_SCRIPT,
     VENV_PYTHON,
 )
-from ..state import STATE, ProcState
-from . import runtime
+from . import camera_operations, runtime
 
 SNAPSHOT_TOOL = "jai_snapshot"
 # GUI-side hard timeout; must stay strictly greater than the in-tool
@@ -31,6 +30,13 @@ SNAPSHOT_TOOL = "jai_snapshot"
 SNAPSHOT_TIMEOUT_S = 30.0
 UNPACK_TIMEOUT_S = 30.0
 CLIP_THRESHOLD = 0xFFF0  # a saturated 12-bit pixel after --shift-to-16bit
+
+
+@dataclass(frozen=True)
+class SnapshotRequest:
+    target_ip: str
+    exposure_ms: float
+    gain: float
 
 
 @dataclass
@@ -45,6 +51,7 @@ class SnapshotResult:
     incomplete: bool = False
     elapsed_s: float = 0.0
     raw_output: str = ""
+    request: SnapshotRequest | None = None  # requested values, not device readbacks
 
 
 def guard_reason() -> str | None:
@@ -55,15 +62,22 @@ def guard_reason() -> str | None:
     Uses the Enable-GOX value captured at process start — the live file value
     can be toggled mid-run and must not unlock the camera the driver owns.
     """
-    if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING):
-        if STATE.enables_at_start.get("gox", False):
-            return "Recording is running with GoX enabled — the driver owns the cameras; stop recording first"
-    return None
+    return camera_operations.guard_reason("gox")
 
 
 async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
-    """One full preview shot. Caller must have checked guard_reason() and must
-    serialize calls (STATE.snapshot_busy)."""
+    request = SnapshotRequest(ip, exposure_ms, gain)
+
+    async def capture() -> SnapshotResult:
+        result = await _snapshot(request.target_ip, request.exposure_ms, request.gain)
+        result.request = request
+        return result
+
+    return await camera_operations.run("gox", capture)
+
+
+async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
+    """One full preview shot while the service owns the camera reservation."""
     t0 = time.monotonic()
     sid = time.strftime("%Y%m%d_%H%M%S")
     out_host = SNAPSHOT_DIR / sid
@@ -140,7 +154,6 @@ async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
     decode_name = png.stem.split("_", 1)[1] if "_" in png.stem else ""
 
     result = await asyncio.to_thread(_encode_and_histogram, png)
-    result.ok = True
     result.decode_name = decode_name
     result.incomplete = incomplete
     result.raw_output = raw_output
@@ -166,7 +179,7 @@ def _encode_and_histogram(png_path) -> SnapshotResult:
         return SnapshotResult(False, reason="JPEG encoding failed")
     hist, _ = np.histogram(gray16, bins=64, range=(0, 65536))
     return SnapshotResult(
-        ok=False,  # caller flips to True after filling metadata
+        ok=True,
         jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
         histogram=[int(v) for v in hist],
         clipped_pct=float((gray16 >= CLIP_THRESHOLD).mean() * 100.0),

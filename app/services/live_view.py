@@ -14,6 +14,7 @@ appending to right now, restricted to committed bytes.
 from __future__ import annotations
 
 import base64
+import asyncio
 import csv
 import importlib.util
 import json
@@ -45,6 +46,7 @@ class GoxLive:
     height: int = 0
     pixel_format: str = ""
     age_s: float = 0.0  # click time minus the frame's host timestamp
+    request: PreviewRequest | None = None
 
 
 @dataclass
@@ -57,16 +59,73 @@ class Fx10Live:
     bands: int = 0
     samples: int = 0
     age_s: float = 0.0  # click time minus the .bil.part mtime (newest line)
+    request: PreviewRequest | None = None
 
 
 # --- shared ------------------------------------------------------------------
 
-def _session_or_reason() -> tuple[Path | None, str]:
-    if STATE.process_state != ProcState.RUNNING:
-        return None, "Recording is not running"
-    if STATE.active_session is None:
-        return None, "No active session directory"
-    return STATE.active_session, ""
+@dataclass(frozen=True)
+class PreviewRequest:
+    session: Path
+    generation: int
+
+
+class PreviewUnavailable(RuntimeError):
+    pass
+
+
+class PreviewObsolete(PreviewUnavailable):
+    pass
+
+
+_preview_task: asyncio.Task | None = None
+
+
+def busy() -> bool:
+    return _preview_task is not None and not _preview_task.done()
+
+
+def is_current(request: PreviewRequest | None) -> bool:
+    return (request is not None and STATE.process_state is ProcState.RUNNING
+            and STATE.ownership_verified and not STATE.control_uncertain
+            and request.generation == STATE.session_generation
+            and request.session == STATE.active_session)
+
+
+async def _fetch(driver: str, decode):
+    global _preview_task
+    if busy():
+        raise PreviewUnavailable("Another live preview is still being decoded; wait for it to finish")
+    if (STATE.process_state is not ProcState.RUNNING or STATE.active_session is None
+            or not STATE.ownership_verified or STATE.control_uncertain):
+        raise PreviewUnavailable("There is no verified running session to preview")
+    if not STATE.enables_at_start.get(driver, False):
+        raise PreviewUnavailable(f"{driver} is not enabled in this recording")
+    request = PreviewRequest(STATE.active_session, STATE.session_generation)
+
+    async def decode_request():
+        # Pass a fixed path into the worker. It must never switch sessions by
+        # rereading global UI state halfway through a file operation.
+        result = await asyncio.to_thread(decode, request.session)
+        result.request = request
+        return result
+
+    _preview_task = asyncio.create_task(decode_request())
+    _preview_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+    # Cancelling a page await does not stop a worker thread. Keep the global
+    # reservation until that worker really finishes; do not queue more work.
+    result = await asyncio.shield(_preview_task)
+    if not is_current(request):
+        raise PreviewObsolete("The recording changed while the preview was being decoded")
+    return result
+
+
+async def fetch_gox() -> GoxLive:
+    return await _fetch("gox", gox_latest_frame)
+
+
+async def fetch_fx10() -> Fx10Live:
+    return await _fetch("fx10", fx10_spectrum)
 
 
 _unpack_mod = None
@@ -107,16 +166,11 @@ def _idx_tail_records(idx_path: Path) -> list[dict]:
     return records
 
 
-def gox_latest_frame() -> GoxLive:
+def gox_latest_frame(session: Path) -> GoxLive:
     """Newest committed frame of the live GoX session, demosaiced to JPEG.
 
     The idx.jsonl writer buffers up to ~1 s / 100 frames, so the newest entry
     can lag the sensor by up to a second — exactly the requested window."""
-    session, reason = _session_or_reason()
-    if reason:
-        return GoxLive(False, reason=reason)
-    if not STATE.enables_at_start.get("gox", False):
-        return GoxLive(False, reason="GoX is not enabled in this run")
     root = session / "raw" / "gox"
     cameras = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
     for cam_dir in cameras:
@@ -214,22 +268,18 @@ def _fx10_frame_offsets(bil: Path, line_bytes: int, limit: int) -> list[int]:
     raw = raw[:raw.rfind(b"\n") + 1]  # discard an uncommitted trailing record
     offsets = []
     for row in csv.reader(raw.decode("ascii").splitlines()):
-        if len(row) == 10 and row[0] == "frame" and row[9] == "0":
+        # v2 appends twelve SDK metadata columns; the first ten keep v1 semantics.
+        if len(row) in (10, 22) and row[0] == "frame" and row[9] == "0":
             offset = int(row[3])
             if offset >= 0 and offset == int(row[1]) * line_bytes:
                 offsets.append(offset)
     return offsets[-limit:]
 
 
-def fx10_spectrum() -> Fx10Live:
+def fx10_spectrum(session: Path) -> Fx10Live:
     """Per-band statistics over roughly the last second of recorded lines
     (frame_rate_hz worth of lines at the tail of the open segment; same
     reductions and normalization as the Camera Tools snapshot preview)."""
-    session, reason = _session_or_reason()
-    if reason:
-        return Fx10Live(False, reason=reason)
-    if not STATE.enables_at_start.get("fx10", False):
-        return Fx10Live(False, reason="FX10 is not enabled in this run")
     root = session / "raw" / "fx10"
     session_dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
     if not session_dirs:

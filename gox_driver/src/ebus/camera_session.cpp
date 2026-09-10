@@ -142,7 +142,7 @@ namespace gox::ebus {
         WriteDeviceJson();
         telemetry_.open(camera_dir_ + "/telemetry.jsonl", std::ios::out | std::ios::app);
         if (!telemetry_) {
-            g_log.Warn("[{}] [eBUS] telemetry.jsonl could not be opened; device telemetry is not recorded", cfg_.id);
+            throw std::runtime_error("cannot open required telemetry.jsonl in " + camera_dir_);
         }
 
         // --- Go: TLParamsLocked, then AcquisitionStart, then the worker threads.
@@ -257,6 +257,11 @@ namespace gox::ebus {
         PollDeviceTelemetry();
         if (telemetry_.is_open()) {
             telemetry_.close();
+            if (!telemetry_) {
+                telemetry_failed_ = true;
+                g_log.Error("[{}] [eBUS] telemetry.jsonl close failed", cfg_.id);
+                stop_->RequestStop(StopReason::kError);
+            }
         }
         receiver_->Teardown();
 
@@ -285,7 +290,7 @@ namespace gox::ebus {
 
     bool CameraSession::Clean() const {
         const CameraStats::Snapshot s = stats_.GetSnapshot();
-        return s.frames_incomplete == 0 && s.frames_error_dropped == 0 && s.frames_dropped_queue == 0 && s.
+        return !telemetry_failed_ && s.frames_incomplete == 0 && s.frames_error_dropped == 0 && s.frames_dropped_queue == 0 && s.
                frames_lost_gap == 0 &&
                s.stream_blocks_dropped == 0;
     }
@@ -307,24 +312,16 @@ namespace gox::ebus {
     }
 
     void CameraSession::WriteDeviceJson() {
-        // Never fatal: a recording without its sidecar is still a recording.
+        // Version-1 raw headers do not contain the full interpretation contract.
+        // Persist it before StreamEnable/AcquisitionStart; failures abort bring-up.
         try {
             const DeviceReport report = controller_->CollectDeviceReport(
                 cfg_, applied_, ptp_ ? ptp_->Summary() : PtpSummary{}, factory_load_, runtime_shape_);
             const std::string path = camera_dir_ + "/device.json";
-            std::ofstream out(path, std::ios::out | std::ios::trunc);
-            if (!out) {
-                g_log.Warn("[{}] [eBUS] device.json could not be opened at {}", cfg_.id, path);
-                return;
-            }
-            out << BuildDeviceJson(report).dump(2) << '\n';
-            if (!out) {
-                g_log.Warn("[{}] [eBUS] device.json could not be written to {}", cfg_.id, path);
-                return;
-            }
+            PublishMetadata(path, BuildDeviceJson(report).dump(2) + "\n");
             g_log.Info("[{}] [eBUS] device metadata written to {}", cfg_.id, path);
         } catch (const std::exception &e) {
-            g_log.Warn("[{}] [eBUS] device.json could not be produced: {}", cfg_.id, e.what());
+            throw std::runtime_error("required device.json: " + std::string(e.what()));
         }
     }
 
@@ -375,9 +372,14 @@ namespace gox::ebus {
                 over_temperature_ = false;
             }
 
-            if (telemetry_.is_open()) {
+            if (telemetry_.is_open() && !telemetry_failed_) {
                 telemetry_ << BuildTelemetryLine(sample) << '\n';
-                telemetry_.flush(); // a killed session keeps the series it had
+                telemetry_.flush(); // userspace -> kernel; not a durability barrier
+                if (!telemetry_) {
+                    telemetry_failed_ = true;
+                    g_log.Error("[{}] [eBUS] telemetry.jsonl write failed", cfg_.id);
+                    stop_->RequestStop(StopReason::kError);
+                }
             }
         } catch (const std::exception &e) {
             g_log.Warn("[{}] [eBUS] device telemetry poll failed: {}", cfg_.id, e.what());

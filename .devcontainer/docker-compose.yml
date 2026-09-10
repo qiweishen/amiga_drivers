@@ -12,6 +12,8 @@ services:
         # Network and IPC
         network_mode: host
         ipc: host
+        # Match the hostname in the host's local Xauthority records (Compose >= 2.15.1).
+        uts: host
         cap_add:
             - NET_ADMIN
             - NET_RAW
@@ -20,13 +22,14 @@ services:
 
         environment:
             PYTHONUNBUFFERED: 1
-            # X11
-            DISPLAY: ${DISPLAY:-:0}
-            XAUTHORITY: /tmp/.docker.xauth
-            # Wayland
-            WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-}
+            # Xorg on Ubuntu 22.04, or XWayland on a Wayland desktop (22.04/26.04).
+            # Inherit the active host session; do not invent :0 for headless sessions.
+            DISPLAY: ${DISPLAY:-}
+            XAUTHORITY: /tmp/.host.xauth
+            QT_QPA_PLATFORM: xcb
+            GDK_BACKEND: x11
+            # Host user runtime for audio; GUI forwarding uses the X11 socket below.
             XDG_RUNTIME_DIR: ${XDG_RUNTIME_DIR:-/run/user/1000}
-            # Audio
             PULSE_SERVER: ${PULSE_SERVER:-unix:/run/user/1000/pulse/native}
             # Software rendering (set 0 for GPU acceleration)
             LIBGL_ALWAYS_SOFTWARE: 1
@@ -36,20 +39,29 @@ services:
 #            - /dev/ttyACM0:/dev/ttyACM0
 #
 #        group_add:
-#            - "20"        # dialout
+#            - "20" # dialout
 
         volumes:
             - ..:/workspace
             - /mnt/SharedData/Post_Processing_Data:/workspace/dataset
-            # X11 socket and auth
-            - /tmp/.X11-unix:/tmp/.X11-unix:rw
-            - /tmp/.docker.xauth:/tmp/.docker.xauth:ro
-            # WSLg (safe to include on native Linux)
-            - /mnt/wslg:/mnt/wslg
+            # Use the existing host desktop authorization file directly; no setup hook.
+            # Missing sources must fail instead of becoming empty directories.
+            -   type: bind
+                source: /tmp/.X11-unix
+                target: /tmp/.X11-unix
+                read_only: true
+                bind:
+                    create_host_path: false
+            -   type: bind
+                source: "${XAUTHORITY:-${HOME}/.Xauthority}"
+                target: /tmp/.host.xauth
+                read_only: true
+                bind:
+                    create_host_path: false
             # User runtime (audio, D-Bus, etc.)
             - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
             # Teensy trigger board
-#            - /dev/serial/by-id:/dev/serial/by-id:ro
-#            - /dev:/dev
+            - /dev/serial/by-id:/dev/serial/by-id:ro
+            - /dev:/dev
 
         working_dir: /workspace

@@ -76,7 +76,8 @@ namespace fx10 {
     RunStatus Classify(const Counters &c) {
         const bool clean = c.frames_missed_rx == 0 && c.op_errors == 0 &&
                            c.size_mismatch_drops == 0 && c.write_errors == 0 &&
-                           c.blockid_anomalies == 0 && c.missed_trigger_delta <= 0;
+                           c.blockid_anomalies == 0 && c.recording_queue_drops == 0 &&
+                           c.recording_worker_unconfirmed == 0 && c.missed_trigger_delta <= 0;
         return clean ? RunStatus::kClean : RunStatus::kDegraded;
     }
 

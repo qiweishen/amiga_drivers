@@ -40,7 +40,7 @@ namespace lms4xxx {
             std::uint32_t chunk_frames = 64; // HDF5 chunk = write batch
             std::uint32_t flush_interval_ms = 1000;
             int compression_level = 0; // 0 = off, 1..9 = gzip on the channel datasets
-            bool swmr = false; // single-writer/multiple-reader (local POSIX FS only)
+            bool swmr = false; // true is rejected to preserve the v3 string datasets safely
         };
 
         explicit ScanRecordWriter(Config config);
@@ -87,4 +87,3 @@ namespace lms4xxx {
         std::unique_ptr<Impl> impl_;
     };
 } // namespace lms4xxx
-

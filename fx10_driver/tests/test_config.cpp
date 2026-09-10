@@ -168,6 +168,20 @@ TEST_CASE("config: unknown keys are errors naming the key and the accepted set")
                    "unknown key 'features.raw[0].extra'"));
 }
 
+TEST_CASE("config: raw writes cannot bypass acquisition ordering or repeat shutter pulses") {
+    for (const std::string name: {"AcquisitionStart", "AcquisitionStop"}) {
+        CHECK(Contains(ErrorOf("features: { raw: [ { name: " + name + ", type: command } ] }"),
+                       "features.raw[0].name"));
+    }
+    for (const std::string name: {"MotorShutter_PulseRev", "MotorShutter_PulseFwd"}) {
+        CHECK(Contains(ErrorOf("features: { raw: [ { name: " + name + ", type: int, value: 255 } ] }"),
+                       "features.raw[0].name"));
+    }
+    // No generic state binding or disable switch: opening is a mandatory action.
+    CHECK(Contains(ErrorOf("shutter: { opened: { name: MotorShutter_PulseRev, type: int, value: 255 } }"),
+                   "unknown key 'shutter'"));
+}
+
 TEST_CASE("config: invalid scalars name the key") {
     CHECK(Contains(ErrorOf("acquisition: { exposure_ms: banana }"), "acquisition.exposure_ms: has an invalid value"));
     CHECK(Contains(ErrorOf("acquisition: { exposure_ms: }"), "acquisition.exposure_ms: has an invalid value"));

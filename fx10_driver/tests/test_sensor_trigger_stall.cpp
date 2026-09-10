@@ -1,5 +1,5 @@
 #include "../include/log_growth_tracker.h"
-#include "../../submodule/sensor_trigger/session_protocol.h"
+#include "../../3rd_party/External/sensor_trigger/session_protocol.h"
 
 #include <doctest/doctest.h>
 

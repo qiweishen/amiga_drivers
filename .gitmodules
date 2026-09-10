@@ -1,4 +1,0 @@
-[submodule "submodule/sensor_trigger"]
-	path = submodule/sensor_trigger
-	url = https://github.com/qiweishen/sensor_trigger
-	branch = main

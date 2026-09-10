@@ -1,8 +1,5 @@
-/// @file lms4xxx_scan_record.h
-/// @brief Fixed-size per-scan record handed to the HDF5 writer; FrameMeta
-/// field names are the /frames/<name> dataset names (docs/FORMAT_H5.md).
-
 #pragma once
+
 #include <cstddef>
 #include <cstdint>
 #include <string>

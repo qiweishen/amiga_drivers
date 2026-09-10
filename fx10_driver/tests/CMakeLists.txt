@@ -9,6 +9,8 @@ set(FX10_TEST_SOURCES
         test_envi_header.cpp
         test_envi_recorder.cpp
         test_pixel_format.cpp
+        test_recording_pipeline.cpp
+        test_session_metadata.cpp
         test_sensor_trigger_stall.cpp
         test_stats_line.cpp
         test_wavelengths.cpp

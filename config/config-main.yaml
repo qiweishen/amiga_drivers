@@ -15,9 +15,9 @@ General:
 
     # Per-driver enable switches
     # It will be overrided by GUI
-    Enable ASTERX: true
-    Enable FX10: false
-    Enable GOX: true
+    Enable ASTERX: false
+    Enable FX10: true
+    Enable GOX: false
     Enable LMS4XXX: false
 
     # =============================================================

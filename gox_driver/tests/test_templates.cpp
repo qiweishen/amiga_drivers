@@ -30,12 +30,12 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
     CHECK(*cam.acquisition.pixel_format == "BayerRG12Packed");
     CHECK_FALSE(cam.acquisition.blemish_correction);
     REQUIRE(cam.acquisition.frame_rate_hz.has_value());
-    CHECK(*cam.acquisition.frame_rate_hz == doctest::Approx(3.0));
+    CHECK(*cam.acquisition.frame_rate_hz == doctest::Approx(5.0));
     REQUIRE(cam.acquisition.exposure_ms.has_value());
     CHECK(*cam.acquisition.exposure_ms == doctest::Approx(150.0));
     REQUIRE(cam.acquisition.gain.has_value());
     CHECK(*cam.acquisition.gain == doctest::Approx(1.0));
-    CHECK(*cam.acquisition.exposure_ms < 1000.0 / *cam.acquisition.frame_rate_hz);
+    CHECK(*cam.acquisition.exposure_ms < 900.0 / *cam.acquisition.frame_rate_hz);
 
     CHECK(cam.acquisition.trigger.mode == TriggerMode::kFreerun);
     CHECK(cam.acquisition.trigger.activation == TriggerActivation::kRising);
@@ -64,9 +64,9 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
 
     CHECK(cfg.stats_interval_s == doctest::Approx(2.5));
 
-    // The acquisition template explicitly enables PTP; omitted-key defaults
-    // remain disabled and are covered separately in test_config.cpp.
-    CHECK(cfg.ptp.enabled);
+    // Current capture profile explicitly disables PTP. Omitted-key defaults
+    // and enabled PTP parsing are covered separately in test_config.cpp.
+    CHECK_FALSE(cfg.ptp.enabled);
     CHECK(cfg.ptp.on_timeout == PtpOnTimeout::kAbort);
 }
 
@@ -85,7 +85,7 @@ TEST_CASE("templates: config-gox-snapshot.yaml keeps the single-shot invariants"
     REQUIRE(cam.acquisition.frame_rate_hz.has_value());
     CHECK(*cam.acquisition.frame_rate_hz == doctest::Approx(3.0));
     REQUIRE(cam.acquisition.exposure_ms.has_value());
-    CHECK(*cam.acquisition.exposure_ms < 1000.0 / *cam.acquisition.frame_rate_hz);
+    CHECK(*cam.acquisition.exposure_ms < 900.0 / *cam.acquisition.frame_rate_hz);
 
     // jai_snapshot forces max_frames / max_duration_s / ptp / trigger itself; the template stays silent
     CHECK(cfg.output.max_frames == 0u);

@@ -45,6 +45,12 @@ class StorageStatus:
     disk_total: int = 0
     disk_used: int = 0
     disk_free: int = 0
+    disk_path: Path | None = None
+    disk_scope: str = "Next recording disk"
+    next_output_path: Path | None = None
+    generation: int = 0
+    sampled_at: float = 0.0
+    error: str = ""
 
 
 @dataclass
@@ -63,6 +69,11 @@ class AppState:
     sensors: dict[str, SensorStatus] = field(default_factory=dict)
     storage: StorageStatus = field(default_factory=StorageStatus)
     snapshot_busy: bool = False
+    stop_requested: bool = False
+    config_locked: bool = False  # held until initialization finishes, including a stop during startup
+    ownership_verified: bool = False
+    control_uncertain: bool = True  # cleared only after checking the execution environment
+    session_generation: int = 0  # invalidates work submitted for an earlier run
 
 
 STATE = AppState()

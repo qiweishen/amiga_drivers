@@ -91,16 +91,23 @@ def disk_gauge() -> Callable[[], None]:
     """Build the output-disk gauge; returns update() for the page timer."""
     with ui.column().classes("w-full gap-1") as box:
         with ui.row().classes("items-center justify-between w-full"):
-            ui.label("Output disk").classes("font-bold")
+            title = ui.label("Output disk").classes("font-bold")
             free_label = ui.label().classes("text-sm")
         bar = ui.linear_progress(value=0.0, show_value=False)
-    missing_label = ui.label("Disk info unavailable (output directory does not exist)").classes(
+        path_label = ui.label("").classes("text-xs text-gray-600 break-all")
+    next_label = ui.label("").classes("text-xs text-gray-600 break-all")
+    error_label = ui.label("").classes("text-sm text-amber-700 break-all")
+    missing_label = ui.label("Disk info is pending or unavailable").classes(
         "text-sm text-gray-500"
     )
 
     def update() -> None:
         s = STATE.storage
-        available = s.disk_total > 0
+        available = s.generation == STATE.session_generation and s.disk_total > 0
+        title.set_text(s.disk_scope)
+        path_label.set_text(str(s.disk_path or ""))
+        next_label.set_text(f"Next recording output: {s.next_output_path or 'unavailable'}")
+        error_label.set_text(s.error)
         box.set_visibility(available)
         missing_label.set_visibility(not available)
         if not available:

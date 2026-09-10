@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,11 +26,11 @@ public:
     void Run() override;
 
     void Shutdown() override;
-    nlohmann::ordered_json FinalStatistics() const override { return final_statistics_; }
+    [[nodiscard]] nlohmann::ordered_json FinalStatistics() const override { return final_statistics_; }
 
     // Silence since the last scan telegram; nullopt until `sEN LMDscandata 1` is acknowledged.
     // Before the first telegram the reference is the moment scanning started.
-    std::optional<std::uint64_t> MicrosSinceLastData() const override;
+    [[nodiscard]] std::optional<std::uint64_t> MicrosSinceLastData() const override;
 
 private:
     struct Impl {

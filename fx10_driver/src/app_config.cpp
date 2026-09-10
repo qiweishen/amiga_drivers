@@ -1,5 +1,6 @@
 #include "app_config.h"
 
+#include <cmath>
 #include <sstream>
 
 #include "string_util.h"
@@ -113,6 +114,11 @@ namespace fx10 {
                 CheckKeys(item, p, {"name", "type", "value"});
                 RawFeature f;
                 f.name = RequireText(item, p, "name");
+                if (f.name == "AcquisitionStart" || f.name == "AcquisitionStop" ||
+                    f.name == "MotorShutter_PulseRev" || f.name == "MotorShutter_PulseFwd") {
+                    Fail(p + ".name", "acquisition lifecycle and shutter pulse writes are owned by the driver; "
+                         "features.raw must not bypass or duplicate shutter preparation");
+                }
                 ReadEnum(item, p, "type", {"int", "float", "bool", "enum", "string", "command"}, f.type);
                 if (f.type.empty()) {
                     Fail(p + ".type", "is required (int | float | bool | enum | string | command)");
@@ -209,7 +215,7 @@ namespace fx10 {
 
         AppConfig ParseRoot(const YAML::Node &root) {
             CheckKeys(root, "", {
-                          "device", "acquisition", "sensor_trigger", "features", "output", "network", "logging"
+                          "device", "acquisition", "sensor_trigger", "features", "output", "network", "logging", "reference"
                       });
             AppConfig c;
 
@@ -226,12 +232,15 @@ namespace fx10 {
             ParseNetwork(root, c.network);
             ParseOutput(root, c.recording);
 
+            const YAML::Node reference = OptionalMap(root, "", "reference", {"duration_s"});
+            ReadRange<double>(reference, "reference", "duration_s", 0.1, 3600.0, c.reference.duration_s);
+            if (!std::isfinite(c.reference.duration_s)) Fail("reference.duration_s", "must be finite");
+
             const YAML::Node logging = OptionalMap(root, "", "logging", {"stats_interval_s"});
             ReadRange<double>(logging, "logging", "stats_interval_s", 0.0, 3600.0, c.logging.stats_interval_s);
             return c;
         }
     } // namespace
-
 
     std::vector<std::pair<int, int> > ParseMroiRegions(const std::string &multiband_string) {
         constexpr int kMaxRegions = 512; // manual p.26

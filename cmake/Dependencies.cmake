@@ -6,6 +6,16 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
+# sensor_trigger - SensorSync-Logger; Not CMake project
+FetchContent_Declare(sensor_trigger
+        GIT_REPOSITORY https://github.com/qiweishen/sensor_trigger.git
+        GIT_TAG main
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/External/sensor_trigger)
+FetchContent_MakeAvailable(sensor_trigger)
+
+
+################################################################################
 # HDF5 - Hierarchical data format version 5 library
 FetchContent_Declare(
         hdf5

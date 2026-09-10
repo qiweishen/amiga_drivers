@@ -8,6 +8,8 @@
 #include <PvStreamGEV.h>
 
 #include <algorithm>
+#include <fstream>
+#include <limits>
 
 #include "logger.h"
 #include "time_util.h"
@@ -108,9 +110,7 @@ namespace fx10 {
             throw TransportError("[eBUS] Stream already open");
         }
 
-        // eBUS 6.5.1 PvStreamGEV.h requires Set -> Open -> Get. A factory
-        // CreateAndOpen() followed by Set always returns NETWORK_CONFIG_ERROR.
-        // Keep ownership local until setup succeeds so every failure rolls back.
+        // eBUS 6.5.1 PvStreamGEV.h requires Set -> Open -> Get
         auto stream = std::make_unique<PvStreamGEV>();
         const std::uint32_t rx_bytes = static_cast<std::uint32_t>(network_.socket_rx_buffer_mb) * 1024u * 1024u;
         const PvResult rx_result = stream->SetUserModeSocketRxBufferSize(rx_bytes);
@@ -133,6 +133,11 @@ namespace fx10 {
 
         std::uint32_t rx_readback = 0;
         const PvResult rx_read = stream->GetUserModeSocketRxBufferSize(rx_readback);
+        runtime_metadata_["socket_rx_requested_bytes"] = rx_bytes;
+        runtime_metadata_["socket_rx_set_result"] = common::Ebus::PvResultToString(rx_result);
+        runtime_metadata_["socket_rx_read_result"] = common::Ebus::PvResultToString(rx_read);
+        runtime_metadata_["socket_rx_effective_bytes"] = rx_read.IsOK() ? nlohmann::json(rx_readback) : nlohmann::json(nullptr);
+        runtime_metadata_["socket_rx_semantics"] = "SDK SO_RCVBUF readback; Linux may include doubled bookkeeping; not payload capacity";
         if (rx_read.IsOK()) {
             g_log.Info("[eBUS] socket rx buffer: requested={} bytes, SDK SO_RCVBUF readback={} bytes, "
                        "set_result={}; Linux readback may include doubled bookkeeping allocation",
@@ -175,15 +180,21 @@ namespace fx10 {
     }
 
 
-    void StreamReceiver::Start(IFrameSink &sink, const ExpectedGeometry &expected, double expected_fps) {
+    void StreamReceiver::Start(IFrameSink &sink, const ExpectedGeometry &expected, double expected_fps,
+                               const std::function<void()> &before_acquisition) {
         if (stream_ == nullptr) {
             throw TransportError("[eBUS] Start: stream not open");
         }
-        if (streaming_.load()) {
-            throw TransportError("[eBUS] Already streaming");
+        if (streaming_.load() || acquisition_thread_.joinable() || pipeline_ || !buffers_.empty()) {
+            throw TransportError("[eBUS] Start requires the previous acquisition to be stopped and drained");
         }
         // Wire size per frame: packed formats carry fewer bytes than W*H*bpp
         pixel_info_ = GetPixelFormatInfo(expected.pixel_format);
+        if (expected.width == 0 || expected.height == 0 || pixel_info_ == nullptr ||
+            expected.bytes_per_pixel != pixel_info_->storage_bpp ||
+            expected.height > std::numeric_limits<std::size_t>::max() / expected.width / 2) {
+            throw TransportError("[eBUS] Invalid or overflowing expected image geometry");
+        }
         const std::size_t pixels = static_cast<std::size_t>(expected.width) * expected.height;
         const std::size_t wire_bytes =
                 pixel_info_ != nullptr
@@ -203,19 +214,16 @@ namespace fx10 {
             g_log.Trace("[eBUS] Receive payload {} B, effective pixels {} B; validating received image layout",
                         expected.payload_size, wire_bytes);
         }
-        if (pixel_info_ != nullptr && pixel_info_->packed) {
-            unpack_buf_.resize(pixels); // reused every frame; sink sees canonical uint16
-        }
-
         expected_ = expected;
         first_frame_checked_ = false;
-        preamble_checked_ = false;
         tracker_ = BlockIdTracker();
         // Full state reset: this object supports reconnect cycles (stop -> disconnect -> connect -> start);
         // so stale link-loss/error state must not survive
         stop_requested_.store(false);
         failed_.store(false);
+        fatal_kind_.store(FatalKind::kNone);
         link_lost_.store(false);
+        loss_seen_.store(false);
         acq_stop_sent_.store(false);
         frames_delivered_.store(0);
         last_frame_us_.store(0);
@@ -235,26 +243,30 @@ namespace fx10 {
                                  " != expected " + std::to_string(expected.payload_size) +
                                  " (camera state changed after configuration?)");
         }
-        const BufferPoolPlan plan = PlanBufferPool(network_, expected_fps, payload, stream_->GetQueuedBufferMaximum());
-        if (plan.count == 0) {
-            throw TransportError("[eBUS] Buffer pool plan failed (payload size 0?)");
+        const auto canonical_bytes = ((pixels * expected.bytes_per_pixel + 1) / 2) * 2;
+        const auto plan = PlanRecordingBuffers(network_, expected_fps, payload, canonical_bytes,
+                                              stream_->GetQueuedBufferMaximum());
+        if (plan.sdk_buffers == 0 || plan.queue_frames == 0) {
+            throw TransportError("[eBUS] Buffer memory limit cannot fit the receive and recording pools");
         }
+        const auto total_bytes = plan.sdk_bytes + plan.application_bytes + plan.canonical_bytes;
         if (plan.clamped_by_memory || plan.clamped_by_stream) {
-            g_log.Warn("[eBUS] Buffer pool clamped to {} buffers ({:.1f} MiB): stall absorption {:.2f} s", plan.count,
-                       static_cast<double>(plan.bytes) / 1048576.0, plan.achievable_stall_s);
-        } else {
-            g_log.Trace("[eBUS] Buffer pool: {} buffers ({:.1f} MiB), stall absorption {:.2f} s", plan.count,
-                        static_cast<double>(plan.bytes) / 1048576.0, plan.achievable_stall_s);
+            g_log.Warn("[eBUS] Recording buffers clamped: SDK={}, queue={}, achievable queue stall {:.2f} s",
+                       plan.sdk_buffers, plan.queue_frames, plan.achievable_stall_s);
         }
+        g_log.Info("[eBUS] Recording pipeline: SDK={} buffers, application={} queued frames, "
+                   "payload/scratch memory={:.1f} MiB, queue stall budget={:.2f} s",
+                   plan.sdk_buffers, plan.queue_frames, static_cast<double>(total_bytes) / 1048576.0,
+                   plan.achievable_stall_s);
 
-        buffers_.reserve(plan.count);
-        for (std::uint32_t i = 0; i < plan.count; ++i) {
+        buffers_.reserve(plan.sdk_buffers);
+        for (std::uint32_t i = 0; i < plan.sdk_buffers; ++i) {
             auto buffer = std::make_unique<PvBuffer>();
             const PvResult alloc = buffer->Alloc(payload);
             if (!alloc.IsOK()) {
                 FreeBuffers();
                 throw TransportError(
-                    "[eBUS] Buffer allocation failed at " + std::to_string(i) + "/" + std::to_string(plan.count) + ": "
+                    "[eBUS] Buffer allocation failed at " + std::to_string(i) + "/" + std::to_string(plan.sdk_buffers) + ": "
                     + pv(
                         alloc.GetCodeString()
                     )
@@ -273,6 +285,31 @@ namespace fx10 {
             }
         }
 
+        RecordingPipeline::Options pipeline_options;
+        pipeline_options.width = expected.width;
+        pipeline_options.height = expected.height;
+        pipeline_options.pixel_format = expected.pixel_format;
+        pipeline_options.status_line = expected.status_line;
+        pipeline_options.payload_capacity = payload;
+        pipeline_options.queue_frames = plan.queue_frames;
+        pipeline_ = std::make_unique<RecordingPipeline>(sink, std::move(pipeline_options));
+
+        runtime_metadata_["buffer_count"] = buffers_.size();
+        runtime_metadata_["buffer_bytes"] = plan.sdk_bytes;
+        runtime_metadata_["recording_queue_frames"] = plan.queue_frames;
+        runtime_metadata_["recording_pool_bytes"] = plan.application_bytes;
+        runtime_metadata_["canonical_scratch_bytes"] = plan.canonical_bytes;
+        runtime_metadata_["total_payload_buffer_bytes"] = total_bytes;
+        runtime_metadata_["payload_capacity_bytes"] = payload;
+        runtime_metadata_["estimated_stall_seconds"] = plan.achievable_stall_s;
+        runtime_metadata_["stall_rate_basis_hz"] = expected_fps;
+        runtime_metadata_["stall_estimate_scope"] = "application queue only; SDK slack is not added";
+        runtime_metadata_["clamped_by_memory"] = plan.clamped_by_memory;
+        runtime_metadata_["clamped_by_stream"] = plan.clamped_by_stream;
+        runtime_metadata_["sink_execution"] = "dedicated unpack/ENVI writer; owned SDK payload copies in bounded queue";
+        runtime_metadata_["recording_queue_full_policy"] = "fatal; drain accepted events and stop session";
+        if (before_acquisition) before_acquisition();
+
         PvResult result = device_->StreamEnable();
         if (!result.IsOK()) {
             if (DrainAborted()) {
@@ -290,7 +327,14 @@ namespace fx10 {
         }
 
         try {
-            acquisition_thread_ = std::thread(&StreamReceiver::AcquisitionLoop, this, std::ref(sink));
+            acquisition_thread_ = std::thread([this] {
+                try { AcquisitionLoop(); }
+                catch (const std::exception &error) {
+                    LatchFatal(std::string("acquisition worker failed: ") + error.what());
+                } catch (...) {
+                    LatchFatal("acquisition worker failed with an unknown exception");
+                }
+            });
         } catch (...) {
             // Unwind like the AcquisitionStart failure path
             // Never leave the camera acquiring with nobody retrieving
@@ -303,6 +347,23 @@ namespace fx10 {
         }
         streaming_.store(true);
         g_log.Info("[eBUS] Acquisition started");
+    }
+
+
+    void StreamReceiver::StopAcquisition() {
+        std::lock_guard<std::mutex> lock(stop_mutex_);
+        if (!device_ || link_lost_.load()) {
+            throw TransportError("[eBUS] Cannot stop acquisition: control link unavailable");
+        }
+        if (acq_stop_sent_.exchange(true)) {
+            if (failed_.load()) throw TransportError(ErrorMessage());
+            return;
+        }
+        auto *command = dynamic_cast<PvGenCommand *>(device_->GetParameters()->Get("AcquisitionStop"));
+        if (!command || !command->Execute().IsOK()) {
+            LatchFatal("AcquisitionStop was not acknowledged; phase boundary is unconfirmed", FatalKind::kOther);
+            throw TransportError(ErrorMessage());
+        }
     }
 
 
@@ -353,7 +414,16 @@ namespace fx10 {
     }
 
 
-    void StreamReceiver::AcquisitionLoop(IFrameSink &sink) {
+    bool StreamReceiver::SubmitFrame(const FrameView &frame, std::uint64_t first_missing,
+                                     std::uint64_t missing_count, RecordingPipeline::Rejection rejection) {
+        if (pipeline_->Submit(frame, first_missing, missing_count, rejection)) return true;
+        if (rejection == RecordingPipeline::Rejection::kNone) ++counters_.recording_queue_drops;
+        loss_seen_.store(true, std::memory_order_release);
+        LatchFatal(pipeline_->ErrorMessage(), FatalKind::kRecordingPipeline);
+        return false;
+    }
+
+    void StreamReceiver::AcquisitionLoop() {
         using clock = std::chrono::steady_clock;
         auto last_frame = clock::now();
 
@@ -372,8 +442,8 @@ namespace fx10 {
                 // the AcquisitionStop for the live-link fatal cases is issued in Stop()
                 break;
             }
-            if (!draining && sink.Failed()) {
-                LatchFatal("frame sink failed (see recorder error above)", FatalKind::kSinkFailed);
+            if (pipeline_->Failed()) {
+                LatchFatal(pipeline_->ErrorMessage(), FatalKind::kRecordingPipeline);
                 break;
             }
             if (!draining && stop_requested_.load()) {
@@ -431,11 +501,34 @@ namespace fx10 {
             last_arrival = clock::now();
             const auto host_receive_rt = common::TimeUtil::RealtimeNowNs();
             const auto host_receive_mono = common::TimeUtil::MonotonicNowNs();
+            FrameView frame;
+            frame.block_id = buffer->GetBlockID();
+            frame.device_timestamp_raw = buffer->GetTimestamp();
+            frame.host_receive_realtime_ns = host_receive_rt;
+            frame.host_receive_monotonic_ns = host_receive_mono;
+            frame.sdk.emplace();
+            auto &sdk = *frame.sdk;
+            sdk.acquired_size = buffer->GetAcquiredSize();
+            sdk.payload_type = static_cast<std::uint32_t>(buffer->GetPayloadType());
+            sdk.operation_result = static_cast<std::uint32_t>(op_result.GetCode());
+            sdk.chunk_count = buffer->GetChunkCount();
+            if (buffer->GetPayloadType() == PvPayloadTypeImage) {
+                if (auto *image = buffer->GetImage()) {
+                    sdk.image_present = true;
+                    sdk.pixel_type = static_cast<std::uint32_t>(image->GetPixelType());
+                    sdk.width = image->GetWidth();
+                    sdk.height = image->GetHeight();
+                    sdk.padding_x = image->GetPaddingX();
+                    sdk.padding_y = image->GetPaddingY();
+                    sdk.image_size = image->GetImageSize();
+                    sdk.effective_image_size = image->GetEffectiveImageSize();
+                }
+            }
             if (!op_result.IsOK()) {
                 ++counters_.op_errors;
                 loss_seen_.store(true, std::memory_order_release);
                 g_log.Warn("[eBUS] Buffer operation error: {}", pv(op_result.GetCodeString()));
-                sink.OnRejected(buffer->GetBlockID(), "operation-error");
+                SubmitFrame(frame, 0, 0, RecordingPipeline::Rejection::kOperationError);
                 Requeue(buffer);
                 CheckStreamUnusable(last_arrival, last_frame);
                 continue;
@@ -444,13 +537,13 @@ namespace fx10 {
                 ++counters_.op_errors;
                 loss_seen_.store(true, std::memory_order_release);
                 g_log.Warn("[eBUS] Non-image payload type {} dropped", static_cast<int>(buffer->GetPayloadType()));
-                sink.OnRejected(buffer->GetBlockID(), "non-image");
+                SubmitFrame(frame, 0, 0, RecordingPipeline::Rejection::kNonImage);
                 Requeue(buffer);
                 CheckStreamUnusable(last_arrival, last_frame);
                 continue;
             }
             if (!CheckFrame(*buffer)) {
-                sink.OnRejected(buffer->GetBlockID(), "layout-error");
+                SubmitFrame(frame, 0, 0, RecordingPipeline::Rejection::kLayoutError);
                 Requeue(buffer);
                 continue; // latchFatal_ set; loop head exits
             }
@@ -463,7 +556,7 @@ namespace fx10 {
                 g_log.Warn("[eBUS] BlockID anomaly at {}", buffer->GetBlockID());
             }
             if (observation.gap_before > 0) {
-                sink.OnGap(observation.first_missing, observation.gap_before);
+                loss_seen_.store(true, std::memory_order_release);
             }
 
             ++counters_.retrieve_ok;
@@ -472,36 +565,8 @@ namespace fx10 {
             last_frame_us_.store(common::TimeUtil::SteadyNowUs(), std::memory_order_release);
 
             PvImage *image = buffer->GetImage();
-            FrameView frame;
-            if (pixel_info_ != nullptr && pixel_info_->packed) {
-                // Unpack to the canonical right-justified uint16 layout
-                const std::size_t n_px = static_cast<std::size_t>(expected_.width) * expected_.height;
-                const std::size_t stride = WireBytes(*pixel_info_, expected_.width) + image->GetPaddingX();
-                for (std::size_t row = 0; row < expected_.height; ++row) {
-                    const auto *src = image->GetDataPointer() + row * stride;
-                    auto *dst = unpack_buf_.data() + row * expected_.width;
-                    if (expected_.pixel_format == "Mono12Packed") {
-                        UnpackMono12Packed(src, expected_.width, dst);
-                    } else {
-                        UnpackMono10Packed(src, expected_.width, dst);
-                    }
-                }
-                frame.data = reinterpret_cast<const std::uint8_t *>(unpack_buf_.data());
-                frame.size = n_px * 2;
-            } else {
-                const std::size_t row_bytes = WireBytes(*pixel_info_, expected_.width);
-                frame.size = row_bytes * expected_.height;
-                frame.data = image->GetDataPointer();
-                if (image->GetPaddingX() != 0) {
-                    row_copy_buf_.resize(frame.size);
-                    const std::size_t stride = row_bytes + image->GetPaddingX();
-                    for (std::size_t row = 0; row < expected_.height; ++row) {
-                        std::copy_n(image->GetDataPointer() + row * stride, row_bytes,
-                                    row_copy_buf_.data() + row * row_bytes);
-                    }
-                    frame.data = row_copy_buf_.data();
-                }
-            }
+            frame.data = image->GetDataPointer();
+            frame.size = static_cast<std::size_t>(sdk.acquired_size);
             frame.width = image != nullptr ? image->GetWidth() : 0;
             frame.height = image != nullptr ? image->GetHeight() : 0;
             frame.bytes_per_pixel = expected_.bytes_per_pixel;
@@ -511,13 +576,10 @@ namespace fx10 {
             frame.host_receive_monotonic_ns = host_receive_mono;
             frame.block_id_anomaly = observation.anomaly;
 
-            if (!preamble_checked_) {
-                preamble_checked_ = true;
-                WarnIfUnexpectedStatusLine(frame.data);
-            }
-
-            sink.OnFrame(frame);
-            frames_delivered_.fetch_add(1);
+            // Submit owns the bytes before returning. The SDK buffer is never
+            // held across unpacking, disk writes, flushes or segment rotation.
+            if (SubmitFrame(frame, observation.first_missing, observation.gap_before))
+                frames_delivered_.fetch_add(1);
             Requeue(buffer);
 
             if (draining) {
@@ -603,30 +665,9 @@ namespace fx10 {
     }
 
 
-    void StreamReceiver::WarnIfUnexpectedStatusLine(const std::uint8_t *data) const {
-        // Status-line double-check on CANONICAL (unpacked) data: when the config
-        // says the status line is OFF, the last row must not start with the
-        // 0x66BB00FF preamble (encoded in the lower 8 bits of the first 4
-        // pixels, LSB first). Runs once, after any unpack, so the byte layout
-        // is identical for packed and unpacked wire formats.
-        if (expected_.status_line || expected_.bytes_per_pixel != 2 || expected_.width < 4 ||
-            expected_.height < 1 || data == nullptr) {
-            return;
-        }
-        const std::size_t last_row =
-                static_cast<std::size_t>(expected_.height - 1) * expected_.width * 2;
-        if (data[last_row] == 0xFF && data[last_row + 2] == 0x00 &&
-            data[last_row + 4] == 0xBB && data[last_row + 6] == 0x66) {
-            g_log.Warn("[eBUS] Status-line preamble detected in the last row but the configuration "
-                "says status_line=off — the last band row may contain metadata, "
-                "check EnStatusLine on the camera");
-        }
-    }
-
-
     void StreamReceiver::Stop() {
         std::lock_guard<std::mutex> lock(stop_mutex_); // Disconnect() and the destructor may race
-        if (!streaming_.load() && !acquisition_thread_.joinable()) {
+        if (!streaming_.load() && !acquisition_thread_.joinable() && !pipeline_) {
             return;
         }
         stop_requested_.store(true);
@@ -654,8 +695,17 @@ namespace fx10 {
             // unconditionally after Close().
             g_log.Warn("[eBUS] Stream queue not fully drained; buffer release deferred to disconnect()");
         }
+        if (pipeline_) {
+            pipeline_->Finish(); // receiver joined; drain copies before recorder.Stop()
+            counters_.recording_worker_unconfirmed += pipeline_->FramesUnconfirmed();
+            if (pipeline_->Failed()) LatchFatal(pipeline_->ErrorMessage(), FatalKind::kRecordingPipeline);
+            g_log.Info("[Writer] Queue drained: accepted={}, delivered_to_sink={}, unconfirmed={} "
+                       "(unconfirmed may overlap sink deliveries after I/O failure)",
+                       frames_delivered_.load(), pipeline_->FramesDelivered(), pipeline_->FramesUnconfirmed());
+            pipeline_.reset();
+        }
         streaming_.store(false);
-        g_log.Info("[eBUS] Acquisition stopped ({} frames delivered)", frames_delivered_.load());
+        g_log.Info("[eBUS] Acquisition stopped ({} frames admitted to recording queue)", frames_delivered_.load());
     }
 
 
@@ -678,7 +728,7 @@ namespace fx10 {
 
 
     void StreamReceiver::Disconnect() {
-        if (streaming_.load()) Stop();
+        Stop(); // also joins a pipeline created during a partially failed Start
         if (stream_ != nullptr) {
             stream_->Close();
             delete stream_; // allocated locally with new, not PvStream::CreateAndOpen
@@ -692,6 +742,37 @@ namespace fx10 {
             PvDevice::Free(device_);
             device_ = nullptr;
             device_gev_ = nullptr;
+        }
+    }
+
+    bool StreamReceiver::DumpStreamParams(const std::filesystem::path &path) const {
+        if (!stream_ || streaming_.load()) return false;
+        try {
+            std::ofstream out(path, std::ios::out | std::ios::trunc);
+            if (!out) throw TransportError("cannot open " + path.string());
+            out << "# FX10 PvStream parameter snapshot after Stop, before Disconnect\n"
+                << "# host_realtime_ns=" << common::TimeUtil::RealtimeNowNs() << "\n"
+                << "# SDK counters, not the application's frame ledger; not a no-loss certificate\n";
+            auto *params = stream_->GetParameters();
+            if (!params) out << "# parameters unavailable\n";
+            const auto count = params ? params->GetCount() : 0;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                auto *p = params->Get(i);
+                if (!p) continue;
+                PvString name, value;
+                p->GetName(name);
+                out << pv(name) << " = ";
+                if (!p->IsReadable()) out << "<not readable>";
+                else if (!p->ToString(value).IsOK()) out << "<read error>";
+                else out << pv(value);
+                out << '\n';
+            }
+            out.close();
+            if (!out) throw TransportError("cannot write/close " + path.string());
+            return true;
+        } catch (const std::exception &e) {
+            g_log.Error("[eBUS] Stream statistics dump failed: {}", e.what());
+            return false;
         }
     }
 

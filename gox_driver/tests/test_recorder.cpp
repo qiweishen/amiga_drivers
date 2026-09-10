@@ -202,7 +202,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
         CHECK(std::string(fh.camera_serial) == "FAKE-1234");
         CHECK(fh.frame_header_size == fmt::kFrameHeaderSize);
         CHECK(fh.record_align == 512u);
-        CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) == 0u); // payload CRC option removed
+        CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) != 0u);
         CHECK((fh.segment_flags & fmt::kSegFlagChunkData) == 0u); // always 0 in v1
         CHECK(fmt::VerifyFileHeader(fh));
 
@@ -238,7 +238,7 @@ TEST_CASE("recorder: segment layout, rotation, index and summaries survive a byt
             std::vector<uint8_t> payload(sizes[g]);
             REQUIRE(std::fread(payload.data(), 1, payload.size(), f) == payload.size());
             CHECK(payload == payloads[g]); // payload round-trips byte for byte
-            CHECK(h.payload_crc32c == 0u); // payload CRC option removed; field stays zero
+            CHECK(h.payload_crc32c == fmt::Crc32c(payload.data(), payload.size()));
 
             // Padding up to the next boundary must be zero.
             const uint64_t rec_bytes = fmt::AlignUp(fmt::kFrameHeaderSize + sizes[g], 512);
@@ -371,7 +371,7 @@ TEST_CASE("recorder: the shipped record_align pads the first record to 4096") {
     std::filesystem::remove_all(tmp);
 }
 
-TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
+TEST_CASE("recorder: existing v1 CRC field protects payload without changing record layout") {
     namespace fmt = gox::format;
 
     const std::string tmp = MakeTempDir();
@@ -405,7 +405,7 @@ TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
     REQUIRE(f != nullptr);
     fmt::FileHeader fh{};
     REQUIRE(std::fread(&fh, sizeof(fh), 1, f) == 1u);
-    CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) == 0u);
+    CHECK((fh.segment_flags & fmt::kSegFlagPayloadCrc) != 0u);
     CHECK(fh.record_align == 1u);
     CHECK(fmt::VerifyFileHeader(fh));
 
@@ -414,7 +414,7 @@ TEST_CASE("recorder: crc field stays zero but headers stay sealed") {
         REQUIRE(std::fread(&h, sizeof(h), 1, f) == 1u);
         CHECK(h.frame_magic == fmt::kFrameMagic);
         CHECK(fmt::VerifyFrameHeader(h)); // header CRC is always on
-        CHECK(h.payload_crc32c == 0u); // payload CRC option removed
+        CHECK(h.payload_crc32c == fmt::Crc32c(payload.data(), payload.size()));
         CHECK(h.frame_seq == static_cast<uint64_t>(i));
         REQUIRE(std::fseek(f, static_cast<long>(h.payload_size), SEEK_CUR) == 0);
     }

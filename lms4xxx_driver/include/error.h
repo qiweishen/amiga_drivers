@@ -1,4 +1,5 @@
 #pragma once
+
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -33,9 +34,9 @@ namespace lms4xxx {
 
     class Lms4xxxErrorCategory : public std::error_category {
     public:
-        const char *name() const noexcept override { return "lms4xxx"; }
+        [[nodiscard]] const char *name() const noexcept override { return "lms4xxx"; }
 
-        std::string message(int ev) const override {
+        [[nodiscard]] std::string message(int ev) const override {
             switch (static_cast<ErrorCode>(ev)) {
                 case ErrorCode::kCrcError:
                     return "CRC8 checksum mismatch";
@@ -86,4 +87,3 @@ namespace lms4xxx {
 template<>
 struct std::is_error_code_enum<lms4xxx::ErrorCode> : std::true_type {
 };
-

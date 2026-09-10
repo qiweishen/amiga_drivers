@@ -7,6 +7,8 @@
 *.vscode/
 *.DS_Store
 
+/3rd_party/External/
+
 /data/
 
 # Devcontainer bind mount of the shared dataset disk (docker-compose.yml)

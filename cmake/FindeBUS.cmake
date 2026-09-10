@@ -1,16 +1,16 @@
-# FindeBUS.cmake — locates the eBUS SDK (JAI or generic Pleora edition).
+# FindeBUS.cmake — locates the eBUS SDK.
 # Single locator for BOTH eBUS drivers (gox_driver and fx10_driver): each
 # subdirectory calls find_package(eBUS); the module recomputes the directory-
 # scoped variables every time and creates the eBUS::eBUS target once.
 #
 # Search order:
-#   1. EBUS_SDK_ROOT / EBUS_ROOT (CMake cache variables, then environment)
-#   2. $ENV{PUREGEV_ROOT}            (set by the SDK's set_puregev_env.sh)
-#   3. /opt/pleora/ebus_sdk/<dist>   (generic Pleora eBUS SDK — the validated
-#                                     6.5.1 edition serving gox AND fx10)
-#   4. /opt/jai/ebus_sdk/<dist>      (legacy eBUS SDK for JAI; fallback only,
-#                                     so a stale 6.6.1 install cannot shadow
-#                                     the intended Pleora SDK)
+#   1. EBUS_SDK_ROOT / EBUS_ROOT        (CMake cache variables, then environment)
+#   2. $ENV{PUREGEV_ROOT}               (set by the SDK's set_puregev_env.sh)
+#   3. /opt/pleora/ebus_sdk/<dist>      (generic Pleora eBUS SDK — the validated
+#                                        6.5.1 edition serving gox AND fx10)
+#   4. /opt/jai/ebus_sdk/<dist>         (legacy eBUS SDK for JAI; fallback only,
+#                                        so a stale 6.6.1 install cannot shadow
+#                                        the intended Pleora SDK)
 #
 # Defines:
 #   eBUS_FOUND, EBUS_FOUND
@@ -21,6 +21,7 @@
 #   EBUS_GENICAM_ROOT_DIR    <root>/lib/genicam
 #   EBUS_GENICAM_LIB_DIR     GenICam shared-library dir (Linux64_x64)
 #   EBUS_GENICAM_ENV_NAME    e.g. GENICAM_ROOT_V3_4 (parsed from set_puregev_env.sh)
+
 
 set(_ebus_candidates "")
 foreach(_var EBUS_SDK_ROOT EBUS_ROOT)

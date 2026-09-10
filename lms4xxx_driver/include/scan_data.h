@@ -9,8 +9,6 @@ namespace lms4xxx {
     inline constexpr std::size_t kMaxPointsPerScan = 841;
 
 
-
-
     enum class DeviceStatus : std::uint8_t {
         kOk = 0x00,
         kError = 0x01,
@@ -64,7 +62,7 @@ namespace lms4xxx {
         std::uint16_t num_data = 0; ///< Number of measurement points
         std::vector<std::uint16_t> data;
 
-        float ScaledValue(std::size_t i) const {
+        [[nodiscard]] float ScaledValue(std::size_t i) const {
             return static_cast<float>(data.at(i)) * scale_factor + scale_offset;
         }
     };
@@ -156,7 +154,7 @@ namespace lms4xxx {
         ScanTimestamp timestamp;
 
         // Channel lookups: nullptr when absent
-        const ChannelData16 *DistanceChannel() const {
+        [[nodiscard]] const ChannelData16 *DistanceChannel() const {
             for (const auto &ch: channels_16bit) {
                 if (ch.content == ChannelContent16::kDist1)
                     return &ch;
@@ -164,7 +162,7 @@ namespace lms4xxx {
             return nullptr;
         }
 
-        const ChannelData16 *RssiChannel() const {
+        [[nodiscard]] const ChannelData16 *RssiChannel() const {
             for (const auto &ch: channels_16bit) {
                 if (ch.content == ChannelContent16::kRssi1)
                     return &ch;
@@ -172,7 +170,7 @@ namespace lms4xxx {
             return nullptr;
         }
 
-        const ChannelData16 *ReflectanceChannel() const {
+        [[nodiscard]] const ChannelData16 *ReflectanceChannel() const {
             for (const auto &ch: channels_16bit) {
                 if (ch.content == ChannelContent16::kRefl1)
                     return &ch;
@@ -180,7 +178,7 @@ namespace lms4xxx {
             return nullptr;
         }
 
-        const ChannelData16 *AngleCorrectionChannel() const {
+        [[nodiscard]] const ChannelData16 *AngleCorrectionChannel() const {
             for (const auto &ch: channels_16bit) {
                 if (ch.content == ChannelContent16::kAngl1)
                     return &ch;
@@ -188,7 +186,7 @@ namespace lms4xxx {
             return nullptr;
         }
 
-        const ChannelData8 *QualityChannel() const {
+        [[nodiscard]] const ChannelData8 *QualityChannel() const {
             for (const auto &ch: channels_8bit) {
                 if (ch.content == ChannelContent8::kQlty1)
                     return &ch;
@@ -197,12 +195,12 @@ namespace lms4xxx {
         }
 
         // Points of the distance channel
-        std::uint16_t NumPoints() const {
+        [[nodiscard]] std::uint16_t NumPoints() const {
             const auto *dist = DistanceChannel();
             return dist ? dist->num_data : 0;
         }
 
-        float ScanFrequencyHz() const { return static_cast<float>(scan_frequency) / 100.0f; }
+        [[nodiscard]] float ScanFrequencyHz() const { return static_cast<float>(scan_frequency) / 100.0f; }
     };
 } // namespace lms4xxx
 

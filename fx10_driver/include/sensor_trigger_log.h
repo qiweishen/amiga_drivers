@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-// SensorSync-Logger (Teensy 4.1, submodule/sensor_trigger) session wrapper.
+// SensorSync-Logger (Teensy 4.1, 3rd_party/External/sensor_trigger) session wrapper.
 // The board fires the camera's hardware trigger pulses and streams a raw
 // timing Log (trigger/strobe/PPS/NMEA events) over USB serial; this class
 // drives the session protocol (START/STOP) and captures the stream into

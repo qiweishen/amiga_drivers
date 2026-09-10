@@ -159,8 +159,12 @@ about the pedestal should discard them.
 
 ## Dataset metadata
 
-Two sidecar files per camera make a recording self-describing. Neither is ever
-fatal: a failure to write them warns and the capture continues.
+The per-camera sidecars retain the interpretation and audit information that
+the fixed v1 raw headers cannot fully store. `device.json` is published as a
+complete file without replacing an existing snapshot, with file and directory
+syncs, before acquisition. Failure aborts startup. Failure to open telemetry
+also aborts startup; a later telemetry write/close failure stops the session.
+Unavailable device readings can still be represented as `null`.
 
 `<cam>/device.json` (once per session, written after the recorder created the
 directory and before `AcquisitionStart`):
@@ -206,8 +210,8 @@ driver targets those two names directly. Time synchronization is performed but
 (p.121).
 
 PTP is the camera's **only** absolute time: no host time is used as a time
-source anywhere on this platform (the host clock is not trusted), so the
-shipped configuration enables it and `ptp.enabled: false` is a warned
+source anywhere on this platform (the host clock is not trusted). The current
+capture YAML sets `ptp.enabled: false`, which is accepted as a warned
 configuration — the frames then carry free-running ticks that cannot be
 associated with anything offline. The grandmaster is the AsteRx RBi3 Pro+
 (its own address, GPS timescale per the rig configuration); the driver records
@@ -260,6 +264,23 @@ failure: the accuracy half of the guard simply never runs and every recorded
   2 GiB of preallocated-but-unused blocks: `ls -l` shows the written size while
   `du` shows the allocation. The data is intact; the space is reclaimed when
   the file is rewritten or removed.
+
+## Recording and recovery
+
+The recording format remains jai-raw-seg v1.0 (512-byte file header, 96-byte
+frame header, unchanged SDK payload). New segments enable the existing
+`kSegFlagPayloadCrc` flag and populate the existing CRC-32C field. The writer
+syncs data followed by its index at `output.flush_interval_mb` and at segment
+close. These barriers may consume the bounded queue's stall budget; their
+throughput and latency require measurement on the acquisition storage.
+
+`inspect_raw.py rebuild-index` creates separate `.rebuilt.idx.jsonl` files
+for directory inputs and refuses to overwrite an existing output. It retains
+supplementary fields only from original rows whose header identities match;
+missing SDK-only fields remain `null`. ROI offsets are reconstructed from the
+raw header. Use `verify SEGMENT.raw --index SEGMENT.rebuilt.idx.jsonl` to check
+a recovered index without replacing the original. Payload CRC detects byte
+damage, but cannot reconstruct SDK metadata lost with an index tail.
 
 ## Not done, and why
 

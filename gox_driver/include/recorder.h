@@ -35,7 +35,7 @@ namespace gox {
         uint8_t session_uuid[16] = {};
         uint64_t segment_max_bytes = 2ull << 30;
         uint32_t record_align = 4096;
-        uint64_t flush_interval_bytes = 64ull << 20; // sync_file_range cadence
+        uint64_t flush_interval_bytes = 64ull << 20; // data + index fdatasync cadence; 0 = close only
     };
 
     class Recorder {

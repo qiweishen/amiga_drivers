@@ -1,12 +1,7 @@
 ################################################################################
-# JAI Go-X Camera Driver (eBUS SDK for JAI)
+# JAI Go-X Camera Driver (Pleora eBUS SDK 6.x)
 # This is a subdirectory of the top-level AmigaDrivers project.
-# spdlog and nlohmann/json are provided by the parent (FetchContent, targets
-# spdlog::spdlog / nlohmann_json::nlohmann_json); doctest is vendored at the
-# repo level in 3rd_party/.
-# The eBUS SDK is a hard requirement (see the shared root cmake/FindeBUS.cmake,
-# one Pleora SDK serves gox and fx10); the devcontainer installs it from
-# resource/ (repo root).
+
 
 # Directory-scoped: applies only to targets defined in this directory
 add_compile_options(-Wall -Wextra -Wpedantic)

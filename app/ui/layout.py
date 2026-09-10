@@ -25,9 +25,10 @@ _PROC_BADGE = {
 _NAV = [
     ("/", "Overview"),
     ("/config", "Config"),
-    ("/asterx", "AsteRx Live"),
+    ("/asterx", "AsteRx"),
     ("/live", "Data Live"),
     ("/camera", "Camera Tools"),
+    ("/reference", "Collect Reference"),
     ("/logs", "Logs")
 ]
 
@@ -66,7 +67,7 @@ def frame(title: str):
             with banner_row:
                 with ui.row().classes("w-full items-center bg-red-100 text-red-900 px-4 py-2 rounded"):
                     ui.icon("error")
-                    ui.label(f"{STATE.env_detail or 'Runtime environment unavailable'} — all controls are disabled")
+                    ui.label(f"{STATE.env_detail or 'Runtime environment unavailable'} — device controls unavailable; offline views remain available")
                     if STATE.mode == "docker":
                         ui.button("Start container", on_click=_compose_up).props("flat dense")
         elif STATE.pending_config_notice:

@@ -8,6 +8,7 @@
 
 #include "app_config.h"
 #include "apply_plan.h"
+#include <nlohmann/json.hpp>
 
 
 class PvDevice;
@@ -59,6 +60,15 @@ namespace fx10 {
 
         void VerifyControlReady() const;
 
+        // After all config writes, before StreamEnable/AcquisitionStart. Every
+        // call writes MotorShutter_PulseRev = 255 once; its stored value is NOT
+        // shutter position. Checks SDK write acknowledgement, not motion completion.
+        // Throws on missing/unwritable/wrong-type node, invalid range, SDK failure
+        // or cancellation. No automatic retry or conditional skip based on readback.
+        void OpenShutter(const std::function<bool()> &stop = {});
+        // Reference capture only: same pulse semantics, MotorShutter_PulseFwd = 255.
+        void CloseShutter(const std::function<bool()> &stop = {});
+
         // Best-effort telemetry reads, safe while Streaming (control channel only); nullopt when
         // unreadable (logged DEBUG). The temperature read writes DeviceTemperatureSelector first:
         // the two sensors have different limits (manual p.44).
@@ -92,7 +102,15 @@ namespace fx10 {
         };
 
         Geometry ReadGeometry();
+        // Read-only snapshot of supported nodes; unknown/unreadable is explicit.
+        // Collect only while acquisition is idle. Selector-scoped apply entries
+        // retain their immediate readback in plan order.
+        nlohmann::json CollectDeviceMetadata() const;
+        nlohmann::json ReadNodeMetadata(const std::string &name) const;
     private:
+        void WriteShutterPulse(bool open, const std::function<bool()> &stop);
         PvDevice &device_;
+        nlohmann::json applied_ = nlohmann::json::array();
+        nlohmann::json shutter_preparation_ = {{"status", "not-attempted"}};
     };
 } // namespace fx10

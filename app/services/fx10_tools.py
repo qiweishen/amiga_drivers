@@ -18,15 +18,12 @@ import numpy as np
 
 from ..constants import (
     BIN_FX10_SNAPSHOT,
-    CONFIG_FILES,
     FX10_SNAPSHOT_DIR,
     SNAPSHOT_KEEP,
 )
-from ..state import STATE, ProcState
-from . import runtime
+from . import camera_operations, config_store, runtime
 
 SNAPSHOT_TOOL = "fx10_snapshot"
-FX10_CONFIG = CONFIG_FILES["fx10"].path
 # Freerun rate forced inside the tool: min(its --fps default, 1000/exposure_ms)
 # — long exposures lower the achievable rate. The GUI-side hard timeout must
 # stay strictly greater than the in-tool wall-clock budget
@@ -37,6 +34,14 @@ SNAPSHOT_FPS = 50.0
 def _timeout_s(frames: int, exposure_ms: float) -> float:
     effective_fps = min(SNAPSHOT_FPS, 1000.0 / max(exposure_ms, 0.01))
     return frames / effective_fps * 3 + 10
+
+
+@dataclass(frozen=True)
+class SnapshotRequest:
+    target_ip: str
+    exposure_ms: float
+    spatial_binning: int | None
+    spectral_binning: int | None
 
 
 @dataclass
@@ -54,6 +59,7 @@ class SnapshotResult:
     elapsed_s: float = 0.0
     raw_output: str = ""
     session_dir: str = ""
+    request: SnapshotRequest | None = None  # requested values, not device readbacks
 
 
 def guard_reason() -> str | None:
@@ -64,18 +70,28 @@ def guard_reason() -> str | None:
     Uses the Enable-FX10 value captured at process start — the live file value
     can be toggled mid-run and must not unlock the camera the driver owns.
     """
-    if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING):
-        if STATE.enables_at_start.get("fx10", False):
-            return "Recording is running with FX10 enabled — the driver owns the camera; stop recording first"
-    return None
+    return camera_operations.guard_reason("fx10")
 
 
 async def snapshot(ip: str, exposure_ms: float,
                    spatial_binning: int | None = None,
                    spectral_binning: int | None = None) -> SnapshotResult:
+    request = SnapshotRequest(ip, exposure_ms, spatial_binning, spectral_binning)
+
+    async def capture() -> SnapshotResult:
+        result = await _snapshot(request.target_ip, request.exposure_ms,
+                                 request.spatial_binning, request.spectral_binning)
+        result.request = request
+        return result
+
+    return await camera_operations.run("fx10", capture)
+
+
+async def _snapshot(ip: str, exposure_ms: float,
+                    spatial_binning: int | None,
+                    spectral_binning: int | None) -> SnapshotResult:
     """One spectral preview: capture ~1 second of frames and reduce them to
-    per-band statistics. Caller must have checked guard_reason() and must
-    serialize calls (STATE.snapshot_busy).
+    per-band statistics while the service owns the camera reservation.
 
     The binning overrides let the page preview a setting WITHOUT writing it to
     config-fx10.yaml (which is also the live recording config) — persisting is
@@ -92,7 +108,7 @@ async def snapshot(ip: str, exposure_ms: float,
         out_host = FX10_SNAPSHOT_DIR / sid
     argv = [
         runtime.exec_path(BIN_FX10_SNAPSHOT),
-        "--config", runtime.exec_path(FX10_CONFIG),
+        "--config", runtime.exec_path(config_store.get("fx10").path),
         "--out", runtime.exec_path(out_host),
         "--ip", ip,
         "--frames", str(frames),
@@ -209,7 +225,7 @@ def _decode_envi(session_dir: Path) -> SnapshotResult:
             raise ValueError("BIL byte length disagrees with the finalized header")
         valid_lines = []
         with hdr.with_suffix(".lines.csv").open(encoding="ascii", newline="") as index:
-            if not index.readline().startswith("# fx10-line-index-v1;"):
+            if not index.readline().startswith(("# fx10-line-index-v1;", "# fx10-line-index-v2;")):
                 raise ValueError("Missing versioned line identity index")
             for row in csv.DictReader(index):
                 if row["event"] != "frame" or row["block_id_anomaly"] != "0":

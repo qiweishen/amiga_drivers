@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,6 +18,8 @@
 #include "app_config.h"
 #include "frame.h"
 #include "pixel_format.h"
+#include "recording_pipeline.h"
+#include <nlohmann/json.hpp>
 
 class PvBuffer;
 class PvStream;
@@ -58,13 +62,24 @@ namespace fx10 {
         // afterwards, then packet size + SetStreamDestination.
         void OpenStream();
 
-        // Allocate/queue the pool (PlanBufferPool), StreamEnable, AcquisitionStart,
-        // spawn the acquisition thread. expected_fps sizes the pool (configured rate
+        // Allocate the SDK + owned recording pools, StreamEnable, AcquisitionStart,
+        // spawn the acquisition thread. expected_fps sizes the pools (configured rate
         // in freerun; expected PPS rate under external trigger).
-        void Start(IFrameSink &sink, const ExpectedGeometry &expected, double expected_fps);
+        // before_acquisition runs after buffer allocation, before StreamEnable:
+        // persist actual runtime metadata without racing the acquisition thread.
+        void Start(IFrameSink &sink, const ExpectedGeometry &expected, double expected_fps,
+                   const std::function<void()> &before_acquisition = {});
+        const nlohmann::json &RuntimeMetadata() const { return runtime_metadata_; }
+        // Stop/join first; stream remains open until Disconnect. Never throws.
+        bool DumpStreamParams(const std::filesystem::path &path) const;
 
         // Deterministic Stop (see file header). Safe to call from any thread, once.
         void Stop();
+
+        // Reference phase boundary: disarm now and require SDK acknowledgement,
+        // sharing the once-per-run stop flag with Stop(). Does not drain/join;
+        // the owner must still call Stop() before destroying the sink.
+        void StopAcquisition();
 
         // Close/free stream and device. stop() first if streaming.
         void Disconnect();
@@ -81,10 +96,12 @@ namespace fx10 {
         // non-image payloads). Deliberately NOT the same thing as total silence,
         // which is a legitimate idle state under an external trigger and is
         // judged by Main's no-data watchdog instead (lastDataReferenceUs).
-        enum class FatalKind { kNone, kLinkLost, kFirstFrame, kSinkFailed, kStreamUnusable, kOther };
+        enum class FatalKind { kNone, kLinkLost, kFirstFrame, kSinkFailed, kStreamUnusable, kRecordingPipeline, kOther };
 
         FatalKind GetFatalKind() const { return fatal_kind_.load(); }
 
+        // Usable frames admitted to the recording queue. Recorder's written
+        // count is separate; Stop drains the accepted queue before returning.
         std::uint64_t FramesDelivered() const { return frames_delivered_.load(); }
 
         // Fail-fast: true once the transport saw a lost or unusable buffer (RetrieveBuffer
@@ -103,11 +120,12 @@ namespace fx10 {
     private:
         void OnLinkDisconnected(PvDevice *device) override;
 
-        void AcquisitionLoop(IFrameSink &sink);
+        void AcquisitionLoop();
+        bool SubmitFrame(const FrameView &frame, std::uint64_t first_missing = 0,
+                         std::uint64_t missing_count = 0,
+                         RecordingPipeline::Rejection rejection = RecordingPipeline::Rejection::kNone);
 
         bool CheckFrame(PvBuffer &buffer);
-
-        void WarnIfUnexpectedStatusLine(const std::uint8_t *data) const; // canonical (unpacked) layout
 
         void LatchFatal(const std::string &message, FatalKind kind = FatalKind::kOther);
 
@@ -121,6 +139,7 @@ namespace fx10 {
         void FreeBuffers();
 
         NetworkConfig network_;
+        nlohmann::json runtime_metadata_ = nlohmann::json::object();
         Counters &counters_;
         PvDevice *device_ = nullptr;
         PvDeviceGEV *device_gev_ = nullptr;
@@ -130,12 +149,8 @@ namespace fx10 {
 
         ExpectedGeometry expected_;
         bool first_frame_checked_ = false;
-        bool preamble_checked_ = false; // one-time status-line warn on canonical data
-        // Packed wire formats are unpacked here into the canonical uint16 layout
-        // before the sink ever sees the frame (acquisition thread only)
         const PixelFormatInfo *pixel_info_ = nullptr; // points into the static format table
-        std::vector<std::uint16_t> unpack_buf_;
-        std::vector<std::uint8_t> row_copy_buf_; // uncompressed pixels without SDK-declared row padding
+        std::unique_ptr<RecordingPipeline> pipeline_;
         BlockIdTracker tracker_;
 
         std::thread acquisition_thread_;

@@ -72,6 +72,10 @@ namespace lms4xxx {
             ReadRange<std::uint32_t>(n, "output", "flush_interval_ms", 1, 60000, out.flush_interval_ms);
             ReadRange<int>(n, "output", "compression_level", 0, 9, out.compression_level);
             Read(n, "output", "swmr", out.swmr);
+            if (out.swmr) {
+                Fail("output.swmr", "must be false: HDF5 v3 contains variable-length telemetry strings; "
+                     "appending them in SWMR mode is unsupported");
+            }
         }
 
         void ParseLidars(const YAML::Node &root, std::vector<LidarConfig> &lidars) {

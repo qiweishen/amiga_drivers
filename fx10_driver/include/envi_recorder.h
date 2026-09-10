@@ -5,10 +5,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -19,10 +19,11 @@
 #include "envi_header.h"
 #include "frame.h"
 #include "wavelengths.h"
+#include "session_metadata.h"
 
 
 // ENVI BIL recorder. One GVSP frame (bands x samples, row-major) is exactly one
-// BIL line record, so the writer appends payloads verbatim. Per segment:
+// BIL line record, so the writer appends the receiver's canonical pixel data. Per segment:
 //   segment_NNNN.bil.part                             (streaming)
 //   -> fdatasync -> rename -> segment_NNNN.hdr        (finalize; .hdr <=> valid)
 // (run status and the counter ledger go to the log at stop).
@@ -32,14 +33,12 @@
 // one connection epoch. Leading losses / trigger association remain unknown
 // until an independent anchor is established; line index is not a trigger ID.
 //
-// Threading: all methods are called from the single acquisition thread
-// (write-in-retrieve-loop topology); nothing here is thread-safe by design,
-// with one exception: the periodic durability flush. write(2) only lands in
-// the page cache, but fdatasync waits for the disk, and a slow disk must never
-// stall the acquisition thread (the SDK pool absorbs ~2 s, then frames are
-// lost). So WriteLine hands dup'd descriptors to a helper thread that runs the
-// fdatasync; the acquisition thread never waits on it. Flush failures are
-// counted on that thread and folded into the ledger when a segment finalizes.
+// Threading: Start/Stop belong to the owner; Stop follows receiver.Stop(), which
+// joins the acquisition and recording workers. OnFrame/OnGap/OnRejected are
+// serialized by the recording worker. Periodic fdatasync uses a helper thread
+// with at most one pending request in addition to the active one. Errors are
+// visible immediately through Failed(), then folded into the ledger by the
+// recorder owner at finalization. Only documented atomic getters are concurrent.
 
 namespace fx10 {
     // Why a recording stopped (mapped to an exit code by the driver)
@@ -89,26 +88,30 @@ namespace fx10 {
         void OnFrame(const FrameView &frame) override;
 
         void OnGap(std::uint64_t first_missing_block_id, std::uint64_t missing_count) override;
-        void OnRejected(std::uint64_t block_id, const char *reason) override;
+        void OnRejected(std::uint64_t block_id, const char *reason, const FrameView *frame = nullptr) override;
 
         // Finalize the open segment and log the final status line. Idempotent.
         // `reason` (e.g. "duration-reached", "sigint", "link-loss") is logged;
         // only the first call takes effect.
         void Stop(const std::string &reason = std::string());
 
-        // Atomic: written by the acquisition thread (which owns onFrame/onGap),
+        // Atomic: written by the recording worker (which owns OnFrame/OnGap),
         // polled by the monitor thread every 200 ms and by the transport.
-        [[nodiscard]] bool Failed() const override { return failed_.load(std::memory_order_acquire); }
+        [[nodiscard]] bool Failed() const override {
+            return failed_.load(std::memory_order_acquire) || flush_errors_.load(std::memory_order_acquire) != 0;
+        }
         [[nodiscard]] const std::string &ErrorMessage() const { return error_message_; }
 
         // Why the recorder failed, so the caller does not have to classify by
         // matching substrings of a log message.
-        [[nodiscard]] ErrorKind GetErrorKind() const { return error_kind_; }
+        [[nodiscard]] ErrorKind GetErrorKind() const {
+            return flush_errors_.load(std::memory_order_acquire) != 0 ? ErrorKind::kIo : error_kind_;
+        }
         [[nodiscard]] const std::filesystem::path &SessionDir() const { return session_dir_; }
         [[nodiscard]] std::uint64_t LinesWrittenTotal() const { return global_line_index_; }
 
         // Thread-safe mirror of Counters::frames_written (the ledger itself is
-        // plain: single-writer, acquisition thread). The main thread polls this
+        // plain: single-writer, recording worker). The main thread polls this
         // for the periodic [Statistics] line's write rate.
         [[nodiscard]] std::uint64_t FramesWrittenTotal() const { return frames_written_.load(std::memory_order_relaxed); }
 
@@ -124,6 +127,7 @@ namespace fx10 {
         // Test seam for injecting write failures (ENOSPC etc.). Signature of ::write.
         using WriteHook = std::function<ssize_t(int fd, const void *buf, std::size_t count)>;
         void SetWriteHookForTest(WriteHook hook) { write_hook_ = std::move(hook); }
+        void SetSummaryWriteHookForTest(JsonlFile::WriteHook hook) { segments_.SetWriteHookForTest(std::move(hook)); }
 
         // Test seam for the durability calls. Signature of ::fdatasync; the
         // periodic flush cadence is otherwise unobservable from outside.
@@ -156,7 +160,7 @@ namespace fx10 {
 
         void LatchError(const std::string &message, ErrorKind kind);
 
-        // Periodic durability off the acquisition thread (see the file header)
+        // Periodic durability off the recording worker (see the file header)
         struct FlushRequest {
             int data_fd;
             int index_fd;
@@ -166,7 +170,7 @@ namespace fx10 {
         void StopFlusher(); // drains, then joins
         void DrainFlusher(); // wait until every queued request has completed
         void RequestFlush(); // dup the segment descriptors and queue them
-        void FoldFlushErrors(); // acquisition thread: flush_errors_ -> counters_.write_errors
+        void FoldFlushErrors(); // recorder owner: flush_errors_ -> counters_.write_errors
         void FlushLoop();
 
         RecordingConfig config_;
@@ -194,6 +198,14 @@ namespace fx10 {
         std::uint64_t data_bytes_this_segment_ = 0;
         std::uint64_t last_flush_bytes_ = 0; // periodic fdatasync cadence
         std::string segment_start_iso_;
+        JsonlFile segments_;
+        std::uint64_t segment_global_first_ = 0;
+        std::uint64_t segment_frames_ = 0, segment_padding_ = 0;
+        std::uint64_t segment_missing_ = 0, segment_rejected_ = 0, segment_anomalies_ = 0;
+        struct FrameStamp {
+            std::uint64_t global_line, block_id, device_timestamp_raw, hrt, hmn;
+        };
+        std::optional<FrameStamp> segment_first_frame_, segment_last_frame_;
 
         std::uint64_t global_line_index_ = 0;
         std::uint32_t consecutive_size_mismatch_ = 0;
@@ -207,10 +219,10 @@ namespace fx10 {
         std::thread flusher_;
         std::mutex flush_mu_;
         std::condition_variable flush_cv_;
-        std::deque<FlushRequest> flush_queue_; // guarded by flush_mu_
+        std::optional<FlushRequest> flush_pending_; // at most one; guarded by flush_mu_
         std::size_t flush_in_progress_ = 0; // taken but not completed; guarded by flush_mu_
         bool flusher_stop_ = false; // guarded by flush_mu_
-        std::atomic<std::uint64_t> flush_errors_{0}; // flusher thread -> acquisition thread
+        std::atomic<std::uint64_t> flush_errors_{0}; // flusher thread -> recorder owner
         std::uint64_t flush_errors_folded_ = 0; // already counted into counters_.write_errors
     };
 } // namespace fx10

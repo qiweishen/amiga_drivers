@@ -1,15 +1,9 @@
-/// @file lms4xxx_scan_h5_file.h
-/// @brief One "lms4xxx-h5" split file (docs/FORMAT_H5.md): layout, batch
-/// append, flush, close. Not thread-safe per instance; all libhdf5 calls are
-/// serialized by a process-wide mutex (libhdf5 is built non-thread-safe).
-
 #pragma once
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
-#include <vector>
 
 #include "device_report.h"
 #include "scan_record.h"
@@ -36,7 +30,7 @@ namespace lms4xxx {
             std::uint32_t split_index = 0; ///< sequence number of this file within the run
             std::uint32_t chunk_frames = 64; ///< HDF5 chunk = this many scans on /channels/*
             int compression_level = 0; ///< 0 = none; 1..9 = gzip (shuffle + deflate) on /channels/*
-            bool swmr = false; ///< enter single-writer/multiple-reader mode after creating the layout
+            bool swmr = false; ///< true is rejected: the v3 variable-length strings are not SWMR-safe
 
             // Root attributes
             double start_angle_deg = 0.0;
@@ -72,10 +66,10 @@ namespace lms4xxx {
         // 600 Hz). No-op when the file is not open.
         bool AppendTelemetry(const TelemetrySample &sample);
 
-        // Bounds the loss on a crash; makes rows visible to SWMR readers.
-        // H5Fflush only pushes the HDF5 cache into the OS page cache, so this
-        // also fdatasync()s the underlying file descriptor: without it a power
-        // cut loses everything the kernel has not written back yet.
+        // H5Fflush + fdatasync of the underlying file. This is a durability
+        // barrier, not a transaction or a guarantee of recovery after a crash:
+        // dataset extents can diverge on a failed append, and an unclean HDF5
+        // file may require recovery even after earlier successful flushes.
         bool Flush();
 
         // Writes the completeness marker (closed_cleanly / frames_total) and
@@ -84,18 +78,17 @@ namespace lms4xxx {
         // reported a truncated file as a clean stop. Idempotent.
         bool Close();
 
-        bool IsOpen() const;
+        [[nodiscard]] bool IsOpen() const;
 
-        std::uint64_t FramesWritten() const;
+        [[nodiscard]] std::uint64_t FramesWritten() const;
 
         // False when gzip was requested but libhdf5 lacks the deflate filter
-        bool CompressionActive() const;
+        [[nodiscard]] bool CompressionActive() const;
 
-        std::string LastError() const;
+        [[nodiscard]] std::string LastError() const;
 
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;
     };
 } // namespace lms4xxx
-

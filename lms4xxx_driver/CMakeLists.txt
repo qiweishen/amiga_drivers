@@ -1,6 +1,7 @@
 ################################################################################
 # LMS4xxx Driver (SICK LMS4xxx 2D LiDAR, CoLa B over TCP)
-# spdlog/yaml-cpp come via amiga_common, HDF5 via cmake/Dependencies.cmake.
+# This is a subdirectory of the top-level AmigaDrivers project.
+
 
 ################################################################################
 # System packages

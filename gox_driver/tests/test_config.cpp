@@ -239,17 +239,28 @@ TEST_CASE("config: the trigger source is checked against the GO-X's own list") {
           .cameras[0].acquisition.trigger.source_entry == "Software");
 }
 
-TEST_CASE("config: a freerun exposure must fit inside the frame period") {
-    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 400, frame_rate_hz: 3.0}")),
-                   "must be below the freerun frame period"));
-    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 333.4, frame_rate_hz: 3.0}")),
-                   "must be below the freerun frame period"));
+TEST_CASE("config: freerun exposure keeps the timing margin without limiting external triggers") {
+    // At 3 Hz, 900/rate = 300 ms: the limit is stricter than the 333.3 ms period.
+    for (const char *exposure : {"300", "333.4", "400"}) {
+        const auto error = ErrorOf(DocWithCamera(
+            std::string("    acquisition: {exposure_ms: ") + exposure + ", frame_rate_hz: 3.0}"));
+        CAPTURE(exposure);
+        CAPTURE(error);
+        CHECK(Contains(error, "cameras[0].acquisition"));
+        CHECK(Contains(error, "must be below the freerun exposure limit 900/frame_rate_hz"));
+    }
     CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 150, frame_rate_hz: 3.0}")).empty());
-    // Under an external trigger the pulse train sets the period
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 299.9, frame_rate_hz: 3.0}")).empty());
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 179.9, frame_rate_hz: 5.0}")).empty());
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 180, frame_rate_hz: 5.0}")),
+                   "must be below the freerun exposure limit 900/frame_rate_hz"));
+    // The external pulse train sets its own period; the configured freerun
+    // rate is not applied in this mode (covered by the apply-plan tests too).
     CHECK(ErrorOf(DocWithCamera(
         "    acquisition:\n"
         "      exposure_ms: 400\n"
         "      frame_rate_hz: 3.0\n"
         "      trigger: {mode: external}")).empty());
     CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 4000}")).empty());
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 3.0}")).empty());
 }

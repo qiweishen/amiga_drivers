@@ -1,17 +1,10 @@
 #pragma once
+
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
-// What the device says about ITSELF, as opposed to what it measures. Kept in
-// its own header so the recorder can store it without depending on the driver
-// API: the driver fills these in, the HDF5 writer turns them into root
-// attributes and /telemetry rows (docs/FORMAT_H5.md).
-//
-// Every field is optional. These are all "sRN <name>" reads whose variables the
-// LMS4000 manual documents but does not guarantee on every firmware, so a
-// device that does not answer must cost the metadata, never the recording.
 
 namespace lms4xxx {
     // Read once at the end of Configure(), when the configuration is live.

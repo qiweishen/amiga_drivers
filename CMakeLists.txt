@@ -1,5 +1,4 @@
-# Effective floor is 3.18: the fetched HDF5 (cmake/Dependencies.cmake) requires it
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.18)
 project(AmigaDrivers
         VERSION 0.1.0
         DESCRIPTION "Amiga Drivers - Septentrio AsteRx, Specim FX10e, JAI Go-X, and SICK LMS4xxx"
@@ -38,7 +37,7 @@ find_package(Threads REQUIRED)
 
 
 ################################################################################
-# Shared FetchContent libraries (HDF5, spdlog, yaml-cpp, and nlohmann/json)
+# Shared FetchContent libraries (sensor_trigger, HDF5, spdlog, yaml-cpp, and nlohmann/json)
 include(${CMAKE_SOURCE_DIR}/cmake/Dependencies.cmake)
 
 # Shared find modules (cmake/FindeBUS.cmake serves gox_driver and fx10_driver)
@@ -46,14 +45,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 
 ################################################################################
-# Testing. One switch for every driver and common; ON in every build type so
-# template/schema drift is caught in the Release builds the rig actually runs.
+# Build Testings
 option(AMIGA_BUILD_TESTS "Build unit tests" ON)
 enable_testing()
 
-# GUI marker contract: driver_markers.h and app/services/markers.py must agree
-# verbatim. The checker is stdlib-only, so the bare python3 interpreter works
-# both in the build container and on the host.
+# GUI marker contract: driver_markers.h and app/services/markers.py must agree verbatim
 find_package(Python3 COMPONENTS Interpreter)
 if (Python3_FOUND)
     add_test(NAME contract_check COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/check_contracts.py)
@@ -119,6 +115,7 @@ message(STATUS "  C++ Standard:     ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Output Dir:       ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "")
 message(STATUS "  Shared Dependencies:")
+message(STATUS "    sensor_trigger: ${sensor_trigger_SOURCE_DIR}")
 message(STATUS "    hdf5:           ${hdf5_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")

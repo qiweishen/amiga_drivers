@@ -99,8 +99,8 @@ namespace gox::ebus {
         void TeardownDevices(); // receiver teardown + Disconnect (best effort)
 
         // <cam>/device.json, written once the recorder created <cam>/ and
-        // before AcquisitionStart. Failures only warn: metadata must never cost
-        // a recording.
+        // before AcquisitionStart. Failure aborts bring-up: this is required to
+        // interpret the version-1 raw payload correctly.
         void WriteDeviceJson();
 
         CameraConfig cfg_; // own copy; receiver_ keeps a reference into it
@@ -132,6 +132,7 @@ namespace gox::ebus {
         RuntimeShape runtime_shape_;
         bool counter_bound_ = false;
         std::ofstream telemetry_; // <cam>/telemetry.jsonl, one JSON object per line
+        bool telemetry_failed_ = false; // owner thread; included in final Clean()
         bool over_temperature_ = false; // latched so the warning fires once per excursion
     };
 } // namespace gox::ebus

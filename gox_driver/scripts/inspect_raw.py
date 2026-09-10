@@ -17,7 +17,7 @@ are little-endian. Any layout change requires a version bump in format.hpp and h
 Subcommands:
     list          print a per-frame table for one segment
     verify        integrity-check segment(s) plus their idx.jsonl / segments.jsonl side files
-    rebuild-index regenerate seg_NNNNN.idx.jsonl from the data (crash recovery; resync scan)
+    rebuild-index write a separate rebuilt index, preserving matching original SDK metadata
     extract       dump a single frame's raw payload
 
 Exit codes: 0 clean, 1 integrity errors (or frame not found), 2 usage errors.
@@ -417,7 +417,7 @@ def expected_payload_size(fr):
     return (fr.w * fr.h * bpp + 7) // 8
 
 
-def verify_segment(path, rep):
+def verify_segment(path, rep, index_path=None):
     """Verifies one segment plus its idx.jsonl. Returns (frames, file_size, truncated) for group checks."""
     f, size = open_segment(path)
     frames = []
@@ -479,20 +479,34 @@ def verify_segment(path, rep):
             rep.info("%s: %d frame(s) flagged INCOMPLETE (recorded with missing packets)" % (path, incomplete))
 
         # Cross-check against the index: it must be an exact per-frame prefix of the data.
-        idx_path = path[:-4] + ".idx.jsonl" if path.endswith(".raw") else path + ".idx.jsonl"
+        idx_path = index_path or (path[:-4] + ".idx.jsonl" if path.endswith(".raw") else path + ".idx.jsonl")
         if os.path.isfile(idx_path):
             entries = load_index(idx_path, rep)
             if len(entries) > len(frames):
                 rep.error("%s: index has %d entries but segment has only %d complete frame(s); "
                           "index must be a subset of the data" % (idx_path, len(entries), len(frames)))
+            unknown_layout = 0
             for i, (e, fr) in enumerate(zip(entries, frames)):
+                if not isinstance(e, dict):
+                    rep.error("%s: entry %d is not a JSON object" % (idx_path, i))
+                    continue
                 diffs = []
                 for key, actual in (("off", fr.off), ("psz", fr.psz), ("bid", fr.bid),
-                                    ("dts", fr.dts), ("fl", fr.fl), ("seq", fr.seq)):
-                    if key in e and e[key] != actual:
-                        diffs.append("%s: index=%s data=%s" % (key, e[key], actual))
+                                    ("dts", fr.dts), ("fl", fr.fl), ("seq", fr.seq),
+                                    ("hrt", fr.hrt), ("hmn", fr.hmn), ("pf", fr.pf),
+                                    ("w", fr.w), ("h", fr.h), ("ox", fr.ox), ("oy", fr.oy)):
+                    if key in ("ox", "oy") and key not in e:
+                        continue # legacy indexes omitted ROI offsets; raw headers retain them
+                    if type(e.get(key)) is not int or e[key] != actual:
+                        diffs.append("%s: index=%s data=%s" % (key, e.get(key), actual))
                 if diffs:
                     rep.error("%s: entry %d disagrees with data (%s)" % (idx_path, i, "; ".join(diffs)))
+                if any(e.get(key) is None for key in
+                       ("payload_type", "padding_x", "padding_y", "chunk_count", "operation_result")):
+                    unknown_layout += 1
+            if unknown_layout:
+                rep.warn("%s: %d frame(s) lack SDK-only layout metadata; v1 raw headers cannot recover it"
+                         % (idx_path, unknown_layout))
             if len(entries) < len(frames):
                 rep.info("%s: %d data frame(s) beyond the index tail (recoverable via rebuild-index)"
                          % (path, len(frames) - len(entries)))
@@ -550,6 +564,9 @@ def collect_targets(path):
 
 
 def cmd_verify(args):
+    if args.index and (not os.path.isfile(args.path) or not os.path.isfile(args.index)):
+        print("error: --index requires one existing segment and one existing index file", file=sys.stderr)
+        return 2
     groups = collect_targets(args.path)
     if groups is None:
         print("error: no such file or directory: %s" % args.path, file=sys.stderr)
@@ -563,7 +580,7 @@ def cmd_verify(args):
     for d in sorted(groups):
         summaries = load_segments_jsonl(os.path.join(d, "segments.jsonl"), rep)
         for seg in sorted(groups[d]):
-            frames, size, truncated = verify_segment(seg, rep)
+            frames, size, truncated = verify_segment(seg, rep, args.index)
             check_against_summary(seg, summaries.get(os.path.basename(seg)), frames, size, truncated, rep)
             total_frames += len(frames)
             total_segments += 1
@@ -577,24 +594,75 @@ def cmd_verify(args):
 # ----------------------------------------------------------------------------------------------------
 
 
-def format_index_line(fr):
-    """Byte-identical to the snprintf in Recorder::write_frame (src/core/recorder.cpp)."""
-    return ('{"seq":%d,"bid":%d,"dts":%d,"hrt":%d,"hmn":%d,"off":%d,"psz":%d,"pf":%d,"w":%d,"h":%d,'
-            '"fl":%d}\n' % (fr.seq, fr.bid, fr.dts, fr.hrt, fr.hmn, fr.off, fr.psz, fr.pf, fr.w, fr.h,
-                            fr.fl)).encode("ascii")
+def recovered_index_entry(fr, original=None):
+    """Header fields are authoritative; SDK-only fields require a matching original row."""
+    header = {key: getattr(fr, key) for key in
+              ("seq", "bid", "dts", "hrt", "hmn", "off", "psz", "pf", "w", "h", "fl", "ox", "oy")}
+    # Older indexes lack ox/oy; all other identity fields must match before any
+    # supplementary metadata can be associated with the recovered payload.
+    matched = isinstance(original, dict) and all(
+        (key in ("ox", "oy") and key not in original) or
+        (type(original.get(key)) is int and original[key] == value)
+        for key, value in header.items())
+    row = dict(original) if matched else {}
+    row.update(header)
+    for key in ("payload_type", "padding_x", "padding_y", "chunk_count", "operation_result"):
+        row.setdefault(key, None)  # unknown is never represented as a valid zero
+    return row, matched
+
+
+def format_index_line(fr, original=None):
+    row, _ = recovered_index_entry(fr, original)
+    return (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def recovery_source_rows(segment):
+    """Keep the original index read-only; ambiguous offsets cannot supply metadata."""
+    path = os.path.splitext(segment)[0] + ".idx.jsonl"
+    if not os.path.isfile(path):
+        return {}
+    rows = {}
+    with open(path, "rb") as source:
+        for line_number, line in enumerate(source, 1):
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict) or type(row.get("off")) is not int:
+                    raise ValueError("index row has no integer offset")
+            except (ValueError, UnicodeDecodeError) as exc:
+                print("warning: %s: skipping invalid index line %d (%s)"
+                      % (path, line_number, exc), file=sys.stderr)
+                continue
+            off = row["off"]
+            if off in rows:
+                rows[off] = None  # duplicate identity: do not guess which row is authoritative
+                print("warning: %s: duplicate offset %d; SDK metadata left unknown"
+                      % (path, off), file=sys.stderr)
+            else:
+                rows[off] = row
+    return rows
 
 
 def _rebuild_one(segment, output):
-    """Rebuilds one segment's index. output=None writes to stdout. Returns the line count."""
+    """Never replaces a file. output=None writes to stdout. Returns the line count."""
+    if output and os.path.lexists(output):
+        raise FileExistsError("refusing to overwrite existing output: " + output)
+    originals = recovery_source_rows(segment)
     f, size = open_segment(segment)
     with f:
         fh = header_or_fallback(f, segment, size, strict=False)
-        out = open(output, "wb") if output else sys.stdout.buffer
+        part = output + ".part" if output else None
+        out = open(part, "xb") if part else sys.stdout.buffer
         try:
             written = 0
+            unassociated = 0
             for ev in iter_records(f, size, align_up(FILE_HEADER_SIZE, fh.align), fh.align):
                 if ev[0] == "frame":
-                    out.write(format_index_line(ev[1]))
+                    fr = ev[1]
+                    original = originals.get(fr.off)
+                    _, matched = recovered_index_entry(fr, original)
+                    if not matched:
+                        unassociated += 1
+                    out.write(format_index_line(fr, original))
                     written += 1
                 elif ev[0] == "corrupt":
                     print("warning: %s: corrupt bytes at offset %d (%s), resynced at %d"
@@ -602,19 +670,38 @@ def _rebuild_one(segment, output):
                 else:
                     print("note: %s: truncated tail at offset %d: %s" % (segment, ev[1], ev[2]),
                           file=sys.stderr)
-        finally:
             if output:
+                out.flush()
+                os.fsync(out.fileno())
                 out.close()
+                os.link(part, output)  # atomic publication, fails if output now exists
+                os.unlink(part)
+                dir_fd = os.open(os.path.dirname(os.path.abspath(output)), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        except BaseException:
+            if output:
+                try:
+                    out.close()
+                finally:
+                    if os.path.exists(part):
+                        os.unlink(part)
+            raise
         print("rebuild-index: %s: %d index line(s)%s"
               % (segment, written, " -> " + output if output else ""), file=sys.stderr)
+        if unassociated:
+            print("warning: %d frame(s) have no matching original index row; SDK-only metadata "
+                  "is unknown and cannot be reconstructed from v1 raw headers" % unassociated,
+                  file=sys.stderr)
     return written
 
 
 def cmd_rebuild_index(args):
     if os.path.isdir(args.path):
-        # Directory form (crash recovery): rebuild EVERY segment's index
-        # in place, next to its .raw file. Accepts a camera directory or a
-        # whole session directory.
+        # Keep original indexes intact: they contain fields absent from v1 raw
+        # headers. Each result is separate and must not overwrite an earlier recovery.
         if args.output:
             print("error: -o/--output only applies when a single seg_NNNNN.raw is given",
                   file=sys.stderr)
@@ -626,9 +713,10 @@ def cmd_rebuild_index(args):
         total = 0
         for d in sorted(groups):
             for seg in sorted(groups[d]):
-                idx_path = seg[:-len(".raw")] + ".idx.jsonl"
+                idx_path = seg[:-len(".raw")] + ".rebuilt.idx.jsonl"
                 total += _rebuild_one(seg, idx_path)
-        print("rebuild-index: done (%d frame(s) indexed); re-run verify to confirm" % total,
+        print("rebuild-index: done (%d frame(s) indexed); original indexes unchanged; "
+              "review the separate .rebuilt.idx.jsonl files" % total,
               file=sys.stderr)
         return 0
     if not os.path.isfile(args.path):
@@ -688,14 +776,16 @@ def main(argv=None):
 
     p = sub.add_parser("verify", help="integrity-check segment(s) and their index/summary side files")
     p.add_argument("path", help="a seg_NNNNN.raw file, a camera directory, or a session directory")
+    p.add_argument("--index", metavar="INDEX.jsonl",
+                   help="verify a separate rebuilt index against one segment, without replacing the original")
     p.set_defaults(func=cmd_verify)
 
     p = sub.add_parser("rebuild-index",
-                       help="regenerate idx.jsonl from segment data (crash recovery; resync scan)")
+                       help="recover a separate index, retaining matching original SDK metadata")
     p.add_argument("path", help="a seg_NNNNN.raw file (prints to stdout unless -o), or a camera/"
-                                "session directory (rewrites every idx.jsonl in place)")
+                                "session directory (creates separate .rebuilt.idx.jsonl files)")
     p.add_argument("-o", "--output", metavar="OUT.jsonl",
-                   help="output file (single-file mode only; default: stdout)")
+                   help="new output file, never overwritten (single-file mode; default: stdout)")
     p.set_defaults(func=cmd_rebuild_index)
 
     p = sub.add_parser("extract", help="dump one frame's raw payload bytes")
@@ -705,7 +795,11 @@ def main(argv=None):
     p.set_defaults(func=cmd_extract)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (OSError, ValueError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

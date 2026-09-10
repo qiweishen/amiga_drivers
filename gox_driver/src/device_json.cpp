@@ -380,6 +380,8 @@ namespace gox {
 
         doc["recording_contract"] = {
             {"payload", "unmodified GetAcquiredSize bytes from SDK buffer"},
+            {"payload_integrity", "CRC-32C in existing v1 payload_crc32c field; kSegFlagPayloadCrc set"},
+            {"durability", "data then index fdatasync at output.flush_interval_mb and segment close; not a time bound"},
             {"device_timestamp", "unscaled SDK GetTimestamp; legacy field device_ts_ns/dts"},
             {"device_timestamp_unit", "unverified"}, {"device_timestamp_epoch", "unverified"},
             {"frame_layout", "padding/chunk count/payload type/operation result in original idx.jsonl"},

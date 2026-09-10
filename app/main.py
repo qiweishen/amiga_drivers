@@ -16,7 +16,7 @@ from .services.session_tailer import TAILER
 from .state import STATE
 
 # Pages register themselves via @ui.page on import.
-from .ui import asterx, camera, config_editor, dashboard, live, logs  # noqa: F401
+from .ui import asterx, camera, config_editor, dashboard, live, logs, reference  # noqa: F401
 
 
 async def _startup() -> None:
@@ -45,6 +45,7 @@ def main() -> None:
     # scan is slow, so this rate is safe on a slow output mount.
     app.timer(2.0, storage.poll)
     app.timer(2.0, _check_env)
+    app.timer(2.0, process.reconcile)
 
     app.colors(**PALETTE)
     ui.run(

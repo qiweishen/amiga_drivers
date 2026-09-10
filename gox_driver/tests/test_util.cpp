@@ -8,6 +8,10 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
 
 TEST_CASE("util: gen_uuid_v4 produces a well-formed version-4 UUID") {
     uint8_t uuid[16];
@@ -34,4 +38,26 @@ TEST_CASE("util: hex_prefix is lowercase, zero padded and length exact") {
     CHECK(gox::HexPrefix(bytes, 5) == "000fa0ff5a");
     CHECK(gox::HexPrefix(bytes, 3) == "000fa0"); // the session-name prefix length
     CHECK(gox::HexPrefix(bytes, 0).empty());
+}
+
+TEST_CASE("util: metadata publication preserves existing snapshots and temporary files") {
+    namespace fs = std::filesystem;
+    uint8_t uuid[16];
+    gox::GenUuidV4(uuid);
+    const auto dir = fs::temp_directory_path() / ("gox_metadata_" + gox::HexPrefix(uuid, 16));
+    REQUIRE(fs::create_directory(dir));
+    const auto path = dir / "device.json";
+    const std::string original = "{\"serial\":\"unit\"}\n";
+    gox::PublishMetadata(path.string(), original);
+    CHECK_FALSE(fs::exists(path.string() + ".part"));
+    CHECK_THROWS_AS(gox::PublishMetadata(path.string(), "replacement"), std::runtime_error);
+    std::ifstream input(path);
+    CHECK(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()) == original);
+    input.close();
+    const auto other = dir / "other.json";
+    { std::ofstream(other.string() + ".part") << "existing temporary data"; }
+    CHECK_THROWS_AS(gox::PublishMetadata(other.string(), "new"), std::runtime_error);
+    CHECK(fs::file_size(other.string() + ".part") == 23);
+    CHECK_FALSE(fs::exists(other));
+    fs::remove_all(dir);
 }

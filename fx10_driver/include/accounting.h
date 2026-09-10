@@ -3,8 +3,8 @@
 #include <cstdint>
 
 // Zero-loss accounting: BlockID continuity tracking and the run counter ledger.
-// Everything here is pure and single-threaded — the acquisition loop is the only
-// writer (write-in-retrieve-loop topology), so no atomics are needed.
+// Each ledger field has one writer while streaming. Whole-ledger reads happen
+// only after receiver.Stop() has joined both acquisition and recording workers.
 
 namespace fx10 {
     // GVSP BlockID continuity. Wire IDs are 16-bit (GVSP 1.x: valid IDs 1..65535,
@@ -26,9 +26,9 @@ namespace fx10 {
 
         Observation Observe(std::uint64_t block_id);
 
-        std::uint64_t Observed() const { return observed_; }
-        std::uint64_t TotalMissed() const { return total_missed_; }
-        std::uint64_t Anomalies() const { return anomalies_; }
+        [[nodiscard]] std::uint64_t Observed() const { return observed_; }
+        [[nodiscard]] std::uint64_t TotalMissed() const { return total_missed_; }
+        [[nodiscard]] std::uint64_t Anomalies() const { return anomalies_; }
 
     private:
         Mode mode_;
@@ -42,13 +42,14 @@ namespace fx10 {
 
     // Session counter ledger, logged at recorder stop. SINGLE-WRITER
     // rule per field (violating it double-counts):
-    //   acquisition loop: retrieve_ok, retrieve_timeouts, op_errors, blockid_anomalies
+    //   acquisition loop: retrieve_ok, retrieve_timeouts, op_errors, blockid_anomalies, recording_queue_drops
     //   recorder (via onFrame/onGap): blockid_gap_events, frames_missed_rx,
     //     size_mismatch_drops, frames_written, gap_lines_padded, bytes_written,
     //     write_errors, segments_finalized
+    //   after worker join: recording_worker_unconfirmed (not additive with frames_written)
     //   control channel: missed_trigger_delta
-    // The transport reports gaps by CALLING IFrameSink::onGap only — it must not
-    // touch the gap counters itself.
+    // The transport queues gap observations; only the recording worker calls
+    // IFrameSink::OnGap and updates the recorder's gap counters.
     struct Counters {
         std::uint64_t retrieve_ok = 0;
         std::uint64_t retrieve_timeouts = 0; // normal idle in triggered mode
@@ -56,6 +57,8 @@ namespace fx10 {
         std::uint64_t blockid_gap_events = 0;
         std::uint64_t frames_missed_rx = 0; // sum of gap sizes
         std::uint64_t blockid_anomalies = 0;
+        std::uint64_t recording_queue_drops = 0; // acquisition: usable frame could not enter bounded queue
+        std::uint64_t recording_worker_unconfirmed = 0; // failed/unattempted frames; may include partly written data
         std::uint64_t size_mismatch_drops = 0;
         std::uint64_t frames_written = 0; // real frames on disk (excludes padding)
         std::uint64_t gap_lines_padded = 0; // synthetic zero lines (pad_zero policy)

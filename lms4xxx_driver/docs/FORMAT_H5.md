@@ -161,21 +161,20 @@ only), `h5repack -f GZIP=4 in.h5 out.h5` (compress a recording offline).
   (typically 1.5–2× smaller for lidar distance data). Metadata columns stay
   uncompressed. The recorder falls back to uncompressed output with a warning
   if the libhdf5 build lacks the deflate filter.
-* `swmr: true` switches the file into single-writer/multiple-reader mode after
-  the layout is created: other processes can open it read-only
-  (`H5F_ACC_SWMR_READ`, `h5py.File(p, "r", swmr=True)`) while it is being
-  written and see every flushed row. Requires a local POSIX file system (not
-  NFS/SMB).
+* `swmr: true` is rejected both during configuration and by `ScanH5File::Open`,
+  before creating a file. The unchanged v3 layout contains variable-length
+  telemetry strings; appending these in SWMR mode is unsupported by HDF5
+  1.14.6 (see the bundled `SWMRTechNote.dox`, limitations). Use `swmr: false`.
 * Crash semantics: HDF5 has no journal, so a file whose writer is killed
   between flushes may be unreadable. Each flush is `H5Fflush` **followed by
-  `fdatasync` on the underlying descriptor**, so the exposure really is bounded
-  by `flush_interval_ms` and not by the kernel's writeback window; without the
-  fdatasync a power cut could cost tens of seconds regardless of the setting.
-  Three things are still lost on a `kill -9`: the scans appended since the last
-  flush, the partial batch (< `chunk_frames`) waiting in the write thread, and
-  whatever sits in the SPSC queue. Only the current split is at risk; earlier
-  splits are closed. `h5clear -s` (HDF5 tools) can remove the status flags of a
-  file left open by a crashed SWMR writer.
+  `fdatasync` on the underlying sec2 descriptor**. This is a durability barrier,
+  not a transaction or a guarantee that only `flush_interval_ms` of data can be
+  lost. A failed batch can leave unequal dataset extents, and a crash can make
+  the current file unreadable despite earlier successful flushes. The current
+  split, partial batch and SPSC queue remain exposed. Completed splits provide
+  separate recovery boundaries. New file directory entries are also synced.
+  Each file has its own lifetime lock; the process-wide HDF5 lock is released
+  during `fdatasync`, allowing other lidar files to continue HDF5 operations.
 * **Completeness marker.** HDF5 offers no atomic "rename on finish", so a
   finished file is marked instead: at close the recorder writes the root
   attributes `closed_cleanly = 1` and `frames_total = <rows>`. **A file without
@@ -186,8 +185,7 @@ only), `h5repack -f GZIP=4 in.h5 out.h5` (compress a recording offline).
   fails the run. The marker alone cannot prove that the final close or storage
   persistence succeeded; check the run outcome and dataset lengths as well.
   `scripts/inspect_h5.py verify` checks the marker.
-  Files written with `swmr: true` carry no marker: SWMR forbids adding
-  attributes after the layout is frozen.
+  Historical SWMR files may lack this marker; new v3 recordings reject that mode.
 * An existing file is **never** overwritten (`H5F_ACC_EXCL`). The path already
   contains the session timestamp and the split index, so a collision means the
   run layout is wrong, and destroying an earlier recording would be the worst

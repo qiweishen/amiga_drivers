@@ -59,6 +59,7 @@ BIN_EBUS_DISCOVER = BUILD_BIN / "ebus_discover"  # common/: GigE enumeration for
 BIN_EBUS_SET_IP = BUILD_BIN / "ebus_set_ip"  # common/: FORCEIP + persistent IP write
 BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
+BIN_FX10_REFERENCE = BUILD_BIN / "fx10_reference"
 
 MAIN_CONFIG = REPO_ROOT / "config" / "config-main.yaml"
 SNAPSHOT_CONFIG = REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml"

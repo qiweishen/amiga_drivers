@@ -3,6 +3,7 @@ so every comment survives; the C++ loaders remain the final validators)."""
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import shutil
@@ -12,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile, to_host
+from ..state import STATE
 from . import runtime
 
 
@@ -19,20 +21,63 @@ class ConflictError(Exception):
     """File changed on disk since it was loaded into the editor."""
 
 
+class ConfigBusyError(RuntimeError):
+    """The acquisition may still be reading its startup configuration."""
+
+
+class ConfigPathChangedError(RuntimeError):
+    """The main config now points at a different file; reload before saving."""
+
+
+_PATH_KEYS = {
+    "asterx": "ASTERX Driver Config Path", "fx10": "FX10 Driver Config Path",
+    "gox": "GOX Driver Config Path", "lms4xxx": "LMS4XXX Driver Config Path",
+}
+
+
 @dataclass
 class LoadedConfig:
     file: ConfigFile
     text: str
-    mtime: float
+    mtime: int  # nanoseconds, for conflict detection
 
 
 def get(config_id: str) -> ConfigFile:
-    return CONFIG_FILES[config_id]
+    template = CONFIG_FILES[config_id]
+    if config_id == "main":
+        return ConfigFile(template.id, template.label, template.path.resolve())
+    general = _main_document().get("General") or {}
+    default = template.path.relative_to(REPO_ROOT).as_posix()
+    raw = general.get(_PATH_KEYS[config_id], default)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{_PATH_KEYS[config_id]} must be a non-empty path")
+    path = resolve_output_dir(raw)
+    if path is None:
+        raise ValueError(f"{_PATH_KEYS[config_id]} is outside the GUI's shared mounts: {raw}")
+    return ConfigFile(template.id, template.label, path.resolve())
+
+
+def _main_document() -> dict:
+    doc = yaml.safe_load(CONFIG_FILES["main"].path.read_text(encoding="utf-8"))
+    if doc is None:
+        doc = {}
+    if not isinstance(doc, dict) or (doc.get("General") is not None and not isinstance(doc["General"], dict)):
+        raise ValueError("Main config and General must be YAML mappings")
+    return doc
 
 
 def read(config_id: str) -> LoadedConfig:
-    cf = CONFIG_FILES[config_id]
-    return LoadedConfig(cf, cf.path.read_text(encoding="utf-8"), cf.path.stat().st_mtime)
+    cf = get(config_id)
+
+    def signature(stat) -> tuple:
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    with cf.path.open(encoding="utf-8") as stream:
+        before = os.fstat(stream.fileno())
+        text = stream.read()
+        if signature(before) != signature(os.fstat(stream.fileno())) or signature(before) != signature(cf.path.stat()):
+            raise ConflictError(f"{cf.path} changed while it was being read; reload it")
+    return LoadedConfig(cf, text, before.st_mtime_ns)
 
 
 def validate(config_id: str, text: str) -> list[str]:
@@ -49,29 +94,42 @@ def validate(config_id: str, text: str) -> list[str]:
     return errors
 
 
-def save(config_id: str, text: str, expected_mtime: float | None) -> float:
+def save(config_id: str, text: str, expected_mtime: int | None, *,
+         expected_path: Path | None = None) -> int:
     """Atomic save with a .bak of the previous content. Returns the new mtime.
 
     Raises ConflictError when the on-disk file changed after `expected_mtime`
     (another editor / another GUI tab); caller decides reload-vs-overwrite.
     """
-    cf = CONFIG_FILES[config_id]
-    if expected_mtime is not None and cf.path.exists():
-        if abs(cf.path.stat().st_mtime - expected_mtime) > 1e-6:
+    # Every editor, Apply action and enable switch ends here. Check at commit,
+    # including after a conflict/validation dialog has yielded to another page.
+    if STATE.control_uncertain:
+        raise ConfigBusyError("Configuration is locked until the acquisition process can be verified")
+    if STATE.config_locked:
+        raise ConfigBusyError("Configuration is locked until acquisition initialization or shutdown finishes")
+    cf = get(config_id)
+    if expected_path is not None and cf.path.resolve() != expected_path.resolve():
+        raise ConfigPathChangedError(f"Config path changed to {cf.path}; reload before saving")
+    if expected_mtime is not None:
+        try:
+            current_mtime = cf.path.stat().st_mtime_ns
+        except FileNotFoundError:
+            raise ConflictError(f"{cf.path.name} was removed from disk") from None
+        if current_mtime != expected_mtime:
             raise ConflictError(f"{cf.path.name} was modified on disk")
     if cf.path.exists():
         shutil.copy2(cf.path, cf.path.with_suffix(cf.path.suffix + ".bak"))
     tmp = cf.path.with_suffix(cf.path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(cf.path)  # atomic within the same directory
-    return cf.path.stat().st_mtime
+    return cf.path.stat().st_mtime_ns
 
 
 # --- config-main.yaml helpers -------------------------------------------------
 
 def main_settings() -> dict:
     """Parsed view of config-main.yaml (read-only; editing stays text-level)."""
-    doc = yaml.safe_load(CONFIG_FILES["main"].path.read_text(encoding="utf-8")) or {}
+    doc = _main_document()
     general = doc.get("General") or {}
     logging_ = doc.get("Logging System") or {}
     output_dir = str(general.get("Output Directory", "./data"))
@@ -122,11 +180,9 @@ def lms_instance_names() -> list[str]:
     pre-seed). The C++ side uses each entry's `id` verbatim as the log tag,
     so the sensor keys are the raw ids.
 
-    Falls back to the older `instances:`/`Instances:` map forms (snake_cased,
-    mirroring the C++ conversion of that era) so a stale field config still
-    seeds the dashboard."""
+    Reads the file selected by the main config."""
     try:
-        doc = yaml.safe_load(CONFIG_FILES["lms4xxx"].path.read_text(encoding="utf-8")) or {}
+        doc = yaml.safe_load(read("lms4xxx").text) or {}
         lidars = doc.get("lidar")
         if isinstance(lidars, list):
             return [str(e["id"]) for e in lidars
@@ -206,7 +262,7 @@ def _fmt(value: float | int) -> str:
     return text
 
 
-def _verify_and_save(config_id: str, lines: list[str], checks: list[tuple[list[str], object]]) -> None:
+def _verify_and_save(loaded: LoadedConfig, lines: list[str], checks: list[tuple[list[str], object]]) -> None:
     """Re-parse the edited text and confirm every (key path, value) round-trips
     before writing. A silently wrong acquisition parameter would corrupt every
     dataset recorded with it."""
@@ -227,7 +283,7 @@ def _verify_and_save(config_id: str, lines: list[str], checks: list[tuple[list[s
             ok = node == expected
         if not ok:
             raise ApplyError(f"{'.'.join(map(str, path))} read back as {node!r}, expected {expected!r}")
-    save(config_id, text, expected_mtime=None)
+    save(loaded.file.id, text, expected_mtime=loaded.mtime, expected_path=loaded.file.path)
 
 
 def _gox_camera_entry(lines: list[str], target_ip: str, target_mac: str) -> tuple[int, int, int, dict]:
@@ -302,8 +358,8 @@ def _sub_block_bounds(lines: list[str], key: str, start: int, end: int) -> tuple
 def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float) -> str:
     """Write exposure/gain into the config-gox.yaml camera entry that identifies
     the selected camera. Returns a human-readable summary of what changed."""
-    cf = CONFIG_FILES["gox"]
-    lines = cf.path.read_text(encoding="utf-8").splitlines()
+    loaded = read("gox")
+    lines = loaded.text.splitlines()
     index, start, end, camera = _gox_camera_entry(lines, target_ip, target_mac)
 
     # The driver rejects a freerun exposure that does not fit in the frame period
@@ -324,12 +380,12 @@ def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, g
 
     _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
     _replace_scalar(lines, "gain", _fmt(float(gain)), start=start, end=end)
-    _verify_and_save("gox", lines, [
+    _verify_and_save(loaded, lines, [
         (["cameras", index, "acquisition", "exposure_ms"], float(exposure_ms)),
         (["cameras", index, "acquisition", "gain"], float(gain)),
     ])
     camera_id = str(camera.get("id", f"#{index}"))
-    return f"{camera_id} ({target_ip}): exposure_ms={_fmt(float(exposure_ms))}, gain={_fmt(float(gain))}"
+    return f"{loaded.file.path} · {camera_id} ({target_ip}): exposure_ms={_fmt(float(exposure_ms))}, gain={_fmt(float(gain))}"
 
 
 def _gox_entry_for_readdress(lines: list[str], target_ip: str, target_mac: str,
@@ -381,19 +437,19 @@ def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> 
     summary."""
     quoted = f'"{new_ip}"'  # both templates quote the address
     if kind == "GoX":
-        cf = CONFIG_FILES["gox"]
-        lines = cf.path.read_text(encoding="utf-8").splitlines()
+        loaded = read("gox")
+        lines = loaded.text.splitlines()
         index, start, end, camera, already = _gox_entry_for_readdress(lines, target_ip, target_mac, new_ip)
         camera_id = camera.get("id", f"#{index}")
         if already:
-            return f"config-gox.yaml · {camera_id}: device.ip already {new_ip} (unchanged)"
+            return f"{loaded.file.path} · {camera_id}: device.ip already {new_ip} (unchanged)"
         dev_start, dev_end = _sub_block_bounds(lines, "device", start, end)
         _replace_scalar(lines, "ip", quoted, start=dev_start, end=dev_end)
-        _verify_and_save("gox", lines, [(["cameras", index, "device", "ip"], new_ip)])
-        return f"config-gox.yaml · {camera_id}: device.ip={new_ip}"
+        _verify_and_save(loaded, lines, [(["cameras", index, "device", "ip"], new_ip)])
+        return f"{loaded.file.path} · {camera_id}: device.ip={new_ip}"
     if kind == "FX10":
-        cf = CONFIG_FILES["fx10"]
-        lines = cf.path.read_text(encoding="utf-8").splitlines()
+        loaded = read("fx10")
+        lines = loaded.text.splitlines()
         doc = yaml.safe_load("\n".join(lines)) or {}
         device = doc.get("device") or {}
         entry_mac = re.sub(r"[^0-9a-f]", "", str(device.get("mac", "")).lower())
@@ -401,15 +457,15 @@ def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> 
             raise ApplyError(f"config-fx10.yaml is bound to MAC {device.get('mac')}, not to {target_mac}")
         start, end = _block_bounds(lines, "device")
         _replace_scalar(lines, "ip", quoted, start=start, end=end)
-        _verify_and_save("fx10", lines, [(["device", "ip"], new_ip)])
-        return f"config-fx10.yaml · device.ip={new_ip}"
+        _verify_and_save(loaded, lines, [(["device", "ip"], new_ip)])
+        return f"{loaded.file.path} · device.ip={new_ip}"
     raise ApplyError(f"no driver config for a {kind} device")
 
 
 def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_binning: int) -> str:
     """Write exposure/binning into config-fx10.yaml's acquisition block."""
-    cf = CONFIG_FILES["fx10"]
-    lines = cf.path.read_text(encoding="utf-8").splitlines()
+    loaded = read("fx10")
+    lines = loaded.text.splitlines()
     doc = yaml.safe_load("\n".join(lines)) or {}
     acquisition = doc.get("acquisition")
     if not isinstance(acquisition, dict):
@@ -428,12 +484,12 @@ def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_bi
     _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
     _replace_scalar(lines, "spatial_binning", str(spatial_binning), start=start, end=end)
     _replace_scalar(lines, "spectral_binning", str(spectral_binning), start=start, end=end)
-    _verify_and_save("fx10", lines, [
+    _verify_and_save(loaded, lines, [
         (["acquisition", "exposure_ms"], float(exposure_ms)),
         (["acquisition", "spatial_binning"], spatial_binning),
         (["acquisition", "spectral_binning"], spectral_binning),
     ])
-    return (f"exposure_ms={_fmt(float(exposure_ms))}, spatial_binning={spatial_binning}, "
+    return (f"{loaded.file.path} · exposure_ms={_fmt(float(exposure_ms))}, spatial_binning={spatial_binning}, "
             f"spectral_binning={spectral_binning}")
 
 
@@ -441,10 +497,10 @@ def set_enable(driver: str, value: bool) -> None:
     """Line-anchored text edit of an Enable flag in config-main.yaml — the file
     is permissive YAML but we edit as text so comments survive."""
     key = ENABLE_KEYS[driver]
-    cf = CONFIG_FILES["main"]
-    text = cf.path.read_text(encoding="utf-8")
+    loaded = read("main")
+    text = loaded.text
     pattern = re.compile(rf"^(\s*{re.escape(key)}\s*:\s*).*$", re.M)
     new_text, n = pattern.subn(rf"\g<1>{'true' if value else 'false'}", text, count=1)
     if n == 0:  # key missing: append under General is risky — refuse loudly
         raise KeyError(f"no '{key}:' line found in config-main.yaml")
-    save("main", new_text, expected_mtime=None)
+    save("main", new_text, expected_mtime=loaded.mtime, expected_path=loaded.file.path)

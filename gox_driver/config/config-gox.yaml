@@ -16,7 +16,7 @@ cameras:
             ip: "10.95.1.101"           # direct connect; used when mac is empty
 
         acquisition:
-            exposure_ms: 150.0              # > 0; freerun: < 1000 / frame_rate_hz
+            exposure_ms: 150.0              # > 0; freerun: < 900 / frame_rate_hz (10% timing margin)
             gain: 1.0                       # 1.0..126.0 (magnification, not dB, p.148)
             pixel_format: BayerRG12Packed   # GenICam entry, verbatim; 12-bit formats also set SensorDigitizationBits
             frame_rate_hz: 5.0              # >= 0.125; freerun only
@@ -66,7 +66,7 @@ output:
     queue_max_frames: 0                 # 0 = auto (~2 s) | >= 2
     queue_on_full: drop_newest          # drop_newest | block; any dropped frame ends the whole rig (fail-fast)
     on_buffer_error: record_flagged     # record_flagged | drop
-    flush_interval_mb: 64               # > 0
+    flush_interval_mb: 64               # > 0; writer fdatasyncs raw data then index at this byte cadence
     max_frames: 0                       # >= 0; 0 = unlimited
     max_duration_s: 0                   # >= 0; 0 = unlimited
 

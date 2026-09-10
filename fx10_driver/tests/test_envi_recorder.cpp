@@ -276,15 +276,95 @@ TEST_CASE("EnviRecorder: LineIdentitySurvivesPaddingAnomaliesAndRotation") {
     };
     const auto first = read_text(recorder.SessionDir() / "segment_0001.lines.csv");
     const auto second = read_text(recorder.SessionDir() / "segment_0002.lines.csv");
-    CHECK(first.find("frame,0,0,0,100,1,9007199254740993,1800000000000000001,123456789,0\n") != std::string::npos);
+    CHECK(first.find("frame,0,0,0,100,1,9007199254740993,1800000000000000001,123456789,0,") != std::string::npos);
     CHECK(first.find("gap,1,1,24,101,2,") != std::string::npos);
     CHECK(first.find("padding,1,1,24,0,1,") != std::string::npos);
     CHECK(second.find("padding,0,2,0,0,1,") != std::string::npos);
-    CHECK(second.find("frame,1,3,24,103,1,9007199254740993,1800000000000000001,123456789,1\n") != std::string::npos);
+    CHECK(second.find("frame,1,3,24,103,1,9007199254740993,1800000000000000001,123456789,1,") != std::string::npos);
     CHECK(fs::file_size(recorder.SessionDir() / "segment_0001.bil") == 2 * kLineBytes);
     CHECK(fs::file_size(recorder.SessionDir() / "segment_0002.bil") == 2 * kLineBytes);
     CHECK(counters.frames_written == 2);
     CHECK(counters.gap_lines_padded == 2);
+    std::ifstream summaries(recorder.SessionDir() / "segments.jsonl");
+    std::string summary_line;
+    REQUIRE(static_cast<bool>(std::getline(summaries, summary_line)));
+    const auto s1 = nlohmann::json::parse(summary_line);
+    REQUIRE(static_cast<bool>(std::getline(summaries, summary_line)));
+    const auto s2 = nlohmann::json::parse(summary_line);
+    CHECK_FALSE(static_cast<bool>(std::getline(summaries, summary_line))); // empty trailing segment omitted
+    CHECK(s1["lines"] == 2);
+    CHECK(s1["frames"] == 1);
+    CHECK(s1["padding_lines"] == 1);
+    CHECK(s1["gap_frames_reported"] == 2); // gap event belongs to the segment where observed
+    CHECK(s1["global_line_end_exclusive"] == 2);
+    CHECK(s1["first_frame"]["device_timestamp_raw"].get<std::uint64_t>() == 9007199254740993ULL);
+    CHECK(s2["global_line_first"] == 2);
+    CHECK(s2["last_frame"]["global_line"] == 3);
+    CHECK(s2["padding_lines"] == 1);
+    CHECK(s2["block_id_anomalies"] == 1);
+}
+
+TEST_CASE("EnviRecorder: SdkLayoutAndRejectedBufferDetailsSurviveInV2Index") {
+    Counters counters;
+    EnviRecorder recorder(MakeConfig(MakeTempDir()), counters);
+    recorder.Start(MakeInit());
+    const auto bytes = MakeLine(5);
+    auto frame = MakeFrame(bytes, 7);
+    frame.sdk = fx10::SdkFrameMetadata{};
+    auto &sdk = *frame.sdk;
+    sdk.acquired_size = 30;
+    sdk.payload_type = 1;
+    sdk.image_present = true;
+    sdk.pixel_type = 42; // serialization test, not a PFNC claim
+    sdk.width = 4;
+    sdk.height = 3;
+    sdk.padding_x = 2;
+    sdk.image_size = 30;
+    sdk.effective_image_size = 24;
+    recorder.OnFrame(frame);
+    frame.block_id = 8;
+    sdk.operation_result = 17; // opaque SDK code
+    sdk.image_present = false;
+    recorder.OnRejected(frame.block_id, "operation-error", &frame);
+    recorder.Stop();
+    const auto bytes_index = ReadFile(recorder.SessionDir() / "segment_0001.lines.csv");
+    const std::string text(bytes_index.begin(), bytes_index.end());
+    CHECK(text.find("# fx10-line-index-v2;") == 0);
+    CHECK(text.find(",30,1,0,0,1,42,4,3,2,0,30,24\n") != std::string::npos);
+    CHECK(text.find(",30,1,17,0,0,,,,,,,\n") != std::string::npos);
+    std::istringstream rows(text);
+    std::string row;
+    std::getline(rows, row); // preamble
+    while (std::getline(rows, row)) CHECK(std::count(row.begin(), row.end(), ',') == 21);
+    std::ifstream summary(recorder.SessionDir() / "segments.jsonl");
+    std::getline(summary, row);
+    const auto doc = nlohmann::json::parse(row);
+    CHECK(doc["frames"] == 1);
+    CHECK(doc["rejected_buffers"] == 1);
+    CHECK(doc["last_frame"]["block_id"] == 7);
+}
+
+TEST_CASE("EnviRecorder: SummaryFailureDoesNotUncommitTheFinalizedPixels") {
+    auto config = MakeConfig(MakeTempDir());
+    config.rotation.max_lines = 1;
+    Counters counters;
+    EnviRecorder recorder(config, counters);
+    recorder.Start(MakeInit());
+    recorder.SetSummaryWriteHookForTest([](int, const void *, std::size_t) -> ssize_t {
+        errno = ENOSPC;
+        return -1;
+    });
+    const auto bytes = MakeLine(9);
+    recorder.OnFrame(MakeFrame(bytes, 1));
+    recorder.Stop();
+    CHECK(recorder.Failed());
+    CHECK(recorder.GetErrorKind() == fx10::ErrorKind::kIo);
+    CHECK(counters.frames_written == 1);
+    CHECK(counters.segments_finalized == 1);
+    CHECK(ReadFile(recorder.SessionDir() / "segment_0001.bil") == bytes);
+    CHECK(fs::exists(recorder.SessionDir() / "segment_0001.hdr"));
+    CHECK(fs::file_size(recorder.SessionDir() / "segments.jsonl") == 0);
+    CHECK_FALSE(fs::exists(recorder.SessionDir() / "segment_0002.bil.part"));
 }
 
 TEST_CASE("EnviRecorder: ShortIndexWriteRollsPixelsBackToTheLastCommittedPair") {
@@ -562,9 +642,9 @@ TEST_CASE("EnviRecorder: FlushIntervalZeroKeepsTheOldSegmentBoundaryBehaviour") 
     CHECK(syncs > 0); // ...but the segment finalize still syncs
 }
 
-TEST_CASE("EnviRecorder: FailedPeriodicFlushIsCountedButDoesNotKillTheRun") {
-    // The data is still in the page cache and the finalize will try again, so a
-    // transient sync error must not end a recording.
+TEST_CASE("EnviRecorder: FailedPeriodicFlushStopsTheRunEvenIfFinalizeCanRecover") {
+    // Finalize retries to preserve usable data, but must not erase the earlier
+    // failure of the durability contract or report this session as successful.
     const fs::path tmp = MakeTempDir();
     RecordingConfig config = MakeConfig(tmp);
     config.flush_interval_mb = 1;
@@ -585,12 +665,14 @@ TEST_CASE("EnviRecorder: FailedPeriodicFlushIsCountedButDoesNotKillTheRun") {
     for (std::uint64_t id = 1; id <= 6; ++id) {
         recorder.OnFrame(MakeBigFrame(line, id));
     }
-    CHECK_FALSE(recorder.Failed());
+    recorder.DrainPendingFlushesForTest();
+    CHECK(recorder.Failed());
+    CHECK(recorder.GetErrorKind() == fx10::ErrorKind::kIo);
     // The flush runs on the helper thread; its failures reach the ledger when
     // the segment finalizes (single-writer rule), i.e. at Stop().
     recorder.Stop();
     CHECK(counters.write_errors >= 1u); // the two failed syncs of one flush request count once
-    CHECK_FALSE(recorder.Failed());
+    CHECK(recorder.Failed());
     CHECK(counters.segments_finalized == 1u);
     CHECK(fs::exists(recorder.SessionDir() / "segment_0001.hdr"));
 }

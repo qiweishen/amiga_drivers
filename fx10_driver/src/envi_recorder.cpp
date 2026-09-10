@@ -135,7 +135,8 @@ namespace fx10 {
             {"pixel_format", init.pixel_format}, {"full_scale", full_scale},
             {"expected_frame_rate_hz", init.expected_frame_rate_hz},
             {"wavelengths_nm", init.wavelengths.nm}, {"wavelength_source", init.wavelengths.source_tag},
-            {"description", init.description}, {"line_index_format", "fx10-line-index-v1"},
+            {"description", init.description}, {"line_index_format", "fx10-line-index-v2"},
+            {"recording_contract", RecordingContract(init.pixel_format)},
             {"trigger_association_verified", false}, {"leading_loss", "unknown"}
         };
         if (!WriteFileAtomic(session_dir_ / "capture.json.part", session_dir_ / "capture.json", capture.dump(2) + "\n") ||
@@ -144,7 +145,10 @@ namespace fx10 {
         }
 
         try {
+            segments_.Open(session_dir_ / "segments.jsonl");
             OpenSegment();
+        } catch (const MetadataError &e) {
+            throw RecorderError(e.what());
         } catch (...) {
             // OpenSegment cleans up its descriptors; retain capture.json as startup provenance.
             std::error_code ec;
@@ -160,7 +164,7 @@ namespace fx10 {
     }
 
 
-    // --- periodic durability, off the acquisition thread ------------------------
+    // --- periodic durability helper, off the recording worker -------------------
 
     void EnviRecorder::StartFlusher() {
         if (config_.flush_interval_mb == 0 || flusher_.joinable()) {
@@ -192,7 +196,7 @@ namespace fx10 {
             return;
         }
         std::unique_lock<std::mutex> lock(flush_mu_);
-        flush_cv_.wait(lock, [this] { return flush_queue_.empty() && flush_in_progress_ == 0; });
+        flush_cv_.wait(lock, [this] { return !flush_pending_ && flush_in_progress_ == 0; });
     }
 
 
@@ -200,21 +204,21 @@ namespace fx10 {
         if (!flusher_.joinable()) {
             return; // flush_interval_mb == 0 never gets here; a missing thread means Start() did not run
         }
-        // Dup'd descriptors: fdatasync acts on the file, so the flusher can sync
-        // (and close its copies) even after this segment rotated away.
+        std::lock_guard<std::mutex> lock(flush_mu_);
+        // Rotation drains the helper before closing this segment. A request
+        // still pending will sync this same file after all writes made so far;
+        // coalesce it instead of allocating unbounded duplicate descriptors.
+        if (flush_pending_) return;
         FlushRequest request{::dup(data_fd_), ::dup(index_fd_)};
         if (request.data_fd < 0 || request.index_fd < 0) {
             const int err = errno;
             if (request.data_fd >= 0) ::close(request.data_fd);
             if (request.index_fd >= 0) ::close(request.index_fd);
             flush_errors_.fetch_add(1, std::memory_order_relaxed);
-            g_log.Warn("[Writer] Cannot dup descriptors for the periodic flush: {}", std::strerror(err));
+            g_log.Error("[Writer] Cannot dup descriptors for the periodic flush: {}", std::strerror(err));
             return;
         }
-        {
-            std::lock_guard<std::mutex> lock(flush_mu_);
-            flush_queue_.push_back(request);
-        }
+        flush_pending_ = request;
         flush_cv_.notify_one();
     }
 
@@ -224,6 +228,7 @@ namespace fx10 {
         if (total > flush_errors_folded_) {
             counters_.write_errors += total - flush_errors_folded_;
             flush_errors_folded_ = total;
+            LatchFinalizeFailure("periodic data/index durability flush failed");
         }
     }
 
@@ -233,12 +238,12 @@ namespace fx10 {
             FlushRequest request{};
             {
                 std::unique_lock<std::mutex> lock(flush_mu_);
-                flush_cv_.wait(lock, [this] { return flusher_stop_ || !flush_queue_.empty(); });
-                if (flush_queue_.empty()) {
+                flush_cv_.wait(lock, [this] { return flusher_stop_ || flush_pending_.has_value(); });
+                if (!flush_pending_) {
                     return; // stop requested and nothing left to sync
                 }
-                request = flush_queue_.front();
-                flush_queue_.pop_front();
+                request = *flush_pending_;
+                flush_pending_.reset();
                 ++flush_in_progress_;
             }
             bool ok = true;
@@ -254,10 +259,10 @@ namespace fx10 {
             ::close(request.data_fd);
             ::close(request.index_fd);
             if (!ok) {
-                // Not fatal: the data is in the page cache and the next flush or
-                // the segment finalize will try again.
+                // Finalize still retries the barrier, but a failed durability
+                // contract must stop acquisition and remain visible in the result.
                 flush_errors_.fetch_add(1, std::memory_order_release);
-                g_log.Warn("[Writer] Periodic fdatasync failed: {}", std::strerror(err));
+                g_log.Error("[Writer] Periodic fdatasync failed: {}", std::strerror(err));
             }
             {
                 std::lock_guard<std::mutex> lock(flush_mu_);
@@ -283,10 +288,12 @@ namespace fx10 {
 
         index_fd_ = ::open(index_part_path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         constexpr std::string_view columns =
-            "# fx10-line-index-v1; zero-based indices; device timestamp unit/epoch unverified; "
+            "# fx10-line-index-v2; zero-based indices; device timestamp unit/epoch unverified; "
             "leading loss unknown; directory identifies connection epoch\n"
             "event,segment_line,global_line,byte_offset,block_id,count,device_timestamp_raw,"
-            "host_receive_realtime_ns,host_receive_monotonic_ns,block_id_anomaly\n";
+            "host_receive_realtime_ns,host_receive_monotonic_ns,block_id_anomaly,"
+            "sdk_acquired_size,sdk_payload_type,sdk_operation_result,sdk_chunk_count,sdk_image_present,"
+            "sdk_pixel_type,sdk_width,sdk_height,sdk_padding_x,sdk_padding_y,sdk_image_size,sdk_effective_image_size\n";
         if (index_fd_ < 0 || !WriteAll(index_fd_, columns.data(), columns.size())) {
             const int err = errno;
             if (index_fd_ >= 0) {
@@ -307,11 +314,15 @@ namespace fx10 {
         data_bytes_this_segment_ = 0;
         last_flush_bytes_ = 0;
         segment_start_iso_ = std::move(segment_start);
+        segment_global_first_ = global_line_index_;
+        segment_frames_ = segment_padding_ = segment_missing_ = segment_rejected_ = segment_anomalies_ = 0;
+        segment_first_frame_.reset();
+        segment_last_frame_.reset();
     }
 
 
     void EnviRecorder::OnFrame(const FrameView &frame) {
-        if (!started_ || stopped_ || failed_) {
+        if (!started_ || stopped_ || Failed()) {
             return;
         }
         try {
@@ -319,7 +330,7 @@ namespace fx10 {
                 bytes_per_pixel != init_.bytes_per_pixel) {
                 ++counters_.size_mismatch_drops;
                 loss_seen_.store(true, std::memory_order_release);
-                OnRejected(frame.block_id, "layout-error");
+                OnRejected(frame.block_id, "layout-error", &frame);
                 g_log.Warn(
                     "[Writer] Dropping frame block_id={} with unexpected geometry {}x{}x{} ({} B, expected {} B)",
                     frame.block_id, frame.width, frame.height, frame.bytes_per_pixel, frame.size, line_bytes_);
@@ -348,7 +359,7 @@ namespace fx10 {
 
 
     void EnviRecorder::OnGap(std::uint64_t first_missing_block_id, std::uint64_t missing_count) {
-        if (!started_ || stopped_ || failed_ || missing_count == 0) {
+        if (!started_ || stopped_ || Failed() || missing_count == 0) {
             return;
         }
         try {
@@ -371,7 +382,7 @@ namespace fx10 {
                 g_log.Warn("[Writer] Gap of {} exceeds pad cap {}; remainder NOT padded",
                            missing_count, kMaxPadLinesPerGap);
             }
-            for (std::uint64_t i = 0; i < to_pad && !failed_; ++i) {
+            for (std::uint64_t i = 0; i < to_pad && !Failed(); ++i) {
                 if (WriteLine(zero_line_.data())) {
                     ++counters_.gap_lines_padded;
                     counters_.bytes_written += line_bytes_;
@@ -385,11 +396,11 @@ namespace fx10 {
     }
 
 
-    void EnviRecorder::OnRejected(std::uint64_t block_id, const char *reason) {
-        if (!started_ || stopped_ || failed_) return;
+    void EnviRecorder::OnRejected(std::uint64_t block_id, const char *reason, const FrameView *frame) {
+        if (!started_ || stopped_ || Failed()) return;
         loss_seen_.store(true, std::memory_order_release);
         try {
-            WriteIndex(reason, block_id, 1);
+            WriteIndex(reason, block_id, 1, frame);
         } catch (const std::exception &e) {
             LatchError(std::string("line index exception: ") + e.what(), ErrorKind::kOther);
         }
@@ -397,12 +408,22 @@ namespace fx10 {
 
     bool EnviRecorder::WriteIndex(const char *event, std::uint64_t block_id, std::uint64_t count,
                                   const FrameView *frame) {
-        const std::string row = fmt::format("{},{},{},{},{},{},{},{},{},{}\n", event, lines_this_segment_,
+        std::string row = fmt::format("{},{},{},{},{},{},{},{},{},{}", event, lines_this_segment_,
             global_line_index_, data_bytes_this_segment_, block_id, count,
             frame ? frame->device_timestamp_raw : 0,
             frame ? frame->host_receive_realtime_ns : 0,
             frame ? frame->host_receive_monotonic_ns : 0,
             frame && frame->block_id_anomaly ? 1 : 0);
+        if (frame && frame->sdk) {
+            const auto &sdk = *frame->sdk;
+            row += fmt::format(",{},{},{},{},{}", sdk.acquired_size, sdk.payload_type,
+                               sdk.operation_result, sdk.chunk_count, sdk.image_present ? 1 : 0);
+            if (sdk.image_present) {
+                row += fmt::format(",{},{},{},{},{},{},{}", sdk.pixel_type, sdk.width, sdk.height,
+                    sdk.padding_x, sdk.padding_y, sdk.image_size, sdk.effective_image_size);
+            } else row += ",,,,,,,"; // seven unknown image fields
+        } else row += ",,,,,,,,,,,,"; // twelve unknown SDK fields (gap, padding, SDK-free inputs)
+        row += '\n';
         if (!WriteAll(index_fd_, row.data(), row.size())) {
             const int err = errno;
             ++counters_.write_errors;
@@ -411,6 +432,9 @@ namespace fx10 {
         }
         index_bytes_ += row.size();
         ++index_records_;
+        const std::string_view kind(event);
+        if (kind == "gap") segment_missing_ += count;
+        else if (kind != "frame" && kind != "padding") segment_rejected_ += count;
         return true;
     }
 
@@ -427,12 +451,20 @@ namespace fx10 {
         if (!WriteIndex(frame ? "frame" : "padding", frame ? frame->block_id : 0, 1, frame)) {
             return false;
         }
+        if (frame) {
+            const FrameStamp stamp{global_line_index_, frame->block_id, frame->device_timestamp_raw,
+                frame->host_receive_realtime_ns, frame->host_receive_monotonic_ns};
+            if (!segment_first_frame_) segment_first_frame_ = stamp;
+            segment_last_frame_ = stamp;
+            ++segment_frames_;
+            if (frame->block_id_anomaly) ++segment_anomalies_;
+        } else ++segment_padding_;
         ++lines_this_segment_;
         ++global_line_index_;
         data_bytes_this_segment_ += line_bytes_;
-        // Bound the loss on a power cut (a segment without its .hdr is invalid as a
-        // whole). The fdatasync itself runs on the flusher thread: the acquisition
-        // thread must never wait on the disk.
+        // Request durability of data and identity together. The helper can
+        // coalesce pending requests; this byte cadence is not a time bound or
+        // a guarantee of crash recovery for an unfinished segment.
         const std::uint64_t flush_bytes = static_cast<std::uint64_t>(config_.flush_interval_mb) * 1024ull * 1024ull;
         if (flush_bytes > 0 && data_bytes_this_segment_ - last_flush_bytes_ >= flush_bytes) {
             last_flush_bytes_ = data_bytes_this_segment_;
@@ -458,7 +490,9 @@ namespace fx10 {
 
 
     int EnviRecorder::Sync(int fd) {
-        return sync_hook_ ? sync_hook_(fd) : ::fdatasync(fd);
+        int result;
+        do { result = sync_hook_ ? sync_hook_(fd) : ::fdatasync(fd); } while (result != 0 && errno == EINTR);
+        return result;
     }
 
 
@@ -620,7 +654,7 @@ namespace fx10 {
                 init_.description + "\nwavelength source: " +
                 (init_.wavelengths.source_tag.empty() ? "none" : init_.wavelengths.source_tag) +
                 "\ndriver: amiga_drivers" +
-                "\nline index format: fx10-line-index-v1" +
+                "\nline index format: fx10-line-index-v2" +
                 "\nline index file: " + base + ".lines.csv" +
                 "\nline association: UNVERIFIED; file line numbers are not trigger sequence numbers" +
                 "\nsegment start clock: host file-open time; not an exposure timestamp" +
@@ -649,12 +683,34 @@ namespace fx10 {
             LatchFinalizeFailure("cannot write '" + hdr_path.string() + "': " + e.what());
             return;
         }
-        if (!FsyncDirectory(session_dir_)) {
+        const bool directory_synced = FsyncDirectory(session_dir_);
+        if (!directory_synced) {
             ++counters_.write_errors;
             g_log.Warn("[Writer] Cannot fsync session directory after publishing segment {}", segment_index_);
         }
 
         ++counters_.segments_finalized;
+        try {
+            const auto stamp_json = [](const std::optional<FrameStamp> &v) -> nlohmann::json {
+                if (!v) return nullptr;
+                return {{"global_line", v->global_line}, {"block_id", v->block_id},
+                    {"device_timestamp_raw", v->device_timestamp_raw}, {"hrt", v->hrt}, {"hmn", v->hmn}};
+            };
+            segments_.Append({{"format", "fx10-segment-v1"}, {"segment", base},
+                {"data", base + ".bil"}, {"index", base + ".lines.csv"}, {"header", base + ".hdr"},
+                {"lines", lines_this_segment_}, {"frames", segment_frames_}, {"padding_lines", segment_padding_},
+                {"bytes", data_bytes_this_segment_}, {"index_bytes", index_bytes_}, {"index_records", index_records_},
+                {"global_line_first", segment_global_first_}, {"global_line_end_exclusive", global_line_index_},
+                {"first_frame", stamp_json(segment_first_frame_)}, {"last_frame", stamp_json(segment_last_frame_)},
+                {"gap_frames_reported", segment_missing_}, {"rejected_buffers", segment_rejected_},
+                {"block_id_anomalies", segment_anomalies_},
+                {"closed_clean", !failed_.load() && directory_synced},
+                {"closed_clean_semantics", "segment finalization only; does not imply no acquisition loss"},
+                {"header_published", true}, {"closed_host_realtime_ns", common::TimeUtil::RealtimeNowNs()}});
+        } catch (const std::exception &e) {
+            ++counters_.write_errors;
+            LatchFinalizeFailure("segment summary failed: " + std::string(e.what()));
+        }
     }
 
 
@@ -679,21 +735,25 @@ namespace fx10 {
         stopped_ = true;
         FinalizeSegment();
         StopFlusher();
+        try { segments_.Close(); }
+        catch (const MetadataError &e) {
+            ++counters_.write_errors;
+            LatchFinalizeFailure(e.what());
+        }
         g_log.Info("[Writer] Session stopped ({}): status={} frames_written={} bytes_written={} segments={}",
                    reason.empty() ? "unspecified" : reason,
                    failed_ ? "FAILED" : ToString(Classify(counters_)),
                    counters_.frames_written, counters_.bytes_written, counters_.segments_finalized);
-        // Ledger cross-check: every retrieved-OK frame is either written or dropped
-        // for size mismatch. Only meaningful on non-failed runs — after a latch the
-        // transport may deliver an unbounded number of frames that onFrame ignores
-        // (until the sink-failed poll stops the loop), which is expected, not an
-        // inconsistency; the run is already marked FAILED.
-        if (!failed_ && counters_.retrieve_ok > 0 &&
-            counters_.frames_written + counters_.size_mismatch_drops != counters_.retrieve_ok) {
-            g_log.Error("[Writer] Ledger inconsistency: retrieve_ok={} frames_written={} size_mismatch={}",
+        // Whole-ledger reads are safe here: receiver.Stop joined both workers.
+        // After a worker failure the affected frame may have been partly or
+        // fully written; unconfirmed is deliberately not an additive drop count.
+        if (!failed_ && counters_.recording_worker_unconfirmed == 0 && counters_.retrieve_ok > 0 &&
+            counters_.frames_written + counters_.size_mismatch_drops + counters_.recording_queue_drops != counters_.retrieve_ok) {
+            g_log.Error("[Writer] Ledger inconsistency: retrieve_ok={} frames_written={} size_mismatch={} "
+                        "queue_drops={}",
                         counters_.retrieve_ok,
                         counters_.frames_written,
-                        counters_.size_mismatch_drops
+                        counters_.size_mismatch_drops, counters_.recording_queue_drops
             );
         }
     }

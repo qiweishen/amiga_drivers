@@ -32,6 +32,11 @@ namespace gox {
             throw IoError(what + ": " + std::strerror(errno));
         }
 
+        void SyncData(int fd, const char *what) {
+            int result;
+            do { result = ::fdatasync(fd); } while (result != 0 && errno == EINTR);
+            if (result != 0) throw_errno(what);
+        }
 
         void WriteAll(int fd, const void *data, size_t size, const char *what,
                       const Recorder::IndexWriteHook &hook = {}) {
@@ -114,11 +119,11 @@ namespace gox {
                        opts_.camera_id, std::strerror(errno));
         }
 
-        // Per-frame header CRC is always on; the optional payload CRC was
-        // dropped (kSegFlagPayloadCrc stays defined in the frozen format).
+        // Use the existing v1 flag/field: payload bytes and header layout stay
+        // unchanged, while readers can detect damage inside a complete record.
         format::FileHeader fh =
                 format::make_file_header(segment_index_, common::TimeUtil::RealtimeNowNs(), opts_.session_uuid, opts_.camera_id.c_str(),
-                                         opts_.camera_serial.c_str(), opts_.record_align, /*seg_flags=*/0);
+                                         opts_.camera_serial.c_str(), opts_.record_align, format::kSegFlagPayloadCrc);
         WriteAll(seg_fd_, &fh, sizeof(fh), "write file header");
         if (::fdatasync(seg_fd_) != 0) {
             throw_errno("fdatasync file header");
@@ -198,7 +203,7 @@ namespace gox {
         h.status_flags = meta.status_flags;
         h.payload_size = size;
         h.frame_seq = frame_seq_;
-        h.payload_crc32c = 0; // populated only under kSegFlagPayloadCrc (option removed)
+        h.payload_crc32c = format::Crc32c(data, size);
         format::SealFrameHeader(h);
 
         const uint64_t record_offset = seg_offset_;
@@ -227,21 +232,6 @@ namespace gox {
             }
         }
         seg_offset_ += record_bytes;
-
-        // Keep dirty pages bounded: kick off async writeback periodically and
-        // drop already-written-back pages from the cache. Prevents the kernel
-        // from accumulating gigabytes of dirty data and then stalling write().
-        if (seg_offset_ - last_synced_off_ >= opts_.flush_interval_bytes) {
-#if defined(__linux__)
-            (void) ::sync_file_range(seg_fd_, static_cast<off_t>(last_synced_off_),
-                                     static_cast<off_t>(seg_offset_ - last_synced_off_),
-                                     SYNC_FILE_RANGE_WRITE);
-            if (last_synced_off_ > 0) {
-                (void) ::posix_fadvise(seg_fd_, 0, static_cast<off_t>(last_synced_off_), POSIX_FADV_DONTNEED);
-            }
-#endif
-            last_synced_off_ = seg_offset_;
-        }
 
         // Index line. Written after the payload so the index is always a subset
         // of the data. SDK-only fields supplement the fixed version-1 raw header.
@@ -280,6 +270,18 @@ namespace gox {
         if (stats_) {
             stats_->frames_written.fetch_add(1, std::memory_order_relaxed);
             stats_->bytes_written.fetch_add(record_bytes, std::memory_order_relaxed);
+        }
+
+        // A writeback hint is not a durability barrier. The dedicated writer
+        // syncs data first, then the full index (including SDK-only metadata).
+        // A stalled barrier consumes the bounded acquisition queue; I/O errors
+        // propagate as IoError and stop the session rather than being ignored.
+        if (opts_.flush_interval_bytes != 0 &&
+            seg_offset_ - last_synced_off_ >= opts_.flush_interval_bytes) {
+            SyncData(seg_fd_, "fdatasync periodic segment");
+            FlushIndex(true);
+            SyncData(idx_fd_, "fdatasync periodic index");
+            last_synced_off_ = seg_offset_;
         }
     }
 
@@ -382,24 +384,20 @@ namespace gox {
         } else {
             FlushIndex(true);
         }
-        if (::fdatasync(idx_fd_) != 0) {
-            throw_errno("fdatasync index");
-        }
-        ::close(idx_fd_);
-        idx_fd_ = -1;
         // A partial frame must be removed before the final durability barrier.
         if (::ftruncate(seg_fd_, static_cast<off_t>(seg_offset_)) != 0) {
             throw_errno("truncate segment");
         }
-        if (::fdatasync(seg_fd_) != 0) {
-            throw_errno("fdatasync segment");
-        }
-        ::close(seg_fd_);
+        SyncData(seg_fd_, "fdatasync segment");
+        SyncData(idx_fd_, "fdatasync index");
+        const int idx_closed = ::close(idx_fd_);
+        idx_fd_ = -1;
+        if (idx_closed != 0) throw_errno("close index");
+        const int seg_closed = ::close(seg_fd_);
         seg_fd_ = -1;
+        if (seg_closed != 0) throw_errno("close segment");
         AppendSegmentSummary(clean);
-        if (::fdatasync(segments_fd_) != 0) {
-            throw_errno("fdatasync segments.jsonl");
-        }
+        SyncData(segments_fd_, "fdatasync segments.jsonl");
     }
 
 

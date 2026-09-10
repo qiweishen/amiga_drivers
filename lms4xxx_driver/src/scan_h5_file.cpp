@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <cerrno>
+#include <filesystem>
+#include <fcntl.h>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -13,13 +16,9 @@
 
 #include <hdf5.h>
 
-#include "logger.h"
-
 
 namespace lms4xxx {
     namespace {
-        common::DriverLog g_log{"LMS4xxx"};
-
         // 3: adds the /telemetry group, the device-audit root attributes and the
         // closed_cleanly/frames_total completeness marker (docs/FORMAT_H5.md).
         constexpr std::uint32_t kFormatVersion = 3;
@@ -279,6 +278,9 @@ namespace lms4xxx {
             std::size_t elem_size;
         };
 
+        // Always acquire this before LibraryMutex(). It protects the file's
+        // lifetime while the global HDF5 lock is released during fdatasync.
+        mutable std::mutex mutex;
         Options opt;
         std::string last_error;
         bool failed = false;
@@ -313,10 +315,10 @@ namespace lms4xxx {
         // Returns false when HDF5 could not finish the file. H5Fclose performs
         // the final metadata flush, so discarding its result reported an ENOSPC
         // truncation as a clean stop.
-        bool CloseLocked() {
+        bool CloseLocked(std::unique_lock<std::mutex> &library_lock) {
             bool ok = !failed;
             if (open && file.Valid()) {
-                if (!FlushLocked()) {
+                if (!FlushLocked(library_lock)) {
                     ok = false;
                 }
                 // A failed batch may leave uneven datasets. Never advertise
@@ -326,14 +328,10 @@ namespace lms4xxx {
                                      static_cast<std::uint64_t>(frames)) ||
                     !WriteScalarAttr(file.Get(), "closed_cleanly", H5T_STD_U8LE, H5T_NATIVE_UINT8,
                                      static_cast<std::uint8_t>(failed ? 0 : 1))) {
-                    // SWMR forbids adding attributes after the layout is frozen,
-                    // so this is expected there and must not fail the close.
-                    if (!opt.swmr) {
-                        last_error = "cannot write the completeness marker";
-                        ok = false;
-                    }
+                    last_error = "cannot write the completeness marker";
+                    ok = false;
                 }
-                if (!FlushLocked()) {
+                if (!FlushLocked(library_lock)) {
                     ok = false;
                 }
             }
@@ -356,8 +354,8 @@ namespace lms4xxx {
             return ok;
         }
 
-        bool OpenLocked(const Options &options) {
-            if (open && !CloseLocked()) {
+        bool OpenLocked(const Options &options, std::unique_lock<std::mutex> &library_lock) {
+            if (open && !CloseLocked(library_lock)) {
                 return false;
             }
             opt = options;
@@ -365,9 +363,14 @@ namespace lms4xxx {
             failed = false;
             frames = 0;
             telemetry_rows = 0; // per FILE, not per run: each split starts empty
-            fsync_unavailable_logged = false;
             compression_active = false;
 
+            // Keep the v3 layout intact. HDF5 1.14.6 SWMRTechNote forbids
+            // appending variable-length/string datatypes; /telemetry/warnings
+            // uses H5T_VARIABLE, and /frames also contains a string column.
+            if (opt.swmr) {
+                return Fail("SWMR is unsupported for the HDF5 v3 layout; set output.swmr=false");
+            }
             if (opt.chunk_frames == 0) {
                 return Fail("chunk_frames must be >= 1");
             }
@@ -378,9 +381,11 @@ namespace lms4xxx {
                 compression_active = H5Zfilter_avail(H5Z_FILTER_DEFLATE) > 0;
             }
 
-            // 1.10 file format: SWMR-capable, readable by any HDF5 >= 1.10
+            // Preserve the existing file-format bounds; explicitly select sec2
+            // so H5Fget_vfd_handle is known to return an int file descriptor.
             Handle fapl(H5Pcreate(H5P_FILE_ACCESS), H5Pclose);
-            if (!fapl.Valid() || H5Pset_libver_bounds(fapl.Get(), H5F_LIBVER_V110, H5F_LIBVER_LATEST) < 0) {
+            if (!fapl.Valid() || H5Pset_fapl_sec2(fapl.Get()) < 0 ||
+                H5Pset_libver_bounds(fapl.Get(), H5F_LIBVER_V110, H5F_LIBVER_LATEST) < 0) {
                 return Fail("cannot prepare the file access property list");
             }
 
@@ -394,18 +399,36 @@ namespace lms4xxx {
             }
 
             if (!CreateLayout()) {
-                CloseLocked();
+                CloseLocked(library_lock);
                 return false;
             }
 
-            // SWMR forbids creating objects afterwards and needs all attributes closed
-            if (opt.swmr && H5Fstart_swmr_write(file.Get()) < 0) {
-                const std::string error = "H5Fstart_swmr_write failed on '" + opt.path + "'";
-                CloseLocked();
-                return Fail(error);
-            }
-
             open = true;
+            // Persist the newly created file and its directory entry before
+            // acquisition starts (also applies to a newly rotated segment).
+            if (!FlushLocked(library_lock)) {
+                CloseLocked(library_lock);
+                return false;
+            }
+            auto parent = std::filesystem::path(opt.path).parent_path();
+            if (parent.empty()) parent = ".";
+            const int dir_fd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (dir_fd < 0) {
+                Fail("cannot open output directory for sync: " + std::string(std::strerror(errno)));
+                CloseLocked(library_lock);
+                return false;
+            }
+            library_lock.unlock();
+            int synced;
+            do { synced = ::fsync(dir_fd); } while (synced != 0 && errno == EINTR);
+            const int saved = errno;
+            ::close(dir_fd);
+            library_lock.lock();
+            if (synced != 0) {
+                Fail("cannot sync output directory: " + std::string(std::strerror(saved)));
+                CloseLocked(library_lock);
+                return false;
+            }
             return true;
         }
 
@@ -826,11 +849,10 @@ namespace lms4xxx {
         }
 
 
-        // H5Fflush only hands the HDF5 cache to the OS page cache. Without the
-        // fdatasync a power cut loses everything the kernel has not written back
-        // (default writeback window: tens of seconds), which is far more than
-        // the flush_interval_ms the configuration promises.
-        bool FlushLocked() {
+        // The instance lock remains held across the barrier. Other lidar files
+        // may use HDF5 while this one waits on storage; no HDF5 API runs outside
+        // LibraryMutex(), and Close cannot invalidate the fd during the wait.
+        bool FlushLocked(std::unique_lock<std::mutex> &library_lock) {
             if (!open || !file.Valid()) {
                 return Fail("file is not open");
             }
@@ -839,24 +861,21 @@ namespace lms4xxx {
             }
             // The sec2 VFD hands back a pointer to its own file descriptor.
             int *fd = nullptr;
-            if (H5Fget_vfd_handle(file.Get(), H5P_DEFAULT, reinterpret_cast<void **>(&fd)) < 0 || fd == nullptr) {
-                // Not fatal — the data is in the page cache and the next flush
-                // tries again — but a silent durability downgrade is worse than
-                // a noisy one, so say it once per file.
-                if (!fsync_unavailable_logged) {
-                    fsync_unavailable_logged = true;
-                    g_log.Warn("[Writer] '{}': no file descriptor from HDF5, flushes are not fsynced — a power "
-                               "loss can cost more than flush_interval_ms of scans", opt.path);
-                }
-                return true;
+            if (H5Fget_vfd_handle(file.Get(), H5P_DEFAULT, reinterpret_cast<void **>(&fd)) < 0 ||
+                fd == nullptr || *fd < 0) {
+                return Fail("cannot obtain the sec2 descriptor for durable flush of '" + opt.path + "'");
             }
-            if (*fd >= 0 && ::fdatasync(*fd) != 0) {
-                return Fail("fdatasync failed on '" + opt.path + "'");
+            const int sync_fd = *fd;
+            library_lock.unlock();
+            int result;
+            do { result = ::fdatasync(sync_fd); } while (result != 0 && errno == EINTR);
+            const int saved = errno;
+            library_lock.lock();
+            if (result != 0) {
+                return Fail("fdatasync failed on '" + opt.path + "': " + std::strerror(saved));
             }
             return true;
         }
-
-        bool fsync_unavailable_logged = false;
     };
 
 
@@ -865,61 +884,68 @@ namespace lms4xxx {
 
 
     ScanH5File::~ScanH5File() {
-        std::lock_guard lock(LibraryMutex());
-        (void) impl_->CloseLocked(); // a destructor has nowhere to report to
+        std::lock_guard instance_lock(impl_->mutex);
+        std::unique_lock library_lock(LibraryMutex());
+        (void) impl_->CloseLocked(library_lock); // a destructor has nowhere to report to
     }
 
 
     bool ScanH5File::Open(const Options &options) {
-        std::lock_guard lock(LibraryMutex());
+        std::lock_guard instance_lock(impl_->mutex);
+        std::unique_lock library_lock(LibraryMutex());
         EnsureLibraryReady();
-        return impl_->OpenLocked(options);
+        return impl_->OpenLocked(options, library_lock);
     }
 
 
     bool ScanH5File::Append(const ScanRecord *records, std::size_t count) {
+        std::lock_guard instance_lock(impl_->mutex);
         std::lock_guard lock(LibraryMutex());
         return impl_->AppendLocked(records, count);
     }
 
 
     bool ScanH5File::AppendTelemetry(const TelemetrySample &sample) {
+        std::lock_guard instance_lock(impl_->mutex);
         std::lock_guard lock(LibraryMutex());
         return impl_->AppendTelemetryLocked(sample);
     }
 
 
     bool ScanH5File::Flush() {
-        std::lock_guard lock(LibraryMutex());
-        return impl_->FlushLocked();
+        std::lock_guard instance_lock(impl_->mutex);
+        std::unique_lock library_lock(LibraryMutex());
+        return impl_->FlushLocked(library_lock);
     }
 
 
     bool ScanH5File::Close() {
-        std::lock_guard lock(LibraryMutex());
-        return impl_->CloseLocked();
+        std::lock_guard instance_lock(impl_->mutex);
+        std::unique_lock library_lock(LibraryMutex());
+        return impl_->CloseLocked(library_lock);
     }
 
 
     bool ScanH5File::IsOpen() const {
-        std::lock_guard lock(LibraryMutex());
+        std::lock_guard lock(impl_->mutex);
         return impl_->open;
     }
 
 
     std::uint64_t ScanH5File::FramesWritten() const {
-        std::lock_guard lock(LibraryMutex());
+        std::lock_guard lock(impl_->mutex);
         return static_cast<std::uint64_t>(impl_->frames);
     }
 
 
     bool ScanH5File::CompressionActive() const {
+        std::lock_guard lock(impl_->mutex);
         return impl_->compression_active;
     }
 
 
     std::string ScanH5File::LastError() const {
-        std::lock_guard lock(LibraryMutex()); // the write thread may be assigning it
+        std::lock_guard lock(impl_->mutex); // the write thread may be assigning it
         return impl_->last_error;
     }
 } // namespace lms4xxx

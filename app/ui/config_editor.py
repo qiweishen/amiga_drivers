@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from ..constants import CONFIG_FILES
 from ..services import config_store
 from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
@@ -19,11 +20,12 @@ def config_page() -> None:
         ui.label(
             "Edited as raw text (comments are preserved). Validation here is syntax-only; "
             "the C++ loader is the final authority. "
+            "Saving is locked during initialization and while acquisition ownership is unknown. "
             "Changes saved while recording take effect on the next start."
         ).classes("text-sm text-gray-600")
 
         with ui.tabs() as tabs:
-            tab_handles = {cid: ui.tab(config_store.get(cid).label) for cid in _EDIT_ORDER}
+            tab_handles = {cid: ui.tab(CONFIG_FILES[cid].label) for cid in _EDIT_ORDER}
         with ui.tab_panels(tabs, value=tab_handles["main"]).classes("w-full"):
             for cid in _EDIT_ORDER:
                 with ui.tab_panel(tab_handles[cid]):
@@ -31,11 +33,17 @@ def config_page() -> None:
 
 
 def _editor_panel(config_id: str) -> None:
-    cf = config_store.get(config_id)
-    loaded = config_store.read(config_id)
-    state = {"mtime": loaded.mtime, "saved_text": loaded.text}
+    try:
+        loaded = config_store.read(config_id)
+    except Exception as e:
+        ui.label(f"Cannot open {config_id} config: {e}").classes("text-red-700")
+        ui.label("Check the driver path in Main, save it, then reload this page.")
+        ui.link("Reload configuration page", "/config")
+        return
+    state = {"mtime": loaded.mtime, "saved_text": loaded.text, "path": loaded.file.path}
 
-    ui.label(str(cf.path)).classes("text-xs text-gray-800 font-mono")
+    path_label = ui.label(str(loaded.file.path)).classes("text-xs text-gray-800 font-mono")
+    path_warning = ui.label("").classes("text-sm text-amber-700")
     editor = ui.codemirror(
         value=loaded.text,
         language="YAML",
@@ -68,7 +76,7 @@ def _editor_panel(config_id: str) -> None:
                 return
         try:
             state["mtime"] = config_store.save(
-                config_id, editor.value, None if force else state["mtime"]
+                config_id, editor.value, None if force else state["mtime"], expected_path=state["path"]
             )
             state["saved_text"] = editor.value
             _mark_dirty()
@@ -89,15 +97,34 @@ def _editor_panel(config_id: str) -> None:
                 _revert()
             elif choice == "force":
                 await _save(force=True)
+        except Exception as e:
+            ui.notify(f"Config was not saved: {e}", type="negative", multi_line=True)
 
     def _revert() -> None:
-        fresh = config_store.read(config_id)
+        try:
+            fresh = config_store.read(config_id)
+        except Exception as e:
+            ui.notify(f"Cannot reload config: {e}", type="negative", multi_line=True)
+            return
         state["mtime"] = fresh.mtime
         state["saved_text"] = fresh.text
+        state["path"] = fresh.file.path
+        path_label.set_text(str(fresh.file.path))
+        path_warning.set_text("")
         editor.set_value(fresh.text)
         _mark_dirty()
 
     with ui.row().classes("gap-2"):
         ui.button("Validate", icon="rule", on_click=_validate).props("outline")
-        ui.button("Save", icon="save", on_click=_save)
+        ui.button("Save", icon="save", on_click=lambda: _save())
         ui.button("Revert", icon="undo", on_click=_revert).props("flat")
+
+    def _check_path() -> None:
+        try:
+            path = config_store.get(config_id).path
+            path_warning.set_text("" if path == state["path"] else
+                                  f"Main now selects {path}. Revert reloads that file; unsaved text is retained until then.")
+        except Exception as e:
+            path_warning.set_text(f"Cannot resolve the selected config: {e}")
+
+    ui.timer(2.0, _check_path)

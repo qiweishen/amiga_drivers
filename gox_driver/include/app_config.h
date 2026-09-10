@@ -90,7 +90,7 @@ namespace gox {
         uint32_t queue_max_frames = 0; // 0 = auto; pool allocates +2 chunks
         QueueOnFull queue_on_full = QueueOnFull::kDropNewest;
         OnBufferError on_buffer_error = OnBufferError::kRecordFlagged;
-        uint32_t flush_interval_mb = 64; // sync_file_range cadence
+        uint32_t flush_interval_mb = 64; // data + index fdatasync cadence on the writer thread
         uint64_t max_frames = 0; // 0 = unlimited
         double max_duration_s = 0; // 0 = unlimited
     };

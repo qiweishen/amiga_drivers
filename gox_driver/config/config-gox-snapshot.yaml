@@ -15,7 +15,7 @@ cameras:
             mac: ""                     # --mac
             ip: "10.95.76.106"          # --ip
         acquisition:
-            exposure_ms: 20.0           # > 0; < 1000 / frame_rate_hz
+            exposure_ms: 20.0           # > 0; < 900 / frame_rate_hz (10% timing margin)
             gain: 1.0                   # 1.0..126.0
             pixel_format: BayerRG12Packed   # must be in scripts/unpack_raw.py's PFNC table
             frame_rate_hz: 3.0          # >= 0.125; sets the exposure ceiling (factory 8 fps clamps > ~114 ms)

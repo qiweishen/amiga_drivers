@@ -6,6 +6,8 @@
 #include <PvGenCommand.h>
 #include <PvGenEnum.h>
 #include <PvGenInteger.h>
+#include <PvGenFloat.h>
+#include <PvGenString.h>
 #include <PvGenParameterArray.h>
 #include <PvGenParameter.h>
 
@@ -18,6 +20,7 @@
 
 #include "logger.h"
 #include "ebus/sdk_error.h" // common/ (amiga_ebus)
+#include <PvVersion.h> // version macro verified in the bundled eBUS 6.5.1 SDK
 
 
 namespace fx10 {
@@ -61,19 +64,6 @@ namespace fx10 {
         void Check(const PvResult &result, const std::string &node, const char *op) {
             if (!result.IsOK()) {
                 failNode(node, std::string(op) + " failed: " + pv(result.GetCodeString()));
-            }
-        }
-
-
-        const char *TypeName(PvGenType type) {
-            switch (type) {
-                case PvGenTypeInteger: return "int";
-                case PvGenTypeEnum: return "enum";
-                case PvGenTypeBoolean: return "bool";
-                case PvGenTypeString: return "string";
-                case PvGenTypeCommand: return "command";
-                case PvGenTypeFloat: return "float";
-                default: return "other";
             }
         }
     } // namespace
@@ -289,6 +279,79 @@ namespace fx10 {
     }
 
 
+    void CameraControl::OpenShutter(const std::function<bool()> &stop) {
+        WriteShutterPulse(true, stop);
+    }
+
+    void CameraControl::CloseShutter(const std::function<bool()> &stop) {
+        WriteShutterPulse(false, stop);
+    }
+
+    void CameraControl::WriteShutterPulse(bool open, const std::function<bool()> &stop) {
+        // Operator-supplied FX10e control definition: numeric pulse nodes,
+        // range 1..255. Rev=255 opens; Fwd=255 closes. WRITING causes motion;
+        // neither node's stored number reports position or motion completion.
+        const char *pulse_node_name = open ? "MotorShutter_PulseRev" : "MotorShutter_PulseFwd";
+        constexpr std::int64_t kPulseValue = 255;
+        const auto started = std::chrono::steady_clock::now();
+        shutter_preparation_ = {{"status", "pending"},
+            {"operation", open ? "open" : "close"}, {"node", pulse_node_name},
+            {"type", "integer pulse value"}, {"requested", kPulseValue},
+            {"binding_source", "operator-provided FX10e node definition"},
+            {"write_acknowledged", false}, {"state_verified", false},
+            {"completion", "SDK write acknowledgement only; pulse value is not shutter state"}};
+        const auto check_ready = [&] {
+            if (stop && stop()) throw ControlError("[eBUS] shutter operation interrupted");
+            if (!device_.IsConnected()) throw ControlError("[eBUS] control link lost during shutter operation");
+        };
+        const auto elapsed_ms = [&] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+        };
+        try {
+            check_ready();
+            auto *parameters = device_.GetParameters();
+            Check(parameters->InvalidateCache(), "node cache", "invalidate before shutter operation");
+            auto *pulse_node = NodeAs<PvGenInteger>(parameters, pulse_node_name);
+            if (!pulse_node->IsWritable()) failNode(pulse_node_name, "shutter pulse node is not writable");
+            std::int64_t minimum = 0, maximum = 0;
+            Check(pulse_node->GetMin(minimum), pulse_node_name, "read minimum");
+            Check(pulse_node->GetMax(maximum), pulse_node_name, "read maximum");
+            shutter_preparation_["node_min"] = minimum;
+            shutter_preparation_["node_max"] = maximum;
+            if (kPulseValue < minimum || kPulseValue > maximum) {
+                failNode(pulse_node_name, "shutter pulse 255 is outside the reported range [" +
+                    std::to_string(minimum) + ", " + std::to_string(maximum) + "]");
+            }
+            check_ready();
+            g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing", pulse_node_name, kPulseValue);
+
+            // Always call SetValue, including when a previous run wrote 255.
+            // Do not use SetInt/GetValue, equality checks, state polling or
+            // PvGenCommand::Execute for this numeric action node. A failed or
+            // ambiguous write is fatal and is never automatically repeated.
+            // Discard any values cached while checking access/range before the
+            // action write; no value read or comparison is needed afterwards.
+            Check(parameters->InvalidateCache(), "node cache", "invalidate before shutter pulse write");
+            check_ready();
+            Check(pulse_node->SetValue(kPulseValue), pulse_node_name, "write shutter pulse (not retried)");
+            shutter_preparation_["write_acknowledged"] = true;
+            // SDK calls block without cancellation; recheck before letting the
+            // caller arm acquisition after the write returns.
+            check_ready();
+            shutter_preparation_["status"] = open ? "open-pulse-acknowledged" : "close-pulse-acknowledged";
+            shutter_preparation_["elapsed_ms"] = elapsed_ms();
+            g_log.Info("[eBUS] Shutter-{} pulse acknowledged ({} ms); mechanical state is not reported by this node",
+                       open ? "open" : "close", elapsed_ms());
+        } catch (const std::exception &e) {
+            shutter_preparation_["status"] = "failed";
+            shutter_preparation_["error"] = e.what();
+            shutter_preparation_["elapsed_ms"] = elapsed_ms();
+            throw;
+        }
+    }
+
+
     bool PrepareFactoryDefaults(StreamReceiver &receiver, const std::function<bool()> &stop) {
         const auto cancelled = [&] { return stop && stop(); };
         for (const char *name: {"CameraHeadFactoryReset", "UserSetLoad"}) {
@@ -413,8 +476,24 @@ namespace fx10 {
 
     bool CameraControl::ApplyWrite(const FeatureWrite &write) {
         const std::string &node = write.node;
+        nlohmann::json requested = nullptr;
+        switch (write.kind) {
+            case WriteKind::kInt: requested = write.int_value; break;
+            case WriteKind::kFloat: requested = write.float_value; break;
+            case WriteKind::kBool: requested = write.bool_value; break;
+            case WriteKind::kEnum:
+            case WriteKind::kString: requested = write.text; break;
+            case WriteKind::kCommand: break;
+        }
+        applied_.push_back({{"node", node}, {"requested", requested}, {"attempted", requested},
+            {"readback", nullptr}, {"required", write.required}, {"strict", write.strict},
+            {"float_tolerance_relative", write.kind == WriteKind::kFloat ? 1e-3 : 0.0},
+            {"float_tolerance_absolute", write.kind == WriteKind::kFloat ? 1e-9 : 0.0},
+            {"status", "pending"}});
+        auto &entry = applied_.back();
         // An optional write whose node this firmware does not implement is skipped
         if (!write.required && device_.GetParameters()->Get(PvString(node.c_str())) == nullptr) {
+            entry["status"] = "absent";
             g_log.Warn("[eBUS] '{}' is not present on this camera - skipped", node);
             return false;
         }
@@ -423,6 +502,7 @@ namespace fx10 {
             switch (write.kind) {
                 case WriteKind::kInt: {
                     const std::int64_t actual = SetInt(node, write.int_value);
+                    entry["readback"] = actual;
                     if (actual != write.int_value && write.strict) {
                         failNode(node, "camera clamped " + std::to_string(write.int_value) + " to " +
                                        std::to_string(actual) +
@@ -435,7 +515,9 @@ namespace fx10 {
                     if (write.clamp_to_node_range) {
                         value = ClampToNodeRange(node, value);
                     }
+                    entry["attempted"] = value;
                     const double actual = SetFloat(node, value);
+                    entry["readback"] = actual;
                     // 0.1 % covers the node's own step quantisation.
                     if (write.strict && std::fabs(actual - value) > std::max(std::fabs(value) * 1e-3, 1e-9)) {
                         failNode(node, "camera clamped " + std::to_string(value) + " to " +
@@ -446,24 +528,30 @@ namespace fx10 {
                 }
                 case WriteKind::kBool:
                     SetBool(node, write.bool_value);
+                    entry["readback"] = write.bool_value; // setter verified equality
                     break;
                 case WriteKind::kEnum:
                     SetEnum(node, write.text);
+                    entry["readback"] = write.text; // setter verified equality
                     break;
                 case WriteKind::kString:
                     SetString(node, write.text);
+                    entry["readback"] = write.text; // setter verified equality
                     break;
                 case WriteKind::kCommand:
                     Execute(node);
                     break;
             }
         } catch (const ControlError &e) {
+            entry["status"] = "failed";
+            entry["error"] = e.what();
             if (write.required) {
                 throw;
             }
             g_log.Warn("[eBUS] optional write '{}' failed ({}) - skipped", node, e.what());
             return false;
         }
+        entry["status"] = write.kind == WriteKind::kCommand ? "executed" : "applied";
         return true;
     }
 
@@ -471,6 +559,7 @@ namespace fx10 {
     void CameraControl::ApplyAcquisitionConfig(const AcquisitionConfig &acquisition,
                                                const std::vector<RawFeature> &raw) {
         const std::vector<FeatureWrite> plan = BuildApplyPlan(acquisition, raw);
+        applied_ = nlohmann::json::array();
         bool line_selector_written = false;
         for (const FeatureWrite &write: plan) {
             // LineSelector/Line1 is not confirmed by the FX10 reference manual.
@@ -513,5 +602,58 @@ namespace fx10 {
                    geometry.height,
                    geometry.pixel_format, geometry.payload_size);
         return geometry;
+    }
+
+    nlohmann::json CameraControl::ReadNodeMetadata(const std::string &name) const {
+        nlohmann::json out = {{"value", nullptr}, {"status", "absent"}};
+        auto *parameters = device_.GetParameters();
+        auto *p = parameters ? parameters->Get(PvString(name.c_str())) : nullptr;
+        if (!p) return out;
+        if (!p->IsAvailable() || !p->IsReadable()) {
+            out["status"] = "unreadable";
+            return out;
+        }
+        try {
+            // Use typed reads: ToString may round numeric values used for calibration.
+            if (dynamic_cast<PvGenInteger *>(p)) out["value"] = GetInt(name);
+            else if (dynamic_cast<PvGenFloat *>(p)) {
+                const double value = GetFloat(name);
+                if (!std::isfinite(value)) { out["status"] = "non-finite"; return out; }
+                out["value"] = value;
+            }
+            else if (dynamic_cast<PvGenBoolean *>(p)) out["value"] = GetBool(name);
+            else if (dynamic_cast<PvGenEnum *>(p)) out["value"] = GetEnum(name);
+            else if (dynamic_cast<PvGenString *>(p)) out["value"] = GetString(name);
+            else { out["status"] = "unsupported-type"; return out; }
+            out["status"] = "ok";
+        } catch (const ControlError &e) {
+            out["status"] = "read-error";
+            out["error"] = e.what();
+        }
+        return out;
+    }
+
+    nlohmann::json CameraControl::CollectDeviceMetadata() const {
+        nlohmann::json doc = {{"format", "fx10-device-v1"}, {"applied", applied_}};
+        doc["shutter_preparation"] = shutter_preparation_;
+        doc["applied_semantics"] = "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
+        for (const char *name : {"DeviceVendorName", "DeviceModelName", "DeviceSerialNumber",
+                "DeviceVersion", "DeviceFirmwareVersion", "DeviceSFNCVersionMajor", "DeviceSFNCVersionMinor",
+                "DeviceSFNCVersionSubMinor", "GevMACAddress", "GevCurrentIPAddress"})
+            doc["identity"][name] = ReadNodeMetadata(name);
+        for (const char *name : {"Width", "Height", "OffsetX", "OffsetY", "SensorWidth", "SensorHeight",
+                "WidthMax", "HeightMax", node::kPixelFormat, node::kSpatialBinning, node::kSpectralBinning,
+                node::kStatusLine, node::kMroiEnable, node::kExposureMode, node::kExposureTime,
+                node::kFrameRateEnable, node::kFrameRate, node::kTriggerSelector, node::kTriggerMode,
+                node::kTriggerSource, node::kTriggerActivation, node::kTriggerDelay,
+                node::kMissedTriggerSource, "UserSetSelector"})
+            doc["final_readback"][name] = ReadNodeMetadata(name);
+        for (const char *name : {"PayloadSize", "GevSCPSPacketSize", "GevSCPD"})
+            doc["transport"][name] = ReadNodeMetadata(name);
+        doc["sdk"] = {{"name", "Pleora eBUS"}, {"header_version", NVERSION_STRING},
+                      {"header_version_source", "PvVersion.h NVERSION_STRING at build time"},
+                      {"runtime_version", nullptr},
+                      {"runtime_version_status", "not queried; loaded binary version not inferred from headers"}};
+        return doc;
     }
 } // namespace fx10

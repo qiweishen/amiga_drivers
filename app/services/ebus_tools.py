@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
-from . import fx10_tools, gox_tools, runtime
+from . import camera_operations, fx10_tools, gox_tools, runtime
 
 SET_IP_TOOL = "ebus_set_ip"
 # GUI-side hard timeout; the tool's own budget is discovery (4 s) + the
@@ -88,7 +88,7 @@ def guard_reason_for(kind: str) -> str | None:
         return gox_tools.guard_reason()
     if kind == "FX10":
         return fx10_tools.guard_reason()
-    return None
+    return camera_operations.guard_reason(None)
 
 
 async def discover(timeout_ms: int = 1500) -> DiscoverResult:
@@ -135,9 +135,16 @@ async def discover(timeout_ms: int = 1500) -> DiscoverResult:
 
 
 async def set_ip(mac: str, ip: str, subnet_mask: str, gateway: str = "0.0.0.0",
-                 allow_foreign_subnet: bool = False) -> SetIpResult:
-    """FORCEIP + persistent write through ebus_set_ip. Caller must have checked
-    guard_reason_for() and must serialize calls (STATE.snapshot_busy)."""
+                 allow_foreign_subnet: bool = False, *, kind: str) -> SetIpResult:
+    """Recheck recording ownership after dialogs and reserve before any await."""
+    driver = {"GoX": "gox", "FX10": "fx10"}.get(kind)
+    return await camera_operations.run(
+        driver, lambda: _set_ip(mac, ip, subnet_mask, gateway, allow_foreign_subnet))
+
+
+async def _set_ip(mac: str, ip: str, subnet_mask: str, gateway: str,
+                  allow_foreign_subnet: bool) -> SetIpResult:
+    """FORCEIP + persistent write with a service-owned camera reservation."""
     t0 = time.monotonic()
     args = [runtime.exec_path(BIN_EBUS_SET_IP), "--mac", mac, "--ip", ip, "--subnet-mask", subnet_mask,
             "--gateway", gateway, "--json"]

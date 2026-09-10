@@ -46,7 +46,7 @@ RUN apt-get install -y --no-install-recommends \
     libqt5opengl5 libavcodec58
 
 # =============================================================
-# Wayland tools (needed by Ubuntu 26.04)
+# Wayland client libraries (GUI forwarding defaults to X11/XWayland)
 # =============================================================
 RUN apt-get install -y --no-install-recommends \
     libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0

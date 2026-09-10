@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
 
 from nicegui import ui
 
@@ -81,8 +80,11 @@ def dashboard_page() -> None:
 
         def refresh() -> None:
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
-            start_btn.set_enabled(STATE.env_ok and not running and STATE.process_state is not ProcState.STOPPING)
+            start_btn.set_enabled(STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy
+                                  and not running and STATE.process_state is not ProcState.STOPPING)
             stop_btn.set_enabled(running)
+            for sw in switches.values():
+                sw.set_enabled(not STATE.config_locked and not STATE.control_uncertain)
             if STATE.active_session is not None:
                 started = STATE.session_started_at or 0
                 elapsed = max(0, int(time.time() - started))
@@ -92,7 +94,9 @@ def dashboard_page() -> None:
                     else f"Last session {STATE.active_session.name}"
                 )
             elif STATE.process_state is ProcState.STARTING:
-                session_label.set_text("Waiting for the session directory ...")
+                session_label.set_text("Waiting for verified session metadata and sensor initialization ...")
+            elif STATE.process_state is ProcState.STOPPING:
+                session_label.set_text("Stop requested — waiting for shutdown ...")
             else:
                 session_label.set_text("")
             refresh_cards()
@@ -160,18 +164,28 @@ async def _on_start() -> None:
                     ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
             if not await dialog:
                 return
-        await process.start()
-        ui.notify("Recording started", type="positive")
+        if await process.start():
+            ui.notify("Start accepted — waiting for sensor initialization", type="info")
+        elif STATE.stop_requested or STATE.process_state is ProcState.EXITED:
+            ui.notify("Start cancelled by the stop request", type="info")
+        else:
+            ui.notify(STATE.last_error or "Start was not accepted; check recording and camera-tool state",
+                      type="warning", multi_line=True)
     finally:
         _start_in_flight = False
 
 
 async def _confirm_stop() -> None:
+    generation = STATE.session_generation
     with ui.dialog() as dialog, ui.card():
         ui.label("Stop recording? All sensors shut down together in order.")
         with ui.row():
             ui.button("Stop", color="negative", on_click=lambda: dialog.submit(True))
             ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
     if await dialog:
+        if generation != STATE.session_generation:
+            ui.notify("The recording changed while this dialog was open; review the current session first",
+                      type="warning")
+            return
         await process.stop()
-        ui.notify("Stop request sent", type="info")
+        ui.notify("Stop requested — waiting for the acquisition to shut down", type="info")

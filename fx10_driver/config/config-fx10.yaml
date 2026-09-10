@@ -23,7 +23,7 @@ acquisition:
     status_line: false                  # true replaces the last image row with camera status (p.34)
     image_enhancement: true             # AIE (p.32); only true is supported (node name unknown, use features.raw)
     trigger:
-        mode: freerun                  # freerun | external
+        mode: external                  # freerun | external
         activation: rising              # rising | falling
         delay_ms: 0.0                   # 0..419
         exposure_control: camera        # camera | pulse_width
@@ -34,10 +34,20 @@ acquisition:
         multiband_string: ""            # "start_row height;..." e.g. "10 20;100 20"; rows 0..1081, height 1..448, total <= 448
 
 
+# Mechanical shutter is a mandatory driver step, with no YAML override:
+# after applying config, write MotorShutter_PulseRev = 255 before AcquisitionStart.
+# Each write opens the shutter; the stored value does not report shutter state.
+# MotorShutter_PulseFwd = 255 closes it and is not issued during normal startup.
+
+# --- Reference collection (Collect Reference page only) ---
+reference:
+    duration_s: 5.0                     # 0.1..3600; seconds per phase: white, then dark
+
+
 # --- Sensor Trigger (Teensy SensorSync, submodule/sensor_trigger) ---
 sensor_trigger:
-    enabled: false
-    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16840200-if00"    # required when enabled
+    enabled: true
+    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"    # required when enabled
     trigger_channel: 0                  # >= 0; Teensy trig[N] wired to the camera
 
 
@@ -76,9 +86,9 @@ output:
 network:
     packet_size: 0                      # 0 = negotiate (jumbo needs MTU 9000)
     socket_rx_buffer_mb: 32             # 1..1024
-    buffer_count: auto                  # auto (= 0) | >= 1
-    stall_budget_s: 2.0                 # >= 0
-    max_buffer_memory_mb: 512           # >= 1
+    buffer_count: auto                  # auto (= 0): 16 SDK buffers; explicit >= 1 (subject to SDK/memory caps)
+    stall_budget_s: 2.0                 # >= 0; sizes the owned application frame queue
+    max_buffer_memory_mb: 512           # >= 1; combined SDK + application payload buffers + unpack scratch
     retrieve_timeout_ms: 1000           # 1..10000
     # No reconnect block: a link loss during a run ends the whole rig (fail-fast)
 

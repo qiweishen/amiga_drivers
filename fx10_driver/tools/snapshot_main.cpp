@@ -224,7 +224,7 @@ int main(int argc, char **argv) {
     // (src/fx10_driver_app.cpp) step for step. The two are deliberately NOT
     // shared in full: the snapshot's invariants differ (freerun forced, tool-side frame
     // budget, no trigger box, no reconnect loop) and every failure exit is a
-    // different stdout contract. The factory preparation itself IS shared.
+    // different stdout contract. Factory preparation and OpenShutter are shared.
     //
     // Factory baseline before the stream open: the load resets GevSCPSPacketSize
     std::unique_ptr<fx10::CameraControl> control;
@@ -282,6 +282,14 @@ int main(int argc, char **argv) {
                        std::to_string(cfg.acquisition.frame_rate_hz) + " Hz";
 
     fx10::EnviRecorder recorder(cfg.recording, counters);
+    // Declared after recorder: joins both receiver workers before the sink can
+    // be destroyed, including exceptions during partial Start or preview setup.
+    struct ReceiverStopGuard {
+        fx10::StreamReceiver &receiver;
+        ~ReceiverStopGuard() {
+            try { receiver.Stop(); } catch (...) {}
+        }
+    } receiver_stop_guard{receiver};
     try {
         recorder.Start(init);
     } catch (const fx10::RecorderError &e) {
@@ -297,10 +305,14 @@ int main(int argc, char **argv) {
     expected.status_line = cfg.acquisition.status_line;
 
     try {
-        receiver.Start(recorder, expected, cfg.acquisition.frame_rate_hz);
-    } catch (const fx10::TransportError &e) {
+        control->OpenShutter([] { return g_signal != 0; });
+        receiver.Start(recorder, expected, cfg.acquisition.frame_rate_hz, [] {
+            if (g_signal != 0) throw fx10::ControlError("[eBUS] acquisition start interrupted");
+        });
+    } catch (const std::exception &e) {
+        receiver.Stop();
         recorder.Stop("start-failed");
-        return Fail(5, std::string("stream-start: ") + e.what());
+        return Fail(g_signal != 0 ? 130 : 5, std::string("stream-start: ") + e.what());
     }
 
     // Two independent bounds. The wall-clock budget covers "the capture is

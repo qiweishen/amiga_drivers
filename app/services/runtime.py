@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..constants import CONTAINER, REPO_ROOT, to_container, to_host
@@ -109,25 +110,29 @@ async def exec_(args: list[str], *, root: bool = False, timeout: float | None = 
     if is_docker():
         return await docker_runner.exec_(args, user="root" if root else None, timeout=timeout)
     argv = (_sudo_prefix() + args) if root else args
-    proc = await asyncio.create_subprocess_exec(
-        *argv, cwd=str(REPO_ROOT),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=str(REPO_ROOT),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as e:
+        return ExecResult(127, "", str(e))
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
         await proc.wait()
         return ExecResult(-1, "", f"timeout after {timeout}s: {' '.join(argv)}")
-    except FileNotFoundError as e:
-        return ExecResult(127, "", str(e))
     return ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
 
 
 async def spawn(args: list[str]) -> asyncio.subprocess.Process:
     """Attached launch for AmigaDrivers: stdout discarded (spinner noise),
-    stderr piped. Stopping always goes through pkill(), never by killing the
-    returned handle. start_new_session detaches the native child from the
+    stderr piped. Stopping targets the verified acquisition identity, never
+    the docker-exec handle. start_new_session detaches the native child from the
     GUI's terminal process group so Ctrl+C on (or death of) the GUI does not
     take the acquisition down — matching the docker-exec semantics that the
     reattach story depends on."""
@@ -155,10 +160,84 @@ async def popen(args: list[str]) -> asyncio.subprocess.Process:
 
 
 async def pgrep(name: str) -> bool:
-    if is_docker():
-        return await docker_runner.pgrep(name)
     res = await exec_(["pgrep", "-x", name], timeout=5)
-    return res.ok
+    if res.code not in (0, 1):
+        raise RuntimeError(f"Cannot inspect {name}: {res.stderr.strip() or res.code}")
+    return res.code == 0
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    start_ticks: str
+    boot_id: str
+
+
+async def _identity(pid: int) -> ProcessIdentity:
+    stat = await exec_(["cat", f"/proc/{pid}/stat"], timeout=5)
+    boot = await exec_(["cat", "/proc/sys/kernel/random/boot_id"], timeout=5)
+    if not stat.ok or not boot.ok:
+        raise RuntimeError("Cannot read acquisition process identity")
+    # comm (field 2) may contain spaces or parentheses. Field 22 is starttime.
+    fields = stat.stdout.rsplit(")", 1)[-1].split()
+    if len(fields) < 20 or not fields[19].isdigit() or not boot.stdout.strip():
+        raise RuntimeError("Invalid acquisition process identity")
+    if fields[0] in ("Z", "X"):
+        raise ProcessLookupError("The acquisition process has exited")
+    return ProcessIdentity(pid, fields[19], boot.stdout.strip())
+
+
+async def running_process(name: str) -> ProcessIdentity | None:
+    result = await exec_(["pgrep", "-x", name], timeout=5)
+    if result.code == 1:
+        return None
+    pids = result.stdout.split()
+    if not result.ok or len(pids) != 1 or not pids[0].isdigit():
+        raise RuntimeError(f"Cannot identify a single {name} process")
+    try:
+        return await _identity(int(pids[0]))
+    except ProcessLookupError:
+        return None
+
+
+async def is_process_alive(ref: ProcessIdentity) -> bool:
+    exists = await exec_(["test", "-d", f"/proc/{ref.pid}"], timeout=5)
+    if exists.code == 1:
+        return False
+    if not exists.ok:
+        raise RuntimeError("Cannot inspect acquisition process")
+    try:
+        return await _identity(ref.pid) == ref
+    except ProcessLookupError:
+        return False
+    except RuntimeError:
+        # A process may exit between test and cat. Other failures stay unknown.
+        exists = await exec_(["test", "-d", f"/proc/{ref.pid}"], timeout=5)
+        if exists.code == 1:
+            return False
+        raise
+
+
+async def signal_process(ref: ProcessIdentity) -> ExecResult:
+    if not await is_process_alive(ref):
+        return ExecResult(1, "", "Acquisition process has already exited")
+    return await exec_(["kill", "-TERM", "--", str(ref.pid)], timeout=5)
+
+
+async def process_files(ref: ProcessIdentity) -> list[str]:
+    """Read open-file targets in the same namespace as the acquisition.
+
+    File capabilities can make /proc/PID/fd unreadable to the same UID. Try
+    the existing noninteractive privileged backend only for this read.
+    Failure is reported as unknown ownership, never as an idle camera.
+    """
+    args = ["find", f"/proc/{ref.pid}/fd", "-mindepth", "1", "-maxdepth", "1", "-printf", "%l\\n"]
+    result = await exec_(args, timeout=5)
+    if not result.ok:
+        result = await exec_(args, root=True, timeout=5)
+    if not result.ok or not await is_process_alive(ref):
+        raise RuntimeError("Cannot verify the acquisition's open session files")
+    return result.stdout.splitlines()
 
 
 async def pkill(name: str, signal: str = "TERM") -> ExecResult:

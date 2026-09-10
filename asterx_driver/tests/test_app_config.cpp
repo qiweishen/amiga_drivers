@@ -107,8 +107,10 @@ TEST_CASE("config: the shipped yaml loads and drives the real sequence") {
     const auto cfg = LoadAppConfig(std::string(ASTERX_CONFIG_DIR) + "/config-asterx.yaml");
     CHECK(cfg.receiver.time_system.pps.polarity == "Low2High");
     CHECK_FALSE(cfg.receiver.ntrip.enabled); // placeholders until credentials are filled in
-    CHECK(cfg.receiver.warmup.min_uptime_s == 1200);
-    CHECK(cfg.receiver.warmup.require_finetime);
+    // This profile explicitly opts out of both gates; omitted-key defaults
+    // remain 1200 s / FINETIME and are tested independently below.
+    CHECK(cfg.receiver.warmup.min_uptime_s == 0);
+    CHECK_FALSE(cfg.receiver.warmup.require_finetime);
     CHECK(cfg.stats_period_ms == 2500);
     CHECK(cfg.rotate_bytes == 1073741824ull);
     CHECK(cfg.rotate_interval_seconds == 3600);
@@ -176,6 +178,7 @@ receiver:
     CHECK(cfg.receiver.antenna.lever_arm_m.z == doctest::Approx(0.0));
     CHECK(cfg.receiver.warmup.min_uptime_s == 1200);
     CHECK(cfg.receiver.time_system.pps.interval == "sec1");
+    CHECK(cfg.receiver.warmup.require_finetime);
     CHECK(cfg.receiver.sbf_streams[0].interval == "OnChange");
     CHECK(cfg.receiver.nmea_streams.empty());
     CHECK(cfg.rotate_bytes == (1ull << 30));

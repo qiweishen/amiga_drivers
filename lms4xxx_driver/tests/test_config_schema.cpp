@@ -109,6 +109,10 @@ TEST_CASE("The shipped config file itself loads") {
     CHECK(cfg.network.response_timeout_ms == 200);
 }
 
+TEST_CASE("The v3 layout rejects SWMR at config validation before device startup") {
+    CHECK(Mentions(LoadError(With("    swmr: false", "    swmr: true")), "output.swmr"));
+}
+
 TEST_CASE("Unknown keys are rejected, block by block, naming the accepted set") {
     SUBCASE("at the root") {
         const auto error = LoadError(std::string(kValidYaml) + "\nrecording:\n    enabled: true\n");
