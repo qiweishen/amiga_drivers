@@ -30,6 +30,14 @@ General:
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
 
 
+# --- Sensor Trigger (Teensy SensorSync-Logger board) ---
+# The rig's one hardware trigger / timing board, shared by the FX10 (FX pair, channels 0/1)
+# and the Go-X cameras (JAI pair, channels 2/3). Named here once; the driver configs only
+# say whether they use it and on which channel. The timing log is raw/sensor_trigger.log.
+Sensor Trigger:
+    Port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"   # by-id survives re-enumeration; "" = no board
+
+
 # --- Rig-wide guards ---
 # One policy for every enabled driver, enforced by the unified main.
 Guards:

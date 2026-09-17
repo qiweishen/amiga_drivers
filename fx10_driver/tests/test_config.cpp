@@ -66,7 +66,6 @@ acquisition:
   trigger: { mode: freerun, activation: falling, delay_ms: 1.5, exposure_control: pulse_width }
 sensor_trigger:
   enabled: true
-  port: /dev/serial/by-id/usb-Teensyduino_Test-if00
   trigger_channel: 2
 output:
   rotation: { max_lines: 5000, max_mb: 1024 }
@@ -100,7 +99,6 @@ logging:
     CHECK(c.acquisition.trigger.delay_ms == doctest::Approx(1.5));
     CHECK(c.acquisition.trigger.exposure_control == ExposureControl::kPulseWidth);
     CHECK(c.sensor_trigger.enabled);
-    CHECK(c.sensor_trigger.port == "/dev/serial/by-id/usb-Teensyduino_Test-if00");
     CHECK(c.sensor_trigger.trigger_channel == 2);
     CHECK(c.recording.rotation.max_lines == 5000u);
     CHECK(c.recording.rotation.max_mb == 1024u);
@@ -121,7 +119,7 @@ logging:
 TEST_CASE("config: the shipped templates parse and stay in sync") {
     const AppConfig prod = LoadAppConfig(std::string(FX10_CONFIG_DIR) + "/config-fx10.yaml");
     CHECK(prod.logging.stats_interval_s == doctest::Approx(2.5));
-    CHECK_FALSE(prod.sensor_trigger.port.empty());
+    CHECK(prod.sensor_trigger.enabled); // the board's port lives in config-main.yaml
     CHECK(prod.recording.on_gap == GapPolicy::kPadZero);
 
     const AppConfig snap = LoadAppConfig(std::string(FX10_CONFIG_DIR) + "/config-fx10-snapshot.yaml");
@@ -246,14 +244,16 @@ TEST_CASE("config: output block") {
 }
 
 TEST_CASE("config: sensor trigger") {
-    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true }"), "sensor_trigger.port: is required"));
+    // The port is the rig's (config-main.yaml); naming it here is an unknown key
+    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, port: /dev/ttyACM0 }"), "unknown key 'sensor_trigger.port'"));
+    CHECK(LoadAppConfigText("sensor_trigger: { enabled: true }").sensor_trigger.enabled);
     CHECK_FALSE(LoadAppConfigText("sensor_trigger: { enabled: false }").sensor_trigger.enabled);
-    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: -1 }"),
+    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, trigger_channel: -1 }"),
                    "sensor_trigger.trigger_channel"));
     // Group-specific v2 limits apply only when the board drives external pulses.
-    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 0.5 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0 }"),
+    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 0.5 }\nsensor_trigger: { enabled: true }"),
                    "acquisition.frame_rate_hz: must be >= 20"));
-    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 4 }"),
+    CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, trigger_channel: 4 }"),
                    "sensor_trigger.trigger_channel"));
     CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 50 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 2 }"),
                    "must be within [1, 10]"));

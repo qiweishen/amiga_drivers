@@ -16,16 +16,20 @@ cameras:
             ip: "10.95.1.101"           # direct connect; used when mac is empty
 
         acquisition:
-            exposure_ms: 150.0              # > 0; freerun: < 900 / frame_rate_hz (10% timing margin)
+            exposure_ms: 150.0              # > 0; < 900 / frame_rate_hz (10% period margin, freerun and SensorSync pulses alike)
             gain: 1.0                       # 1.0..126.0 (magnification, not dB, p.148)
             pixel_format: BayerRG12Packed   # GenICam entry, verbatim; 12-bit formats also set SensorDigitizationBits
-            frame_rate_hz: 5.0              # >= 0.125; freerun only
+            frame_rate_hz: 5.0              # >= 0.125 freerun; external + sensor_trigger: the SensorSync pulse rate, 1..10 Hz (12-bit packed full frame: <= ~5.8 fps, p.48-53)
             blemish_correction: false       # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
-                mode: freerun           # freerun | external
-                activation: rising      # rising | falling
+                mode: external          # freerun | external
+                activation: rising      # rising | falling (TriggerActivation 1 | 2, p.142)
                 selector_entry: FrameStart
-                source_entry: 24        # 7..19 | 24 | 36 | 37 or an entry name; 24 = Line5 Opt In (p.141)
+                source_entry: 24        # 7..19 | 24 | 36 | 37 or an entry name; 24 = Line5 Opt In, pins 2/3 of the 6-pin connector (p.17, p.141)
+                delay_ms: 0.0           # 0..500; TriggerDelay, exposure start after the trigger edge (p.142)
+                input_filter_ns: 0      # 0..40000000 step 100; OptInFilter debounce on Line5 (p.145); keep << the 50 us pulse
+                exposure_active_output: true    # Line2 Opt Out (pins 4/5) = ExposureActive: LineSelector 21, LineSource 4 (p.143-144)
+                sensor_channel: 2       # 2 | 3: SensorSync JAI trigger output / strobe input pair wired to this camera
             roi:
                 width: 0                # 0 = keep | >= 96, step 8
                 height: 0               # 0 = keep | >= 8, step 2
@@ -45,6 +49,17 @@ cameras:
             local_ip: ""                # bind to this NIC; "" = auto
             throughput_safety_margin_pct: 0     # 0 = factory 92 | 10..100 (p.128); ~100/N for N cameras on one NIC
             receiver_tuning: []         # PvStream parameters, same format as features.raw
+
+
+# --- Sensor Trigger (Teensy SensorSync, 3rd_party/External/sensor_trigger) ---
+# The rig's one board, shared with the FX10 driver: its serial port is named once in
+# config/config-main.yaml ("Sensor Trigger: Port"); this block only declares participation
+# (the channel is per camera: trigger.sensor_channel). One session per rig
+# (common::SensorSyncHub): the JAI pair (channels 2/3) pulses at the cameras' frame_rate_hz
+# and their Line2 ExposureActive strobes are logged into raw/sensor_trigger.log. Pulses
+# start once every registered camera is armed and stop before the first camera stops.
+sensor_trigger:
+    enabled: true
 
 
 # =============================================================

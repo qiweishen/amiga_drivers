@@ -63,6 +63,11 @@ TEST_CASE("config: minimal valid config fills every default") {
     CHECK(cam.acquisition.trigger.activation == TriggerActivation::kRising);
     CHECK(cam.acquisition.trigger.selector_entry == "FrameStart");
     CHECK(cam.acquisition.trigger.source_entry == "24"); // Line5 Opt In; a GO-X has no "Line1"
+    CHECK(cam.acquisition.trigger.delay_ms == doctest::Approx(0.0));
+    CHECK(cam.acquisition.trigger.input_filter_ns == 0u);
+    CHECK(cam.acquisition.trigger.exposure_active_output); // Line2 = ExposureActive is the rig's strobe
+    CHECK(cam.acquisition.trigger.sensor_channel == 2);
+    CHECK_FALSE(cfg.sensor_trigger.enabled);
     CHECK(cam.features.raw.empty());
     CHECK(cam.network.buffer_count == 0u);
     CHECK(cam.network.socket_rx_buffer_mb == 16u);
@@ -72,7 +77,7 @@ TEST_CASE("config: minimal valid config fills every default") {
 TEST_CASE("config: unknown keys are errors that name the key and the accepted set") {
     const std::string top = ErrorOf(DocWithTop("bogus_top_level: 42"));
     CHECK(Contains(top, "unknown key 'bogus_top_level'"));
-    CHECK(Contains(top, "accepts only: cameras, output, ptp, logging"));
+    CHECK(Contains(top, "accepts only: cameras, output, ptp, sensor_trigger, logging"));
 
     CHECK(Contains(ErrorOf(DocWithTop("logging: {stats_intervall_s: 99}")), "unknown key 'logging.stats_intervall_s'"));
     CHECK(Contains(ErrorOf(DocWithCamera("    netwrok: {buffer_count: 2}")), "unknown key 'cameras[0].netwrok'"));
@@ -263,4 +268,63 @@ TEST_CASE("config: freerun exposure keeps the timing margin without limiting ext
         "      trigger: {mode: external}")).empty());
     CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 4000}")).empty());
     CHECK(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 3.0}")).empty());
+}
+
+TEST_CASE("config: trigger extras follow the manual's ranges") {
+    const AppConfig cfg = ParseOk(DocWithCamera(
+        "    acquisition:\n"
+        "      trigger: {mode: external, delay_ms: 1.5, input_filter_ns: 500, exposure_active_output: false, sensor_channel: 3}\n"));
+    const TriggerConfig &t = cfg.cameras[0].acquisition.trigger;
+    CHECK(t.delay_ms == doctest::Approx(1.5));
+    CHECK(t.input_filter_ns == 500u);
+    CHECK_FALSE(t.exposure_active_output);
+    CHECK(t.sensor_channel == 3);
+    // TriggerDelay 0..500000 us (p.142), OptInFilter 0..40 ms in 100 ns steps (p.145), JAI pair = 2/3
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {trigger: {delay_ms: 501}}")), "trigger.delay_ms"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {trigger: {input_filter_ns: 40000100}}")),
+                   "trigger.input_filter_ns"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {trigger: {input_filter_ns: 150}}")), "multiple of 100 ns"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {trigger: {sensor_channel: 0}}")), "trigger.sensor_channel"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {trigger: {sensor_channel: 4}}")), "trigger.sensor_channel"));
+}
+
+TEST_CASE("config: sensor trigger ties the rig's pulse rate to the cameras") {
+    // The board's port is the rig's (config-main.yaml): naming it here is an unknown key
+    CHECK(Contains(ErrorOf(DocWithTop("sensor_trigger: {enabled: true, port: /dev/ttyACM0}")),
+                   "unknown key 'sensor_trigger.port'"));
+    // Off: an external trigger is somebody else's pulses and nothing more is checked
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {trigger: {mode: external}}")).empty());
+
+    const std::string board = "sensor_trigger: {enabled: true}\n";
+    // External + SensorSync: frame_rate_hz is the commanded JAI pulse rate, 1..10 Hz
+    CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {trigger: {mode: external}}")),
+                   "frame_rate_hz: is required under an external trigger with sensor_trigger.enabled"));
+    CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 12, trigger: {mode: external}}")),
+                   "must be within [1, 10] Hz"));
+    CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 0.5, trigger: {mode: external}}")),
+                   "must be within [1, 10] Hz"));
+    // ...and the exposure must fit the pulse period with the same 10 % margin as freerun
+    CHECK(Contains(ErrorOf(board + DocWithCamera(
+                       "    acquisition: {frame_rate_hz: 5, exposure_ms: 180, trigger: {mode: external}}")),
+                   "must be below 900/frame_rate_hz"));
+    const AppConfig ok = ParseOk(board + DocWithCamera(
+        "    acquisition: {frame_rate_hz: 5, exposure_ms: 150, trigger: {mode: external}}"));
+    CHECK(ok.sensor_trigger.enabled);
+    // A freerun camera on an enabled board is allowed (strobes only), even without a rate
+    CHECK(ErrorOf(board + kMinimalCameras).empty());
+
+    // Two cameras: distinct channels, one shared rate (one hardware PWM per pair)
+    const std::string two =
+            "cameras:\n"
+            "  - id: cam0\n"
+            "    device: {ip: 10.0.0.2}\n"
+            "    acquisition: {frame_rate_hz: 5, trigger: {mode: external, sensor_channel: 2}}\n"
+            "  - id: cam1\n"
+            "    device: {ip: 10.0.0.3}\n";
+    CHECK(ErrorOf(board + two + "    acquisition: {frame_rate_hz: 5, trigger: {mode: external, sensor_channel: 3}}\n")
+          .empty());
+    CHECK(Contains(ErrorOf(board + two + "    acquisition: {frame_rate_hz: 5, trigger: {mode: external, sensor_channel: 2}}\n"),
+                   "already wired to another enabled camera"));
+    CHECK(Contains(ErrorOf(board + two + "    acquisition: {frame_rate_hz: 4, trigger: {mode: external, sensor_channel: 3}}\n"),
+                   "share one hardware pulse rate"));
 }

@@ -36,3 +36,9 @@ SICK LMS4xxx:
         IP: 10.95.76.103
     Ethernet Port: eno1
     Subnetwork: 10.95.76.255
+
+
+# The Teensy SensorSync-Logger board (hardware trigger pulses + timing log) is a
+# USB serial device, not an IP host: its /dev/serial/by-id/... path is set ONCE in
+# config/config-main.yaml ("Sensor Trigger: Port"). FX pair (channels 0/1) -> FX10,
+# JAI pair (channels 2/3) -> Go-X Line5 in / Line2 ExposureActive out.

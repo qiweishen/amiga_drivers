@@ -1,10 +1,12 @@
 #include "app_config.h"
 
 #include <cctype>
+#include <optional>
 #include <set>
 
 #include "logger.h"
 #include "string_util.h"
+#include "trigger_groups.h" // SensorSync firmware/host rate rules (3rd_party/External/sensor_trigger)
 
 
 namespace gox {
@@ -107,7 +109,9 @@ namespace gox {
                 acq.roi = r;
             }
 
-            const YAML::Node t = OptionalMap(a, p, "trigger", {"mode", "activation", "selector_entry", "source_entry"});
+            const YAML::Node t = OptionalMap(a, p, "trigger",
+                                             {"mode", "activation", "selector_entry", "source_entry", "delay_ms",
+                                              "input_filter_ns", "exposure_active_output", "sensor_channel"});
             const std::string tp = p + ".trigger";
             ReadEnum<TriggerMode>(t, tp, "mode", {{"freerun", TriggerMode::kFreerun}, {"external", TriggerMode::kExternal}},
                                   acq.trigger.mode);
@@ -118,6 +122,15 @@ namespace gox {
             if (Read(t, tp, "source_entry", acq.trigger.source_entry)) {
                 CheckTriggerSource(acq.trigger.source_entry, tp + ".source_entry");
             }
+            // TriggerDelay 0..500000 us (manual p.142); OptInFilter 0..40 ms in 100 ns steps (p.145)
+            ReadRange<double>(t, tp, "delay_ms", 0.0, 500.0, acq.trigger.delay_ms);
+            ReadRange<uint32_t>(t, tp, "input_filter_ns", 0, 40000000, acq.trigger.input_filter_ns);
+            if (acq.trigger.input_filter_ns % 100 != 0) {
+                Fail(tp + ".input_filter_ns", "must be a multiple of 100 ns (OptInFilter step, manual p.145)");
+            }
+            Read(t, tp, "exposure_active_output", acq.trigger.exposure_active_output);
+            // The JAI pair of the SensorSync board (channels 2/3); 0/1 are the FX pair (>= 20 Hz)
+            ReadRange<int>(t, tp, "sensor_channel", 2, 3, acq.trigger.sensor_channel);
         }
 
         void ParseNetwork(const YAML::Node &cam, const std::string &path, NetworkConfig &net) {
@@ -197,8 +210,62 @@ namespace gox {
             return c;
         }
 
+        // With the pulses commanded by this process, the exposure must fit the pulse
+        // period the same way it must fit the freerun period (10 % margin)
+        void CheckSensorTriggerRig(AppConfig &cfg) {
+            if (!cfg.sensor_trigger.enabled) {
+                return;
+            }
+            std::set<int> channels;
+            std::optional<double> pair_rate;
+            std::string pair_owner;
+            std::size_t i = 0;
+            for (const auto &cam: cfg.cameras) {
+                const std::string path = IndexPath("cameras", i++);
+                if (!cam.enabled) {
+                    continue;
+                }
+                const TriggerConfig &t = cam.acquisition.trigger;
+                if (!channels.insert(t.sensor_channel).second) {
+                    Fail(path + ".acquisition.trigger.sensor_channel",
+                         "channel " + std::to_string(t.sensor_channel) + " is already wired to another enabled "
+                         "camera; each camera needs its own SensorSync JAI channel (2 or 3)");
+                }
+                if (t.mode != TriggerMode::kExternal) {
+                    continue;
+                }
+                if (!cam.acquisition.frame_rate_hz) {
+                    Fail(path + ".acquisition.frame_rate_hz",
+                         "is required under an external trigger with sensor_trigger.enabled: it is the SensorSync "
+                         "pulse rate this driver commands on the JAI pair (1..10 Hz)");
+                }
+                const double hz = *cam.acquisition.frame_rate_hz;
+                if (hz == 0.0 || !trigger::validRate(trigger::Group::JAI, hz)) {
+                    Fail(path + ".acquisition.frame_rate_hz",
+                         "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
+                }
+                if (pair_rate && *pair_rate != hz) {
+                    Fail(path + ".acquisition.frame_rate_hz",
+                         "differs from " + pair_owner + "'s (" + std::to_string(*pair_rate) +
+                         " Hz); both SensorSync JAI outputs share one hardware pulse rate");
+                }
+                pair_rate = hz;
+                pair_owner = cam.id;
+                if (cam.acquisition.exposure_ms) {
+                    const double exposure_limit_ms = 900.0 / hz;
+                    if (*cam.acquisition.exposure_ms >= exposure_limit_ms) {
+                        Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*cam.acquisition.exposure_ms) +
+                                                    ") must be below 900/frame_rate_hz (" +
+                                                    std::to_string(exposure_limit_ms) +
+                                                    " ms; 10% pulse-period margin): this process commands the "
+                                                    "SensorSync pulse period; lower the exposure or the rate");
+                    }
+                }
+            }
+        }
+
         AppConfig ParseRoot(const YAML::Node &root) {
-            CheckKeys(root, "", {"cameras", "output", "ptp", "logging"});
+            CheckKeys(root, "", {"cameras", "output", "ptp", "sensor_trigger", "logging"});
             AppConfig cfg;
 
             const YAML::Node out = OptionalMap(root, "", "output",
@@ -232,6 +299,10 @@ namespace gox {
                                    {{"abort", PtpOnTimeout::kAbort}, {"warn_continue", PtpOnTimeout::kWarnContinue}},
                                    cfg.ptp.on_timeout);
 
+            // The port is the rig's (config-main.yaml "Sensor Trigger: Port")
+            const YAML::Node st = OptionalMap(root, "", "sensor_trigger", {"enabled"});
+            Read(st, "sensor_trigger", "enabled", cfg.sensor_trigger.enabled);
+
             const YAML::Node logging = OptionalMap(root, "", "logging", {"stats_interval_s"});
             if (Read(logging, "logging", "stats_interval_s", cfg.stats_interval_s) && cfg.stats_interval_s <= 0) {
                 Fail("logging.stats_interval_s", "must be > 0");
@@ -256,6 +327,7 @@ namespace gox {
             if (enabled_count == 0) {
                 Fail("cameras", "at least one camera must be enabled");
             }
+            CheckSensorTriggerRig(cfg);
             g_log.Trace("Loaded {} cam instance(s)", enabled_count);
             return cfg;
         }

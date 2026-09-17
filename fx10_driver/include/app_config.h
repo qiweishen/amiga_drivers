@@ -48,9 +48,9 @@ namespace fx10 {
         std::string multiband_string; // "y1 h1;y2 h2;..." native sensor rows
     };
 
+    // The board's serial port is the rig's (config-main.yaml "Sensor Trigger: Port")
     struct SensorTriggerConfig {
         bool enabled = false;
-        std::string port; // /dev/serial/by-id/...; required when enabled
         int trigger_channel = 0; // physical log ID; v2 pairs 0/1 = FX, 2/3 = JAI
     };
 

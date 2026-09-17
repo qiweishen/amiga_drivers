@@ -30,9 +30,11 @@ namespace gox::ebus {
     class CameraSession {
     public:
         // `app` must outlive the session (owned by CaptureRunner); it carries
-        // the global output/ptp blocks shared by every camera.
+        // the global output/ptp/sensor_trigger blocks shared by every camera.
+        // `timing_log_path`: the rig's SensorSync timing log (empty = none);
+        // device.json records it relative to <cam>/.
         CameraSession(const CameraConfig &cfg, const AppConfig &app, const uint8_t session_uuid[16],
-                      StopController *stop);
+                      StopController *stop, std::string timing_log_path = std::string());
 
         ~CameraSession();
 
@@ -56,9 +58,10 @@ namespace gox::ebus {
 
         // Silence since this camera last handed over a buffer, microseconds, for
         // Main's no-data watchdog. nullopt when the watchdog must not apply:
-        // the camera is not acquiring, or it runs on an external trigger where
-        // silence only means the pulses stopped. Reads one atomic; safe from
-        // any thread.
+        // the camera is not acquiring, or it runs on an external trigger that
+        // somebody else controls, where silence only means the pulses stopped.
+        // SensorSync pulses are commanded by this process, so their silence is
+        // a fault and IS watched. Reads one atomic; safe from any thread.
         std::optional<uint64_t> MicrosSinceLastData() const;
         StatsReporter &Reporter() { return reporter_; }
         bool Started() const { return started_; }
@@ -122,6 +125,7 @@ namespace gox::ebus {
         std::thread writer_thread_;
 
         std::string camera_dir_;
+        std::string timing_log_path_; // rig-wide SensorSync log; empty = no SensorSync
         bool started_ = false;
         bool stopped_ = false;
 

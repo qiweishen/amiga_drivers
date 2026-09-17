@@ -42,9 +42,9 @@ namespace {
     }
 } // namespace
 
-TEST_CASE("apply_plan: a bare camera forces the 64-bit block IDs and the raw blemish state") {
+TEST_CASE("apply_plan: a bare camera forces the 64-bit block IDs, the raw blemish state and the strobe") {
     const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(BaseCamera());
-    REQUIRE(plan.size() == 2u);
+    REQUIRE(plan.size() == 5u);
     CHECK(plan[0].name == "GevGVSPExtendedIDMode");
     CHECK(plan[0].value == "On");
     CHECK(plan[0].value_is_string);
@@ -54,8 +54,66 @@ TEST_CASE("apply_plan: a bare camera forces the 64-bit block IDs and the raw ble
     // the factory value, so even a config that asks for nothing else writes it.
     CHECK(plan[1].name == "BlemishEnable");
     CHECK(plan[1].value == "0");
+    // The Line2 ExposureActive strobe is the rig's default too: the factory
+    // LineSource for Line2 copies the Line5 input, useless for timing.
+    CHECK(plan[2].name == "LineSelector");
+    CHECK(plan[3].name == "LineSource");
+    CHECK(plan[4].name == "LineInverter");
     // freerun needs no trigger write at all: the factory TriggerMode is Off.
     CHECK(IndexOf(plan, "TriggerMode") == -1);
+}
+
+TEST_CASE("apply_plan: the ExposureActive strobe leaves on Line2 Opt Out, in freerun and under a trigger") {
+    gox::CameraConfig c = BaseCamera();
+    for (const gox::TriggerMode mode: {gox::TriggerMode::kFreerun, gox::TriggerMode::kExternal}) {
+        c.acquisition.trigger.mode = mode;
+        c.features.raw = {gox::RawFeature{"BlackLevel", "0", false}};
+        const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(c);
+        const int selector = IndexOf(plan, "LineSelector");
+        const int source = IndexOf(plan, "LineSource");
+        const int inverter = IndexOf(plan, "LineInverter");
+        REQUIRE(selector >= 0);
+        // The selector points at Line2 before the source is written and read back
+        CHECK(selector < source);
+        CHECK(source < inverter);
+        CHECK(inverter < IndexOf(plan, "BlackLevel")); // still ahead of the operator's escape hatch
+        CHECK(Find(plan, "LineSelector")->value == "21"); // Line2 Opt Out1 (p.143)
+        CHECK(Find(plan, "LineSource")->value == "4"); // ExposureActive (p.144)
+        CHECK(Find(plan, "LineInverter")->value == "0");
+        for (const char *n: {"LineSelector", "LineSource", "LineInverter"}) {
+            CAPTURE(n);
+            CHECK_FALSE(Find(plan, n)->value_is_string); // the manual's integer values
+            CHECK(Find(plan, n)->strict);
+            CHECK(Find(plan, n)->required);
+        }
+        if (mode == gox::TriggerMode::kExternal) {
+            CHECK(IndexOf(plan, "TriggerMode") < selector); // after the trigger group
+        }
+    }
+    c.acquisition.trigger.exposure_active_output = false;
+    const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(c);
+    CHECK(IndexOf(plan, "LineSelector") == -1);
+    CHECK(IndexOf(plan, "LineSource") == -1);
+    CHECK(IndexOf(plan, "LineInverter") == -1);
+}
+
+TEST_CASE("apply_plan: trigger delay and input filter are written only when they leave the factory value") {
+    gox::CameraConfig c = BaseCamera();
+    c.acquisition.trigger.mode = gox::TriggerMode::kExternal;
+    CHECK(IndexOf(gox::BuildApplyPlan(c), "TriggerDelay") == -1);
+    CHECK(IndexOf(gox::BuildApplyPlan(c), "OptInFilter") == -1);
+    c.acquisition.trigger.delay_ms = 1.5;
+    c.acquisition.trigger.input_filter_ns = 500;
+    const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(c);
+    CHECK(Find(plan, "TriggerDelay")->value == "1500"); // microseconds (p.142)
+    CHECK(Find(plan, "OptInFilter")->value == "500"); // nanoseconds (p.145)
+    // Both before the trigger is armed
+    CHECK(IndexOf(plan, "TriggerDelay") < IndexOf(plan, "TriggerMode"));
+    CHECK(IndexOf(plan, "OptInFilter") < IndexOf(plan, "TriggerMode"));
+    // Freerun never touches them
+    c.acquisition.trigger.mode = gox::TriggerMode::kFreerun;
+    CHECK(IndexOf(gox::BuildApplyPlan(c), "TriggerDelay") == -1);
+    CHECK(IndexOf(gox::BuildApplyPlan(c), "OptInFilter") == -1);
 }
 
 TEST_CASE("apply_plan: blemish correction is only written when it differs from the factory value") {
@@ -252,14 +310,17 @@ TEST_CASE("apply_plan: the trigger selector is armed before the trigger mode") {
     CHECK(Find(plan, "TriggerSelector")->value == "FrameStart");
     CHECK(Find(plan, "TriggerSelector")->value_is_string);
     CHECK(Find(plan, "TriggerMode")->value == "On");
-    CHECK(Find(plan, "TriggerActivation")->value == "RisingEdge");
+    // The manual prints only integer values for TriggerActivation (1 = Rising
+    // Edge, 2 = Falling Edge, p.142); the entry names are not in it.
+    CHECK(Find(plan, "TriggerActivation")->value == "1");
+    CHECK_FALSE(Find(plan, "TriggerActivation")->value_is_string);
     // Every trigger write carries operator intent and is verified.
     for (const char *n: {"TriggerSelector", "TriggerSource", "TriggerActivation", "TriggerMode"}) {
         CHECK(Find(plan, n)->strict);
     }
 
     c.acquisition.trigger.activation = gox::TriggerActivation::kFalling;
-    CHECK(Find(gox::BuildApplyPlan(c), "TriggerActivation")->value == "FallingEdge");
+    CHECK(Find(gox::BuildApplyPlan(c), "TriggerActivation")->value == "2");
 }
 
 TEST_CASE("apply_plan: a numeric TriggerSource is written as an enum value, a name as a name") {

@@ -88,14 +88,10 @@ namespace fx10 {
         }
 
         void ParseSensorTrigger(const YAML::Node &root, SensorTriggerConfig &st, const AcquisitionConfig &acq) {
-            const YAML::Node n = OptionalMap(root, "", "sensor_trigger", {"enabled", "port", "trigger_channel"});
+            // The port is the rig's (config-main.yaml "Sensor Trigger: Port")
+            const YAML::Node n = OptionalMap(root, "", "sensor_trigger", {"enabled", "trigger_channel"});
             Read(n, "sensor_trigger", "enabled", st.enabled);
-            Read(n, "sensor_trigger", "port", st.port);
             ReadRange<int>(n, "sensor_trigger", "trigger_channel", 0, 3, st.trigger_channel);
-            if (st.enabled && st.port.empty()) {
-                Fail("sensor_trigger.port", "is required when sensor_trigger.enabled "
-                     "(a /dev/serial/by-id/... path survives USB re-enumeration)");
-            }
             // Protocol v2 drives paired outputs: 0/1 = FX, 2/3 = JAI.
             const auto group = static_cast<trigger::Group>(st.trigger_channel / 2);
             if (st.enabled && acq.trigger.mode == TriggerMode::kExternal &&

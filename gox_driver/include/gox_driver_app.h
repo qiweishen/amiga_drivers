@@ -15,6 +15,10 @@ namespace gox {
     class StopController;
 } // namespace gox
 
+namespace common {
+    class SensorSyncHub;
+}
+
 
 class GoxDriverApp final : public common::IDriverApp {
 public:
@@ -41,6 +45,7 @@ private:
 
     // Declaration order matters: stop_ must outlive runner_ (the runner's CameraSessions hold a StopController*)
     std::unique_ptr<gox::StopController> stop_;
+    std::shared_ptr<common::SensorSyncHub> sync_; // the rig's SensorSync session (main's), used when sensor_trigger.enabled
     std::unique_ptr<gox::CaptureRunner> runner_;
     std::vector<std::string> camera_ids_; // enabled cameras, for the per-instance markers
 

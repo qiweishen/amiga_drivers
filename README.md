@@ -6,7 +6,10 @@ set of 2D LiDARs recording concurrently behind a shared logging, configuration
 and lifecycle framework, with a web control panel on top.
 
 **Time.** The rig is configured around **AsteRx GPS time**: LMS4xxx uses NTP,
-Go-X uses PTP, and FX10 uses SensorSync strobe edges against AsteRx PPS/ZDA.
+Go-X uses PTP plus SensorSync hardware triggering (Line5 pulse in, Line2
+ExposureActive out), and FX10 uses SensorSync strobe edges against AsteRx
+PPS/ZDA. The two cameras share the one SensorSync board through a single
+session per run (`common::SensorSyncHub`, log at `raw/sensor_trigger.log`).
 Actual receiver timescales, the ZDA-to-GPS conversion, wiring and time lock must
 be established for the deployed rig; configuration alone does not demonstrate
 cross-sensor synchronization. Native device timestamps remain distinct from
@@ -48,8 +51,8 @@ are named at second resolution and an existing one is refused, never reused.
 | Sensor | Driver | Transport | Records |
 |---|---|---|---|
 | Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (+ `prewarm/` context) + `live_*.csv` telemetry sidecar |
-| JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP), PTP slave | `jai-raw-seg` segments + `idx.jsonl` + `device.json` + `telemetry.jsonl` per camera |
-| Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP) | ENVI BIL `.bil`/`.hdr` + `.lines.csv` + SensorSync `sensor_trigger.log` |
+| JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `jai-raw-seg` segments + `idx.jsonl` + `device.json` + `telemetry.jsonl` per camera; its channel in `raw/sensor_trigger.log` |
+| Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP), SensorSync-triggered | ENVI BIL `.bil`/`.hdr` + `.lines.csv`; its channel in `raw/sensor_trigger.log` |
 | SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | `scan_<id>_<ts>_NNN.h5` (`lms4xxx-h5` v3) |
 
 Every driver **resets the device to a known baseline on each start** and then
@@ -231,6 +234,8 @@ General:
     FX10 Driver Config Path: ./fx10_driver/config/config-fx10.yaml
     GOX Driver Config Path: ./gox_driver/config/config-gox.yaml
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
+Sensor Trigger:                    # the rig's one SensorSync board, shared by FX10 and Go-X
+    Port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"   # "" = no board
 Guards:                            # rig-wide, see Health guards below
     Disk Min Free GiB: 5           # stop the whole run below this (0 = off)
     Disk Warn Free GiB: 20
@@ -247,8 +252,11 @@ Each driver config is a heavily commented YAML template next to its driver. The
 templates are **part of the documentation** — every non-obvious value carries the
 manual page it comes from — so the GUI edits them as text rather than
 re-serialising them. The shipped defaults keep every time source on
-(`ntp.enabled: true`, `ptp.enabled: true`); the FX10 `sensor_trigger` block is
-enabled per rig once the SensorSync board is wired.
+(`ntp.enabled: true`, `ptp.enabled: true`, and `sensor_trigger.enabled: true`
+with `trigger.mode: external` in both camera configs). The SensorSync board's
+serial port lives in `config-main.yaml` only (`Sensor Trigger: Port`); the camera
+configs declare just their channel and pulse rate, and `main` logs one
+`SensorSync: ...` line summarising what the rig asked of the board.
 
 The GUI resolves driver editors from the paths in the selected main config.
 Saving checks both the resolved path and file modification time, so a stale page
@@ -283,11 +291,13 @@ configuration snapshot and run metadata under `raw/`:
     ├── log_<ts>.log                  # diagnostics, live rates and legacy GUI health markers
     ├── drivers.json                  # process/session identity, lifecycle, versions and final results
     ├── config/                       # snapshot of config-main + every enabled driver's config
+    ├── sensor_trigger.log            # SensorSync timing log, one session per rig: trigger (T) and
+    │                                 #   exposure (S) edges of every channel, PPS (P) and NMEA (Z)
     ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; prewarm/ holds the
     │                                 #   SBF context streamed before the warm-up gate opened
     ├── gox/<cam>/                    # seg_NNNNN.raw (jai-raw-seg) + seg_NNNNN.idx.jsonl + segments.jsonl
-    │                                 #   + device.json (one-shot audit) + telemetry.jsonl + stream_stats.txt
-    ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv + sensor_trigger.log
+    │                                 #   + device.json (one-shot audit, timing block) + telemetry.jsonl + stream_stats.txt
+    ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv
     │                                #   + device.json + telemetry.jsonl + stream_stats.txt + segments.jsonl
     └── lms4xxx/                      # scan_<instance>_<ts>_NNN.h5
 ```
@@ -368,7 +378,7 @@ On top of the two, each driver keeps the guards that are specific to its device:
 | Driver | Guards |
 |---|---|
 | asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME before any block is recorded; a 30 s SBF silence timer that **reconnects before recording** and is **fatal while recording**; damaged blocks, link loss, a receiver reset and a full write queue while recording are fatal too (fail-fast) |
-| gox | PTP slave-status / clock-accuracy guard, thermal warning, `Counter0` missed-trigger accounting; the first dropped / lost / incomplete frame is fatal (fail-fast) |
+| gox | PTP slave-status / clock-accuracy guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
 | fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
 | lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
 

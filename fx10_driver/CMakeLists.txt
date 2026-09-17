@@ -27,14 +27,12 @@ add_library(fx10_core STATIC
         src/apply_plan.cpp
         src/envi_header.cpp
         src/envi_recorder.cpp
-        src/sensor_trigger_log.cpp
         src/stats_line.cpp
         src/wavelengths.cpp
 )
 
-# SensorSync-Logger host client
-set(SENSOR_TRIGGER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/External/sensor_trigger")
-target_include_directories(fx10_core PRIVATE "${SENSOR_TRIGGER_DIR}")
+# SensorSync-Logger: the session wrapper (common::SensorSyncLog) and the shared
+# hub live in amiga_common; trigger_groups.h comes through its include dirs
 # NOTE: gox_driver/include exposes the SAME relative paths (core/..., ebus/...)
 target_include_directories(fx10_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # amiga_common carries the unified logging layer and provides spdlog/yaml-cpp/

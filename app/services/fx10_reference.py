@@ -140,15 +140,21 @@ async def _collect() -> ReferenceResult:
         if await runtime.pgrep("AmigaDrivers"):
             raise RuntimeError("Stop the main recording before collecting references")
         config = config_store.get("fx10")
-        output_root = config_store.main_settings()["output_dir"]
+        settings = config_store.main_settings()
+        output_root = settings["output_dir"]
         if output_root is None:
             raise ValueError("The configured output directory is outside the shared mounts")
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
-        proc = await tool_jobs.spawn([
+        # The SensorSync board's port is the rig's (config-main.yaml), so the tool
+        # receives it explicitly; it only needs it when sensor_trigger is enabled.
+        argv = [
             runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config.path),
             "--out", runtime.exec_path(output_root),
-        ])
+        ]
+        if settings["sensor_trigger_port"]:
+            argv += ["--sensor-port", settings["sensor_trigger_port"]]
+        proc = await tool_jobs.spawn(argv)
 
         async def read_stdout() -> None:
             nonlocal success_path, failure, session_path, duration_s

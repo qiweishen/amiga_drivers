@@ -10,7 +10,7 @@
 #include "app_config.h"
 #include "envi_recorder.h"
 #include "pixel_format.h"
-#include "sensor_trigger_log.h"
+#include "sensor_sync_hub.h"
 #include "session_metadata.h"
 #include "stats_line.h"
 #include "logger.h"
@@ -24,13 +24,17 @@
 
 
 namespace {
-    // App-level module token: this file's error lines drive the GUI health
-    // machine. All other fx10 files log under the internal "FX10" module.
     common::DriverLog g_log{std::string(common::Markers::kModuleFx10)};
 
-    // No timing-log growth for this long = the Teensy USB link is down (the
-    // board emits a #H health line at least every 5 s while a session runs).
+    // No timing-log growth for this long = the Teensy USB link is down
     constexpr double kTriggerLogStallAbortS = 15.0;
+
+    // The shared SensorSync session STARTs once every registered camera has armed.
+    // Armed this long without a START = another participant never got there.
+    constexpr double kSensorSyncStartWaitS = 30.0;
+
+    // This driver's name in the rig-wide SensorSync session (common::SensorSyncHub)
+    constexpr const char *kSensorSyncOwner = "fx10";
 
     // Device telemetry is a blocking GVCP round trip that shares the link with
     // the stream, so it gets a slow cadence of its own and is NEVER tied to
@@ -54,7 +58,6 @@ struct Fx10DriverApp::Impl {
         std::unique_ptr<fx10::EnviRecorder> recorder; // built in startStreaming_
         fx10::StreamReceiver receiver;
         std::unique_ptr<fx10::CameraControl> control; // built after connect, before the stream open
-        std::unique_ptr<fx10::SensorTriggerLog> trigger_log; // opened in bringUpSession_
         fx10::RecorderInit recorder_init;
         fx10::CameraControl::Geometry geometry;
         std::uint32_t bytes_per_pixel = 2;
@@ -115,6 +118,13 @@ struct Fx10DriverApp::Impl {
     std::string stop_reason = "completed"; // logged by EnviRecorder::Stop as the exit reason
     int last_exit_code = 0; // standalone exit-code semantics, reported at shutdown
     bool run_incomplete = false; // checked only after Run joins
+
+    // The rig's SensorSync board is shared with the Go-X driver: this app is one
+    // participant of the session main owns (registered in bring-up, armed after
+    // AcquisitionStart, disarmed before the stream stops)
+    std::shared_ptr<common::SensorSyncHub> sync;
+    bool sync_participant = false;
+    std::string observations_file; // timing log path relative to the ENVI session directory
 };
 
 
@@ -122,6 +132,7 @@ Fx10DriverApp::Fx10DriverApp(const common::Config &config) : impl_(std::make_uni
     // Actual config loading is deferred to Init()
     config_path_ = config.fx10_config_path;
     data_folder_path_ = config.data_folder_path;
+    impl_->sync = config.sensor_sync;
 }
 
 
@@ -204,8 +215,20 @@ Fx10DriverApp::BringUp Fx10DriverApp::BringUpSession() const {
             }
             g_log.Info("SensorSync observations and camera BlockIDs have independent counters; "
                        "use the line index and a verified anchor, never infer association from padding");
-            s.trigger_log = std::make_unique<fx10::SensorTriggerLog>(cfg.sensor_trigger.port);
-            s.trigger_log->Open();
+            if (!impl_->sync) {
+                throw common::SensorSyncError("sensor_trigger.enabled but the host provides no SensorSync session "
+                                              "(common::Config::sensor_sync is empty)");
+            }
+            // One board for the rig: registering opens it (STOP + idle check) before
+            // any camera is armed; the pulses start once every participant armed
+            const double pulse_hz = cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal
+                                        ? cfg.acquisition.frame_rate_hz
+                                        : 0.0;
+            impl_->sync->Register(kSensorSyncOwner, cfg.sensor_trigger.trigger_channel, pulse_hz);
+            impl_->sync_participant = true;
+            // The ENVI session directory is <output_dir>/fx10_<UTC>/, two levels below raw/
+            impl_->observations_file = std::filesystem::relative(impl_->sync->LogPath(),
+                                                                 cfg.recording.output_dir / "session").generic_string();
         } else {
             // SensorSync is the FX10's only path to GPS time (host time is never a
             // time source on this platform)
@@ -307,7 +330,11 @@ Fx10DriverApp::BringUp Fx10DriverApp::BringUpSession() const {
                      ? "\nmroi: " + cfg.acquisition.mroi.multiband_string
                      : "") +
                 "\nline identity: segment_NNNN.lines.csv; trigger association requires a verified anchor" +
-                (cfg.sensor_trigger.enabled ? "\ntiming observations: sensor_trigger.log (SensorSync-Logger)" : "");
+                (impl_->sync_participant
+                     ? "\ntiming observations: " + impl_->observations_file +
+                       " (SensorSync-Logger; one session per rig, channel " +
+                       std::to_string(cfg.sensor_trigger.trigger_channel) + ")"
+                     : "");
     } catch (const fx10::ConfigError &e) {
         // A configuration value only the camera could reject: the wavelength
         // axis against the camera's band count, or an MROI role group the
@@ -389,7 +416,8 @@ bool Fx10DriverApp::StartStreaming() {
                 {"expected_line_rate_hz", cfg.acquisition.frame_rate_hz},
                 {"rate_semantics", "configured expectation; external pulse rate is not camera-measured line rate"},
                 {"sensor_trigger_enabled", cfg.sensor_trigger.enabled}, {"trigger_channel", cfg.sensor_trigger.trigger_channel},
-                {"observations_file", cfg.sensor_trigger.enabled ? nlohmann::json("sensor_trigger.log") : nlohmann::json(nullptr)},
+                {"observations_file", impl_->sync_participant ? nlohmann::json(impl_->observations_file) : nlohmann::json(nullptr)},
+                {"observations_scope", "one SensorSync session per rig: every triggered camera's events share this log, keyed by channel"},
                 {"association_verified", false}, {"association_anchor", nullptr}};
             try { fx10::PublishMetadata(s.recorder->SessionDir() / "device.json", device); }
             catch (...) { s.metadata_failed = true; throw; }
@@ -406,16 +434,18 @@ bool Fx10DriverApp::StartStreaming() {
         return false;
     }
 
-    // Issue the shutter-open pulse and arm the camera before requesting triggers. This ordering alone does not
-    // prove a one-to-one frame association (freerun = trigger channel off).
-    if (s.trigger_log) {
-        const double pulse_hz = cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal
-                                    ? cfg.acquisition.frame_rate_hz
-                                    : 0.0;
+    // The camera is armed: tell the shared SensorSync session. Pulses start when
+    // every registered camera has armed (the Go-X arms during its Init, so this
+    // is normally the arm that starts them). This ordering alone does not prove
+    // a one-to-one frame association (freerun = trigger channel off).
+    if (impl_->sync_participant) {
         try {
-            s.trigger_log->Start(s.recorder->SessionDir() / "sensor_trigger.log",
-                                 {{cfg.sensor_trigger.trigger_channel, pulse_hz}});
-        } catch (const fx10::TriggerLogError &e) {
+            if (impl_->sync->Arm(kSensorSyncOwner)) {
+                g_log.Info("SensorSync session running; timing log {}", impl_->sync->LogPath().string());
+            } else {
+                g_log.Info("SensorSync: camera armed, pulses start once the other participant(s) arm");
+            }
+        } catch (const common::SensorSyncError &e) {
             g_log.Error("{}", e.what());
             impl_->last_exit_code = 20;
             impl_->stop_reason = "trigger-log-start-failed";
@@ -482,19 +512,28 @@ void Fx10DriverApp::MonitorLoop() {
             impl_->last_exit_code = 10;
             break;
         }
-        if (s.trigger_log && !s.trigger_log->Ok()) {
-            g_log.Error("Sensor trigger log/protocol integrity failed (I/O, rejected command, restart or event loss); stopping");
+        if (impl_->sync_participant && !impl_->sync->Ok()) {
+            g_log.Error("Sensor trigger log/protocol integrity failed (I/O, rejected command, restart or event "
+                        "loss): {}; stopping", impl_->sync->LastError());
             impl_->stop_reason = "trigger-log-failure";
             impl_->last_exit_code = 20;
             break;
         }
-        if (s.trigger_log && s.trigger_log->StalledSeconds() > kTriggerLogStallAbortS) {
+        if (impl_->sync_participant && impl_->sync->StalledSeconds() > kTriggerLogStallAbortS) {
             // Even without an explicit I/O/protocol error, sustained silence
             // means timing observations are unavailable.
             g_log.Error("Sensor trigger timing log has not grown for {:.0f} s (Teensy USB link lost?) — "
                         "frames without timing are worthless, stopping",
-                        s.trigger_log->StalledSeconds());
+                        impl_->sync->StalledSeconds());
             impl_->stop_reason = "trigger-log-stalled";
+            impl_->last_exit_code = 20;
+            break;
+        }
+        if (impl_->sync_participant && impl_->sync->WaitingSeconds(kSensorSyncOwner) > kSensorSyncStartWaitS) {
+            // Every frame recorded before the pulses run would have no time source
+            g_log.Error("SensorSync session has not started {:.0f} s after this camera armed (another registered "
+                        "camera never armed?); stopping", impl_->sync->WaitingSeconds(kSensorSyncOwner));
+            impl_->stop_reason = "trigger-session-not-started";
             impl_->last_exit_code = 20;
             break;
         }
@@ -613,9 +652,9 @@ void Fx10DriverApp::TeardownSession() {
     // Stop pulses first, then the stream and counter reads. A strobe already
     // active at STOP may lack its ending edge; the offline index must flag it.
     bool trigger_log_failed = false;
-    if (s.trigger_log) {
-        s.trigger_log->Stop();
-        trigger_log_failed = !s.trigger_log->Ok();
+    if (impl_->sync_participant) {
+        impl_->sync->Disarm(kSensorSyncOwner); // first disarm ends the rig's session: pulses stop, log closes
+        trigger_log_failed = !impl_->sync->Ok();
     }
     s.receiver.Stop();
 

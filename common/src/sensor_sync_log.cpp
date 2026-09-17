@@ -1,4 +1,4 @@
-#include "sensor_trigger_log.h"
+#include "sensor_sync_log.h"
 
 #include <sys/stat.h>
 #include <cerrno>
@@ -9,9 +9,9 @@
 #include "session_client.cpp"
 
 
-namespace fx10 {
+namespace common {
     namespace {
-        common::DriverLog g_log{"FX10"};
+        DriverLog g_log{"SensorSync"};
 
         // No log growth for this long at Stop() time = the STOP command very likely never reached the board
         constexpr double kStopStallWarnS = 15.0;
@@ -34,23 +34,23 @@ namespace fx10 {
     } // namespace
 
 
-    struct SensorTriggerLog::Impl {
+    struct SensorSyncLog::Impl {
         SensorSyncSession session;
-        LogGrowthTracker growth; // see log_growth_tracker.hpp for why size, not mtime
+        LogGrowthTracker growth; // see log_growth_tracker.h for why size, not mtime
     };
 
 
-    SensorTriggerLog::SensorTriggerLog(std::string port)
+    SensorSyncLog::SensorSyncLog(std::string port)
         : impl_(std::make_unique<Impl>()), port_(std::move(port)) {
     }
 
 
-    SensorTriggerLog::~SensorTriggerLog() {
+    SensorSyncLog::~SensorSyncLog() {
         Stop();
     }
 
 
-    void SensorTriggerLog::Open() {
+    void SensorSyncLog::Open() {
         const bool opened = impl_->session.open(port_.c_str());
         if (!impl_->session.startupLog().empty()) {
             g_log.Info("[TriggerLog] Pre-session serial synchronization (not capture data):\n{}",
@@ -58,20 +58,20 @@ namespace fx10 {
         }
         if (!opened) {
             const int err = impl_->session.lastErrno();
-            throw TriggerLogError(fmt::format("[TriggerLog] Cannot prepare sensor trigger port '{}': {} (errno {}){}",
+            throw SensorSyncError(fmt::format("[TriggerLog] Cannot prepare sensor trigger port '{}': {} (errno {}){}",
                                               port_, impl_->session.lastError(), err, OpenErrnoHint(err)));
         }
         g_log.Info("[TriggerLog] Sensor trigger port '{}' open; startup synchronization confirmed idle", port_);
     }
 
 
-    void SensorTriggerLog::Start(const std::filesystem::path &log_path,
-                                 const std::vector<std::pair<int, double> > &channel_freqs_hz) {
+    void SensorSyncLog::Start(const std::filesystem::path &log_path,
+                              const std::vector<std::pair<int, double> > &channel_freqs_hz) {
         if (started_) {
-            throw TriggerLogError("[TriggerLog] Trigger log session already running");
+            throw SensorSyncError("[TriggerLog] Trigger log session already running");
         }
         if (!impl_->session.start(log_path.string(), channel_freqs_hz)) {
-            throw TriggerLogError(fmt::format("[TriggerLog] Cannot start the trigger log session '{}': {}",
+            throw SensorSyncError(fmt::format("[TriggerLog] Cannot start the trigger log session '{}': {}",
                                               log_path.string(), impl_->session.lastError()));
         }
         log_path_ = log_path;
@@ -92,7 +92,7 @@ namespace fx10 {
     }
 
 
-    void SensorTriggerLog::Stop() {
+    void SensorSyncLog::Stop() {
         if (!started_) {
             return;
         }
@@ -100,7 +100,8 @@ namespace fx10 {
         started_ = false;
         impl_->session.stop(); // sends STOP, drains the tail (~300 ms), closes the file
         if (!impl_->session.ok()) {
-            g_log.Warn("[TriggerLog] Timing session '{}' failed integrity checks (I/O, protocol, event loss or missing STOP acknowledgement)", log_path_.string());
+            g_log.Warn("[TriggerLog] Timing session '{}' failed integrity checks (I/O, protocol, event loss or "
+                       "missing STOP acknowledgement)", log_path_.string());
         } else if (stalled > kStopStallWarnS) {
             g_log.Warn("[TriggerLog] Link was stalled for {:.0f} s at stop — the STOP command may not have "
                        "reached the board (it keeps pulsing until the next session start)", stalled);
@@ -110,12 +111,12 @@ namespace fx10 {
     }
 
 
-    bool SensorTriggerLog::Ok() const {
+    bool SensorSyncLog::Ok() const {
         return impl_->session.ok();
     }
 
 
-    double SensorTriggerLog::StalledSeconds() const {
+    double SensorSyncLog::StalledSeconds() const {
         if (!started_) {
             return -1.0;
         }
@@ -126,4 +127,4 @@ namespace fx10 {
         // impl_ is a pointer: mutating through it is fine in a const member
         return impl_->growth.Update(static_cast<std::int64_t>(st.st_size), std::chrono::steady_clock::now());
     }
-} // namespace fx10
+} // namespace common

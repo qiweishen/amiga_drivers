@@ -94,9 +94,9 @@ ENV GENICAM_ROOT_V3_4=${EBUS_SDK_ROOT}/lib/genicam
 ENV LD_LIBRARY_PATH=${EBUS_SDK_ROOT}/lib:${EBUS_SDK_ROOT}/lib/genicam/bin/Linux64_x64
 
 # =============================================================
-# Clean cache to reduce image size
+# Load ld.so and clean up APT cache to reduce image size
 # =============================================================
-RUN apt-get clean && rm -rf /var/lib/apt/lists/* && rm -rf /tmp/ebus
+RUN ldconfig && apt-get clean && rm -rf /var/lib/apt/lists/* && rm -rf /tmp/ebus
 
 # =============================================================
 # Locale configuration

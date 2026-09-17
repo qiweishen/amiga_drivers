@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 
 #include "buffering.h"
 #include "logger.h"
@@ -15,8 +16,9 @@ namespace gox::ebus {
     } // namespace
 
     CameraSession::CameraSession(const CameraConfig &cfg, const AppConfig &app, const uint8_t session_uuid[16],
-                                 StopController *stop) : cfg_(cfg), app_(app), stop_(stop),
-                                                         reporter_(cfg.id, &stats_) {
+                                 StopController *stop, std::string timing_log_path)
+        : cfg_(cfg), app_(app), stop_(stop), reporter_(cfg.id, &stats_),
+          timing_log_path_(std::move(timing_log_path)) {
         std::memcpy(session_uuid_, session_uuid, sizeof(session_uuid_));
     }
 
@@ -276,8 +278,10 @@ namespace gox::ebus {
     }
 
     std::optional<uint64_t> CameraSession::MicrosSinceLastData() const {
-        if (cfg_.acquisition.trigger.mode == TriggerMode::kExternal) {
+        if (cfg_.acquisition.trigger.mode == TriggerMode::kExternal && !app_.sensor_trigger.enabled) {
             // Silence is the operator's doing (the pulses stopped), not a fault.
+            // With SensorSync the pulses are this process's own, so silence is
+            // watched like freerun (fx10's watchdog_applies rule).
             return std::nullopt;
         }
         const uint64_t reference = stats_.data_reference_mono_ns.load(std::memory_order_acquire);
@@ -315,8 +319,23 @@ namespace gox::ebus {
         // Version-1 raw headers do not contain the full interpretation contract.
         // Persist it before StreamEnable/AcquisitionStart; failures abort bring-up.
         try {
-            const DeviceReport report = controller_->CollectDeviceReport(
+            DeviceReport report = controller_->CollectDeviceReport(
                 cfg_, applied_, ptp_ ? ptp_->Summary() : PtpSummary{}, factory_load_, runtime_shape_);
+            const TriggerConfig &trigger = cfg_.acquisition.trigger;
+            const bool external = trigger.mode == TriggerMode::kExternal;
+            report.timing.mode = external ? "external" : "freerun";
+            report.timing.trigger_source = external ? trigger.source_entry : std::string();
+            report.timing.sensor_trigger_enabled = app_.sensor_trigger.enabled;
+            report.timing.sensor_channel = app_.sensor_trigger.enabled ? trigger.sensor_channel : -1;
+            if (external && app_.sensor_trigger.enabled && cfg_.acquisition.frame_rate_hz) {
+                report.timing.expected_pulse_rate_hz = *cfg_.acquisition.frame_rate_hz;
+            }
+            report.timing.exposure_active_output = trigger.exposure_active_output;
+            if (!timing_log_path_.empty()) {
+                // <cam>/ exists (the recorder created it); the log may not yet
+                report.timing.observations_file =
+                        std::filesystem::relative(timing_log_path_, camera_dir_).generic_string();
+            }
             const std::string path = camera_dir_ + "/device.json";
             PublishMetadata(path, BuildDeviceJson(report).dump(2) + "\n");
             g_log.Info("[{}] [eBUS] device metadata written to {}", cfg_.id, path);

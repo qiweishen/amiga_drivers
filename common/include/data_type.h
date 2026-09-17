@@ -1,12 +1,15 @@
 #pragma once
 
-#include <string>
 #include <filesystem>
+#include <memory>
+#include <string>
 
 #include "run_guards.h"
 
 
 namespace common {
+    class SensorSyncHub;
+
     struct Config {
         std::string operator_name;
         std::string field_name;
@@ -29,5 +32,11 @@ namespace common {
 
         std::string timestamp;
         std::filesystem::path data_folder_path;
+
+        // The rig's one SensorSync-Logger board: its serial port ("Sensor Trigger: Port" in
+        // config-main.yaml; "" = no board) and the session shared by every camera it
+        // triggers (created by main for the run; see common/include/sensor_sync_hub.h)
+        std::string sensor_trigger_port;
+        std::shared_ptr<SensorSyncHub> sensor_sync;
     };
 } // namespace common

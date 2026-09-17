@@ -67,6 +67,7 @@ services:
 
         volumes:
             - ..:/workspace
+            # Mount our dataset directory
             - /mnt/SharedData/Post_Processing_Data:/workspace/dataset
             # Use the existing host desktop authorization file directly; no setup hook.
             # Missing sources must fail instead of becoming empty directories.

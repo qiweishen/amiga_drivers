@@ -1,18 +1,18 @@
-#include "../include/log_growth_tracker.h"
-#include "../../3rd_party/External/sensor_trigger/session_protocol.h"
-#include "../../3rd_party/External/sensor_trigger/session_rates.h"
+#include "log_growth_tracker.h"
+#include "session_protocol.h"
+#include "session_rates.h"
 
 #include <doctest/doctest.h>
 
 #include <chrono>
 
 // The timing log is the only time source for recorded lines, so "the log has
-// stopped growing" aborts a session (fx10_driver_app.cpp). The decision used to
-// compare st_mtime against the WALL clock: 1 s granularity, and any NTP step —
-// routine on a rig that has just acquired GNSS time — fabricated a stall and
-// killed a healthy recording.
+// stopped growing" aborts a session (fx10_driver_app.cpp, gox capture_runner.cpp
+// through common::SensorSyncHub). The decision used to compare st_mtime against
+// the WALL clock: 1 s granularity, and any NTP step — routine on a rig that has
+// just acquired GNSS time — fabricated a stall and killed a healthy recording.
 
-using fx10::LogGrowthTracker;
+using common::LogGrowthTracker;
 using Clock = LogGrowthTracker::Clock;
 
 TEST_CASE("SensorSync rates: physical channels encode firmware v2 group names") {

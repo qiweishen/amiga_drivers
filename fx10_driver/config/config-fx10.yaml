@@ -44,10 +44,14 @@ reference:
     duration_s: 5.0                     # 0.1..3600; seconds per phase: white, then dark
 
 
-# --- Sensor Trigger (Teensy SensorSync, submodule/sensor_trigger) ---
+# --- Sensor Trigger (Teensy SensorSync, 3rd_party/External/sensor_trigger) ---
+# The rig's one board, shared with the Go-X driver: its serial port is named once in
+# config/config-main.yaml ("Sensor Trigger: Port"); this block only declares participation
+# and the channel. One session per rig (common::SensorSyncHub), one timing log at
+# raw/sensor_trigger.log with every channel's events. Pulses start once every registered
+# camera has armed and stop before the first camera stops.
 sensor_trigger:
     enabled: true
-    port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"    # required when enabled
     trigger_channel: 0                  # 0..3 physical ID; v2 drives 0/1 together (FX, >=20 Hz), 2/3 together (JAI, 1..10 Hz)
 
 

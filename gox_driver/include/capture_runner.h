@@ -16,15 +16,24 @@
 #include "signal_stop.h"
 
 
+namespace common {
+    class SensorSyncHub;
+}
+
 namespace gox::ebus {
     class CameraSession;
 }
 
 namespace gox {
+    // This camera's name in the rig-wide SensorSync session (common::SensorSyncHub)
+    inline std::string SensorSyncOwner(const std::string &camera_id) { return "gox:" + camera_id; }
+
     class CaptureRunner {
     public:
         // stop must outlive the runner (CameraSessions keep the raw pointer).
-        CaptureRunner(AppConfig cfg, StopController *stop);
+        // `sync`: the rig's shared SensorSync session when sensor_trigger.enabled
+        // (the cameras were registered by GoxDriverApp before this); nullptr otherwise
+        CaptureRunner(AppConfig cfg, StopController *stop, std::shared_ptr<common::SensorSyncHub> sync = nullptr);
 
         ~CaptureRunner();
 
@@ -61,6 +70,7 @@ namespace gox {
     private:
         AppConfig cfg_;
         StopController *stop_;
+        std::shared_ptr<common::SensorSyncHub> sync_; // non-null only when this driver participates
         std::string session_dir_;
         uint8_t session_uuid_[16] = {};
         uint64_t start_rt_ = 0;

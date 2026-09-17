@@ -1,5 +1,6 @@
 #include "apply_plan.h"
 
+#include <cmath>
 #include <cstdio>
 
 namespace gox {
@@ -148,15 +149,37 @@ namespace gox {
                     !acq.trigger.source_entry.empty() &&
                     acq.trigger.source_entry.find_first_not_of("0123456789") == std::string::npos;
             add(plan, "TriggerSource", acq.trigger.source_entry, !numeric_source);
-            add(plan, "TriggerActivation",
-                acq.trigger.activation == TriggerActivation::kRising ? "RisingEdge" : "FallingEdge",
-                true);
+            // The manual's integer values (1 = Rising Edge, 2 = Falling Edge, p.142); the
+            // symbolic entry names are not printed anywhere in it. Line5 itself cannot be
+            // inverted (LineInverter is fixed for it, p.143), so this is the polarity knob.
+            add(plan, "TriggerActivation", acq.trigger.activation == TriggerActivation::kRising ? "1" : "2", false);
+            if (acq.trigger.delay_ms > 0.0) {
+                // TriggerDelay is in microseconds (0..500000, p.142); the factory value is 0
+                add(plan, "TriggerDelay", std::to_string(static_cast<long long>(std::llround(acq.trigger.delay_ms * 1000.0))),
+                    false);
+            }
+            if (acq.trigger.input_filter_ns != 0) {
+                // OptInFilter debounces Line5 (p.18, p.145); the factory value is 0
+                add(plan, "OptInFilter", std::to_string(acq.trigger.input_filter_ns), false);
+            }
             add(plan, "TriggerMode", "On", true);
 
             // 9b. Counter0 counts received FrameTrigger events (p.115-116, p.160): triggers the camera
             // swallowed are otherwise invisible. required=false: a camera without it costs only trig=
             add(plan, "CounterSelector", "0", false, /*strict=*/true, /*required=*/false);
             add(plan, "CounterEventSource", "1", false, /*strict=*/true, /*required=*/false);
+        }
+
+        // 9c. ExposureActive strobe on Line2 Opt Out, the only opto-coupled output (pins 4/5,
+        // p.17), for the SensorSync strobe input — in freerun too, so the timing log records
+        // exposures whichever way the camera is driven. The factory LineSource for Line2 is a
+        // copy of the Line5 input (24, p.144), useless as a strobe. LineSelector first (it is
+        // a selector), then the source and the polarity, both read back while the selector
+        // still points at Line2 (p.143-144).
+        if (acq.trigger.exposure_active_output) {
+            add(plan, "LineSelector", "21", false); // 21 = Line2 Opt Out1 (p.143)
+            add(plan, "LineSource", "4", false); // 4 = ExposureActive (p.144)
+            add(plan, "LineInverter", "0", false); // False: high while the sensor exposes (p.143)
         }
 
         // 10. Operator escape hatch, last so it can override anything above.

@@ -24,6 +24,7 @@
 #include "utility.h"
 #include "logger.h"
 #include "run_guards.h"
+#include "sensor_sync_hub.h"
 
 
 // Baked by the root CMakeLists (target_compile_definitions on AmigaDrivers)
@@ -100,6 +101,19 @@ namespace {
                                        "(or 0 to disable the warning)");
         }
 
+        // Sensor Trigger: the rig's one SensorSync-Logger board. Named here, once, so
+        // the camera drivers only declare what they need from it (channel, pulse
+        // rate) and never two different ports. Optional: no block, no board.
+        const YAML::Node sensor_trigger = root["Sensor Trigger"];
+        if (sensor_trigger && sensor_trigger["Port"]) {
+            config.sensor_trigger_port = sensor_trigger["Port"].as<std::string>("");
+        }
+        if (!config.sensor_trigger_port.empty() && config.sensor_trigger_port.front() != '/') {
+            common::Log::LogAndThrow(kModule,
+                                       fmt::format("Sensor Trigger: Port must be an absolute device path such as "
+                                                   "/dev/serial/by-id/... in '{}'", config_path.string()));
+        }
+
         const auto resolve_path = [&project_root](std::filesystem::path &input_path) {
             if (input_path.is_relative()) {
                 input_path = project_root / input_path;
@@ -165,6 +179,14 @@ int main(int argc, char *argv[]) {
         std::cerr << "Cannot initialize acquisition session: " << e.what() << '\n';
         return 1;
     }
+
+    // One SensorSync-Logger board per rig (its port comes from this config): the
+    // cameras it triggers (FX10, Go-X) share this session. Each registers during its
+    // Init and arms once its camera accepts triggers; the pulses start when every
+    // registered camera has armed and stop with the first teardown. The board is
+    // not touched unless a driver registers.
+    main_config.sensor_sync = std::make_shared<common::SensorSyncHub>(
+        main_config.data_folder_path / "sensor_trigger.log", main_config.sensor_trigger_port);
 
     // Run-level summary at the data folder root; finalized on every exit path below
     common::DriversJson drivers_json(main_config.data_folder_path / "drivers.json");
@@ -383,6 +405,14 @@ int main(int argc, char *argv[]) {
         publish_lifecycle("initializing", initialized == drivers.size());
     }
 
+    // What the rig asked of the SensorSync board, in one line, now that every
+    // driver has declared its needs (the pulses themselves start once the cameras
+    // are armed; the per-driver [TriggerLog] lines above show each registration)
+    if (main_config.sensor_sync->HasParticipants()) {
+        common::Log::LogMessage(spdlog::level::info, kModule,
+                                 "SensorSync: " + main_config.sensor_sync->Describe());
+    }
+
     // LMS4xxx maps one app per LiDAR instance; the driver-level lifecycle
     // markers are therefore aggregated here (per-instance markers come from
     // each Lms4xxxDriverApp itself).
@@ -542,6 +572,14 @@ int main(int argc, char *argv[]) {
         }
         sensor_states[driver.key]["state"] = driver.app->HasFailed() ? "failed" : "stopped";
         publish_lifecycle("stopping", initialized == drivers.size());
+    }
+    // The SensorSync session ended with the first camera teardown; make sure of it
+    // and keep its verdict in the log (a failed session already failed its
+    // participants, which is what the manifest reports)
+    if (main_config.sensor_sync->HasParticipants()) {
+        main_config.sensor_sync->Disarm("main");
+        common::Log::LogMessage(main_config.sensor_sync->Ok() ? spdlog::level::info : spdlog::level::err, kModule,
+                                 "SensorSync session summary: " + main_config.sensor_sync->Summary().dump());
     }
     std::string failed_at_shutdown;
     for (const auto &driver: drivers) {

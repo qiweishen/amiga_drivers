@@ -6,7 +6,8 @@
 // p.168); ROI before PixelFormat, offsets after size (p.133-134); NetworkThroughputSafetyMargin
 // before the frame rate (p.128); AcquisitionFrameRate before ExposureTime (p.142);
 // TriggerSelector before TriggerMode (p.141); BlemishEnable after PixelFormat (p.156);
-// the Counter0 binding after the trigger (p.115-116, p.160); features.raw last.
+// the Counter0 binding after the trigger (p.115-116, p.160); the Line2 ExposureActive strobe
+// (LineSelector=21 then LineSource=4, p.143-144) after the trigger group; features.raw last.
 
 #include <string>
 #include <vector>

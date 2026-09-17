@@ -13,7 +13,7 @@
 //
 // Header-only and clock-injected so tests can drive it without a filesystem.
 
-namespace fx10 {
+namespace common {
     class LogGrowthTracker {
     public:
         using Clock = std::chrono::steady_clock;
@@ -43,4 +43,4 @@ namespace fx10 {
         std::int64_t last_size_ = -1; // -1 = not sampled yet
         Clock::time_point last_growth_{};
     };
-} // namespace fx10
+} // namespace common

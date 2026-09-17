@@ -54,7 +54,7 @@ GO-X series (Pregius S, PGE) user manual (`docs/Manual_Go-X-Series-PregiusS-PGE.
 | 3 | PTP | `GevIEEE1588=true` + wait for `GevIEEE1588Status` = slave (when `ptp.enabled`) |
 | 4 | stream open | rx buffer, `NegotiatePacketSize`/`SetPacketSize`, `SetStreamDestination`, receiver tuning. **No device feature is written here** — their legal ranges depend on the format/ROI writes that follow (p.130) |
 | 5 | `ApplyConfig` | walks `BuildApplyPlan()` (see below). Every write is read back; the read-backs become device.json's `applied` block |
-| 6 | streaming | buffers → recorder (creates `<cam>/`) → **`device.json`** → `StreamEnable` → `CounterReset` (external only) → `AcquisitionStart` → **first `telemetry.jsonl` row** |
+| 6 | streaming | buffers → recorder (creates `<cam>/`) → **`device.json`** → `StreamEnable` → `CounterReset` (external only) → `AcquisitionStart` → **first `telemetry.jsonl` row** → **SensorSync arm** (`sensor_trigger.enabled`: the rig's shared session starts pulsing once every registered camera has armed, see "External trigger and SensorSync") |
 
 ## The apply plan
 
@@ -74,8 +74,9 @@ or that carry operator intent and must therefore be verified, are in it:
 | 6 | `AcquisitionFrameRate` | freerun + configured | under an external trigger the pulse train sets the timing and the node is not writable (p.36) |
 | 7 | `ExposureTime` | configured | **after** the frame rate: the exposure ceiling is the frame period (p.142), so writing it first gets it clamped against the factory 8 fps |
 | 8 | `Gain` | configured | `GainSelector` is already AnalogAll after the load and the GO-X has no "All" entry (p.148), so the selector is not written |
-| 9 | `TriggerSelector`, `TriggerSource`, `TriggerActivation`, `TriggerMode=On` | external only | selector first, or `TriggerMode=On` arms the factory selector (AcquisitionStart, p.141). freerun writes nothing: the factory `TriggerMode` is already Off |
+| 9 | `TriggerSelector`, `TriggerSource`, `TriggerActivation`, [`TriggerDelay`], [`OptInFilter`], `TriggerMode=On` | external only | selector first, or `TriggerMode=On` arms the factory selector (AcquisitionStart, p.141). `TriggerActivation` is written as the manual's integer (1 = Rising Edge, 2 = Falling Edge, p.142) — Line5 has no `LineInverter` (fixed False, p.143), so this is the only polarity knob. `TriggerDelay` (µs, p.142) and `OptInFilter` (ns, p.145) are written only when `delay_ms` / `input_filter_ns` leave the factory 0. freerun writes nothing: the factory `TriggerMode` is already Off |
 | 9b | `CounterSelector=0`, `CounterEventSource=1` | external only; **not required** | Counter0 counts the FrameTrigger events the camera *received* (p.115-116, p.160). BlockID gaps only show frames the camera emitted, so `Counter0 − emitted` is the only camera-side evidence of a trigger that never became a frame. The values are the integer enum indices the manual prints, so a camera without counters (or one numbering them differently) warns and loses the `trig=` metric instead of failing the bring-up. `CounterReset` is deliberately **not** in the plan: it runs just before `AcquisitionStart`, because `CounterEventSource=Off` stops a counter without clearing it (p.116), and triggers arriving between the apply and the start would otherwise inflate `missed=` |
+| 9c | `LineSelector=21`, `LineSource=4`, `LineInverter=0` | `exposure_active_output: true` (the default), both modes | Line2 Opt Out — the only opto-coupled output, pins 4/5 of the 6-pin connector (p.17) — carries **ExposureActive** to the SensorSync strobe input. The factory value is a copy of the Line5 input (`LineSource=24`, p.144), useless as a strobe. The selector is written first and the source/polarity are read back while it still points at Line2 (p.143-144). Written in freerun too, so the timing log records exposures whichever way the camera is driven |
 | 10 | `features.raw` | as listed | last, so an operator can override anything above |
 
 Read-back is enforced for every write. For items 1-9 a camera-side clamp is a
@@ -179,6 +180,7 @@ directory and before `AcquisitionStart`):
 | `transport` | `PayloadSize`, `GevSCPSPacketSize`, `GevSCPD`, the throughput margin and the frame rate, with the frame rate's node min/max |
 | `runtime` | what "auto" resolved to: buffer count, queue frames, socket RX requested vs effective, negotiated packet size, whether Counter0 bound |
 | `ptp` | enable result, lock time, last status/accuracy, and a `timescale` note: the grandmaster's timescale is a rig property the driver does not verify (p.121 only documents a 1 ns count with a 1970 origin), and no host clock is consulted to guess it |
+| `timing` | the trigger path: `mode`, `trigger_source`, whether this process commands the SensorSync board, the camera's `sensor_channel`, the `expected_pulse_rate_hz` (commanded, not measured), whether Line2 carries ExposureActive, the ExposureActive semantics (width = ExposureTime + 2.45 µs, p.38; opto-out delays, p.19) and `observations_file` — the rig's shared timing log relative to `<cam>/`. `association_verified` is always false: the frame ↔ strobe association is an offline step |
 
 `<cam>/telemetry.jsonl`, one JSON object per device-poll tick (5 s) plus a
 first and a last row: `hrt` (host CLOCK_REALTIME ns, the same key `idx.jsonl`
@@ -199,6 +201,78 @@ unaffected.
 Together the two files cost ~5 KB plus ~200 B / 5 s (≈3.5 MB/day). They are
 counted by the GUI's directory-size poll, so an idle external-trigger session
 now reports a write rate of ~40 B/s instead of exactly zero.
+
+## External trigger and SensorSync
+
+The rig triggers the Go-X the same way it triggers the FX10: hardware pulses
+from the Teensy SensorSync-Logger board (`3rd_party/External/sensor_trigger`),
+whose timing log is the frames' path to GPS time. Wiring, per the manual's
+6-pin DC IN / TRIG connector table (p.17):
+
+| Camera | Signal | Board |
+|---|---|---|
+| Line 5 Opt In (pins 2/3), `TriggerSource=24` | trigger pulse **in** (≈9 V driver, 50 µs, the JAI pair's rate) | JAI-1 GPIO 37 / JAI-2 GPIO 36 (`sensor_channel` 2 / 3) |
+| Line 2 Opt Out (pins 4/5), `LineSource=4` | **ExposureActive out** (high while the sensor exposes) | JAI_EXP-1 GPIO 14 / JAI_EXP-2 GPIO 15 (same channel) |
+
+This is the whole digital I/O of the PGE models: one opto-coupled input, one
+opto-coupled output (the other `LineSelector` entries are internal NAND inputs
+and `TimestampReset`). Line5 cannot be inverted (p.143): `trigger.activation`
+is the polarity knob. `trigger.delay_ms` maps to `TriggerDelay` (µs, p.142) and
+`trigger.input_filter_ns` to `OptInFilter` (p.145), both only when non-zero.
+
+**One board, one session, one log.** The board has two PWM groups — the FX pair
+(channels 0/1, ≥ 20 Hz) and the JAI pair (channels 2/3, 1..10 Hz) — programmed
+by a single `START` command, one serial client, one session at a time. So the
+FX10 driver and this driver cannot each own a session: both are participants of
+the rig-wide `common::SensorSyncHub` that `main` creates for the run
+(`common::Config::sensor_sync`). The board's serial port is named once, in
+`config/config-main.yaml` (`Sensor Trigger: Port`); this driver's yaml only says
+`sensor_trigger.enabled` and, per camera, `trigger.sensor_channel` — a `port`
+key here is rejected as unknown so the two files can never disagree. The timing
+log is one file for the rig, `raw/sensor_trigger.log`, with every channel's
+events (`device.json` `timing.observations_file` points at it relative to
+`<cam>/`), and once every driver has registered `main` logs one
+`SensorSync: port …; FX pair 50 Hz: fx10 (ch0); JAI pair 5 Hz: gox:cam0 (ch2); …`
+line summarising what the rig asked of the board.
+
+* **Register** — `GoxDriverApp::Init`, before any camera is armed: each
+  enabled camera claims its `sensor_channel` and asks for `frame_rate_hz`
+  pulses (0 for a freerun camera: strobes are still logged). The first
+  registration opens the board (STOP + idle check). The config loader already
+  refused rates outside 1..10 Hz, two cameras on one channel, two different
+  rates on the pair, and an exposure that does not fit the pulse period
+  (`exposure_ms < 900 / frame_rate_hz`, the same 10 % margin as freerun —
+  this process commands the period).
+* **Arm** — `CaptureRunner::Init`, right after each camera's
+  `AcquisitionStart`: the pulses start when every registered camera has armed.
+  `main` initialises drivers sequentially and the FX10 arms in its `Run`, so
+  with both cameras it is the FX10's arm that starts the pulses; with the Go-X
+  alone they start here. A pulse a camera is not ready for would be a frame
+  that never exists, hence never earlier.
+* **Guard** — the 200 ms monitor tick fails the rig (fail-fast) on the board's
+  integrity verdict (protocol error, event loss, log I/O), on a timing log that
+  has not grown for 15 s (USB link lost), and on a session that has not started
+  30 s after arming (the other participant never armed). With SensorSync the
+  pulses are this process's own, so **silence is watched**: `MicrosSinceLastData`
+  reports it to main's no-data watchdog exactly as in freerun. An external
+  trigger *without* `sensor_trigger` stays unwatched (somebody else's pulses).
+* **Disarm** — `CaptureRunner::Shutdown`, before the cameras stop: the first
+  participant to tear down ends the session (STOP, board idle, log flushed);
+  a camera stopped under a running pulse train would only collect missed
+  triggers. `main` disarms once more at exit and logs the session summary.
+
+What the timing log can and cannot say for the Go-X: the `T` records are the
+board's own pulse edges and the `S` records the ExposureActive edges on the
+camera's channel; `postprocess.py` fits both to GNSS time through PPS/NMEA. The
+rising ExposureActive edge is the one to use — the opto output rises ≈ 0.48 µs
+after the sensor starts exposing but falls ≈ 3.16 µs late with a load-dependent
+fall time (52 µs at 10 kΩ, p.19), and the pulse width is `ExposureTime + 2.45 µs`
+(p.38). Which strobe belongs to which frame is *not* decided here:
+`association_verified` stays false, Counter0 (received triggers) minus the
+frames the camera emitted is the only camera-side evidence of a lost trigger.
+The link, not the sensor, bounds the pulse rate: 12-bit packed full frames
+allow ≈ 5.8 fps at 1476-byte packets and ≈ 6.1 fps at 12036 (p.48-53), so the
+JAI pair's 1..10 Hz range is not all usable at full resolution.
 
 ## PTP
 
@@ -314,7 +388,22 @@ damage, but cannot reconstruct SDK metadata lost with an index tail.
 * `TriggerSource` is written as the manual's integer enum value (24 = Line5
   Opt In) because the symbolic entry name is not printed anywhere in the
   manual. A symbolic name can be configured instead if the camera's own
-  spelling turns out to be more convenient.
+  spelling turns out to be more convenient. The same holds for
+  `TriggerActivation` (1/2), `LineSelector` (21) and `LineSource` (4): the
+  bring-up reads each one back by value, so a firmware that numbers them
+  differently fails loudly at the apply step rather than triggering wrongly.
+* **Line2 strobe polarity at the board.** The SensorSync firmware assumes
+  `active_high` exposure inputs and the board has 1 kΩ pull-ups on them; the
+  camera's opto output sinks through a user pull-down (p.18). Confirm with a
+  scope on the first run that the JAI_EXP channel is HIGH exactly while the
+  sensor exposes; if it is inverted, set `LineInverter` through `features.raw`
+  (it is writable for Line2, p.143) rather than changing the firmware polarity
+  table for all cameras.
+* **Trigger pulse acceptance.** The board's ≈ 9 V, 50 µs pulses have not yet
+  been measured at the camera connector against the opto input's (undocumented
+  here) current limit; Counter0 vs emitted frames on the first run will show
+  whether every pulse is accepted. `input_filter_ns` must stay well below the
+  pulse width.
 * **Does bypass change anything?** Cover the lens, add
   `{name: VideoProcessBypassMode, value: "On"}` to `features.raw` in
   `config-gox-snapshot.yaml`, take five GUI snapshots with and without it, and

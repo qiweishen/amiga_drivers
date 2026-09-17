@@ -36,14 +36,28 @@ namespace gox {
         TriggerActivation activation = TriggerActivation::kRising;
         std::string selector_entry = "FrameStart"; // only FrameStart drives per-frame exposure (manual p.42)
         // TriggerSource: a number is written as the enum's integer value, a name as the entry name.
-        // 24 = Line5 Opt In, the only opto-coupled input and the factory default (manual p.141)
+        // 24 = Line5 Opt In, the only opto-coupled input (pins 2/3 of the 6-pin connector, p.17)
+        // and the factory default (manual p.141)
         std::string source_entry = "24";
+        double delay_ms = 0.0; // TriggerDelay: exposure start after the trigger edge, 0..500 ms (manual p.142)
+        // OptInFilter on Line5: input changes shorter than this are ignored (chatter); 0 = factory
+        // (manual p.18, p.145). Keep it well below the SensorSync pulse width (50 us)
+        uint32_t input_filter_ns = 0; // 0..40000000, step 100
+        // Line2 Opt Out (pins 4/5, the only opto-coupled output) carries ExposureActive for the
+        // SensorSync strobe input: LineSelector=21, LineSource=4 (manual p.143-144). The factory
+        // value is a copy of the Line5 input (LineSource=24), which is useless as a strobe
+        bool exposure_active_output = true;
+        // SensorSync JAI pair member wired to this camera: trigger output + strobe input
+        // channel 2 (JAI-1: GPIO 37 / 14) or 3 (JAI-2: GPIO 36 / 15)
+        int sensor_channel = 2;
     };
 
     struct AcquisitionConfig {
         std::optional<double> exposure_ms; // ExposureTime is in us (x1000)
         std::optional<double> gain; // Gain[AnalogAll] magnification x1.0..126.0 (manual p.148), not dB
-        std::optional<double> frame_rate_hz; // freerun only
+        // Freerun rate; under an external trigger with sensor_trigger.enabled it is the pulse
+        // rate this driver commands on the SensorSync JAI pair (1..10 Hz) and is required
+        std::optional<double> frame_rate_hz;
         std::optional<std::string> pixel_format; // GenICam enum entry, verbatim
         std::optional<RoiConfig> roi;
         // BlemishEnable (manual p.156): false = "Disable all", the sensor's own pixels, hot pixels included.
@@ -104,10 +118,16 @@ namespace gox {
         PtpOnTimeout on_timeout = PtpOnTimeout::kAbort;
     };
 
+    // Teensy SensorSync-Logger (3rd_party/External/sensor_trigger)
+    struct SensorTriggerConfig {
+        bool enabled = false;
+    };
+
     struct AppConfig {
         std::vector<CameraConfig> cameras;
         OutputConfig output;
         PtpConfig ptp;
+        SensorTriggerConfig sensor_trigger;
         double stats_interval_s = 2.5; // > 0
     };
 

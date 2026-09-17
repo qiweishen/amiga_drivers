@@ -37,10 +37,17 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
     CHECK(*cam.acquisition.gain == doctest::Approx(1.0));
     CHECK(*cam.acquisition.exposure_ms < 900.0 / *cam.acquisition.frame_rate_hz);
 
-    CHECK(cam.acquisition.trigger.mode == TriggerMode::kFreerun);
+    // The rig triggers the Go-X from the SensorSync board: Line5 Opt In takes the
+    // pulses, Line2 Opt Out returns ExposureActive, and the board is the FX10's.
+    CHECK(cam.acquisition.trigger.mode == TriggerMode::kExternal);
     CHECK(cam.acquisition.trigger.activation == TriggerActivation::kRising);
     CHECK(cam.acquisition.trigger.selector_entry == "FrameStart");
     CHECK(cam.acquisition.trigger.source_entry == "24");
+    CHECK(cam.acquisition.trigger.exposure_active_output);
+    CHECK(cam.acquisition.trigger.sensor_channel == 2);
+    CHECK(cfg.sensor_trigger.enabled); // the board's port lives in config-main.yaml
+    CHECK(*cam.acquisition.frame_rate_hz >= 1.0); // the SensorSync JAI pair runs 1..10 Hz
+    CHECK(*cam.acquisition.frame_rate_hz <= 10.0);
 
     REQUIRE(cam.acquisition.roi.has_value());
     CHECK(cam.acquisition.roi->width == 0u);

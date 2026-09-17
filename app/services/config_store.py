@@ -143,6 +143,7 @@ def main_settings() -> dict:
     doc = _main_document()
     general = doc.get("General") or {}
     logging_ = doc.get("Logging System") or {}
+    sensor_trigger = doc.get("Sensor Trigger") or {}
     output_dir = str(general.get("Output Directory", "./data"))
     return {
         "output_dir": resolve_output_dir(output_dir),
@@ -150,6 +151,9 @@ def main_settings() -> dict:
         "enables": {drv: bool(general.get(key, drv == "lms4xxx")) for drv, key in ENABLE_KEYS.items()},
         "enable_logging": bool(logging_.get("Enable Logging", True)),
         "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
+        # The rig's one SensorSync board; "" = none. Standalone tools that own the
+        # board (fx10_reference) get it from here, the drivers through main.
+        "sensor_trigger_port": str(sensor_trigger.get("Port") or "") if isinstance(sensor_trigger, dict) else "",
     }
 
 

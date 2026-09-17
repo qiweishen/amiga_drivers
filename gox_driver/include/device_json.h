@@ -129,6 +129,18 @@ namespace gox {
         bool selector_restore_failed = false;
     };
 
+    // How the frames get their timing: the trigger path and the SensorSync
+    // observations (the association itself is established offline)
+    struct TimingInfo {
+        std::string mode = "freerun"; // "freerun" | "external"
+        std::string trigger_source; // TriggerSource as configured ("24" = Line5 Opt In); "" in freerun
+        bool sensor_trigger_enabled = false; // this process commands the SensorSync board
+        int sensor_channel = -1; // SensorSync channel wired to this camera; -1 = none
+        std::optional<double> expected_pulse_rate_hz; // commanded pulse rate (external + SensorSync)
+        bool exposure_active_output = false; // Line2 Opt Out = ExposureActive was written
+        std::optional<std::string> observations_file; // timing log, relative to <cam>/
+    };
+
     struct DeviceReport {
         std::string camera_id;
         std::string ip;
@@ -145,6 +157,7 @@ namespace gox {
         std::optional<int64_t> sensor_digitization_bits;
         RuntimeShape runtime;
         PtpSummary ptp;
+        TimingInfo timing;
     };
 
     // Every key always present; unavailable values are null

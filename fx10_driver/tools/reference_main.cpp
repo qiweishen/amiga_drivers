@@ -58,7 +58,9 @@ namespace {
         }
     };
 
-    nlohmann::json CapturePhase(const char *phase, fx10::AppConfig cfg,
+    // `sensor_port`: the rig's SensorSync board (config-main.yaml "Sensor Trigger: Port",
+    // passed as --sensor-port); this tool runs without main and owns the board alone
+    nlohmann::json CapturePhase(const char *phase, fx10::AppConfig cfg, const std::string &sensor_port,
                                 const std::filesystem::path &root,
                                 fx10::StreamReceiver &receiver, fx10::CameraControl &control,
                                 fx10::Counters &counters) {
@@ -91,7 +93,7 @@ namespace {
 
         std::unique_ptr<fx10::SensorTriggerLog> trigger;
         if (cfg.sensor_trigger.enabled) {
-            trigger = std::make_unique<fx10::SensorTriggerLog>(cfg.sensor_trigger.port);
+            trigger = std::make_unique<fx10::SensorTriggerLog>(sensor_port);
             trigger->Open();
         }
         fx10::EnviRecorder recorder(cfg.recording, counters);
@@ -228,20 +230,21 @@ namespace {
 }
 
 int main(int argc, char **argv) {
-    std::string config_path, output_dir;
+    std::string config_path, output_dir, sensor_port;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
-            std::puts("Usage: fx10_reference --config <saved FX10 YAML> --out <output root>\n"
+            std::puts("Usage: fx10_reference --config <saved FX10 YAML> --out <output root> [--sensor-port <tty>]\n"
                       "Collect white (open shutter), then dark (closed), each for reference.duration_s from YAML.\n"
-                      "Keeps configured device/acquisition/trigger/recording policies; writes reference_<UTC>/raw/fx10/{white,dark}/fx10_<UTC>.");
+                      "Keeps configured device/acquisition/trigger/recording policies; writes reference_<UTC>/raw/fx10/{white,dark}/fx10_<UTC>.\n"
+                      "--sensor-port: the SensorSync board (config-main.yaml 'Sensor Trigger: Port'); required when sensor_trigger.enabled.");
             return 0;
         }
-        if ((arg != "--config" && arg != "--out") || i + 1 >= argc) {
+        if ((arg != "--config" && arg != "--out" && arg != "--sensor-port") || i + 1 >= argc) {
             Marker("FAIL invalid arguments");
             return 2;
         }
-        (arg == "--config" ? config_path : output_dir) = argv[++i];
+        (arg == "--config" ? config_path : arg == "--out" ? output_dir : sensor_port) = argv[++i];
     }
     if (config_path.empty() || output_dir.empty()) {
         Marker("FAIL --config and --out are required");
@@ -265,6 +268,10 @@ int main(int argc, char **argv) {
         Marker("CONFIG " + nlohmann::json{{"duration_s", cfg.reference.duration_s}}.dump());
         if (cfg.sensor_trigger.enabled && (cfg.sensor_trigger.trigger_channel < 0 || cfg.sensor_trigger.trigger_channel >= 4)) {
             throw std::runtime_error("SensorSync reference capture requires trigger_channel in [0, 3]");
+        }
+        if (cfg.sensor_trigger.enabled && sensor_port.empty()) {
+            throw std::runtime_error("SensorSync reference capture requires --sensor-port "
+                                     "(config-main.yaml 'Sensor Trigger: Port')");
         }
         root = fx10::createSessionDir(std::filesystem::absolute(output_dir), "reference",
             common::TimeUtil::CompactUtc(common::TimeUtil::RealtimeNowNs()));
@@ -295,7 +302,7 @@ int main(int argc, char **argv) {
         fx10::CameraControl control(*receiver.Device());
         control.ApplyAcquisitionConfig(cfg.acquisition, cfg.features.raw);
         for (const char *phase : {"white", "dark"}) {
-            summary["phases"].push_back(CapturePhase(phase, cfg, root, receiver, control, counters));
+            summary["phases"].push_back(CapturePhase(phase, cfg, sensor_port, root, receiver, control, counters));
         }
         receiver.Disconnect(); // dark phase ends closed; the next normal start explicitly opens again
         CheckCancelled();

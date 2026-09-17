@@ -359,6 +359,29 @@ Check whether `LineSelector` exists before choosing an entry for it.
   and nothing that can be associated with another sensor offline. Host time is
   never a time source on this platform (the `host_receive_*` columns of the
   line index are diagnostics, kept for format stability).
+* **One SensorSync session per rig.** The board also triggers the Go-X (its
+  JAI pair), and its protocol allows one client and one `START` per session,
+  so the FX10 driver no longer owns the board: it is a participant of the
+  rig-wide `common::SensorSyncHub` that `main` creates
+  (`common::Config::sensor_sync`). The board's serial port is the rig's,
+  named once in `config/config-main.yaml` (`Sensor Trigger: Port`); this yaml
+  only declares `sensor_trigger.enabled` and `trigger_channel` (a `port` key
+  here is rejected as unknown). `BringUpSession` registers channel
+  `trigger_channel` with `frame_rate_hz` pulses (0 in freerun) — the first
+  registration opens the board, before any camera is armed; `StartStreaming`
+  arms after `AcquisitionStart` and the pulses start once every registered
+  camera has armed (the Go-X arms during its `Init`, so this arm is normally
+  the one that starts them); `TeardownSession` disarms before the stream
+  stops, which ends the session for everybody. The timing log is therefore one
+  file for the rig, `raw/sensor_trigger.log`, and `device.json`
+  `timing.observations_file` / the `.hdr` description name it relative to the
+  ENVI session directory (`../../sensor_trigger.log`); the FX10's own events
+  are the ones on its channel. The monitor loop keeps the same guards on the
+  shared session (integrity, 15 s stall) plus one more: a session that has not
+  started 30 s after this camera armed ends the run. `fx10_reference` still
+  owns the board alone through `fx10::SensorTriggerLog` (now an alias of
+  `common::SensorSyncLog`), takes the port as `--sensor-port` (the GUI passes
+  the main config's value) and writes its log next to its own phases.
 * **Fail-fast.** The first lost or unrecorded frame ends the whole rig at once:
   the monitor thread polls `StreamReceiver::LossSeen()` (RetrieveBuffer error,
   failed operation result, non-image payload, BlockID anomaly, requeue failure)

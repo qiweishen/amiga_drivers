@@ -8,6 +8,8 @@ add_library(amiga_common STATIC
         src/ebus/ipv4.cpp
         src/logger.cpp
         src/run_guards.cpp
+        src/sensor_sync_hub.cpp
+        src/sensor_sync_log.cpp
         src/signal_handler.cpp
         src/utility.cpp
 )
@@ -20,6 +22,12 @@ target_include_directories(amiga_common PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
+
+# SensorSync-Logger host client (session_client.cpp is header-included by
+# sensor_sync_log.cpp; trigger_groups.h / session_rates.h are shared with the
+# firmware). PUBLIC: the camera drivers validate pulse rates with trigger_groups.h
+set(SENSOR_TRIGGER_DIR "${CMAKE_SOURCE_DIR}/3rd_party/External/sensor_trigger")
+target_include_directories(amiga_common SYSTEM PUBLIC "${SENSOR_TRIGGER_DIR}")
 
 target_link_libraries(amiga_common PUBLIC
         spdlog::spdlog

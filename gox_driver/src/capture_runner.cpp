@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "logger.h"
+#include "sensor_sync_hub.h"
 #include "time_util.h"
 #include "stats.h"
 #include "util.h"
@@ -19,11 +20,16 @@ namespace gox {
         // PTP health guard and the device telemetry row.
         constexpr double kDevicePollIntervalS = 5.0;
 
-
+        // SensorSync guards (same numbers as the fx10 driver): no timing-log growth
+        // for this long = the Teensy USB link is down; armed this long without the
+        // shared session starting = another registered camera never armed.
+        constexpr double kSensorSyncStallAbortS = 15.0;
+        constexpr double kSensorSyncStartWaitS = 30.0;
     } // namespace
 
 
-    CaptureRunner::CaptureRunner(AppConfig cfg, StopController *stop) : cfg_(std::move(cfg)), stop_(stop) {
+    CaptureRunner::CaptureRunner(AppConfig cfg, StopController *stop, std::shared_ptr<common::SensorSyncHub> sync)
+        : cfg_(std::move(cfg)), stop_(stop), sync_(cfg_.sensor_trigger.enabled ? std::move(sync) : nullptr) {
     }
 
 
@@ -52,14 +58,29 @@ namespace gox {
             return false;
         }
 
+        const std::string timing_log = sync_ ? sync_->LogPath().string() : std::string();
         for (const CameraConfig &cam: cfg_.cameras) {
             if (cam.enabled) {
-                sessions_.push_back(std::make_unique<ebus::CameraSession>(cam, cfg_, session_uuid_, stop_));
+                sessions_.push_back(std::make_unique<ebus::CameraSession>(cam, cfg_, session_uuid_, stop_, timing_log));
             }
         }
         for (auto &session: sessions_) {
             try {
                 session->Start(session_dir_);
+                // The camera is armed (TriggerMode On, AcquisitionStart): tell the shared
+                // SensorSync session. The pulses start once every registered camera has
+                // armed — normally the FX10, which arms in its Run — or right here when
+                // this driver is the only participant. Never before AcquisitionStart:
+                // a pulse the camera is not ready for is a frame that never exists.
+                if (sync_) {
+                    if (sync_->Arm(SensorSyncOwner(session->id()))) {
+                        g_log.Info("[{}] SensorSync session running; timing log {}", session->id(),
+                                   sync_->LogPath().string());
+                    } else {
+                        g_log.Info("[{}] armed; SensorSync pulses start once every registered camera has armed",
+                                   session->id());
+                    }
+                }
             } catch (const std::exception &e) {
                 // A stop that landed mid-bring-up (Ctrl+C during a PTP wait, or
                 // a running camera's writer failing) surfaces as an exception
@@ -147,6 +168,34 @@ namespace gox {
             if (loss) {
                 break;
             }
+            // SensorSync (the frames' only path to GPS time): the board's integrity
+            // verdict, a stalled timing log and a session that never started are
+            // all "frames without timing", which are worthless — stop the rig.
+            if (sync_) {
+                std::string why;
+                if (!sync_->Ok()) {
+                    why = "SensorSync trigger log/protocol integrity failed (I/O, rejected command, restart or "
+                          "event loss): " + sync_->LastError();
+                } else if (const double stalled = sync_->StalledSeconds(); stalled > kSensorSyncStallAbortS) {
+                    why = fmt::format("SensorSync timing log has not grown for {:.0f} s (Teensy USB link lost?)",
+                                      stalled);
+                } else {
+                    for (auto &s: sessions_) {
+                        const double waiting = sync_->WaitingSeconds(SensorSyncOwner(s->id()));
+                        if (waiting > kSensorSyncStartWaitS) {
+                            why = fmt::format("SensorSync session has not started {:.0f} s after [{}] armed "
+                                              "(another registered camera never armed?)", waiting, s->id());
+                            break;
+                        }
+                    }
+                }
+                if (!why.empty()) {
+                    last_error_ = why;
+                    g_log.Error("{} - stopping the rig (frames without timing observations are worthless)", why);
+                    stop_->RequestStop(StopReason::kError);
+                    break;
+                }
+            }
             // Device poll. Two jobs on one tick, guard first so the telemetry
             // row carries the status the guard just read:
             //  1. PTP guard - the camera must stay in "slave" with a usable
@@ -188,6 +237,12 @@ namespace gox {
             return clean_;
         }
         shutdown_done_ = true;
+        // Pulses stop before the cameras do: a camera stopped under a running pulse
+        // train would only collect missed triggers. The first disarm ends the rig's
+        // shared session (the FX10's teardown may already have); later ones are no-ops
+        if (sync_) {
+            sync_->Disarm(sessions_.empty() ? std::string("gox") : SensorSyncOwner(sessions_.front()->id()));
+        }
         if (!initialized_) {
             // Init() already tore down, logged and kept the concrete error.
             clean_ = false;
@@ -214,6 +269,10 @@ namespace gox {
             clean_ = false;
         } else if (!all_clean) {
             last_error_ = "frame drops / incomplete frames / stream errors detected (see the final statistics above)";
+            clean_ = false;
+        } else if (sync_ && !sync_->Ok()) {
+            // The frames are complete but their timing observations are not
+            last_error_ = "SensorSync timing session failed integrity checks (" + sync_->LastError() + ")";
             clean_ = false;
         }
         return clean_;

@@ -378,6 +378,30 @@ namespace gox {
         ptp["timescale"] = kPtpTimescaleNote;
         doc["ptp"] = std::move(ptp);
 
+        // Timing path. No time is inferred here: the SensorSync log carries the
+        // trigger and strobe observations, and the association is made offline.
+        ordered_json timing;
+        timing["mode"] = r.timing.mode;
+        timing["trigger_source"] = r.timing.trigger_source.empty() ? ordered_json(nullptr) : ordered_json(r.timing.trigger_source);
+        timing["sensor_trigger_enabled"] = r.timing.sensor_trigger_enabled;
+        timing["sensor_channel"] = r.timing.sensor_channel >= 0 ? ordered_json(r.timing.sensor_channel) : ordered_json(nullptr);
+        timing["expected_pulse_rate_hz"] = OptDouble(r.timing.expected_pulse_rate_hz);
+        timing["rate_semantics"] = "commanded SensorSync pulse rate; not a camera-measured frame rate";
+        timing["exposure_active_output"] = r.timing.exposure_active_output;
+        timing["exposure_active_line"] = r.timing.exposure_active_output
+                                             ? ordered_json("Line2 Opt Out (LineSelector 21, LineSource 4 = ExposureActive, manual p.143-144)")
+                                             : ordered_json(nullptr);
+        // Manual p.38: ExposureActive width = ExposureTime + 2.45 us; p.19: opto-out
+        // delays at 12 V / 10 kOhm: rise 0.48 us, fall 3.16 us (+52 us fall time)
+        timing["exposure_active_semantics"] =
+                "high while the sensor exposes; width = ExposureTime + 2.45 us (p.38); opto-out rise delay ~0.48 us, "
+                "fall delay ~3.16 us plus a load-dependent fall time (p.19)";
+        timing["observations_file"] = OptString(r.timing.observations_file);
+        timing["observations_scope"] =
+                "one SensorSync session per rig: every triggered camera's trigger/strobe events share this log, keyed by channel";
+        timing["association_verified"] = false;
+        doc["timing"] = std::move(timing);
+
         doc["recording_contract"] = {
             {"payload", "unmodified GetAcquiredSize bytes from SDK buffer"},
             {"payload_integrity", "CRC-32C in existing v1 payload_crc32c field; kSegFlagPayloadCrc set"},

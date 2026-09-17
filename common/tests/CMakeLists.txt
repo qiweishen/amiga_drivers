@@ -11,6 +11,7 @@ add_executable(common_tests
         test_logger.cpp
         test_ring_buffer.cpp
         test_run_guards.cpp
+        test_sensor_sync_hub.cpp
         test_util.cpp
 )
 

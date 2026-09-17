@@ -158,6 +158,13 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
     r.ptp.synchronized = true;
     r.ptp.status = "slave";
     r.ptp.accuracy = 6;
+    r.timing.mode = "external";
+    r.timing.trigger_source = "24";
+    r.timing.sensor_trigger_enabled = true;
+    r.timing.sensor_channel = 2;
+    r.timing.expected_pulse_rate_hz = 5.0;
+    r.timing.exposure_active_output = true;
+    r.timing.observations_file = "../../sensor_trigger.log";
 
     const nlohmann::ordered_json doc = gox::BuildDeviceJson(r);
 
@@ -225,6 +232,18 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
     CHECK(doc["ptp"]["timescale"] == gox::kPtpTimescaleNote);
     CHECK_FALSE(doc["ptp"].contains("raw_offset_ns"));
     CHECK_FALSE(doc["ptp"].contains("assumed_tai_utc_offset_s"));
+
+    // Timing: the trigger path and where the SensorSync observations are. No
+    // time is inferred here; the association stays an offline step.
+    CHECK(doc["timing"]["mode"] == "external");
+    CHECK(doc["timing"]["trigger_source"] == "24");
+    CHECK(doc["timing"]["sensor_trigger_enabled"] == true);
+    CHECK(doc["timing"]["sensor_channel"] == 2);
+    CHECK(doc["timing"]["expected_pulse_rate_hz"].get<double>() == doctest::Approx(5.0));
+    CHECK(doc["timing"]["exposure_active_output"] == true);
+    CHECK(doc["timing"]["exposure_active_line"].is_string());
+    CHECK(doc["timing"]["observations_file"] == "../../sensor_trigger.log");
+    CHECK(doc["timing"]["association_verified"] == false);
 }
 
 TEST_CASE("device_json: an empty report still has every key, with nulls") {
@@ -237,6 +256,12 @@ TEST_CASE("device_json: an empty report still has every key, with nulls") {
     CHECK(doc["derived"]["sensor_digitization_bits"].is_null());
     // The constants are properties of the camera model, not of this session.
     CHECK(doc["derived"]["exposure_offset_us"].get<double>() == doctest::Approx(2.45));
+    CHECK(doc["timing"]["mode"] == "freerun");
+    CHECK(doc["timing"]["trigger_source"].is_null());
+    CHECK(doc["timing"]["sensor_channel"].is_null());
+    CHECK(doc["timing"]["expected_pulse_rate_hz"].is_null());
+    CHECK(doc["timing"]["exposure_active_line"].is_null());
+    CHECK(doc["timing"]["observations_file"].is_null());
     CHECK(doc["derived"]["black_level"]["black_level_register"].is_null());
     CHECK(doc["transport"]["AcquisitionFrameRateMin"].is_null());
     CHECK(doc["ptp"]["accuracy"].is_null()); // -1 = never read
