@@ -9,17 +9,19 @@
 # --- LiDARs ---
 lidar:
     -   id: Front_Left_Laser            # 1..63 chars [A-Za-z0-9_-]; log tag and file name
-        enabled: false                  # at least one must be enabled
+        enabled: true                  # at least one must be enabled
         device:
             ip: "10.95.76.101"          # IPv4, unique among enabled entries
             port: 2111                  # 1..65535; CoLa B
+
     -   id: Front_Right_Laser
-        enabled: false
+        enabled: true
         device:
             ip: "10.95.76.103"
             port: 2111
+
     -   id: Front_Center_Laser
-        enabled: true
+        enabled: false
         device:
             ip: "10.95.76.102"
             port: 2111
@@ -41,7 +43,7 @@ scan:
 # from its own subnet: see docs/DEVICE_CONFIG.md, "Time".
 ntp:
     enabled: true
-    server: "10.95.2.102"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
+    server: "10.95.76.28"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
     sync_interval_s: 1                  # 1..3600
     check_status_s: 5                   # 1..3600; server probe period while scanning
     lock_timeout_s: 60                  # 1..3600; plausible date deadline; earlier scans retained with quality flags
