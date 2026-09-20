@@ -44,7 +44,7 @@ ntp:
     server: "10.95.2.102"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
     sync_interval_s: 1                  # 1..3600
     check_status_s: 5                   # 1..3600; server probe period while scanning
-    lock_timeout_s: 60                  # 1..3600; first plausible device time stamp must arrive within this
+    lock_timeout_s: 60                  # 1..3600; plausible date deadline; earlier scans retained with quality flags
     max_time_step_ms: 1000              # 1..60000; device time vs uptime disagreement between scans that faults the run
 
 

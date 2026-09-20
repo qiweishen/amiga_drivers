@@ -98,7 +98,7 @@ namespace common {
         }
         const double stalled = StalledSeconds();
         started_ = false;
-        impl_->session.stop(); // sends STOP, drains the tail (~300 ms), closes the file
+        impl_->session.stop(); // stops PWM, waits for exposure tail/final health, closes the file
         if (!impl_->session.ok()) {
             g_log.Warn("[TriggerLog] Timing session '{}' failed integrity checks (I/O, protocol, event loss or "
                        "missing STOP acknowledgement)", log_path_.string());

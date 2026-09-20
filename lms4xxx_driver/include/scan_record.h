@@ -24,6 +24,9 @@ namespace lms4xxx {
         std::int64_t device_time_unix_us = 0; ///< Telegram timestamp as Unix us; 0 when absent
         std::uint32_t time_since_startup_us = 0;
         std::uint32_t transmission_time_us = 0;
+        std::uint64_t host_receive_monotonic_us = 0; ///< Host reception, never an exposure/scan timestamp
+        std::int64_t clock_step_us = 0;
+        std::uint16_t clock_quality_flags = 0; ///< ClockFlag bitmask; 0 = unassessed
 
         // --- Counters / scan geometry ---
         std::uint16_t telegram_counter = 0;

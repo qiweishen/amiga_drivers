@@ -115,13 +115,13 @@ namespace fx10 {
         const std::uint32_t rx_bytes = static_cast<std::uint32_t>(network_.socket_rx_buffer_mb) * 1024u * 1024u;
         const PvResult rx_result = stream->SetUserModeSocketRxBufferSize(rx_bytes);
         if (rx_result.GetCode() == PvResult::Code::INVALID_PARAMETER) {
-            g_log.Warn("[eBUS] SetUserModeSocketRxBufferSize({} bytes): {}. On Linux, eBUS 6.5.1 "
+            throw TransportError(fmt::format("[eBUS] SetUserModeSocketRxBufferSize({} bytes): {}. On Linux, eBUS 6.5.1 "
                        "uses net.core.rmem_max and returns INVALID_PARAMETER when the request exceeds that limit; "
-                       "check sysctl net.core.rmem_max in the acquisition environment. Reading back after Open",
-                       rx_bytes, common::Ebus::PvResultToString(rx_result));
-        } else if (!rx_result.IsOK()) {
-            g_log.Warn("[eBUS] SetUserModeSocketRxBufferSize({} bytes) failed: {}; "
-                       "requested capacity is not confirmed", rx_bytes, common::Ebus::PvResultToString(rx_result));
+                       "requested receive buffering is unavailable; acquisition not started",
+                       rx_bytes, common::Ebus::PvResultToString(rx_result)));
+        } else if (!rx_result.IsOK() && rx_result.GetCode() != PvResult::Code::NOT_SUPPORTED) {
+            throw TransportError(fmt::format("[eBUS] Cannot configure receive buffering ({} bytes): {}",
+                                             rx_bytes, common::Ebus::PvResultToString(rx_result)));
         }
 
         // The explicit GEV Open overload expects an IP, whereas Connect also
@@ -143,15 +143,14 @@ namespace fx10 {
                        "set_result={}; Linux readback may include doubled bookkeeping allocation",
                        rx_bytes, rx_readback, pv(rx_result.GetCodeString()));
             if (rx_readback < rx_bytes) {
-                g_log.Warn("[eBUS] socket rx readback is below the requested size; "
-                           "receive buffering is smaller than configured");
+                throw TransportError(fmt::format("[eBUS] Receive buffer readback {} bytes is below the "
+                    "requested {} bytes; acquisition not started (SO_RCVBUF includes OS bookkeeping)", rx_readback, rx_bytes));
             }
         } else if (rx_read.GetCode() == PvResult::Code::NOT_SUPPORTED) {
             g_log.Info("[eBUS] socket rx readback: {}; this API only supports the user-mode receiver, "
                        "socket capacity is unavailable", common::Ebus::PvResultToString(rx_read));
         } else {
-            g_log.Warn("[eBUS] GetUserModeSocketRxBufferSize failed: {}; socket capacity is unknown",
-                       common::Ebus::PvResultToString(rx_read));
+            throw TransportError("[eBUS] Cannot verify receive buffering: " + common::Ebus::PvResultToString(rx_read));
         }
 
         if (network_.packet_size > 0) {

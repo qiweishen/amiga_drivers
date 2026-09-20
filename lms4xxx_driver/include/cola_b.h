@@ -40,6 +40,14 @@ namespace lms4xxx {
         std::vector<std::uint8_t> payload; ///< Raw binary parameters after command name
     };
 
+    // Subscription acknowledgements use the SAME name but carry one status
+    // byte, not a scan payload. Never dispatch them to ScanDataParser.
+    inline bool IsScanMessage(const ColaBMessage &message) {
+        return message.command_name == "LMDscandata" &&
+               (message.command_type == CommandType::kEventNotify ||
+                message.command_type == CommandType::kReadAnswer);
+    }
+
 
     // Frame: STX(4) + Length(4) + Data + CS(1); integers big-endian
     namespace ColaBCodec {
@@ -76,4 +84,3 @@ namespace lms4xxx {
         std::uint8_t ComputeChecksum(const std::uint8_t *data, std::size_t len);
     } // namespace ColaBCodec
 } // namespace lms4xxx
-

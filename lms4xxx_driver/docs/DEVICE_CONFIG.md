@@ -74,8 +74,9 @@ the clock free-runs (p.97: no RTC) and the time stamp block is switched off.
 NTP is the LiDAR's **only** absolute time source, so the shipped configuration
 enables it. With `ntp.enabled: false` the driver warns at start-up: the scans
 then carry nothing but the device uptime (`time_since_startup_us`, wraps every
-71.6 min) and cannot be associated with any other sensor offline. No host time
-is recorded on this platform in any case.
+71.6 min). Absolute association then requires an independently established
+mapping. Host monotonic reception is recorded for diagnostics, never substituted
+for device scan time.
 
 * **Server.** The AsteRx RBi3 Pro+ serves NTP (and PTP) on its own address,
   10.95.2.102, on the GPS timescale. The LiDARs sit on 10.95.76.x, so the
@@ -84,26 +85,27 @@ is recorded on this platform in any case.
   forwarding on the host, or put the LiDARs on the AsteRx subnet. The driver
   does not write network parameters. The host-side SNTP probe only proves that
   the server is alive from the host; it says nothing about the device's route.
-* **Time lock.** The LMS4xxx has no RTC (p.97): until its first NTP sync the
-  time stamp block carries a free-running clock that starts at the 1970 epoch.
-  The parse thread therefore records nothing until the first telegram whose
-  time stamp is at or after 2026-01-01T00:00:00Z
-  (`kEarliestPlausibleDeviceTimeUs`, `include/scan_verify.h`). Scans before
-  that are counted (`prelock=` in the status line, `prelock_scans_discarded`
-  in `drivers.json`) but not written; their telegram counters are still tracked
-  so the lock does not produce a false counter gap. No plausible time stamp
-  within `ntp.lock_timeout_s` of the stream start faults the run (`ntp=NO-LOCK`
-  in the status line until then; `ntp=OK` once locked).
+* **Plausibility.** The date floor is 2026-01-01T00:00:00Z
+  (`kEarliestPlausibleDeviceTimeUs`, `include/scan_verify.h`). A date above it
+  never means verified NTP lock. Pre-plausibility scans are now written with
+  invalid-time flags; the legacy `prelock_scans_discarded` counter stays zero.
+  No plausible timestamp within `ntp.lock_timeout_s` still requests a time-fault stop.
+* **Device health.** Device warning 38 (No NTP signal) produces `NO-SIGNAL`,
+  independently of host NTP probes. Missing, malformed, or >30-second-old warning
+  readbacks produce `UNKNOWN`. A clear fresh warning list yields `UNVERIFIED`,
+  not an accuracy guarantee. Disabling telemetry leaves device health unknown.
 * **Step check.** Once locked, the device time must advance in step with the
   device uptime: between consecutive recorded scans
   `|Δdevice_time − Δuptime|` (uptime taken modulo 2^32 µs) above
   `ntp.max_time_step_ms` is an NTP step or a clock fault while recording and
   faults the run; the largest value seen is reported as `tstep_max_us=`. A
-  device time that falls below the floor again after the lock faults as well.
-* **Fail-fast.** Like every other loss (ring/queue overflow, telegram counter
-  gap, checksum/framing/parse error), a time fault ends the whole rig at once —
-  an incomplete recording is worthless to the platform and the operator
-  restarts immediately.
+  device time that falls below the floor again after first plausibility faults
+  as well. Every UTC regression is separately flagged/counted even below this
+  threshold; equal UTC samples are counted without being mistaken for lost scans.
+  Regressions and device NTP-loss reports degrade the final session verdict.
+* **Time-fault stop.** A severe time fault requests orderly rig shutdown. The
+  triggering scan and queued valid scan payloads remain recordable with their
+  original timestamp and quality flags. No synthetic corrected time is written.
 
 After `Run`, `sEN LMDscandata 1` starts the stream. The first telegram is the
 proof that everything took effect: DIST1 + RSSI1/REFL1 + ANGL1 + QLTY1, exactly
@@ -112,10 +114,9 @@ block present with NTP and absent without, no encoder block, no device name
 block — anything else faults the run. Scan frequency ≠ 600 Hz or a device
 status ≠ ok are logged as warnings.
 
-A latched fault now stops the parse thread immediately, including on the
-telegram that raised it. It used to only set a flag that the owner polled every
-200 ms, so at 600 Hz more than a hundred scans already known to be invalid were
-written to the `.h5` file first.
+Protocol/content faults stop parsing. Time faults instead allow the parser to
+drain scans and shutdown replies while the owner stops the stream; the writer
+drains before final statistics are published.
 
 ## Shutdown
 

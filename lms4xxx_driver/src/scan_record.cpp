@@ -80,6 +80,9 @@ namespace lms4xxx {
 
         m.time_since_startup_us = scan.time_since_startup_us;
         m.transmission_time_us = scan.transmission_time_us;
+        m.host_receive_monotonic_us = scan.host_receive_monotonic_us;
+        m.clock_step_us = scan.clock_observation.step_us;
+        m.clock_quality_flags = scan.clock_observation.flags;
         m.telegram_counter = scan.telegram_counter;
         m.scan_counter = scan.scan_counter;
 
@@ -155,12 +158,12 @@ namespace lms4xxx {
 
 
     // Packed on-disk width of one /frames row: the sum of the FILE types, not
-    // sizeof(FrameMeta). The struct carries 14 bytes of alignment padding that
-    // never reach the file, so using sizeof() made both the bytes= statistic and
-    // the max_file_bytes split threshold overstate the payload.
+    // sizeof(FrameMeta): alignment padding never reaches the file.
     std::uint32_t FrameMetaBytesOnDisk() {
         return static_cast<std::uint32_t>(
             sizeof(FrameMeta::device_time_unix_us) + sizeof(FrameMeta::time_since_startup_us) +
+            sizeof(FrameMeta::host_receive_monotonic_us) + sizeof(FrameMeta::clock_step_us) +
+            sizeof(FrameMeta::clock_quality_flags) +
             sizeof(FrameMeta::transmission_time_us) + sizeof(FrameMeta::telegram_counter) +
             sizeof(FrameMeta::scan_counter) + sizeof(FrameMeta::num_points) + sizeof(FrameMeta::start_angle) +
             sizeof(FrameMeta::angle_step) + sizeof(FrameMeta::scan_frequency) +

@@ -23,6 +23,7 @@
 #include "logger.h"
 #include "pixel_format.h"
 #include "sensor_trigger_log.h"
+#include "sensor_sync_quality.h"
 #include "session_metadata.h"
 #include "time_util.h"
 #include "wavelengths.h"
@@ -199,6 +200,21 @@ namespace {
             counters.missed_trigger_delta = fx10::MissedTriggerDelta(final_telemetry).value_or(-1);
             result["missed_triggers"] = fx10::BuildTelemetryJson(final_telemetry, "stop")["missed_triggers"];
             telemetry.Close();
+            // Save transport evidence even when the accounting below rejects
+            // this phase (e.g. every second trigger produced no exposure).
+            if (!receiver.DumpStreamParams(recorder.SessionDir() / "stream_stats.txt")) {
+                throw std::runtime_error("cannot save reference stream statistics");
+            }
+            if (trigger) {
+                const auto quality = common::InspectSensorSync(trigger->LogPath(),
+                    static_cast<unsigned>(cfg.sensor_trigger.trigger_channel),
+                    cfg.acquisition.trigger.mode == fx10::TriggerMode::kExternal,
+                    recorder.FramesWrittenTotal(), counters.frames_missed_rx);
+                result["timing_quality"] = quality.Json();
+                fx10::PublishMetadata(recorder.SessionDir() / "timing_quality.json", quality.Json());
+                if (!quality.Ok()) throw std::runtime_error(
+                    "reference trigger/exposure/frame accounting or exposure tail is incomplete; see timing_quality.json");
+            }
             if (receiver.Failed()) throw std::runtime_error("reference transport: " + receiver.ErrorMessage());
             if (recorder.Failed()) throw std::runtime_error("reference recorder: " + recorder.ErrorMessage());
             if (trigger && !trigger->Ok()) throw std::runtime_error("reference trigger stop/log integrity failure");
@@ -208,9 +224,6 @@ namespace {
                 throw std::runtime_error("reference recording contains lost or unconfirmed data");
             }
             if (recorder.FramesWrittenTotal() == 0) throw std::runtime_error("reference contains no frames; check configured trigger source");
-            if (!receiver.DumpStreamParams(recorder.SessionDir() / "stream_stats.txt")) {
-                throw std::runtime_error("cannot save reference stream statistics");
-            }
             result["status"] = "completed";
         } catch (const std::exception &e) {
             cleanup.Finish("reference-failed");

@@ -19,9 +19,9 @@
 
 namespace lms4xxx {
     namespace {
-        // 3: adds the /telemetry group, the device-audit root attributes and the
-        // closed_cleanly/frames_total completeness marker (docs/FORMAT_H5.md).
-        constexpr std::uint32_t kFormatVersion = 3;
+        // 4: adds per-scan clock quality, step residual and host receive time.
+        // Retains v3 /telemetry, device audit and clean-close markers.
+        constexpr std::uint32_t kFormatVersion = 4;
 
         // Chunk of the 1-D metadata columns
         constexpr hsize_t kMetaChunkFrames = 4096;
@@ -93,7 +93,7 @@ namespace lms4xxx {
         };
 
 
-        enum class ColType : std::uint8_t { kU8, kU16, kU32, kI32, kI64, kF32, kStr16 };
+        enum class ColType : std::uint8_t { kU8, kU16, kU32, kU64, kI32, kI64, kF32, kStr16 };
 
 
         // One /frames/<name> dataset per FrameMeta field
@@ -111,12 +111,21 @@ namespace lms4xxx {
 
         constexpr ColumnDesc kFrameColumns[] = {
             LMS_COL(device_time_unix_us, ColType::kI64, "us",
-                    "Telegram timestamp as microseconds since the Unix epoch (NTP-synchronised device clock); "
+                    "Unmodified device UTC as microseconds since the Unix epoch; absolute accuracy unverified; "
                     "0 when NTP is off, the time stamp block is then not output (has_timestamp == 0)."),
             LMS_COL(time_since_startup_us, ColType::kU32, "us",
                     "Device uptime at the start of the scan, microseconds (32-bit wrap)."),
             LMS_COL(transmission_time_us, ColType::kU32, "us",
                     "Device uptime when the telegram was transmitted, microseconds (32-bit wrap)."),
+            LMS_COL(host_receive_monotonic_us, ColType::kU64, "us",
+                    "Host monotonic time when the complete telegram was received; not scan time or UTC."),
+            LMS_COL(clock_step_us, ColType::kI64, "us",
+                    "UTC delta minus unsigned uptime delta; invalid for first/invalid/discontinuous samples."),
+            LMS_COL(clock_quality_flags, ColType::kU16, "bitmask",
+                    "0 unassessed; 1 assessed; 2 invalid timestamp; 4 first sample; 8 repeated UTC; "
+                    "16 backward UTC; 32 step exceeds configured limit; 64 NTP disabled; "
+                    "128 device reports no NTP; 256 device NTP warning status unknown/stale; "
+                    "512 uptime discontinuity; 1024 absolute time accuracy unverified."),
             LMS_COL(telegram_counter, ColType::kU16, nullptr, "Telegram counter, increments per telegram (16-bit wrap)."),
             LMS_COL(scan_counter, ColType::kU16, nullptr, "Scan counter, increments per scan (16-bit wrap)."),
             LMS_COL(num_points, ColType::kU16, nullptr,
@@ -164,6 +173,8 @@ namespace lms4xxx {
                     return 2;
                 case ColType::kU32:
                     return 4;
+                case ColType::kU64:
+                    return 8;
                 case ColType::kI32:
                     return 4;
                 case ColType::kI64:
@@ -196,6 +207,8 @@ namespace lms4xxx {
                     return H5T_NATIVE_UINT16;
                 case ColType::kU32:
                     return H5T_NATIVE_UINT32;
+                case ColType::kU64:
+                    return H5T_NATIVE_UINT64;
                 case ColType::kI32:
                     return H5T_NATIVE_INT32;
                 case ColType::kI64:
@@ -217,6 +230,8 @@ namespace lms4xxx {
                     return H5T_STD_U16LE;
                 case ColType::kU32:
                     return H5T_STD_U32LE;
+                case ColType::kU64:
+                    return H5T_STD_U64LE;
                 case ColType::kI32:
                     return H5T_STD_I32LE;
                 case ColType::kI64:

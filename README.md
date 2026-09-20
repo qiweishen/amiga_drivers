@@ -430,7 +430,7 @@ interleaved. The shutdown totals line is `[Statistics] [inst] Final: ...`.
 ```
 [FX10App]:    [Statistics] frames=1200  rate=50.0 Hz  fps=49.8  missed_triggers=0  temp_pcb=41.2  temp_fpga=52.7
 [GoX]:        [Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ok=1560  incomp=0  drop_q=0  ...
-[LMS4xxxApp]: [Statistics] [Front_Center_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=OK  frames=6000  ...  unexpected=0  prelock=0  tstep_max_us=812
+[LMS4xxxApp]: [Statistics] [Front_Center_Laser] up=00:00:10  rate=600.0 Hz  fps=598.0  ntp=UNVERIFIED  frames=6000  ...  unexpected=0  prelock=0  tstep_max_us=812
 [AsteRx]:     [Statistics] blocks=48210  bytes=12.4 MB  files=1  crc_fail=0  length_errors=0  discarded_bytes=0  ...  queue_pending=0  queue_max=4096
 ```
 
@@ -439,7 +439,9 @@ dashboard's per-sensor cards, and `tools/check_contracts.py` fails if either sid
 renames it. AsteRx records a byte stream rather than frames, so it has no `fps=`;
 during the receiver warm-up its line carries `warmup=<up>/<min>  finetime=0|1`
 instead. The lms4xxx `ntp=` token is `OFF`, `NO-LOCK` (streaming, device clock
-not yet plausible), `OK`, `NO-TS` or `UNREACH`.
+not yet plausible), `UNVERIFIED`, `UNKNOWN` (device warning status stale/unknown),
+`NO-SIGNAL` (device NTP warning), `TIME-ANOMALY`, `NO-TS` or `UNREACH`.
+Host server reachability is a separate field; no token certifies absolute time accuracy.
 
 **4. Throwing is an app-layer decision.** `common::DriverLog` never throws by
 default; the explicit `g_log.Error(true, ...)` overload (log, then

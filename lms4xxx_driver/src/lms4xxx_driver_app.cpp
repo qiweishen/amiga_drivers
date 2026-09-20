@@ -20,8 +20,14 @@ namespace {
     // DriverStatistics::NtpStatus -> status-line token
     const char *NtpStatusText(lms4xxx::DriverStatistics::NtpStatus status) {
         switch (status) {
-            case lms4xxx::DriverStatistics::NtpStatus::kOk:
-                return "OK";
+            case lms4xxx::DriverStatistics::NtpStatus::kUnverified:
+                return "UNVERIFIED";
+            case lms4xxx::DriverStatistics::NtpStatus::kNoSignal:
+                return "NO-SIGNAL";
+            case lms4xxx::DriverStatistics::NtpStatus::kStale:
+                return "UNKNOWN";
+            case lms4xxx::DriverStatistics::NtpStatus::kClockAnomaly:
+                return "TIME-ANOMALY";
             case lms4xxx::DriverStatistics::NtpStatus::kNoTimestamp:
                 return "NO-TS";
             case lms4xxx::DriverStatistics::NtpStatus::kUnreachable:
@@ -294,7 +300,8 @@ void Lms4xxxDriverApp::Run() {
             // sample). New fields are APPENDED, never interleaved.
             g_log.Info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
                        "drop_ring={}  gaps={}  crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  "
-                       "bytes={}  queued={:.1f}  temp={}  unexpected={}  prelock={}  tstep_max_us={}",
+                       "bytes={}  queued={:.1f}  temp={}  unexpected={}  prelock={}  tstep_max_us={}  "
+                       "utc_back={}  utc_repeat={}  ntp_device_loss={}  ntp_server_reachable={}",
                        instance_name_, common::TimeUtil::HumanDuration(uptime_s), scan_hz, write_fps,
                        NtpStatusText(drv.ntp_status),
                        drv.frames_received, drv.frames_parsed, drv.frames_dropped, drv.counter_gaps, drv.crc_errors,
@@ -303,7 +310,8 @@ void Lms4xxxDriverApp::Run() {
                        impl_->last_telemetry.temperature_c
                            ? fmt::format("{:.1f}", *impl_->last_telemetry.temperature_c)
                            : "n/a",
-                       drv.unexpected_replies, drv.prelock_scans_discarded, drv.max_time_step_us);
+                       drv.unexpected_replies, drv.prelock_scans_discarded, drv.max_time_step_us,
+                       drv.utc_backwards, drv.utc_repeated, drv.device_no_ntp_events, drv.ntp_server_reachable);
         }
     }
 
@@ -356,7 +364,8 @@ void Lms4xxxDriverApp::Shutdown() {
     // A clean file close does not make missing scans complete. Keep transport,
     // parser and writer loss visible in the rig's final manifest/exit status.
     if (drv.frames_dropped != 0 || drv.counter_gaps != 0 || drv.crc_errors != 0 ||
-        drv.framing_errors != 0 || drv.parse_errors != 0 || wr.frames_dropped != 0) {
+        drv.framing_errors != 0 || drv.parse_errors != 0 || wr.frames_dropped != 0 ||
+        drv.utc_backwards != 0 || drv.clock_step_events != 0 || drv.device_no_ntp_events != 0) {
         MarkFailed();
     }
     final_statistics_ = {
@@ -368,6 +377,9 @@ void Lms4xxxDriverApp::Shutdown() {
         {"dropped_writer", wr.frames_dropped}, {"bytes_written", wr.bytes_written},
         {"files_created", wr.files_created}, {"ntp_status", NtpStatusText(drv.ntp_status)},
         {"prelock_scans_discarded", drv.prelock_scans_discarded}, {"max_time_step_us", drv.max_time_step_us},
+        {"utc_backwards", drv.utc_backwards}, {"utc_repeated", drv.utc_repeated},
+        {"clock_step_events", drv.clock_step_events}, {"device_no_ntp_events", drv.device_no_ntp_events},
+        {"ntp_server_reachable", drv.ntp_server_reachable}, {"absolute_time_verified", false},
         {"recording_incomplete", HasFailed()}
     };
     const auto duration_s = impl_->scan_start == std::chrono::steady_clock::time_point{}
@@ -378,12 +390,14 @@ void Lms4xxxDriverApp::Shutdown() {
     g_log.Info("[Statistics] [{}] Final: duration={}  frames={}  parsed={}  delivery={:.1f}%  ntp={}  "
                "dropped_ring={}  counter_gaps={}  crc_errors={}  framing_errors={}  parse_errors={}  "
                "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}  prelock={}  "
-               "tstep_max_us={}",
+               "tstep_max_us={}  utc_back={}  utc_repeat={}  clock_step_events={}  ntp_device_loss={}  "
+               "ntp_server_reachable={}",
                instance_name_, common::TimeUtil::HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
                drv.DeliveryRate(), NtpStatusText(drv.ntp_status), drv.frames_dropped, drv.counter_gaps,
                drv.crc_errors, drv.framing_errors, drv.parse_errors, drv.unexpected_replies,
                wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created,
-               drv.prelock_scans_discarded, drv.max_time_step_us);
+               drv.prelock_scans_discarded, drv.max_time_step_us, drv.utc_backwards, drv.utc_repeated,
+               drv.clock_step_events, drv.device_no_ntp_events, drv.ntp_server_reachable);
 
     impl_->driver->Disconnect();
 

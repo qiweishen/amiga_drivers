@@ -36,7 +36,8 @@ except ImportError as exc:  # pragma: no cover - environment guard
 FORMAT = "lms4xxx-h5"
 # Bumped whenever the layout changes; 3 added /telemetry, the device-audit
 # root attributes and the closed_cleanly/frames_total completeness marker.
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
+SUPPORTED_FORMAT_VERSIONS = (3, 4)
 CHANNELS = ("dist", "rssi", "refl", "angl", "qlty")
 
 
@@ -127,10 +128,24 @@ def _verify_file(path: Path, prev_counter: int | None, expect_split: int | None)
         if expect_split is not None and split != expect_split:
             errors.append(f"split_index {split}, expected {expect_split} (missing split file?)")
 
-        # A reader written for v3 must not silently mis-read a future layout.
+        # v4 adds capture-time clock observations; v3 remains readable.
         version = int(_attr(f, "format_version", 0))
-        if version != FORMAT_VERSION:
-            errors.append(f"format_version {version}, this reader understands {FORMAT_VERSION}")
+        if version not in SUPPORTED_FORMAT_VERSIONS:
+            errors.append(f"format_version {version}, this reader understands {SUPPORTED_FORMAT_VERSIONS}")
+        if version == 4:
+            for name in ("host_receive_monotonic_us", "clock_step_us", "clock_quality_flags"):
+                if name not in f["frames"]:
+                    errors.append(f"v4 file lacks /frames/{name}")
+            if "clock_quality_flags" in f["frames"]:
+                flags = f["frames/clock_quality_flags"][:]
+                for bit, label in ((2, "invalid timestamp"), (16, "backward UTC"),
+                                   (32, "excessive clock step"), (128, "device reports no NTP"),
+                                   (512, "uptime discontinuity")):
+                    count = int(np.count_nonzero(flags & bit))
+                    if count:
+                        errors.append(f"{count} scan(s) flagged: {label}; raw data retained")
+                repeated = int(np.count_nonzero(flags & 8))
+                print(f"   {path.name}: {repeated} repeated UTC samples; absolute time accuracy unverified")
 
         # HDF5 has no rename-on-finish, so the marker is the only way to tell a
         # complete recording from one whose writer was killed (FORMAT_H5.md).

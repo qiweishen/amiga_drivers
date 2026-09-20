@@ -1,4 +1,5 @@
 #pragma once
+#include "clock_quality.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -111,6 +112,9 @@ namespace lms4xxx {
 
     // One sSN/sRA LMDscandata telegram
     struct ScanData {
+        // Host observations added by the live driver, not telegram fields.
+        ClockObservation clock_observation;
+        std::uint64_t host_receive_monotonic_us = 0;
         // --- Device Info ---
         ScanDeviceInfo device_info;
 
@@ -203,4 +207,3 @@ namespace lms4xxx {
         [[nodiscard]] float ScanFrequencyHz() const { return static_cast<float>(scan_frequency) / 100.0f; }
     };
 } // namespace lms4xxx
-

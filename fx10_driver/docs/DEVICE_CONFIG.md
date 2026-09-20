@@ -126,6 +126,13 @@ Written but **not** exposed (hidden, driver-internal):
 | 7 | streaming | buffers → `StreamEnable` → `AcquisitionStart` |
 | 8 | external trigger | `SensorTriggerLog::Start` requests pulses only after the camera starts; the snapshot is freerun and does not request pulses |
 
+Stream initialization now fails if the user-mode socket buffer request is
+rejected or its supported readback is below the requested value. A documented
+`NOT_SUPPORTED` backend retains an explicit unknown capacity in runtime metadata;
+other readback errors fail startup. Linux SO_RCVBUF includes bookkeeping and is
+not directly the payload capacity. No sysctl, interface MTU, packet size, or
+resend-policy changes are applied to compensate automatically.
+
 ### Mandatory mechanical-shutter action
 
 The operator supplied the following FX10e control definition. The supplied FX10
@@ -218,6 +225,15 @@ add to the total button-operation time. Startup and in-flight frames are retaine
 with their original per-line timing observations, so the saved data do not assert
 an exact physical exposure span equal to the requested duration. Shutter write acknowledgement still
 does not verify position or settling; no undocumented wait is assumed.
+
+When SensorSync is enabled, each finalized phase also writes `timing_quality.json`.
+It checks the selected channel's edge sequence/order, declared active-high
+exposure polarity, complete exposure pairs, and trigger/exposure/real-frame
+counts. RX gaps can explain a count difference but still fail a clean reference.
+For example, 602 triggers with 301 exposures/frames fails even when the camera's
+MissedTrigger counter is zero. Matching counts never set `association_verified`:
+the per-frame timing anchor and physical signal polarity still require evidence.
+Normal FX10 sessions apply the same final accounting check after stopping/draining.
 
 For external mode with SensorSync enabled, the configured channel's PWM pair
 is enabled: channels 0/1 share FX and channels 2/3 share JAI. Both outputs of that

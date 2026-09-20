@@ -81,6 +81,8 @@ namespace lms4xxx {
         std::atomic<bool> parse_running{false};
         // Polled via HasFault(); data collected past it is invalid
         std::atomic<bool> fault{false};
+        std::atomic<bool> time_fault{false}; // preserve parsed scans while the owner stops/drains
+        std::atomic<bool> stop_stream_requested{false};
 
         // --- Threads ---
         std::thread receive_thread;
@@ -105,6 +107,9 @@ namespace lms4xxx {
         mutable std::mutex telemetry_mutex;
         TelemetrySample telemetry_latest;
         bool telemetry_dirty = false;
+        // Parse-thread owned; never refreshed by unrelated temperature/state replies.
+        std::uint64_t device_warnings_monotonic_us = 0;
+        bool device_no_ntp = false;
 
         // Last sAN seen on the STREAMING path. Once the stream is running the
         // receive thread owns the socket, so a method issued at shutdown cannot
@@ -431,7 +436,9 @@ namespace lms4xxx {
         // Uint16 count, then count x {Uint16 id, Uint16 length, chars}.
         // Pure decode so the command phase and the streaming telemetry path
         // share one implementation.
-        static std::vector<std::string> DecodeActiveMessages(const std::vector<std::uint8_t> &p) {
+        static std::vector<std::string> DecodeActiveMessages(const std::vector<std::uint8_t> &p,
+                                                            bool *complete = nullptr) {
+            if (complete) *complete = false;
             std::vector<std::string> out;
             if (p.size() < 2) {
                 return out;
@@ -449,6 +456,7 @@ namespace lms4xxx {
                                           std::string(reinterpret_cast<const char *>(p.data() + pos), len)));
                 pos += len;
             }
+            if (complete) *complete = pos == p.size() && out.size() == count;
             return out;
         }
 
@@ -548,6 +556,16 @@ namespace lms4xxx {
 
 
         void HandleNonScanFrame(const ColaBMessage &msg) {
+            if (msg.command_type == CommandType::kEventAnswer && msg.command_name == "LMDscandata") {
+                const std::uint8_t expected = stop_stream_requested.load(std::memory_order_acquire) ? 0 : 1;
+                if (msg.payload.size() == 1 && msg.payload[0] == expected) {
+                    g_log.Trace("[{}] LMDscandata subscription acknowledgement: {}", Tag(), expected);
+                } else {
+                    stats.unexpected_replies.fetch_add(1, std::memory_order_relaxed);
+                    g_log.Warn("[{}] Unexpected LMDscandata subscription acknowledgement (expected {})", Tag(), expected);
+                }
+                return;
+            }
             if (msg.command_type == CommandType::kMethodAnswer) {
                 std::lock_guard lock(telemetry_mutex);
                 last_method_name = msg.command_name;
@@ -574,7 +592,22 @@ namespace lms4xxx {
             } else if (msg.command_name == "SCdevicestate" && !msg.payload.empty()) {
                 telemetry_latest.device_state = msg.payload[0];
             } else if (msg.command_name == "EMActiveCustomerInfo") {
-                telemetry_latest.warnings = DecodeActiveMessages(msg.payload);
+                bool complete = false;
+                telemetry_latest.warnings = DecodeActiveMessages(msg.payload, &complete);
+                device_warnings_monotonic_us = complete ? common::TimeUtil::SteadyNowUs() : 0;
+                if (complete) {
+                    const bool no_ntp = std::any_of(telemetry_latest.warnings.begin(), telemetry_latest.warnings.end(),
+                        [](const std::string &warning) { return warning.starts_with("38:"); });
+                    if (config.ntp.enabled && no_ntp && !device_no_ntp) {
+                        stats.device_no_ntp_events.fetch_add(1, std::memory_order_relaxed);
+                        g_log.Warn("[{}] Device reports No NTP signal; host server reachability does not prove device lock", Tag());
+                    }
+                    device_no_ntp = no_ntp;
+                    if (config.ntp.enabled && no_ntp)
+                        stats.ntp_status.store(DriverStatistics::NtpStatus::kNoSignal, std::memory_order_relaxed);
+                } else {
+                    g_log.Warn("[{}] Incomplete device warning readback; NTP warning status unknown", Tag());
+                }
             } else {
                 stats.unexpected_replies.fetch_add(1, std::memory_order_relaxed);
                 return;
@@ -765,8 +798,8 @@ namespace lms4xxx {
         }
 
 
-        // Server watch while scanning (a dead server is masked by the device's
-        // still-accurate clock); kNtpProbeMaxFailures consecutive misses fault the run
+        // Host-to-server reachability watch, independent of device clock quality.
+        // kNtpProbeMaxFailures consecutive misses request an orderly stop.
         void NtpWatchLoop() {
             g_log.Trace("[{}] NTP watch thread started (period {} s)", Tag(), config.ntp.check_status_s);
             int failures = 0;
@@ -785,24 +818,26 @@ namespace lms4xxx {
                 }
                 std::string detail;
                 if (ProbeNtpServer(detail)) {
+                    stats.ntp_server_reachable.store(true, std::memory_order_relaxed);
                     if (failures > 0) {
                         g_log.Info("[{}] NTP server {} reachable again ({})", Tag(), config.ntp.server, detail);
                     }
                     failures = 0;
-                    // ntp_status is owned by the time lock on the parse thread while
-                    // scanning (NO-LOCK -> OK); a reachable server does not change it
+                    // A healthy host probe cannot certify the device's NTP state.
                     continue;
                 }
                 ++failures;
+                stats.ntp_server_reachable.store(false, std::memory_order_relaxed);
                 if (failures < kNtpProbeMaxFailures) {
                     g_log.Warn("[{}] NTP server {} probe failed ({}/{}): {}", Tag(), config.ntp.server, failures,
                                kNtpProbeMaxFailures, detail);
                     continue; // immediate retry
                 }
                 stats.ntp_status.store(DriverStatistics::NtpStatus::kUnreachable, std::memory_order_relaxed);
-                g_log.Error("[{}] NTP server {} unreachable ({} consecutive probes failed: {}) — the device clock "
-                            "is free-running",
+                g_log.Error("[{}] NTP server {} unreachable from this host ({} consecutive probes failed: {}); "
+                            "device synchronization cannot be inferred",
                             Tag(), config.ntp.server, failures, detail);
+                time_fault.store(true, std::memory_order_release);
                 fault.store(true, std::memory_order_release);
                 ReportError(make_error_code(ErrorCode::kInvalidConfig), "NTP server unreachable: " + detail);
                 return; // fault latched; the app terminates the run
@@ -811,75 +846,70 @@ namespace lms4xxx {
         }
 
 
-        // NTP time lock, parse thread only. The LMS4xxx has no RTC (manual p.97):
-        // until its first NTP sync the time stamp block carries a free-running
-        // clock, so scans before the first plausible device time are counted but
-        // not recorded (none within ntp.lock_timeout_s faults the run). Once
-        // locked, device time must advance in step with the device uptime: a
-        // disagreement beyond ntp.max_time_step_ms between consecutive scans is
-        // an NTP step or a clock fault while recording, and faults the run. Host
-        // time is never consulted — the platform does not trust it.
+        // Plausibility is not an NTP lock. Preserve raw scans and their quality
+        // flags, including the sample which requests an orderly time-fault stop.
         struct TimeGate {
             std::chrono::steady_clock::time_point deadline;
-            bool locked = false;
-            std::int64_t prev_device_time_us = 0;
-            std::uint32_t prev_uptime_us = 0;
+            bool plausible_seen = false;
+            bool anomaly_seen = false;
+            ClockQualityTracker tracker;
         };
 
-        // True when the scan may be recorded; false = discarded (pre-lock) or faulted
-        bool TimeGateAdmits(const ScanData &scan, TimeGate &gate) {
+        void AssessScanTime(ScanData &scan, TimeGate &gate) {
             const std::int64_t device_time_us = DeviceTimeUnixUs(scan.timestamp);
             const bool plausible = scan.has_timestamp && DeviceTimePlausible(scan.timestamp);
-            if (!gate.locked) {
-                if (!plausible) {
-                    const auto discarded = stats.prelock_scans_discarded.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (std::chrono::steady_clock::now() >= gate.deadline) {
-                        g_log.Error("[{}] Device clock did not reach a plausible NTP time within {} s (last device "
-                                    "time {}, {} scans discarded) — the device cannot reach NTP server {}? Check "
-                                    "the route/gateway from the LiDAR subnet (manual p.136)", Tag(),
-                                    config.ntp.lock_timeout_s, FormatDeviceTime(scan), discarded, config.ntp.server);
-                        fault.store(true, std::memory_order_release);
-                        ReportError(make_error_code(ErrorCode::kInvalidConfig), "NTP time lock timeout");
-                    }
-                    return false;
-                }
-                gate.locked = true;
-                gate.prev_device_time_us = device_time_us;
-                gate.prev_uptime_us = scan.time_since_startup_us;
-                stats.ntp_status.store(DriverStatistics::NtpStatus::kOk, std::memory_order_relaxed);
-                g_log.Info("[{}] NTP time lock: device time {} at uptime {} us ({} pre-lock scans discarded)", Tag(),
-                           FormatDeviceTime(scan), scan.time_since_startup_us,
-                           stats.prelock_scans_discarded.load(std::memory_order_relaxed));
-                return true;
+            auto &observation = scan.clock_observation;
+            if (!config.ntp.enabled) {
+                observation = {ClockFlag::kAssessed | ClockFlag::kNtpDisabled | ClockFlag::kAbsoluteTimeUnverified, 0};
+                return;
             }
-            if (!plausible) {
-                g_log.Error("[{}] Device time became implausible after the NTP lock ({}) — stopping", Tag(),
-                            FormatDeviceTime(scan));
-                fault.store(true, std::memory_order_release);
-                ReportError(make_error_code(ErrorCode::kInvalidConfig), "device time lost NTP plausibility");
-                return false;
+            observation = gate.tracker.Observe(device_time_us, plausible, scan.time_since_startup_us,
+                                               config.ntp.max_time_step_ms);
+            const auto now_us = common::TimeUtil::SteadyNowUs();
+            const bool warnings_fresh = device_warnings_monotonic_us != 0 &&
+                now_us >= device_warnings_monotonic_us && now_us - device_warnings_monotonic_us <= 30000000;
+            if (!warnings_fresh) observation.flags |= ClockFlag::kDeviceNtpUnknown;
+            else if (device_no_ntp) observation.flags |= ClockFlag::kDeviceNoNtp;
+
+            if (observation.flags & ClockFlag::kBackwardUtc) {
+                const auto count = stats.utc_backwards.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (count == 1) g_log.Warn("[{}] Device UTC moved backwards; raw scan order/time retained, timing quality degraded", Tag());
+                gate.anomaly_seen = true;
             }
-            // Unsigned subtraction wraps correctly across the 2^32 us uptime rollover
-            const std::uint32_t uptime_delta = scan.time_since_startup_us - gate.prev_uptime_us;
-            const std::int64_t step_us = (device_time_us - gate.prev_device_time_us) -
-                                         static_cast<std::int64_t>(uptime_delta);
-            gate.prev_device_time_us = device_time_us;
-            gate.prev_uptime_us = scan.time_since_startup_us;
+            if (observation.flags & ClockFlag::kRepeatedUtc)
+                stats.utc_repeated.fetch_add(1, std::memory_order_relaxed);
+            const bool large_step = (observation.flags & (ClockFlag::kStepExceeded | ClockFlag::kUptimeDiscontinuity)) != 0;
+            if (large_step) {
+                stats.clock_step_events.fetch_add(1, std::memory_order_relaxed);
+                gate.anomaly_seen = true;
+            }
+            const auto step_us = observation.step_us;
             const std::int64_t magnitude = step_us < 0 ? -step_us : step_us;
             std::int64_t seen = stats.max_time_step_us.load(std::memory_order_relaxed);
             while (magnitude > seen &&
                    !stats.max_time_step_us.compare_exchange_weak(seen, magnitude, std::memory_order_relaxed)) {
             }
-            if (magnitude > static_cast<std::int64_t>(config.ntp.max_time_step_ms) * 1000) {
-                g_log.Error("[{}] Device time stepped by {} ms against the device uptime between consecutive scans "
-                            "(limit {} ms; device time now {}): NTP re-synchronisation or clock fault while "
-                            "recording — stopping", Tag(), step_us / 1000, config.ntp.max_time_step_ms,
-                            FormatDeviceTime(scan));
+            auto status = !plausible ? DriverStatistics::NtpStatus::kNotLocked :
+                (!warnings_fresh ? DriverStatistics::NtpStatus::kStale :
+                 (device_no_ntp ? DriverStatistics::NtpStatus::kNoSignal : DriverStatistics::NtpStatus::kUnverified));
+            if (gate.anomaly_seen && status != DriverStatistics::NtpStatus::kNoSignal)
+                status = DriverStatistics::NtpStatus::kClockAnomaly;
+            if (!stats.ntp_server_reachable.load(std::memory_order_relaxed) && fault.load(std::memory_order_acquire))
+                status = DriverStatistics::NtpStatus::kUnreachable;
+            stats.ntp_status.store(status, std::memory_order_relaxed);
+
+            const bool invalid_after_start = !plausible &&
+                (gate.plausible_seen || std::chrono::steady_clock::now() >= gate.deadline);
+            if ((invalid_after_start || large_step) && !time_fault.exchange(true, std::memory_order_acq_rel)) {
+                g_log.Error("[{}] Device time fault (flags={}, step={} us, UTC={}); retaining scan and draining on stop",
+                            Tag(), observation.flags, step_us, FormatDeviceTime(scan));
                 fault.store(true, std::memory_order_release);
-                ReportError(make_error_code(ErrorCode::kInvalidConfig), "device time step while recording");
-                return false;
+                ReportError(make_error_code(ErrorCode::kInvalidConfig), "device time fault; raw scans retained with quality flags");
             }
-            return true;
+            if (plausible && !gate.plausible_seen) {
+                gate.plausible_seen = true;
+                g_log.Info("[{}] Device date plausible: {}; absolute time accuracy remains unverified", Tag(), FormatDeviceTime(scan));
+            }
         }
 
 
@@ -894,9 +924,9 @@ namespace lms4xxx {
             }
 
             while (true) {
-                // A latched fault means the data is worthless; stop feeding the recorder here rather than
-                    // letting ~120 more scans through before the owner's 200 ms poll
-                if (fault.load(std::memory_order_acquire)) {
+                // A time fault does not invalidate native range/intensity data.
+                // Keep draining its scans and command replies during orderly stop.
+                if (fault.load(std::memory_order_acquire) && !time_fault.load(std::memory_order_acquire)) {
                     g_log.Trace("[{}] Parse thread stopping: fault latched", Tag());
                     break;
                 }
@@ -918,7 +948,7 @@ namespace lms4xxx {
                     continue;
                 }
 
-                if (msg.command_name != "LMDscandata") {
+                if (!IsScanMessage(msg)) {
                     // Telemetry answers (sRA) and anything else the device sends
                     // mid-stream. Never silently discarded: an unexpected reply
                     // here is the only visible symptom of a desynchronised link.
@@ -976,13 +1006,8 @@ namespace lms4xxx {
                 stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);
                 stats.last_frame_time_us.store(frame.receive_timestamp_us, std::memory_order_relaxed);
 
-                // Counters above are tracked for every scan; only time-locked scans are recorded
-                if (config.ntp.enabled && !TimeGateAdmits(scan, time_gate)) {
-                    if (fault.load(std::memory_order_acquire)) {
-                        break;
-                    }
-                    continue;
-                }
+                scan.host_receive_monotonic_us = frame.receive_timestamp_us;
+                AssessScanTime(scan, time_gate);
 
                 ScanDataCallback cb;
                 {
@@ -1183,7 +1208,8 @@ namespace lms4xxx {
                 g_log.Error("[{}] NTP server {} check failed: {}", impl_->Tag(), cfg.ntp.server, ntp_detail);
                 return fail(make_error_code(ErrorCode::kInvalidConfig));
             }
-            impl_->stats.ntp_status.store(DriverStatistics::NtpStatus::kOk, std::memory_order_relaxed);
+            impl_->stats.ntp_server_reachable.store(true, std::memory_order_relaxed);
+            impl_->stats.ntp_status.store(DriverStatistics::NtpStatus::kUnverified, std::memory_order_relaxed);
             impl_->stats.ntp_configured_at_us.store(common::TimeUtil::RealtimeNowUs(), std::memory_order_relaxed);
             g_log.Info("[{}] NTP configured: server={} ({}), interval={} s, timezone=UTC", impl_->Tag(),
                        cfg.ntp.server, ntp_detail, cfg.ntp.sync_interval_s);
@@ -1223,6 +1249,10 @@ namespace lms4xxx {
 
         impl_->stats.Reset(); // ntp_status keeps Configure()'s probe result
         impl_->fault.store(false, std::memory_order_release);
+        impl_->time_fault.store(false, std::memory_order_release);
+        impl_->stop_stream_requested.store(false, std::memory_order_release);
+        impl_->device_warnings_monotonic_us = 0;
+        impl_->device_no_ntp = false;
 
         impl_->ring_buffer = std::make_unique<FrameRingBuffer>(impl_->config.network.ring_buffer_frames);
 
@@ -1307,11 +1337,12 @@ namespace lms4xxx {
         // standby leaves the laser on (p.17). Skipped when the parse thread has already given up
         if (impl_->tcp_client && impl_->tcp_client->IsConnected()) {
             constexpr int kShutdownMethodTimeoutMs = 1000;
+            impl_->stop_stream_requested.store(true, std::memory_order_release);
             if (const auto ec = impl_->tcp_client->Write(CommandBuilder::BuildStopStream())) {
                 g_log.Warn("[{}] Failed to send stop stream command (non-fatal): {}", impl_->Tag(), ec.message());
             }
             if (impl_->parse_running.load(std::memory_order_acquire) &&
-                !impl_->fault.load(std::memory_order_acquire)) {
+                (!impl_->fault.load(std::memory_order_acquire) || impl_->time_fault.load(std::memory_order_acquire))) {
                 // SetAccessMode answers 1 = success, LMCstandby answers 0 = success.
                 const bool logged_in = impl_->CallMethodStreaming(CommandBuilder::BuildLogin(), "SetAccessMode",
                                                                    0x01, kShutdownMethodTimeoutMs);

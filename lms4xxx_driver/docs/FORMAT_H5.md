@@ -14,9 +14,12 @@ concatenate them in index order to get the whole run.
 
 The files are self-describing: every dataset and attribute below can be
 discovered with `h5ls -r`, `h5dump -A` or `h5py` without any code from this
-repository. The producer is `lms4xxx_driver/src/lms4xxx_scan_h5_file.cpp`;
+repository. The producer is `lms4xxx_driver/src/scan_h5_file.cpp`;
 `lms4xxx_driver/scripts/inspect_h5.py` is a reference reader (summary,
 integrity check, CSV export).
+
+New recordings use format version 4, adding three per-scan clock observations.
+The reference reader supports both versions 3 and 4; existing files are not migrated.
 
 ## Layout
 
@@ -33,6 +36,8 @@ integrity check, CSV export).
 │                                   (group attribute: description)
 │   ├── device_time_unix_us int64   telegram timestamp as µs since the epoch (device clock), 0 if absent
 │   ├── time_since_startup_us, transmission_time_us          uint32, µs of device uptime
+│   ├── host_receive_monotonic_us uint64                    host complete-telegram reception, µs
+│   ├── clock_step_us int64, clock_quality_flags uint16     clock observations (v4)
 │   ├── telegram_counter, scan_counter, num_points           uint16
 │   ├── start_angle (int32), angle_step (uint16)             1e-4 deg
 │   ├── scan_frequency (1/100 Hz), measurement_frequency     uint32
@@ -101,25 +106,39 @@ counts are also checked on every scan before conversion to the fixed layout.
 
 ### Timestamps
 
-No host-computer time is recorded anywhere in the file: the host clock is not
-trusted on the platform. Existing device-clock fields below are diagnostic
-only, not synchronization sources. Cross-sensor association uses AsteRx GPS
-time and SensorSync driven by AsteRx PPS/ZDA, with the ZDA time-scale conversion
-explicitly established. There is no host/device-clock fallback; tests without
-SensorSync do not provide cross-sensor time association.
+Device timestamps and host observations retain their original meanings; the
+driver does not correct UTC, sort scans, or substitute the host clock. No field
+certifies cross-sensor synchronization. Absolute association needs independent
+evidence for the actual clock source, time scale, and device relationship.
 
-* `device_time_unix_us` — the telegram's timestamp (year…microsecond fields
-  combined, UTC), NTP-synchronised (see `ntp=` in the status line). Scans are
-  only written after the driver's time lock: the first recorded scan is the
-  first one whose time stamp is at or after 2026-01-01 (the device streams a
-  free-running 1970-epoch clock before its first NTP sync), and from then on
-  the device time must advance in step with `time_since_startup_us`
-  (`ntp.max_time_step_ms`, `DEVICE_CONFIG.md` "Time") or the run faults. With
-  NTP off (a warned configuration) the device clock free-runs and the driver
-  switches the time stamp block off (`has_timestamp` = 0,
-  `device_time_unix_us` = 0, `ts_*` = 0).
+* `device_time_unix_us` — the unmodified telegram calendar fields combined as
+  Unix microseconds. A plausible date is not proof of NTP lock. Version 4 retains
+  pre-plausibility and time-fault scans with quality flags. With NTP disabled the
+  timestamp block is absent (`has_timestamp=0`, `device_time_unix_us=0`).
 * `time_since_startup_us` — device uptime, wraps every 2^32 µs (~71 min);
   `inspect_h5.py` uses it for the span/rate estimate.
+* `host_receive_monotonic_us` — complete-telegram reception on the host monotonic
+  clock. Diagnostic only: neither scan time nor UTC, and no cross-boot epoch.
+* `clock_step_us` — consecutive device UTC delta minus the unsigned uptime delta.
+  It is not valid for first, invalid-timestamp, or uptime-discontinuity samples.
+* `clock_quality_flags` — bitmask below. Zero means unassessed, not good quality.
+
+| Bit | Meaning |
+|---:|---|
+| 1 | Assessed by the live driver |
+| 2 | Missing or implausible device timestamp |
+| 4 | First valid sample after startup or an invalid timestamp |
+| 8 | UTC equals the previous sample; may reflect timestamp quantization |
+| 16 | UTC moved backwards |
+| 32 | UTC/uptime disagreement exceeds `ntp.max_time_step_ms` |
+| 64 | NTP disabled |
+| 128 | A fresh device warning reports No NTP signal |
+| 256 | Device warning readback absent, malformed, or older than 30 seconds |
+| 512 | Uptime did not advance or cannot be unwrapped reliably |
+| 1024 | Absolute time accuracy unverified (always set by this driver) |
+
+The clean-close marker describes file finalization, not timing quality. Read the
+per-scan flags and final driver statistics before using UTC for association.
 
 ## Reading
 

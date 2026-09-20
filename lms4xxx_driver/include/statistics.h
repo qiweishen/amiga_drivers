@@ -22,10 +22,15 @@ namespace lms4xxx {
         // telemetry answer. Non-zero means the link carries something the driver
         // does not model — the only visible symptom of a desynchronised stream.
         std::atomic<std::uint64_t> unexpected_replies{0};
-        // NTP time lock (parse thread): scans discarded before the first plausible device time
-        // stamp, and the largest |device-time step - uptime step| between recorded scans (us)
+        // Legacy discarded count (now zero: flagged pre-plausibility scans are retained),
+        // and largest |device UTC delta - uptime delta| between recorded scans (us).
         std::atomic<std::uint64_t> prelock_scans_discarded{0};
         std::atomic<std::int64_t> max_time_step_us{0};
+        std::atomic<std::uint64_t> utc_backwards{0};
+        std::atomic<std::uint64_t> utc_repeated{0};
+        std::atomic<std::uint64_t> clock_step_events{0};
+        std::atomic<std::uint64_t> device_no_ntp_events{0};
+        std::atomic<bool> ntp_server_reachable{false};
 
         // --- Timing (us) ---
         std::atomic<std::uint64_t> last_frame_time_us{0}; ///< Timestamp of last received frame
@@ -35,14 +40,17 @@ namespace lms4xxx {
         // CLOCK_REALTIME us when NTP was configured; 0 = disabled / not yet
         std::atomic<std::uint64_t> ntp_configured_at_us{0};
 
-        // Verified by probing the NTP server itself (not the device clock: a
-        // previously synced device keeps near-correct time and masks a dead server)
+        // Host server reachability is separate. No state below certifies device
+        // lock or absolute timestamp accuracy.
         enum class NtpStatus : std::uint8_t {
             kOff = 0, ///< ntp.enabled = false
-            kOk = 2, ///< server answered a healthy SNTP response (and, while scanning, the device time is locked)
+            kUnverified = 2, ///< plausible device date; absolute time remains unverified
             kNoTimestamp = 3, ///< device streams no timestamp block
-            kUnreachable = 4, ///< server stopped answering (device clock free-running)
-            kNotLocked = 5, ///< scanning, but no plausible (NTP-synchronised) device time stamp seen yet
+            kUnreachable = 4, ///< host cannot reach the server; device's route is not observed
+            kNotLocked = 5, ///< no plausible device calendar timestamp seen yet
+            kNoSignal = 6, ///< device explicitly reports No NTP signal
+            kStale = 7, ///< device warning readback absent, malformed or older than 30 seconds
+            kClockAnomaly = 8, ///< observed UTC regression, uptime discontinuity or excessive step
         };
 
         std::atomic<NtpStatus> ntp_status{NtpStatus::kOff};
@@ -65,6 +73,11 @@ namespace lms4xxx {
             std::uint32_t last_scan_counter;
             std::uint64_t ntp_configured_at_us;
             NtpStatus ntp_status;
+            std::uint64_t utc_backwards;
+            std::uint64_t utc_repeated;
+            std::uint64_t clock_step_events;
+            std::uint64_t device_no_ntp_events;
+            bool ntp_server_reachable;
 
             // Frames delivered to the callback, percent
             double DeliveryRate() const {
@@ -91,6 +104,11 @@ namespace lms4xxx {
                 last_scan_counter.load(std::memory_order_relaxed),
                 ntp_configured_at_us.load(std::memory_order_relaxed),
                 ntp_status.load(std::memory_order_relaxed),
+                utc_backwards.load(std::memory_order_relaxed),
+                utc_repeated.load(std::memory_order_relaxed),
+                clock_step_events.load(std::memory_order_relaxed),
+                device_no_ntp_events.load(std::memory_order_relaxed),
+                ntp_server_reachable.load(std::memory_order_relaxed),
             };
         }
 
@@ -106,6 +124,10 @@ namespace lms4xxx {
             unexpected_replies.store(0, std::memory_order_relaxed);
             prelock_scans_discarded.store(0, std::memory_order_relaxed);
             max_time_step_us.store(0, std::memory_order_relaxed);
+            utc_backwards.store(0, std::memory_order_relaxed);
+            utc_repeated.store(0, std::memory_order_relaxed);
+            clock_step_events.store(0, std::memory_order_relaxed);
+            device_no_ntp_events.store(0, std::memory_order_relaxed);
             last_frame_time_us.store(0, std::memory_order_relaxed);
             last_telegram_counter.store(0, std::memory_order_relaxed);
             last_scan_counter.store(0, std::memory_order_relaxed);
@@ -123,4 +145,3 @@ namespace lms4xxx {
         DriverStatistics &operator=(DriverStatistics &&) = delete;
     };
 } // namespace lms4xxx
-

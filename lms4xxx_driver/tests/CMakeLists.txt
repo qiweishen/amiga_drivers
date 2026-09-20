@@ -3,6 +3,7 @@
 
 set(LMS4XXX_TEST_SOURCES
         test_command_builder.cpp
+        test_clock_quality.cpp
         test_config_schema.cpp
         test_frame_receiver.cpp
         test_ntp_probe.cpp

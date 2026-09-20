@@ -36,6 +36,9 @@ namespace {
         r.meta.angle_step = 833;
         r.meta.scan_frequency = 60000;
         r.meta.device_time_unix_us = 1700000000000000LL + index;
+        r.meta.host_receive_monotonic_us = 10000000ULL + index;
+        r.meta.clock_step_us = -20644;
+        r.meta.clock_quality_flags = lms4xxx::ClockFlag::kAssessed | lms4xxx::ClockFlag::kBackwardUtc;
         r.meta.has_device_name = 1;
         std::strncpy(r.meta.device_name, "unit-test", sizeof(r.meta.device_name) - 1);
         for (std::size_t i = 0; i < lms4xxx::kMaxPointsPerScan; ++i) {
@@ -184,7 +187,10 @@ TEST_CASE("ScanH5File writes the lms4xxx-h5 layout and reads back through the C 
     REQUIRE(file.id >= 0);
 
     CHECK(ReadStringAttr(file.id, "format") == "lms4xxx-h5");
-    CHECK(ReadScalarAttr<std::uint32_t>(file.id, "format_version", H5T_NATIVE_UINT32) == 3u);
+    CHECK(ReadScalarAttr<std::uint32_t>(file.id, "format_version", H5T_NATIVE_UINT32) == 4u);
+    CHECK(ReadAll<std::uint64_t>(file.id, "/frames/host_receive_monotonic_us", H5T_NATIVE_UINT64)[0] == 10000000ULL);
+    CHECK(ReadAll<std::int64_t>(file.id, "/frames/clock_step_us", H5T_NATIVE_INT64)[0] == -20644);
+    CHECK(ReadAll<std::uint16_t>(file.id, "/frames/clock_quality_flags", H5T_NATIVE_UINT16)[0] == 17);
     CHECK(ReadStringAttr(file.id, "config_remission") == "rssi");
     CHECK(ReadStringAttr(file.id, "device_order_number") == "1116198");
     CHECK(ReadStringAttr(file.id, "device_firmware") == "LMS41xxx 1.6.0.0R");
@@ -569,12 +575,12 @@ TEST_CASE("The device audit becomes root attributes, and only for fields that we
     CHECK(H5Aexists(h5.id, "device_laser_trigger_source") > 0);
     CHECK(H5Aexists(h5.id, "device_motor_sync_role") == 0); // never read: no attribute
 
-    // format_version 3 is what carries /telemetry and the marker.
+    // Version 4 retains the v3 telemetry/close markers and adds clock quality.
     Id version{H5Aopen(h5.id, "format_version", H5P_DEFAULT), H5Aclose};
     REQUIRE(version.id >= 0);
     std::uint32_t value = 0;
     REQUIRE(H5Aread(version.id, H5T_NATIVE_UINT32, &value) >= 0);
-    CHECK(value == 3);
+    CHECK(value == 4);
 
     fs::remove_all(dir);
 }

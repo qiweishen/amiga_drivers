@@ -11,6 +11,7 @@
 #include "envi_recorder.h"
 #include "pixel_format.h"
 #include "sensor_sync_hub.h"
+#include "sensor_sync_quality.h"
 #include "session_metadata.h"
 #include "stats_line.h"
 #include "logger.h"
@@ -649,8 +650,8 @@ void Fx10DriverApp::TeardownSession() {
     }
     auto &s = *impl_->session;
 
-    // Stop pulses first, then the stream and counter reads. A strobe already
-    // active at STOP may lack its ending edge; the offline index must flag it.
+    // STOP halts new pulses, retains in-flight exposure edges, then closes the
+    // timing log. Independently check the actual tail, including older firmware.
     bool trigger_log_failed = false;
     if (impl_->sync_participant) {
         impl_->sync->Disarm(kSensorSyncOwner); // first disarm ends the rig's session: pulses stop, log closes
@@ -703,6 +704,26 @@ void Fx10DriverApp::TeardownSession() {
         // Stop(), so classifying before it would miss exactly the failures that
         // leave a segment without its header.
         s.recorder->Stop(impl_->stop_reason);
+    }
+    if (s.recorder && impl_->sync_participant && impl_->sync->Started()) {
+        try {
+            const auto quality = common::InspectSensorSync(impl_->sync->LogPath(),
+                static_cast<unsigned>(impl_->config.sensor_trigger.trigger_channel),
+                impl_->config.acquisition.trigger.mode == fx10::TriggerMode::kExternal,
+                s.recorder->FramesWrittenTotal(), s.counters.frames_missed_rx);
+            fx10::PublishMetadata(s.recorder->SessionDir() / "timing_quality.json", quality.Json());
+            if (!quality.Ok()) {
+                g_log.Error("Trigger/exposure/frame accounting or exposure tail is incomplete: {}",
+                            quality.Json().dump());
+                if (exit_code == 0) {
+                    exit_code = 10;
+                    impl_->stop_reason = "trigger-exposure-accounting";
+                }
+            }
+        } catch (const std::exception &e) {
+            s.metadata_failed = true;
+            g_log.Error("Cannot assess/persist timing accounting: {}", e.what());
+        }
     }
     if (s.recorder && s.recorder->Failed()) {
         // Classified by kind, not by matching substrings of the message.

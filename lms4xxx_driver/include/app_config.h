@@ -65,12 +65,11 @@ namespace lms4xxx {
         std::string server; // IPv4; required when enabled
         std::uint32_t sync_interval_s = 1; // TSCTCupdatetime 1..3600
         std::uint32_t check_status_s = 5; // scanning-time server probe period
-        // The device has no RTC (manual p.97): until its first NTP sync the time stamp block
-        // carries a free-running clock. Scans before the first plausible time stamp are not
-        // recorded; none within this many seconds of the stream start faults the run
+        // Deadline for a plausible device date, not proof of an NTP lock.
+        // Earlier scans remain recorded with invalid-time flags.
         std::uint32_t lock_timeout_s = 60; // 1..3600
-        // Once locked, device time must advance in step with the device uptime; a larger
-        // disagreement between consecutive scans (NTP step, clock fault) faults the run
+        // Large UTC/uptime disagreement requests a time-fault stop. Every UTC
+        // regression is also recorded/counted independently of this threshold.
         std::uint32_t max_time_step_ms = 1000; // 1..60000
     };
 
