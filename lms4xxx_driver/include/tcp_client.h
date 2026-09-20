@@ -26,6 +26,7 @@ namespace lms4xxx {
         kResponseTimeout = 4, ///< Read deadline exceeded
         kNotConnected = 5, ///< Operation requires an active connection
         kAlreadyConnected = 6, ///< Connect called on an active connection
+        kReceiveShutdown = 7, ///< EOF after a local ShutdownReceive request
     };
 
     const std::error_category &TcpErrorCategory() noexcept;
@@ -68,7 +69,8 @@ namespace lms4xxx {
         // Connect with a deadline, then apply the socket options
         std::error_code Connect(int timeout_ms);
 
-        // SHUT_RD: unblocks a pending ReadSome() from another thread; send side stays open
+        // SHUT_RD: unblocks a pending read from another thread; EOF is reported as
+        // kReceiveShutdown, not connection loss. The send side stays open.
         void ShutdownReceive();
 
         // Idempotent
@@ -81,9 +83,11 @@ namespace lms4xxx {
         // the caller can tell "nothing arrived" (0) from "half an answer is on
         // the floor" (> 0) and resynchronise instead of silently reading the
         // tail of this answer as the head of the next one.
+        // A local receive shutdown also returns the bytes already read.
         std::size_t Read(std::uint8_t *buf, std::size_t len, std::error_code &ec, int timeout_ms);
 
-        // Whatever is available; 0 without error when the idle wait expires
+        // Whatever is available; 0 without error when the idle wait expires,
+        // or kReceiveShutdown when EOF follows a local receive shutdown.
         std::size_t ReadSome(std::uint8_t *buf, std::size_t max_len, std::error_code &ec);
 
         // Sends all `len` bytes

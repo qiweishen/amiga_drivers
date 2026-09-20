@@ -816,8 +816,17 @@ namespace lms4xxx {
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                 }
+                if (!ntp_watch_running.load(std::memory_order_acquire)) {
+                    break;
+                }
                 std::string detail;
-                if (ProbeNtpServer(detail)) {
+                const bool reachable = ProbeNtpServer(detail);
+                // The probe may finish after StopScanning() has requested a
+                // stop. Its late result must not create a new shutdown fault.
+                if (!ntp_watch_running.load(std::memory_order_acquire)) {
+                    break;
+                }
+                if (reachable) {
                     stats.ntp_server_reachable.store(true, std::memory_order_relaxed);
                     if (failures > 0) {
                         g_log.Info("[{}] NTP server {} reachable again ({})", Tag(), config.ntp.server, detail);
@@ -952,6 +961,7 @@ namespace lms4xxx {
                     // Telemetry answers (sRA) and anything else the device sends
                     // mid-stream. Never silently discarded: an unexpected reply
                     // here is the only visible symptom of a desynchronised link.
+                    stats.non_scan_frames.fetch_add(1, std::memory_order_relaxed);
                     HandleNonScanFrame(msg);
                     continue;
                 }
@@ -963,8 +973,6 @@ namespace lms4xxx {
                     g_log.Warn("[{}] Scan data parse error: {}", Tag(), ec.message());
                     continue;
                 }
-
-                stats.frames_parsed.fetch_add(1, std::memory_order_relaxed);
 
                 if (!first_frame) {
                     const auto problems = lms4xxx::VerifyScanContent(scan, config.scan, config.ntp.enabled);
@@ -1001,6 +1009,7 @@ namespace lms4xxx {
                     }
                 }
                 first_frame = false;
+                stats.frames_parsed.fetch_add(1, std::memory_order_relaxed);
 
                 stats.last_telegram_counter.store(scan.telegram_counter, std::memory_order_relaxed);
                 stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);

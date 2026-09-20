@@ -103,6 +103,9 @@ for device scan time.
   as well. Every UTC regression is separately flagged/counted even below this
   threshold; equal UTC samples are counted without being mistaken for lost scans.
   Regressions and device NTP-loss reports degrade the final session verdict.
+  `ntp_device_loss` counts entering the device's No NTP signal warning state,
+  including the first such report after starting; it does not prove a previously
+  locked clock lost lock. A later recovery does not erase an event from the run.
 * **Time-fault stop.** A severe time fault requests orderly rig shutdown. The
   triggering scan and queued valid scan payloads remain recordable with their
   original timestamp and quality flags. No synthetic corrected time is written.
@@ -134,6 +137,45 @@ two fire-and-forget writes issued while logged out, so the device almost
 certainly answered `sFA 1` and **the laser kept burning after every run** (p.17:
 permanent measurement shortens the laser diode's life) with nothing in the log
 to say so. If the handshake fails now, the log says the laser is still on.
+
+After the stop handshake, the receive loop is stopped and joined, the parser
+drains its queue and joins, and the writer drains and closes its file. EOF caused
+by the local receive shutdown is a trace-level cancellation, not an unexpected
+connection-loss warning. A remote EOF or connection reset during acquisition
+still reports an error.
+
+Thread/resource teardown and the recording verdict are separate. A run with a
+device No NTP signal event still fails the existing time-quality policy even if
+every accepted scan was written and every thread stopped. Its final log now says
+`LMS4xxx shutdown complete; recording is INCOMPLETE:` followed by the reasons
+(for example `device reported No NTP signal: ntp_device_loss=1`). This remains a
+nonzero run exit status; stopping via a signal must not erase recorded faults.
+Successful-session markers keep their existing meaning.
+
+The LMS4xxx entry in `drivers.json` adds these statistics:
+
+* `shutdown_complete`: the receive/parse/writer teardown and disconnect returned.
+  This describes resource teardown, not whether standby succeeded on the device.
+* `data_integrity_failed`: observed receive/parse/writer loss, a writer failure,
+  or disagreement between validated, queued and written scan totals after drain.
+* `time_quality_degraded`: an observed time-quality event or a bad final NTP
+  status. Before the time grace period expires, a bad final status alone is
+  diagnostic; it does not add a new failure policy.
+* `failure_reasons`: the explicit reasons for rejecting this recording, including
+  driver faults and earlier run failures. `recording_incomplete` remains the
+  aggregate verdict for compatibility.
+
+False degradation/error flags do not certify end-to-end completeness or absolute
+time accuracy; `absolute_time_verified` remains false.
+
+`frames`/`frames_received` still count all complete CoLa B frames. The new
+`control_frames` log field (`non_scan_frames` in the manifest) counts frames
+decoded and classified as non-scan replies. `scan_candidates` is their difference;
+undecodable, dropped and unprocessed complete frames remain in this denominator.
+`parsed` now counts scans that passed parsing and configured-content checks.
+`delivery` is `parsed / scan_candidates`; it is not a wire-loss or disk-success
+rate. CRC/framing errors and missing telegrams retain their separate counters.
+The live `rate` counts validated scans per second; `fps` still counts written scans.
 
 Timeouts: variable reads/writes use `network.response_timeout_ms` (shipped at
 1000 ms; the socket's `SO_RCVTIMEO` follows it as the poll granularity, and

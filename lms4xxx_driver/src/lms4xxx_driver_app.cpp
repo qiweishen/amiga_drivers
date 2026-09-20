@@ -8,6 +8,7 @@
 
 #include "driver_markers.h"
 #include "logger.h"
+#include "recording_status.h"
 #include "time_util.h"
 #include "utility.h"
 
@@ -37,19 +38,6 @@ namespace {
             default:
                 return "OFF";
         }
-    }
-
-    // Fail-fast: the name of the first counter that proves the recording is no
-    // longer complete, or nullptr. Same predicate as the final verdict in Shutdown().
-    const char *FirstLoss(const lms4xxx::DriverStatistics::Snapshot &drv,
-                          const lms4xxx::ScanRecordWriter::Statistics &wr) {
-        if (drv.frames_dropped != 0) return "receive ring overflow";
-        if (wr.frames_dropped != 0) return "writer queue overflow";
-        if (drv.counter_gaps != 0) return "telegram counter gap";
-        if (drv.crc_errors != 0) return "frame checksum error";
-        if (drv.framing_errors != 0) return "framing error";
-        if (drv.parse_errors != 0) return "parse error";
-        return nullptr;
     }
 
     // DIST + ANGL + QLTY always; the remission channel follows scan.remission
@@ -240,7 +228,7 @@ void Lms4xxxDriverApp::Run() {
             const auto drv = impl_->driver->GetStatistics();
             const lms4xxx::ScanRecordWriter::Statistics wr =
                     impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
-            if (const char *what = FirstLoss(drv, wr); what != nullptr) {
+            if (const char *what = lms4xxx::FirstDataLoss(drv, wr); what != nullptr) {
                 MarkFailed();
                 g_log.Error("[{}] First data-loss event ({}) — terminating the run (fail-fast: the recording "
                             "would be incomplete; see the warning above for the details)", instance_name_, what);
@@ -273,10 +261,10 @@ void Lms4xxxDriverApp::Run() {
             const auto drv = impl_->driver->GetStatistics();
             const lms4xxx::ScanRecordWriter::Statistics wr =
                     impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
-            // One CoLa B frame per scan
+            // Only validated scans contribute to scan rate; CoLa B also carries control replies.
             const double dt = std::chrono::duration<double>(now - rate_prev_time).count();
             const double scan_hz = dt > 0.0
-                                       ? static_cast<double>(drv.frames_received - rate_prev_frames) / dt
+                                       ? static_cast<double>(drv.frames_parsed - rate_prev_frames) / dt
                                        : 0.0;
             // app/services/driver_stats.py defines fps= as frames ACTUALLY
             // WRITTEN TO DISK per second, and that is what the dashboard card
@@ -288,7 +276,7 @@ void Lms4xxxDriverApp::Run() {
             const double queued_fps = dt > 0.0
                                           ? static_cast<double>(wr.frames_queued - rate_prev_queued) / dt
                                           : 0.0;
-            rate_prev_frames = drv.frames_received;
+            rate_prev_frames = drv.frames_parsed;
             rate_prev_written = wr.frames_written;
             rate_prev_queued = wr.frames_queued;
             rate_prev_time = now;
@@ -344,30 +332,23 @@ void Lms4xxxDriverApp::Shutdown() {
     }
 
     if (impl_->driver->IsScanning()) {
-        impl_->driver->StopScanning();
-    }
-    if (impl_->driver->HasFault()) {
-        MarkFailed();
+        if (const auto ec = impl_->driver->StopScanning()) {
+            MarkFailed();
+            g_log.Error("[{}] StopScanning failed: {}", instance_name_, ec.message());
+        }
     }
 
     // Stop the writer first so the summary reports the on-disk totals
     if (impl_->writer) {
         impl_->writer->Stop();
-        if (impl_->writer->HasFailed()) {
-            MarkFailed();
-        }
     }
 
     const auto drv = impl_->driver->GetStatistics();
     const lms4xxx::ScanRecordWriter::Statistics wr =
             impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
-    // A clean file close does not make missing scans complete. Keep transport,
-    // parser and writer loss visible in the rig's final manifest/exit status.
-    if (drv.frames_dropped != 0 || drv.counter_gaps != 0 || drv.crc_errors != 0 ||
-        drv.framing_errors != 0 || drv.parse_errors != 0 || wr.frames_dropped != 0 ||
-        drv.utc_backwards != 0 || drv.clock_step_events != 0 || drv.device_no_ntp_events != 0) {
-        MarkFailed();
-    }
+    const auto result = lms4xxx::AssessRecording(drv, wr, impl_->driver->HasFault(),
+                                                impl_->writer && impl_->writer->HasFailed(), HasFailed());
+    if (result.Failed()) MarkFailed();
     final_statistics_ = {
         {"instance", instance_name_}, {"frames_received", drv.frames_received},
         {"frames_parsed", drv.frames_parsed}, {"dropped_ring", drv.frames_dropped},
@@ -380,6 +361,9 @@ void Lms4xxxDriverApp::Shutdown() {
         {"utc_backwards", drv.utc_backwards}, {"utc_repeated", drv.utc_repeated},
         {"clock_step_events", drv.clock_step_events}, {"device_no_ntp_events", drv.device_no_ntp_events},
         {"ntp_server_reachable", drv.ntp_server_reachable}, {"absolute_time_verified", false},
+        {"non_scan_frames", drv.non_scan_frames}, {"scan_candidates", drv.ScanCandidateFrames()},
+        {"shutdown_complete", false}, {"data_integrity_failed", result.data_integrity_failed},
+        {"time_quality_degraded", result.time_quality_degraded}, {"failure_reasons", result.failure_reasons},
         {"recording_incomplete", HasFailed()}
     };
     const auto duration_s = impl_->scan_start == std::chrono::steady_clock::time_point{}
@@ -391,22 +375,22 @@ void Lms4xxxDriverApp::Shutdown() {
                "dropped_ring={}  counter_gaps={}  crc_errors={}  framing_errors={}  parse_errors={}  "
                "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}  prelock={}  "
                "tstep_max_us={}  utc_back={}  utc_repeat={}  clock_step_events={}  ntp_device_loss={}  "
-               "ntp_server_reachable={}",
+               "ntp_server_reachable={}  control_frames={}  scan_candidates={}",
                instance_name_, common::TimeUtil::HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
                drv.DeliveryRate(), NtpStatusText(drv.ntp_status), drv.frames_dropped, drv.counter_gaps,
                drv.crc_errors, drv.framing_errors, drv.parse_errors, drv.unexpected_replies,
                wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created,
                drv.prelock_scans_discarded, drv.max_time_step_us, drv.utc_backwards, drv.utc_repeated,
-               drv.clock_step_events, drv.device_no_ntp_events, drv.ntp_server_reachable);
+               drv.clock_step_events, drv.device_no_ntp_events, drv.ntp_server_reachable,
+               drv.non_scan_frames, drv.ScanCandidateFrames());
 
     impl_->driver->Disconnect();
+    impl_->driver.reset(); // Makes the destructor and repeated Shutdown() no-ops.
+    final_statistics_["shutdown_complete"] = true;
 
     if (HasFailed()) {
-        g_log.Error("[{}] LMS4xxx driver ended with issues; recording is INCOMPLETE", instance_name_);
+        g_log.Error("[{}] LMS4xxx shutdown complete; recording is INCOMPLETE: {}", instance_name_, result.Summary());
     } else {
         g_log.Info(fmt::runtime(common::Markers::kLmsShutdownInstTpl), instance_name_);
     }
-
-    // Makes the destructor and repeated Shutdown() no-ops
-    impl_->driver.reset();
 }

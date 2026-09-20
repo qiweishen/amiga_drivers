@@ -42,6 +42,8 @@ namespace {
                     return "not connected";
                 case lms4xxx::TcpError::kAlreadyConnected:
                     return "already connected";
+                case lms4xxx::TcpError::kReceiveShutdown:
+                    return "receive side shut down locally";
             }
             return "unknown tcp_client error";
         }
@@ -66,6 +68,7 @@ namespace lms4xxx {
         asio::io_context io_context;
         tcp::socket socket;
         std::atomic<bool> connected{false};
+        std::atomic<bool> receive_shutdown_requested{false};
 
         explicit Impl(Options opts) : options(std::move(opts)), io_context(), socket(io_context) {
         }
@@ -181,6 +184,7 @@ namespace lms4xxx {
             return make_error_code(TcpError::kAlreadyConnected);
         }
         Disconnect(); // also closes a socket left open by a failed previous operation
+        impl_->receive_shutdown_requested.store(false, std::memory_order_release);
 
         boost::system::error_code bec;
         const auto address = asio::ip::make_address(impl_->options.host, bec);
@@ -234,6 +238,9 @@ namespace lms4xxx {
         if (!impl_ || !impl_->connected.load(std::memory_order_acquire)) {
             return;
         }
+        // Publish before SHUT_RD can wake the receive thread with EOF. Keep this
+        // separate from connected: shutting down reception leaves writes valid.
+        impl_->receive_shutdown_requested.store(true, std::memory_order_release);
         boost::system::error_code ec;
         impl_->socket.shutdown(tcp::socket::shutdown_receive, ec);
         // Best-effort: the socket may already be closing
@@ -299,7 +306,11 @@ namespace lms4xxx {
                     }
                     continue;
                 }
-                if (bec == asio::error::eof || bec == asio::error::connection_reset) {
+                if (bec == asio::error::eof &&
+                    impl_->receive_shutdown_requested.load(std::memory_order_acquire)) {
+                    ec = make_error_code(TcpError::kReceiveShutdown);
+                    g_log.Trace("[TCP] Read stopped by local receive shutdown");
+                } else if (bec == asio::error::eof || bec == asio::error::connection_reset) {
                     impl_->connected.store(false, std::memory_order_release);
                     ec = make_error_code(TcpError::kConnectionLost);
                     g_log.Warn("[TCP] Connection lost during read: {}", bec.message());
@@ -340,7 +351,11 @@ namespace lms4xxx {
                 ec = {};
                 return 0;
             }
-            if (bec == asio::error::eof || bec == asio::error::connection_reset) {
+            if (bec == asio::error::eof &&
+                impl_->receive_shutdown_requested.load(std::memory_order_acquire)) {
+                ec = make_error_code(TcpError::kReceiveShutdown);
+                g_log.Trace("[TCP] ReadSome stopped by local receive shutdown");
+            } else if (bec == asio::error::eof || bec == asio::error::connection_reset) {
                 impl_->connected.store(false, std::memory_order_release);
                 ec = make_error_code(TcpError::kConnectionLost);
                 g_log.Warn("[TCP] Connection lost during read_some: {}", bec.message());

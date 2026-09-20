@@ -7,6 +7,8 @@ set(LMS4XXX_TEST_SOURCES
         test_config_schema.cpp
         test_frame_receiver.cpp
         test_ntp_probe.cpp
+        test_recording_status.cpp
+        test_statistics.cpp
         test_scan_data_parser.cpp
         test_scan_h5_file.cpp
         test_scan_record.cpp

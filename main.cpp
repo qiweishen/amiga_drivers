@@ -583,12 +583,16 @@ int main(int argc, char *argv[]) {
     }
     std::string failed_at_shutdown;
     for (const auto &driver: drivers) {
-        drivers_json.AddDriverResult(std::string(driver.name), driver.app->HasFailed(), driver.app->FinalStatistics());
+        const auto statistics = driver.app->FinalStatistics();
+        drivers_json.AddDriverResult(std::string(driver.name), driver.app->HasFailed(), statistics);
         if (driver.app->HasFailed()) {
             if (!failed_at_shutdown.empty()) {
                 failed_at_shutdown += ", ";
             }
             failed_at_shutdown.append(driver.name);
+            if (const auto instance = statistics.value("instance", std::string{}); !instance.empty()) {
+                failed_at_shutdown += "[" + instance + "]";
+            }
         }
     }
     if (lms_ready_count() > 0 && failed_at_shutdown.empty()) {

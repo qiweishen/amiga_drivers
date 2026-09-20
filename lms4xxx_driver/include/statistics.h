@@ -15,7 +15,8 @@ namespace lms4xxx {
         std::atomic<std::uint64_t> framing_errors{0}; ///< Invalid frame structure
 
         // --- Parse thread counters ---
-        std::atomic<std::uint64_t> frames_parsed{0}; ///< Successfully parsed scan frames
+        std::atomic<std::uint64_t> frames_parsed{0}; ///< Parsed scans that passed configured content checks
+        std::atomic<std::uint64_t> non_scan_frames{0}; ///< Decoded CoLa B frames classified as non-scan replies
         std::atomic<std::uint64_t> parse_errors{0}; ///< Parse failures
         std::atomic<std::uint64_t> counter_gaps{0}; ///< Telegram/scan counter discontinuities
         // Frames that decoded cleanly but were neither a scan nor an expected
@@ -78,12 +79,24 @@ namespace lms4xxx {
             std::uint64_t clock_step_events;
             std::uint64_t device_no_ntp_events;
             bool ntp_server_reachable;
+            std::uint64_t non_scan_frames;
 
-            // Frames delivered to the callback, percent
+            // Exclude only frames positively identified as non-scan replies.
+            // Undecodable, dropped and pending frames remain candidates, so a
+            // receive-ring loss or parse failure cannot improve the rate.
+            std::uint64_t ScanCandidateFrames() const {
+                return frames_received > non_scan_frames ? frames_received - non_scan_frames : 0;
+            }
+
+            // Parsed, content-verified scans / received scan candidates, percent.
+            // This is not callback delivery, writer success or end-to-end loss:
+            // missing telegrams and frames rejected before extraction have their
+            // own counters and never enter frames_received.
             double DeliveryRate() const {
-                if (frames_received == 0)
+                const auto candidates = ScanCandidateFrames();
+                if (candidates == 0)
                     return 0.0;
-                return static_cast<double>(frames_parsed) / static_cast<double>(frames_received) * 100.0;
+                return static_cast<double>(frames_parsed) / static_cast<double>(candidates) * 100.0;
             }
 
         };
@@ -109,6 +122,7 @@ namespace lms4xxx {
                 clock_step_events.load(std::memory_order_relaxed),
                 device_no_ntp_events.load(std::memory_order_relaxed),
                 ntp_server_reachable.load(std::memory_order_relaxed),
+                non_scan_frames.load(std::memory_order_relaxed),
             };
         }
 
@@ -119,6 +133,7 @@ namespace lms4xxx {
             crc_errors.store(0, std::memory_order_relaxed);
             framing_errors.store(0, std::memory_order_relaxed);
             frames_parsed.store(0, std::memory_order_relaxed);
+            non_scan_frames.store(0, std::memory_order_relaxed);
             parse_errors.store(0, std::memory_order_relaxed);
             counter_gaps.store(0, std::memory_order_relaxed);
             unexpected_replies.store(0, std::memory_order_relaxed);
