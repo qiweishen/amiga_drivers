@@ -28,8 +28,7 @@ target_include_directories(amiga_common PUBLIC
 # SensorSync-Logger host client (session_client.cpp is header-included by
 # sensor_sync_log.cpp; trigger_groups.h / session_rates.h are shared with the
 # firmware). PUBLIC: the camera drivers validate pulse rates with trigger_groups.h
-set(SENSOR_TRIGGER_DIR "${CMAKE_SOURCE_DIR}/3rd_party/External/sensor_trigger")
-target_include_directories(amiga_common SYSTEM PUBLIC "${SENSOR_TRIGGER_DIR}")
+target_include_directories(amiga_common SYSTEM PUBLIC "${sensor_trigger_SOURCE_DIR}")
 
 target_link_libraries(amiga_common PUBLIC
         spdlog::spdlog

@@ -177,7 +177,7 @@ deployment is the single container shown above. See [Web GUI](#web-gui) for reco
 | Boost (header-only) | system | lms4xxx (Asio TCP) |
 | Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
 | eBUS SDK (Pleora) 6.5.1-6797 | exact local package and SHA-256 checked by the Dockerfile; shared `cmake/FindeBUS.cmake` | gox + fx10 hardware adapters |
-| SensorSync host client | reviewed local source snapshot, four consumed files pinned by SHA-256 in `cmake/SensorTriggerSnapshot.cmake`; configure never updates it | shared camera trigger session |
+| SensorSync host client | FetchContent from [`qiweishen/sensor_trigger`](https://github.com/qiweishen/sensor_trigger.git), following `main` without a version or content pin (`cmake/Dependencies.cmake`) | shared camera trigger session |
 
 The GUI/control service use Python 3.10+ and the direct dependency versions in
 [`requirements.txt`](requirements.txt): NiceGUI, PyYAML, NumPy and OpenCV.
@@ -192,9 +192,13 @@ Build boundaries are explicit (all default to `ON`):
 A configuration enabling an excluded driver is rejected before initialization.
 `AMIGA_BUILD_TESTS=OFF` also omits contract-test registration.
 `AMIGA_BUILD_REVISION` supplies the recorded source identity (default `unknown`);
-configure does not query Git. The existing manifest field name `git_sha` is retained.
-SensorSync is pinned by local content, not an inferred upstream commit; missing or
-changed files stop configuration and require an explicit reviewed snapshot update.
+configure does not query Git for this identity. The existing manifest field name
+`git_sha` is retained.
+During configuration, FetchContent obtains the SensorSync source under
+`3rd_party/External/sensor_trigger`. This upstream repository is not a CMake
+project: only its source is populated, and `amiga_common` compiles the host-side
+`session_client.cpp`. The firmware is not built. The dependency follows `main`
+without fixed-version or file-hash checks.
 
 ## Quick start
 

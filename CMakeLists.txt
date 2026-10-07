@@ -37,7 +37,7 @@ option(AMIGA_BUILD_TESTS "Build unit tests" ON)
 option(AMIGA_ENABLE_EBUS "Build eBUS camera acquisition and device tools" ON)
 option(AMIGA_ENABLE_ASTERX "Build AsteRx acquisition and its Qt/ssnrx SDK" ON)
 option(AMIGA_ENABLE_LMS4XXX "Build LMS acquisition and its HDF5 recorder" ON)
-# Caller-provided identity: configure never queries version control.
+# Caller-provided application identity; no version-control query for metadata.
 set(AMIGA_BUILD_REVISION "unknown" CACHE STRING "Source revision recorded in drivers.json")
 if (NOT AMIGA_BUILD_REVISION MATCHES "^[A-Za-z0-9._+-]+$")
     message(FATAL_ERROR "AMIGA_BUILD_REVISION must contain only letters, digits, '.', '_', '+' or '-'")

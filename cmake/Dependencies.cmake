@@ -6,9 +6,17 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
-# SensorSync host API is supplied as a reviewed local source snapshot. Never
-# update it from a moving branch during configure; verify every consumed file.
-include(${CMAKE_CURRENT_LIST_DIR}/SensorTriggerSnapshot.cmake)
+# SensorSync host API follows upstream main without a version/content pin.
+# There is no CMakeLists.txt, so MakeAvailable only populates the sources.
+# amiga_common includes session_client.cpp; board firmware is not built here.
+FetchContent_Declare(
+        sensor_trigger
+        GIT_REPOSITORY https://github.com/qiweishen/sensor_trigger.git
+        GIT_TAG main
+        GIT_SHALLOW TRUE
+        SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/External/sensor_trigger
+)
+FetchContent_MakeAvailable(sensor_trigger)
 
 
 ################################################################################
