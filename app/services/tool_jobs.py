@@ -1,4 +1,4 @@
-"""Durable tool identity, bounded output, and verified termination on both backends.
+"""Durable tool identity, bounded output, and verified local termination.
 
 The shell is a fixed launch gate: its PID survives exec. No device tool runs
 until that identity has been journaled. Arguments are always separate argv.
@@ -113,12 +113,6 @@ async def terminate(proc: asyncio.subprocess.Process) -> None:
     try:
         _save()
         await _terminate_identity(_handle.identity)
-        # Reap a remaining docker-exec client only after the remote PID is gone.
-        if runtime.is_docker() and proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
         await asyncio.wait_for(proc.wait(), 5)
     except BaseException:
         STATE.tool_uncertain = True
@@ -212,10 +206,6 @@ async def reconcile() -> None:
 
 
 async def stop(operation_id: str) -> None:
-    from . import control_client
-    if control_client.enabled():
-        await control_client.call("tool.stop", operation_id)
-        return
     from .control_owner import require
     require()
     entry = STATE.tool_operation

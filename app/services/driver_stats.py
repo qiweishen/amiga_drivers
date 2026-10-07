@@ -55,7 +55,7 @@ class DriverStats:
         self._period: dict[str, float] = {}
 
     def reset(self) -> None:
-        """Called with MONITOR.reset() on every start/reattach."""
+        """Called when acquisition state resets on start/reattach."""
         self._gox_cams.clear()
         self._period.clear()
 
@@ -70,7 +70,7 @@ class DriverStats:
             return
         m = _FPS_RE.search(msg)
         if m is None:
-            return  # "Final:" summaries and pre-fps binaries carry no rate
+            return  # Final summaries carry counters rather than a periodic rate.
         fps = float(m.group(1))
         now = time.monotonic()
         inst = _INSTANCE_RE.match(msg)

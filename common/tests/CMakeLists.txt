@@ -9,10 +9,12 @@ add_executable(common_tests
         test_file_writer.cpp
         test_ipv4.cpp
         test_logger.cpp
+        test_main_config.cpp
         test_ring_buffer.cpp
         test_run_guards.cpp
         test_sensor_sync_hub.cpp
         test_sensor_sync_quality.cpp
+        test_session_runner.cpp
         test_util.cpp
 )
 

@@ -111,7 +111,6 @@ namespace gox {
         bool written = false; // GevIEEE1588 = true accepted
         bool synchronized = false; // status reached "slave"
         std::string status; // last GevIEEE1588Status text
-        int64_t accuracy = -1; // last GevIEEE1588ClockAccuracy, -1 = never read
         uint64_t lock_wait_ms = 0;
     };
 
@@ -169,9 +168,11 @@ namespace gox {
         std::optional<double> temp_sensor, temp_mainboard, temp_fpga;
         std::optional<int64_t> trig; // CounterValue[Counter0]
         bool trig_overflow = false;
+        bool trig_status_read = false;
+        bool trig_binding_verified = false;
+        bool trig_input_verified = false; // FrameStart / On / Line5 Opt In at this read
         std::optional<int64_t> pause_rx; // aPAUSEMACCtrlFramesReceived (p.130)
         std::optional<std::string> ptp_status;
-        std::optional<int64_t> ptp_accuracy;
     };
 
     // One JSONL row, without the trailing newline.

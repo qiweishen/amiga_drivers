@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..constants import DRIVERS, SESSION_DIR_RE
+from .run_status import SCHEMA
 
 _SLOTS = asyncio.Semaphore(2)
 MAX_SESSIONS = 5000
@@ -64,13 +65,15 @@ def _scan(root: Path, active: Path | None, cancel: threading.Event) -> tuple[lis
             if len(data) > MAX_MANIFEST:
                 raise ValueError("Manifest exceeds the metadata preview limit")
             doc = json.loads(data)
+            if not isinstance(doc, dict) or doc.get("status_schema") != SCHEMA:
+                raise ValueError("Unsupported recording manifest; amiga-run-v1 is required")
             run = doc["run"]
             if run["timestamp"] != name:
                 raise ValueError("Manifest timestamp does not match the session directory")
             started = str(run.get("started", name))
             drivers = tuple(k for k in DRIVERS if doc.get("drivers", {}).get(k, {}).get("enabled") is True)
             detail = str(run.get("status", "Unknown recording result"))
-            finalized = bool(run.get("ended"))
+            finalized = bool(run.get("ended")) and doc.get("lifecycle", {}).get("phase") == "finished"
             if path == active:
                 status = "active"
             elif finalized and run.get("recording_failed") is True:

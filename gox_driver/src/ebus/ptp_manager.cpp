@@ -21,7 +21,9 @@ namespace gox::ebus {
         // fall back to: this camera family has no SFNC PtpEnable/PtpStatus pair.
         constexpr const char *kEnableFeature = "GevIEEE1588";
         constexpr const char *kStatusFeature = "GevIEEE1588Status";
-        constexpr const char *kAccuracyFeature = "GevIEEE1588ClockAccuracy";
+        // GevIEEE1588ClockAccuracy describes this camera as a potential
+        // grandmaster. AsteRx is the rig's grandmaster, so do not read it or
+        // interpret it as the camera's accuracy while operating as a slave.
 
         // A bad health reading is re-checked this many times, one second apart,
         // before the session is failed (mirrors the lms4xxx NTP watchdog).
@@ -41,34 +43,6 @@ namespace gox::ebus {
             return false;
         }
         last_status_ = out;
-        return true;
-    }
-
-
-    bool PtpManager::ReadClockAccuracy(int64_t &out) {
-        if (ReadIntFeature(params_, kAccuracyFeature, out)) {
-            last_accuracy_ = out;
-            return true;
-        }
-        // The node is an enumeration (p.128: 0..20), and GetIntegerValue above
-        // fails on an enum node, so this is the path a real GO-X takes: read the
-        // entry's own value, which is the number the manual prints.
-        if (ReadEnumIntFeature(params_, kAccuracyFeature, out)) {
-            last_accuracy_ = out;
-            return true;
-        }
-        // Last resort: the node is exposed as text only. read_enum_feature
-        // returns the entry NAME, so it has to be mapped back (a plain decimal
-        // string is accepted too).
-        std::string text;
-        if (!ReadEnumFeature(params_, kAccuracyFeature, text) &&
-            !ReadFeatureAsString(params_, kAccuracyFeature, text)) {
-            return false;
-        }
-        if (!PtpClockAccuracyFromName(text, out)) {
-            return false;
-        }
-        last_accuracy_ = out;
         return true;
     }
 
@@ -163,18 +137,8 @@ namespace gox::ebus {
                     case PtpState::kSlave: {
                         synchronized_ = true;
                         lock_wait_ms_ = (common::TimeUtil::MonotonicNowNs() - start_mono) / 1000000ull;
-                        int64_t accuracy = 0;
-                        std::string accuracy_text = " clock_accuracy=<not readable>";
-                        if (ReadClockAccuracy(accuracy)) {
-                            accuracy_text = " clock_accuracy=" + std::to_string(accuracy);
-                            if (!PtpClockAccuracyOk(accuracy)) {
-                                accuracy_text += " (outside the driver's acceptance window 0..9)";
-                            }
-                        } else {
-                            accuracy_readable_ = false;
-                        }
-                        g_log.Info("[{}] [eBUS] PTP synchronized: status={} lock_wait={}ms{}", camera_id_,
-                                   last_status_, lock_wait_ms_, accuracy_text);
+                        g_log.Info("[{}] [eBUS] PTP synchronized: status={} lock_wait={}ms", camera_id_,
+                                   last_status_, lock_wait_ms_);
                         return true;
                     }
                     case PtpState::kOther:
@@ -207,7 +171,6 @@ namespace gox::ebus {
         }
 
         std::string status;
-        int64_t accuracy = 0;
         std::string reason;
 
         for (int attempt = 0; attempt <= kHealthRetries; ++attempt) {
@@ -227,19 +190,7 @@ namespace gox::ebus {
             if (!ReadStatus(status)) {
                 reason = "GevIEEE1588Status is no longer readable";
             } else if (ClassifyPtpStatus(status) != PtpState::kSlave) {
-                reason = "PTP status left the \"slave\" state (now \"" + status + "\")";
-            } else if (accuracy_readable_) {
-                if (!ReadClockAccuracy(accuracy)) {
-                    // Some firmware never populates the register; report it once
-                    // and keep guarding the status only.
-                    accuracy_readable_ = false;
-                    g_log.Warn("[{}] [eBUS] {} is not readable; the PTP guard continues on the status alone",
-                               camera_id_, kAccuracyFeature);
-                } else if (!PtpClockAccuracyOk(accuracy)) {
-                    reason = "PTP clock accuracy degraded to " + std::to_string(accuracy) +
-                             " (the driver accepts 0..9, i.e. 1 ms or better; the register itself ranges "
-                             "0..20 with 19 = Unknown, which is also the factory value)";
-                }
+                reason = R"(PTP status left the "slave" state (now ")" + status + "\")";
             }
 
             if (reason.empty()) {
@@ -266,7 +217,6 @@ namespace gox::ebus {
         s.written = enabled_;
         s.synchronized = synchronized_;
         s.status = last_status_;
-        s.accuracy = last_accuracy_;
         s.lock_wait_ms = lock_wait_ms_;
         return s;
     }

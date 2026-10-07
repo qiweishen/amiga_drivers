@@ -4,8 +4,7 @@ Nothing polls: each fetch is a single read of the files the drivers are
 appending to right now, restricted to committed bytes.
 
 - GoX: newest frame from the live jai-raw-seg segment — idx.jsonl tail gives
-  the record offset, the payload sits at off + 96 (frame header), decode via
-  gox_driver/scripts/unpack_raw.py (PFNC table + demosaic).
+  the record offset; jai_raw validates matching headers and decodes native DN.
 - FX10: image-row statistics over committed BIL lines, using capture.json
   geometry and the line index. SensorSync edge observations require a verified
   association before they can be treated as GNSS camera-line timestamps.
@@ -16,21 +15,17 @@ from __future__ import annotations
 import base64
 import asyncio
 import csv
-import importlib.util
-import json
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
-import numpy as np
 
-from ..constants import UNPACK_SCRIPT
+from gox_driver.scripts.jai_raw import pixels, recording
+
+from ..formats import fx10
 from ..state import STATE, ProcState
 
-_GOX_FRAME_HEADER_BYTES = 96  # jai-raw-seg FrameHeader (frozen format)
-_IDX_TAIL_BYTES = 256 * 1024  # more than enough for the last idx.jsonl lines
 _WINDOW_S = 1.0  # "the last second before the click"
 _FX10_STALE_S = 3.0  # .bil.part mtime older than this = the lines stopped
 
@@ -128,227 +123,58 @@ async def fetch_fx10() -> Fx10Live:
     return await _fetch("fx10", fx10_spectrum)
 
 
-_unpack_mod = None
-
-
-def _unpack():
-    """gox_driver/scripts/unpack_raw.py as a module (PFNC table, decode,
-    demosaic). Loaded once; the scripts dir joins sys.path for its sibling
-    `import inspect_raw`."""
-    global _unpack_mod
-    if _unpack_mod is None:
-        scripts_dir = str(UNPACK_SCRIPT.parent)
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        spec = importlib.util.spec_from_file_location("gox_unpack_raw", UNPACK_SCRIPT)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _unpack_mod = mod
-    return _unpack_mod
-
-
-# --- GoX ---------------------------------------------------------------------
-
-def _idx_tail_records(idx_path: Path) -> list[dict]:
-    with idx_path.open("rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        f.seek(max(0, size - _IDX_TAIL_BYTES))
-        tail = f.read().decode(errors="replace")
-    records = []
-    for line in tail.splitlines():
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue  # torn first/partial line of the tail window
-    return records
-
-
 def gox_latest_frame(session: Path) -> GoxLive:
-    """Newest committed frame of the live GoX session, demosaiced to JPEG.
-
-    The idx.jsonl writer buffers up to ~1 s / 100 frames, so the newest entry
-    can lag the sensor by up to a second — exactly the requested window."""
+    """Newest committed frame; shared raw/header/PixelFormat interpretation."""
     root = session / "raw" / "gox"
-    cameras = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
-    for cam_dir in cameras:
-        idx_files = sorted(cam_dir.glob("seg_*.idx.jsonl"))
-        if not idx_files:
-            continue
-        records = _idx_tail_records(idx_files[-1])
-        if not records:
-            return GoxLive(False, reason=f"No committed frames yet in {idx_files[-1].name} "
-                                         "(the index flushes about once per second — retry)")
-        rec = records[-1]
-        if int(rec.get("fl", 0)) & 3:
-            return GoxLive(False, reason="Newest frame is incomplete or has an SDK receive error")
-        if any(key not in rec for key in ("padding_x", "padding_y", "chunk_count")):
-            return GoxLive(False, reason="Frame layout metadata is unavailable; refusing to guess row stride")
-        if any(int(rec[key]) != 0 for key in ("padding_x", "padding_y", "chunk_count")):
-            return GoxLive(False, reason="Preview does not support this padded/chunked payload; raw data is retained")
-        if not 0 < int(rec["psz"]) <= 128 * 1024 * 1024 or int(rec["off"]) < 0:
-            return GoxLive(False, reason="Frame size or offset exceeds preview bounds")
-        seg = idx_files[-1].with_name(idx_files[-1].name.replace(".idx.jsonl", ".raw"))
-        try:
-            with seg.open("rb") as f:
-                f.seek(int(rec["off"]) + _GOX_FRAME_HEADER_BYTES)
-                payload = f.read(int(rec["psz"]))
-        except OSError as e:
-            return GoxLive(False, reason=f"Cannot read {seg.name}: {e}")
-        if len(payload) < int(rec["psz"]):
-            return GoxLive(False, reason="Newest frame is not fully on disk yet — retry")
-
-        up = _unpack()
-        try:
-            img, name, pattern = up.decode(int(rec["pf"]), int(rec["w"]), int(rec["h"]), payload)
-        except ValueError as e:
-            return GoxLive(False, reason=str(e))
-        if pattern in up.CV_BAYER:
-            img = up.demosaic(img, pattern)
-        # Bit depth from the PFNC name; 12/10-bit data lives in uint16.
-        full_scale = 4095 if "12" in name else 1023 if "10" in name else 255
-        img8 = np.clip(img.astype(np.float32) / full_scale * 255.0, 0, 255).astype(np.uint8)
-        ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        if not ok:
-            return GoxLive(False, reason="JPEG encoding failed")
-        return GoxLive(
-            ok=True,
-            jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
-            camera=cam_dir.name,
-            seq=int(rec.get("seq", 0)),
-            width=int(rec["w"]),
-            height=int(rec["h"]),
-            pixel_format=name,
-            age_s=max(0.0, time.time() - int(rec.get("hrt", 0)) / 1e9),
-        )
+    try:
+        cameras = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
+        for cam_dir in cameras:
+            indexes = sorted(cam_dir.glob("seg_*.idx.jsonl"))
+            if not indexes:
+                continue
+            rows = list(recording.index_records(indexes[-1], tail_bytes=recording.INDEX_TAIL_BYTES))
+            if not rows:
+                return GoxLive(False, reason="No committed frames yet — retry after the index flush")
+            frame, payload = recording.read_indexed_frame(recording.segment_for_index(indexes[-1]), rows[-1])
+            native, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
+            img8 = pixels.live_image(native, pixels.format_for_code(frame.pf))
+            ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if not ok:
+                return GoxLive(False, reason="JPEG encoding failed")
+            return GoxLive(True, jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
+                           camera=cam_dir.name, seq=frame.seq, width=frame.w, height=frame.h,
+                           pixel_format=name, age_s=max(0.0, time.time() - frame.hrt / 1e9))
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, cv2.error) as error:
+        return GoxLive(False, reason=f"Cannot read committed GoX frame: {error}")
     return GoxLive(False, reason=f"No camera data under {root} yet")
 
 
 # --- FX10 --------------------------------------------------------------------
 
-def _fx10_geometry(capture_dir: Path) -> tuple[int, int, int, list[float], float] | str:
-    """Use immutable acquisition metadata, never the editable requested config."""
-    try:
-        doc = json.loads((capture_dir / "capture.json").read_text(encoding="utf-8"))
-        if doc.get("format") != "fx10-capture-v1" or doc.get("byte_order") != "little":
-            return "Unsupported capture metadata; refusing to guess the image layout"
-        samples, bands = int(doc["samples"]), int(doc["bands"])
-        bpp, full_scale = int(doc["bytes_per_pixel"]), int(doc["full_scale"])
-        if not (0 < samples <= 65535 and 0 < bands <= 65535):
-            return "Invalid capture geometry"
-        if (bpp, full_scale) not in ((1, 255), (2, 1023), (2, 4095)):
-            return "Unknown capture bit depth"
-        frame_rate_hz = float(doc["expected_frame_rate_hz"])
-        if not np.isfinite(frame_rate_hz) or not 0 <= frame_rate_hz <= 100000:
-            return "Invalid capture frame rate"
-        wavelengths = [float(v) for v in doc.get("wavelengths_nm", [])]
-        if wavelengths and (len(wavelengths) != bands or not all(np.isfinite(v) and v > 0 for v in wavelengths)):
-            return "Invalid capture wavelength axis"
-        return samples, bands, full_scale, wavelengths, frame_rate_hz
-    except Exception as e:
-        return f"Cannot read recorded capture geometry: {e}"
-
-
-def _fx10_frame_offsets(bil: Path, line_bytes: int, limit: int) -> list[int]:
-    """Complete index records are the live commit boundary; skip padding/anomalies."""
-    base = bil.name.removesuffix(".part").removesuffix(".bil")
-    index = bil.parent / (base + ".lines.csv.part")
-    if not index.exists():
-        index = bil.parent / (base + ".lines.csv")
-    with index.open("rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        start = max(0, size - _IDX_TAIL_BYTES)
-        f.seek(start)
-        raw = f.read()
-    if start:
-        raw = raw.partition(b"\n")[2]  # discard a potentially partial first record
-    raw = raw[:raw.rfind(b"\n") + 1]  # discard an uncommitted trailing record
-    offsets = []
-    for row in csv.reader(raw.decode("ascii").splitlines()):
-        # v2 appends twelve SDK metadata columns; the first ten keep v1 semantics.
-        if len(row) in (10, 22) and row[0] == "frame" and row[9] == "0":
-            offset = int(row[3])
-            if offset >= 0 and offset == int(row[1]) * line_bytes:
-                offsets.append(offset)
-    return offsets[-limit:]
-
-
 def fx10_spectrum(session: Path) -> Fx10Live:
-    """Per-band statistics over roughly the last second of recorded lines
-    (frame_rate_hz worth of lines at the tail of the open segment; same
-    reductions and normalization as the Camera Tools snapshot preview)."""
+    """One-second bounded tail, interpreted by the same format library as snapshots."""
     root = session / "raw" / "fx10"
-    session_dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
-    if not session_dirs:
-        return Fx10Live(False, reason=f"No FX10 session under {root} yet")
-    # The OPEN segment carries a .part suffix (renamed on finalize); prefer it,
-    # fall back to the newest finalized segment right after a rotation.
-    bil_files = sorted(session_dirs[-1].glob("segment_*.bil.part")) \
-        or sorted(session_dirs[-1].glob("segment_*.bil"))
-    if not bil_files:
-        return Fx10Live(False, reason="No open segment yet")
-    bil = bil_files[-1]
-
-    geometry = _fx10_geometry(bil.parent)
-    if isinstance(geometry, str):
-        return Fx10Live(False, reason=geometry)
-    samples, bands, full_scale, wavelengths, frame_rate_hz = geometry
-    dtype = np.dtype("u1") if full_scale == 255 else np.dtype("<u2")
-    line_bytes = samples * bands * dtype.itemsize
-
     try:
-        stat = bil.stat()
-    except OSError as e:
-        return Fx10Live(False, reason=f"Cannot stat {bil.name}: {e}")
-    if stat.st_size < line_bytes:
-        return Fx10Live(False, reason="No complete line on disk yet — retry")
-
-    # The writer appends unbuffered, so the mtime is the newest line's time.
-    age = max(0.0, time.time() - stat.st_mtime)
-    if age > _FX10_STALE_S:
-        return Fx10Live(False, reason=f"No frames in the last {_WINDOW_S:.0f} s "
-                                      f"(newest line is {age:.1f} s old — trigger pulses missing?)")
-
-    # Bound preview allocation independently of requested sensor rates/geometry.
-    if line_bytes > 64 * 1024 * 1024:
-        return Fx10Live(False, reason="Recorded line exceeds the preview memory budget")
-    window = min(max(1, round(frame_rate_hz * _WINDOW_S)), max(1, (64 * 1024 * 1024) // line_bytes))
-    try:
-        offsets = _fx10_frame_offsets(bil, line_bytes, window)
-        frames = []
-        with bil.open("rb") as f:
-            for offset in offsets:
-                f.seek(offset)
-                frame = f.read(line_bytes)
-                if len(frame) == line_bytes:
-                    frames.append(frame)
-        data = b"".join(frames)
-    except (OSError, ValueError, UnicodeError) as e:
-        return Fx10Live(False, reason=f"Cannot read committed frame index (retry after rotation): {e}")
-    count = len(data) // line_bytes
-    if count == 0:
-        return Fx10Live(False, reason="No complete line on disk yet — retry")
-    cube = np.frombuffer(data, dtype=dtype, count=count * bands * samples)
-    cube = cube.reshape(count, bands, samples)
-
-    band_axis = (0, 2)
-    scale = 100.0 / full_scale
-    spectrum_pct = {
-        "mean": (cube.mean(axis=band_axis) * scale),
-        "median": (np.median(cube, axis=band_axis) * scale),
-        "max": (cube.max(axis=band_axis) * scale),
-        "min": (cube.min(axis=band_axis) * scale),
-        "p90": (np.percentile(cube, 90, axis=band_axis) * scale),
-    }
-    return Fx10Live(
-        ok=True,
-        wavelengths_nm=wavelengths,
-        spectrum_pct={k: [round(float(x), 3) for x in v] for k, v in spectrum_pct.items()},
-        frames=count,
-        bands=bands,
-        samples=samples,
-        age_s=age,
-    )
+        directories = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
+        if not directories:
+            return Fx10Live(False, reason=f"No FX10 session under {root} yet")
+        files = sorted(directories[-1].glob("segment_*.bil.part")) or sorted(directories[-1].glob("segment_*.bil"))
+        if not files:
+            return Fx10Live(False, reason="No open segment yet")
+        data = files[-1]
+        capture = fx10.load_capture(data.parent)
+        segment = fx10.open_segment(data, capture)
+        stat = data.stat()
+        if stat.st_size < capture.line_bytes:
+            return Fx10Live(False, reason="No complete line on disk yet — retry")
+        age = max(0.0, time.time() - stat.st_mtime)
+        if age > _FX10_STALE_S:
+            return Fx10Live(False, reason=f"No frames in the last {_WINDOW_S:.0f} s "
+                                          f"(newest line is {age:.1f} s old — trigger pulses missing?)")
+        window = max(1, round(capture.expected_frame_rate_hz * _WINDOW_S))
+        cube = fx10.tail_cube(segment, window)
+        values, _, _ = fx10.spectrum(cube, capture.full_scale)
+        return Fx10Live(True, wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
+                        frames=cube.shape[0], bands=capture.bands, samples=capture.samples, age_s=age)
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, csv.Error) as error:
+        return Fx10Live(False, reason=f"Cannot read committed FX10 data (retry after rotation): {error}")

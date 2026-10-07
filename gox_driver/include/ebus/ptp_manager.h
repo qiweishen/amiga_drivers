@@ -1,8 +1,8 @@
 #pragma once
 
 // PTP slave management: GevIEEE1588 / GevIEEE1588Status (manual p.128), 1 GHz ticks (p.121).
-// A grandmaster is assumed on the camera's L2 domain; this turns the slave on, waits for the
-// lock and keeps checking it stays locked and accurate.
+// The rig's grandmaster is AsteRx; enable PTP, wait for slave status, and guard
+// that status. The camera's advertised grandmaster accuracy is not assessed.
 
 #include <PvGenParameterArray.h>
 #include <cstdint>
@@ -26,7 +26,7 @@ namespace gox::ebus {
         // False when the requirement was not met under on_timeout=abort, or the process is stopping
         bool WaitForSync(StopController *stop);
 
-        // Periodic: status must stay "slave" and accuracy within 0..9; a bad reading is re-checked a
+        // Periodic: status must stay "slave"; a bad reading is re-checked a
         // few times first. False = synchronization lost (caller stops); true when PTP is off
         bool CheckHealth(StopController *stop);
 
@@ -36,8 +36,6 @@ namespace gox::ebus {
     private:
         bool ReadStatus(std::string &out);
 
-        bool ReadClockAccuracy(int64_t &out);
-
         std::string camera_id_;
         PvGenParameterArray *params_;
         PtpConfig cfg_;
@@ -45,9 +43,7 @@ namespace gox::ebus {
         bool feature_found_ = false; // GevIEEE1588 + GevIEEE1588Status both present
         bool enabled_ = false; // GevIEEE1588 was written successfully
         bool synchronized_ = false; // WaitForSync() reached "slave"
-        bool accuracy_readable_ = true; // GevIEEE1588ClockAccuracy could be read
         std::string last_status_;
-        int64_t last_accuracy_ = -1; // -1 = never read
         uint64_t lock_wait_ms_ = 0;
     };
 } // namespace gox::ebus

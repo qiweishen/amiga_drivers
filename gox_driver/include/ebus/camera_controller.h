@@ -90,6 +90,7 @@ namespace gox::ebus {
 
         // Clears Counter0 so trig= counts from AcquisitionStart (manual p.116); false = no counter
         bool ResetTriggerCounter();
+        bool TriggerCounterBound(); // final selector/source readback, not an earlier plan entry
 
         // Everything device.json needs from the connected device; never throws (unreadable
         // features are recorded as such)

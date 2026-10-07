@@ -1,5 +1,5 @@
 """FX10 helpers: the snapshot pipeline (fx10_snapshot in the container ->
-ENVI BIL decode on the host -> per-band spectral statistics over ~1 s of
+shared ENVI BIL reader -> per-band spectral statistics over ~1 s of
 frames, normalized to 100%). Device discovery is driver-neutral:
 services/ebus_tools.py."""
 
@@ -7,21 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import json
-import re
 import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import numpy as np
 
 from ..constants import (
     BIN_FX10_SNAPSHOT,
     FX10_SNAPSHOT_DIR,
     SNAPSHOT_KEEP,
 )
-from . import camera_operations, config_store, runtime, tool_jobs, control_client, wire
+from ..formats import fx10
+from . import camera_operations, config_store, runtime, tool_jobs
 
 SNAPSHOT_TOOL = "fx10_snapshot"
 # Freerun rate forced inside the tool: min(its --fps default, 1000/exposure_ms)
@@ -76,9 +73,6 @@ def guard_reason() -> str | None:
 async def snapshot(ip: str, exposure_ms: float,
                    spatial_binning: int | None = None,
                    spectral_binning: int | None = None) -> SnapshotResult:
-    if control_client.enabled():
-        return wire.restore(SnapshotResult, await control_client.call("fx10.snapshot", ip, exposure_ms,
-                                                                     spatial_binning, spectral_binning))
     request = SnapshotRequest(ip, exposure_ms, spatial_binning, spectral_binning)
 
     async def capture() -> SnapshotResult:
@@ -166,104 +160,19 @@ async def _snapshot(ip: str, exposure_ms: float,
     return result
 
 
-def _hdr_int(text: str, key: str) -> int | None:
-    m = re.search(rf"^{key}\s*=\s*(\d+)\s*$", text, re.MULTILINE | re.IGNORECASE)
-    return int(m.group(1)) if m else None
-
-
-def _hdr_wavelengths(text: str, bands: int) -> list[float]:
-    """Only return an explicit finite header axis. Missing calibration stays missing."""
-    m = re.search(r"^wavelength\s*=\s*\{([^}]*)\}", text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
-    if m:
-        try:
-            values = [float(v) for v in m.group(1).replace("\n", " ").split(",") if v.strip()]
-            if len(values) == bands and all(np.isfinite(v) and v > 0 for v in values):
-                return values
-        except ValueError:
-            pass
-    return []
-
-
 def _decode_envi(session_dir: Path) -> SnapshotResult:
-    """Reduce the snapshot segment (ENVI BIL cube: lines x bands x samples) to
-    statistics over genuine, non-anomalous frames and spatial samples.
-    Bit depth comes only from immutable capture metadata. This bounded preview
-    refuses oversized inputs instead of partially interpreting a snapshot."""
-    hdrs = sorted(session_dir.glob("segment_*.hdr"))
-    if not hdrs:
-        return SnapshotResult(False, reason=f"No finalized segment (.hdr) in {session_dir}")
-    if len(hdrs) != 1:
-        return SnapshotResult(False, reason="Snapshot unexpectedly contains multiple segments")
-    hdr = hdrs[0]
-    bil = hdr.with_suffix(".bil")
-    if not bil.is_file():
-        return SnapshotResult(False, reason=f"Missing BIL data file for {hdr.name}")
-
-    text = hdr.read_text(errors="replace")
-    samples = _hdr_int(text, "samples")
-    bands = _hdr_int(text, "bands")
-    lines = _hdr_int(text, "lines")
-    data_type = _hdr_int(text, "data type")
-    if None in (samples, bands, lines, data_type) or 0 in (samples, bands, lines):
-        return SnapshotResult(False, reason=f"Bad ENVI header {hdr.name}: samples/bands/lines/data type missing")
+    """Bounded full snapshot; layout/index validation is shared with live/reference."""
     try:
-        capture = json.loads((session_dir / "capture.json").read_text(encoding="utf-8"))
-        full_scale = int(capture["full_scale"])
-        bpp = int(capture["bytes_per_pixel"])
-        if (capture.get("format") != "fx10-capture-v1" or capture.get("byte_order") != "little"
-                or _hdr_int(text, "byte order") != 0 or _hdr_int(text, "header offset") != 0
-                or int(capture["samples"]) != samples or int(capture["bands"]) != bands
-                or (data_type, bpp, full_scale) not in ((1, 1, 255), (12, 2, 1023), (12, 2, 4095))):
-            raise ValueError("Capture metadata and ENVI layout disagree")
-        line_bytes = samples * bands * bpp
-        if lines > 4096 or lines * line_bytes > 256 * 1024 * 1024:
-            raise ValueError("Snapshot exceeds preview memory budget")
-        if bil.stat().st_size != lines * line_bytes:
-            raise ValueError("BIL byte length disagrees with the finalized header")
-        valid_lines = []
-        with hdr.with_suffix(".lines.csv").open(encoding="ascii", newline="") as index:
-            if not index.readline().startswith(("# fx10-line-index-v1;", "# fx10-line-index-v2;")):
-                raise ValueError("Missing versioned line identity index")
-            for row in csv.DictReader(index):
-                if row["event"] != "frame" or row["block_id_anomaly"] != "0":
-                    continue
-                n = int(row["segment_line"])
-                if not 0 <= n < lines or int(row["byte_offset"]) != n * line_bytes:
-                    raise ValueError("Invalid line index offset")
-                if valid_lines and n <= valid_lines[-1]:
-                    raise ValueError("Duplicate or reversed line index offset")
-                valid_lines.append(n)
-        if not valid_lines:
-            raise ValueError("No non-anomalous camera frames in the line index")
-        dtype = np.dtype("u1") if bpp == 1 else np.dtype("<u2")
-        cube = np.fromfile(bil, dtype=dtype, count=lines * bands * samples)
-    except (OSError, ValueError, KeyError, TypeError, csv.Error) as e:
-        return SnapshotResult(False, reason=f"Cannot decode recorded capture: {e}")
-    if cube.size != lines * bands * samples:
-        return SnapshotResult(False, reason=f"BIL size mismatch: {cube.size} px != {lines}x{bands}x{samples}")
-    cube = cube.reshape(lines, bands, samples)  # BIL: one frame = one line record
-    cube = cube[valid_lines]
-
-    # Per-band reductions over (frames, samples), normalized to 100%.
-    band_axis = (0, 2)
-    scale = 100.0 / full_scale
-    spectrum_pct = {
-        "mean": (cube.mean(axis=band_axis) * scale).tolist(),
-        "median": (np.median(cube, axis=band_axis) * scale).tolist(),
-        "max": (cube.max(axis=band_axis) * scale).tolist(),
-        "min": (cube.min(axis=band_axis) * scale).tolist(),
-        "p90": (np.percentile(cube, 90, axis=band_axis) * scale).tolist(),
-    }
-    return SnapshotResult(
-        ok=False,  # caller flips to True after filling metadata
-        wavelengths_nm=_hdr_wavelengths(text, bands),
-        spectrum_pct={k: [round(float(v), 3) for v in vals] for k, vals in spectrum_pct.items()},
-        clipped_pct=float((cube >= full_scale).mean() * 100.0),
-        mean_pct=float(cube.mean() * scale),
-        lines=len(valid_lines),
-        bands=bands,
-        samples=samples,
-    )
+        capture, cube = fx10.snapshot_cube(session_dir)
+        values, mean, clipped = fx10.spectrum(cube, capture.full_scale)
+        return SnapshotResult(
+            ok=False,  # caller fills elapsed/source metadata before declaring success
+            wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
+            clipped_pct=clipped, mean_pct=mean, lines=cube.shape[0],
+            bands=capture.bands, samples=capture.samples,
+        )
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, csv.Error) as error:
+        return SnapshotResult(False, reason=f"Cannot decode recorded capture: {error}")
 
 
 def _cleanup_old() -> None:

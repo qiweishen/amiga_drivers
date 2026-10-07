@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "app_config.h"
 #include "signal_stop.h"
@@ -66,6 +67,7 @@ namespace gox {
         // camera decides: one dead camera already makes the session incomplete,
         // while a legitimately idle one excludes itself by returning nullopt.
         std::optional<std::uint64_t> MicrosSinceLastData() const;
+        nlohmann::ordered_json FinalStatistics() const; // after Shutdown
 
     private:
         AppConfig cfg_;
@@ -79,6 +81,7 @@ namespace gox {
         std::string last_error_;
         bool initialized_ = false;
         bool shutdown_done_ = false;
+        bool shutdown_complete_ = false;
         bool clean_ = true;
     };
 } // namespace gox

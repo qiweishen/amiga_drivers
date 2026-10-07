@@ -108,6 +108,7 @@ bool Lms4xxxDriverApp::Init(const std::function<bool()> &external_stop) {
     }
     ec = impl_->driver->Configure();
     if (ec) {
+        MarkFailed();
         g_log.Error("[{}] Configure failed: {}", instance_name_, ec.message());
         impl_->driver->Disconnect();
         return false;
@@ -153,26 +154,26 @@ bool Lms4xxxDriverApp::Init(const std::function<bool()> &external_stop) {
 
 void Lms4xxxDriverApp::Run() {
     if (!impl_->driver) {
-        g_log.Error(true, "Run() called without Init()");
+        RequestFailure();
+        g_log.Error("Run() called without Init()");
         return;
     }
 
     // Before scanning so no frames are missed
     if (impl_->writer && !impl_->writer->Start()) {
-        terminate_.store(true, std::memory_order_release);
-        g_log.Error(true, "[{}] Cannot start the scan writer", instance_name_);
-        return; // unreachable
+        RequestFailure();
+        g_log.Error("[{}] Cannot start the scan writer", instance_name_);
+        return;
     }
 
     auto ec = impl_->driver->StartScanning();
     if (ec) {
-        // Error(true, ...) never returns
         if (impl_->writer) {
             impl_->writer->Stop();
         }
-        terminate_.store(true, std::memory_order_release);
-        g_log.Error(true, "[{}] Start scanning failed: {}", instance_name_, ec.message());
-        return; // unreachable; keeps the control flow obvious
+        RequestFailure();
+        g_log.Error("[{}] Start scanning failed: {}", instance_name_, ec.message());
+        return;
     }
 
     g_log.Info("[{}] Scanning started", instance_name_);
@@ -331,11 +332,11 @@ void Lms4xxxDriverApp::Shutdown() {
         return;
     }
 
-    if (impl_->driver->IsScanning()) {
-        if (const auto ec = impl_->driver->StopScanning()) {
-            MarkFailed();
-            g_log.Error("[{}] StopScanning failed: {}", instance_name_, ec.message());
-        }
+    // Device measurement begins during Configure(), before IsScanning() is true.
+    // Cancelled initialization and writer startup failures need the same rollback.
+    if (const auto ec = impl_->driver->StopScanning()) {
+        MarkFailed();
+        g_log.Error("[{}] StopScanning failed: {}", instance_name_, ec.message());
     }
 
     // Stop the writer first so the summary reports the on-disk totals
@@ -343,11 +344,15 @@ void Lms4xxxDriverApp::Shutdown() {
         impl_->writer->Stop();
     }
 
+    const auto cleanup_ec = impl_->driver->Disconnect(); // idempotent; preserves the standby result
+    if (cleanup_ec) MarkFailed();
+    const auto shutdown = impl_->driver->GetMeasurementShutdownStatus();
     const auto drv = impl_->driver->GetStatistics();
     const lms4xxx::ScanRecordWriter::Statistics wr =
             impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
-    const auto result = lms4xxx::AssessRecording(drv, wr, impl_->driver->HasFault(),
-                                                impl_->writer && impl_->writer->HasFailed(), HasFailed());
+    auto result = lms4xxx::AssessRecording(drv, wr, impl_->driver->HasFault(),
+                                         impl_->writer && impl_->writer->HasFailed(), HasFailed());
+    if (cleanup_ec) result.failure_reasons.push_back("device standby not confirmed: " + cleanup_ec.message());
     if (result.Failed()) MarkFailed();
     final_statistics_ = {
         {"instance", instance_name_}, {"frames_received", drv.frames_received},
@@ -363,6 +368,11 @@ void Lms4xxxDriverApp::Shutdown() {
         {"ntp_server_reachable", drv.ntp_server_reachable}, {"absolute_time_verified", false},
         {"non_scan_frames", drv.non_scan_frames}, {"scan_candidates", drv.ScanCandidateFrames()},
         {"shutdown_complete", false}, {"data_integrity_failed", result.data_integrity_failed},
+        {"measurement_start_requested", shutdown.measurement_start_requested},
+        {"measurement_cleanup_attempted", shutdown.cleanup_attempted},
+        {"standby_command_attempted", shutdown.standby_command_attempted},
+        {"standby_confirmed", shutdown.standby_confirmed},
+        {"measurement_cleanup_error", cleanup_ec ? cleanup_ec.message() : ""},
         {"time_quality_degraded", result.time_quality_degraded}, {"failure_reasons", result.failure_reasons},
         {"recording_incomplete", HasFailed()}
     };
@@ -384,7 +394,6 @@ void Lms4xxxDriverApp::Shutdown() {
                drv.clock_step_events, drv.device_no_ntp_events, drv.ntp_server_reachable,
                drv.non_scan_frames, drv.ScanCandidateFrames());
 
-    impl_->driver->Disconnect();
     impl_->driver.reset(); // Makes the destructor and repeated Shutdown() no-ops.
     final_statistics_["shutdown_complete"] = true;
 

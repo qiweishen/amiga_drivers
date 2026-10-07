@@ -67,8 +67,6 @@ def _request() -> _Request:
     error = ""
     try:
         output = config_store.main_settings()["output_dir"]
-        if output is None:
-            error = "Next output directory is outside the GUI's shared mounts"
     except Exception as e:
         output = None
         error = f"Cannot read next output directory: {e}"

@@ -4,17 +4,16 @@ so every comment survives; the C++ loaders remain the final validators)."""
 from __future__ import annotations
 
 import os
-import posixpath
 import re
 import shutil
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import yaml
 
-from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile, to_host
+from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile
 from ..state import STATE
-from . import runtime, control_owner
+from . import control_owner
 
 
 class ConflictError(Exception):
@@ -59,8 +58,6 @@ def get(config_id: str) -> ConfigFile:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"{_PATH_KEYS[config_id]} must be a non-empty path")
     path = resolve_output_dir(raw)
-    if path is None:
-        raise ValueError(f"{_PATH_KEYS[config_id]} is outside the GUI's shared mounts: {raw}")
     return _checked_config(ConfigFile(template.id, template.label, path.resolve()))
 
 
@@ -68,7 +65,7 @@ def _main_document() -> dict:
     doc = yaml.safe_load(get("main").path.read_text(encoding="utf-8"))
     if doc is None:
         doc = {}
-    if not isinstance(doc, dict) or (doc.get("General") is not None and not isinstance(doc["General"], dict)):
+    if not isinstance(doc, dict) or ("General" in doc and not isinstance(doc["General"], dict)):
         raise ValueError("Main config and General must be YAML mappings")
     return doc
 
@@ -88,10 +85,10 @@ def read(config_id: str) -> LoadedConfig:
 
 
 def validate(config_id: str, text: str) -> list[str]:
-    """Structure-only validation. An empty list means 'parses fine'.
+    """Syntax-only validation. An empty list means 'parses fine'.
 
-    The C++ loaders re-validate on load (lenient parsing, but critical
-    invariants still throw) — surface that in the UI as the final word.
+    The C++ loaders strictly validate the configuration schema on load;
+    syntax validity alone does not certify an accepted acquisition config.
     """
     errors: list[str] = []
     try:
@@ -142,39 +139,35 @@ def main_settings() -> dict:
     """Parsed view of config-main.yaml (read-only; editing stays text-level)."""
     doc = _main_document()
     general = doc.get("General") or {}
-    logging_ = doc.get("Logging System") or {}
-    sensor_trigger = doc.get("Sensor Trigger") or {}
+    enables = {}
+    for driver, key in ENABLE_KEYS.items():
+        value = general.get(key, False)
+        if type(value) is not bool:
+            raise ValueError(f"General.{key} must be a boolean")
+        enables[driver] = value
+    sensor_trigger = doc.get("Sensor Trigger", {})
+    if not isinstance(sensor_trigger, dict):
+        raise ValueError("Sensor Trigger must be a YAML mapping")
+    sensor_trigger_port = sensor_trigger.get("Port", "")
+    if not isinstance(sensor_trigger_port, str):
+        raise ValueError("Sensor Trigger.Port must be a string")
+    if sensor_trigger_port and not Path(sensor_trigger_port).is_absolute():
+        raise ValueError("Sensor Trigger.Port must be an absolute device path or empty")
     output_dir = str(general.get("Output Directory", "./data"))
     return {
         "output_dir": resolve_output_dir(output_dir),
         "output_dir_raw": output_dir,
-        "enables": {drv: bool(general.get(key, drv == "lms4xxx")) for drv, key in ENABLE_KEYS.items()},
-        "enable_logging": bool(logging_.get("Enable Logging", True)),
+        "enables": enables,
+        "enable_logging": True,  # The main executable always initializes session logging.
         "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
         # The rig's one SensorSync board; "" = none. Standalone tools that own the
         # board (fx10_reference) get it from here, the drivers through main.
-        "sensor_trigger_port": str(sensor_trigger.get("Port") or "") if isinstance(sensor_trigger, dict) else "",
+        "sensor_trigger_port": sensor_trigger_port,
     }
 
 
-def resolve_output_dir(raw: str) -> Path | None:
-    """Host-side view of the Output Directory, or None when it is not visible
-    from the host.
-
-    The raw string is consumed by the BINARY in ITS namespace: relative
-    entries resolve against the binary's working dir (/workspace in docker,
-    the repo root natively — runtime.spawn sets both). Natively every path is
-    already a host path; in docker mode absolute paths must be container
-    paths that map back through the mounts."""
-    if runtime.is_docker():
-        if PurePosixPath(raw).is_absolute():
-            container_abs = posixpath.normpath(raw)
-        else:
-            container_abs = posixpath.normpath("/workspace/" + raw)
-        try:
-            return to_host(container_abs)
-        except ValueError:
-            return None
+def resolve_output_dir(raw: str) -> Path:
+    """Resolve paths exactly where the co-located acquisition sees them."""
     p = Path(raw)
     return p if p.is_absolute() else (REPO_ROOT / p).resolve()
 
@@ -183,15 +176,9 @@ def output_dir_problems(raw: str) -> list[str]:
     """Start-preflight checks for the Output Directory value."""
     path = resolve_output_dir(raw)
     root = os.environ.get("AMIGA_DATA_ROOT", "")
-    if path is not None and root and not path.resolve().is_relative_to(Path(root).resolve()):
+    if root and not path.resolve().is_relative_to(Path(root).resolve()):
         return [f"Output Directory must remain inside the shared recording mount {root}"]
-    if path is not None:
-        return []
-    return [
-        f"Output Directory ({raw}) is outside the container mounts. Accepted forms: a repo-relative "
-        "path (e.g. ./recordings), /workspace/..., or the shared disk ./dataset|/workspace/dataset/...; "
-        "host-style absolute paths (/mnt/..., /home/...) do not exist inside the container"
-    ]
+    return []
 
 
 def lms_instance_names() -> list[str]:

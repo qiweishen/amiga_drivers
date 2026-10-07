@@ -85,4 +85,11 @@ namespace fx10 {
     const char *ToString(RunStatus status) {
         return status == RunStatus::kClean ? "CLEAN" : "DEGRADED";
     }
+
+    SnapshotStatus ClassifySnapshot(const Counters &counters, std::uint64_t requested_frames, bool timed_out) {
+        if (counters.frames_written == 0) return SnapshotStatus::kNoFrames;
+        if (timed_out || counters.frames_written < requested_frames || Classify(counters) != RunStatus::kClean)
+            return SnapshotStatus::kIncomplete;
+        return SnapshotStatus::kComplete;
+    }
 } // namespace fx10

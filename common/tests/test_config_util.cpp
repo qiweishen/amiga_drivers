@@ -114,6 +114,35 @@ TEST_CASE("Require and ReadRange") {
 }
 
 
+TEST_CASE("Floating configuration values must be finite before range checks or narrowing") {
+    for (const auto *text : {".nan", ".NaN", ".NAN", ".inf", "-.inf", ".Inf", "-.INF"}) {
+        CAPTURE(text);
+        const auto root = LoadText(std::string("value: ") + text);
+        double value = 17.0;
+        CHECK(Contains(ErrorOf([&] { Read(root, "output", "value", value); }),
+                       "output.value: must be finite"));
+        CHECK(value == 17.0);
+        CHECK(Contains(ErrorOf([&] { ReadRange(root, "output", "value", 0.0, 86400.0, value); }),
+                       "output.value: must be finite"));
+        CHECK(value == 17.0);
+        std::optional<double> optional = 23.0;
+        CHECK_THROWS_AS(Read(root, "output", "value", optional), ConfigError);
+        REQUIRE(optional.has_value());
+        CHECK(*optional == 23.0);
+    }
+
+    float narrow = 1.0f;
+    CHECK(Contains(ErrorOf([&] { Read(LoadText("value: 1e100"), "", "value", narrow); }),
+                   "value: is out of range"));
+    CHECK(narrow == 1.0f);
+    double boundary = -1.0;
+    CHECK(ReadRange(LoadText("value: 0.0"), "", "value", 0.0, 86400.0, boundary));
+    CHECK(boundary == 0.0);
+    CHECK(ReadRange(LoadText("value: 86400.0"), "", "value", 0.0, 86400.0, boundary));
+    CHECK(boundary == 86400.0);
+}
+
+
 TEST_CASE("ReadEnum by text and by enum class") {
     enum class Mode { kA, kB };
     const YAML::Node root = LoadText("m: b\nbad: c\nyes_word: on\n");

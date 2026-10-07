@@ -23,10 +23,21 @@ namespace common {
 
         IDriverApp &operator=(IDriverApp &&) = delete;
 
+        // One acquisition epoch per instance. Init runs on the coordinator
+        // thread and may already acquire hardware/worker resources. false or an
+        // exception is NOT a completed rollback: Shutdown is still mandatory.
+        // The stop predicate remains valid until Shutdown completes.
         virtual bool Init(const std::function<bool()> &external_stop = {}) = 0;
 
+        // Called once, only after successful Init. May own processing or merely
+        // supervise workers started by Init; the coordinator treats return as
+        // a request to stop the whole rig.
         virtual void Run() = 0;
 
+        // Coordinator first sets every TerminateFlag and joins every Run thread,
+        // then calls Shutdown in reverse order, including uninitialized apps.
+        // Must be idempotent: stop producers, join workers, drain writers, close
+        // files, release device/SDK resources. Preserve all integrity failures.
         virtual void Shutdown() = 0;
 
         // Main reads this only after Run threads have joined and Shutdown has

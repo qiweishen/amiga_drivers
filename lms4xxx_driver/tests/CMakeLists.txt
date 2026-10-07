@@ -3,9 +3,11 @@
 
 set(LMS4XXX_TEST_SOURCES
         test_command_builder.cpp
+        test_command_channel.cpp
         test_clock_quality.cpp
         test_config_schema.cpp
         test_frame_receiver.cpp
+        test_measurement_shutdown.cpp
         test_ntp_probe.cpp
         test_recording_status.cpp
         test_statistics.cpp
@@ -26,6 +28,7 @@ target_link_libraries(lms4xxx_tests PRIVATE lms4xxx_lib hdf5-static)
 
 # SYSTEM: no warnings from the vendored doctest header
 target_include_directories(lms4xxx_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rd_party)
+target_include_directories(lms4xxx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 # The shipped template is asserted against the loader, so a config that documents
 # a key the schema rejects fails the build's tests rather than the field.

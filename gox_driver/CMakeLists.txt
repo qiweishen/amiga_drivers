@@ -11,7 +11,9 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 # eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake).
 # common/ already failed the configure with a helpful message when it is
 # missing; the call here only (re)creates the directory-scoped eBUS::eBUS target.
-find_package(eBUS REQUIRED)
+if (AMIGA_ENABLE_EBUS)
+    find_package(eBUS REQUIRED)
+endif ()
 
 
 ################################################################################
@@ -49,44 +51,44 @@ target_link_libraries(jai_core PUBLIC
 
 ################################################################################
 # SDK-dependent targets
+if (AMIGA_ENABLE_EBUS)
 
-# jai_ebus - eBUS SDK glue (camera control, streaming, PTP) + the shared
-# capture orchestration (CaptureRunner). Discovery, the GenICam env bootstrap
-# and the PvResult error plumbing come from common/ (amiga_ebus).
-add_library(jai_ebus STATIC
-    src/capture_runner.cpp
-    src/ebus/camera_controller.cpp
-    src/ebus/camera_session.cpp
-    src/ebus/ptp_manager.cpp
-    src/ebus/stream_receiver.cpp
-)
-# RPATH to the SDK/GenICam lib dirs propagates from eBUS::eBUS
-# (INTERFACE_LINK_OPTIONS, see cmake/FindeBUS.cmake) to every consumer,
-# including the top-level AmigaDrivers executable.
-target_link_libraries(jai_ebus PUBLIC jai_core amiga_ebus eBUS::eBUS)
+    # jai_ebus - eBUS SDK glue (camera control, streaming, PTP) + the shared
+    # capture orchestration (CaptureRunner). Discovery, the GenICam env bootstrap
+    # and the PvResult error plumbing come from common/ (amiga_ebus).
+    add_library(jai_ebus STATIC
+        src/capture_runner.cpp
+        src/ebus/camera_controller.cpp
+        src/ebus/camera_session.cpp
+        src/ebus/ptp_manager.cpp
+        src/ebus/stream_receiver.cpp
+    )
+    # RPATH to the SDK/GenICam lib dirs propagates from eBUS::eBUS
+    # (INTERFACE_LINK_OPTIONS, see cmake/FindeBUS.cmake) to every consumer,
+    # including the top-level AmigaDrivers executable.
+    target_link_libraries(jai_ebus PUBLIC jai_core amiga_ebus eBUS::eBUS)
 
-# gox_lib - Amiga-facing wrapper layer (GoxDriverApp)
-add_library(gox_lib STATIC
-    src/gox_driver_app.cpp
-)
-target_include_directories(gox_lib PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(gox_lib PUBLIC
-    jai_ebus
-    # Shared common library provides spdlog, yaml-cpp, Threads
-    amiga_common
-)
+    # gox_lib - Amiga-facing wrapper layer (GoxDriverApp)
+    add_library(gox_lib STATIC
+        src/gox_driver_app.cpp
+    )
+    target_include_directories(gox_lib PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    # The adapter's public interface has no SDK types. Static-library link needs
+    # still propagate, while SDK includes/compile definitions stay private.
+    target_link_libraries(gox_lib PUBLIC amiga_common PRIVATE jai_ebus)
 
-# jai_snapshot - one-shot frame grab for the web GUI preview loop (device
-# enumeration is the common ebus_discover tool)
-add_executable(jai_snapshot tools/snapshot_main.cpp)
-target_link_libraries(jai_snapshot PRIVATE jai_ebus)
+    # jai_snapshot - one-shot frame grab for the web GUI preview loop (device
+    # enumeration is the common ebus_discover tool)
+    add_executable(jai_snapshot tools/snapshot_main.cpp)
+    target_link_libraries(jai_snapshot PRIVATE jai_ebus)
 
-set_target_properties(jai_snapshot PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
+    set_target_properties(jai_snapshot PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif ()
 
 
 ################################################################################

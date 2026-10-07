@@ -138,3 +138,24 @@ TEST_CASE("Classify: CleanAndDegraded") {
     degraded.gap_lines_padded = 5;
     CHECK(Classify(degraded) == RunStatus::kClean);
 }
+
+TEST_CASE("Snapshot: a header or padded event segment does not prove a captured frame") {
+    Counters c;
+    c.segments_finalized = 1;
+    c.size_mismatch_drops = 1;
+    c.gap_lines_padded = 3;
+    CHECK(fx10::ClassifySnapshot(c, 1, true) == fx10::SnapshotStatus::kNoFrames);
+}
+
+TEST_CASE("Snapshot: success requires real frames, the requested limit and clean accounting") {
+    Counters c;
+    c.frames_written = 2;
+    CHECK(fx10::ClassifySnapshot(c, 2, false) == fx10::SnapshotStatus::kComplete);
+    CHECK(fx10::ClassifySnapshot(c, 3, false) == fx10::SnapshotStatus::kIncomplete);
+    CHECK(fx10::ClassifySnapshot(c, 2, true) == fx10::SnapshotStatus::kIncomplete);
+
+    SUBCASE("usable frames can coexist with rejected buffers") { c.op_errors = 1; }
+    SUBCASE("admitted frames can be unconfirmed after worker failure") { c.recording_worker_unconfirmed = 1; }
+    SUBCASE("queue overflow must remain visible") { c.recording_queue_drops = 1; }
+    CHECK(fx10::ClassifySnapshot(c, 2, false) == fx10::SnapshotStatus::kIncomplete);
+}

@@ -17,6 +17,12 @@ recorded `host_*` diagnostics. AsteRx CSV history playback uses `host_unix_ns`
 for its display timeline, not as a replacement for GNSS/INS measurement time.
 Host monotonic clocks also drive operational deadlines, rates and playback.
 FX10 recordings without SensorSync lack that cross-sensor timing association.
+The user-confirmed PTP topology has AsteRx as its sole grandmaster; the Go-X
+driver does not verify the master's identity. Go-X retains slave-status
+admission and runtime guards. It does not read `GevIEEE1588ClockAccuracy` or
+use that grandmaster capability node as a slave synchronization quality
+criterion; the existing `ptp.accuracy` output key remains `null` for format
+compatibility (not sampled, not an indication of degraded synchronization).
 
 **Fail-fast.** All four apps share `Init → Run → Shutdown` and a sticky
 `HasFailed()` result. Reported driver failures and rig-wide guards request an
@@ -32,7 +38,7 @@ are named at second resolution and an existing one is refused, never reused.
   <img alt="C++20"    src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white">
   <img alt="CMake"    src="https://img.shields.io/badge/CMake-%E2%89%A5%203.14-064F8C?logo=cmake&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Ubuntu%2022.04%20(devcontainer)-E95420?logo=ubuntu&logoColor=white">
-  <img alt="GUI"      src="https://img.shields.io/badge/GUI-NiceGUI%20%C2%B7%20uv-3776AB?logo=python&logoColor=white">
+  <img alt="GUI"      src="https://img.shields.io/badge/GUI-NiceGUI%20%C2%B7%20pip-3776AB?logo=python&logoColor=white">
   <img alt="Storage"  src="https://img.shields.io/badge/storage-SBF%20%C2%B7%20ENVI%20%C2%B7%20HDF5-4B8BBE">
 </p>
 
@@ -67,7 +73,7 @@ server are listed in `resource/devices_ip.yaml`.
 
 ```
                       +---------------------------------------------------+
-                      |              AmigaDrivers (main.cpp)              |
+                      |     AmigaDrivers: composition + coordinator       |
                       |  SignalHandler · spdlog (single instance) ·       |
                       |  session folder · config snapshot · drivers.json  |
                       |  · rig-wide guards · terminate propagation ·      |
@@ -89,36 +95,62 @@ server are listed in `resource/devices_ip.yaml`.
 Every driver app derives from `common::IDriverApp` (`common/include/driver_app.h`):
 `bool Init(external_stop)` / `void Run()` / `void Shutdown()`, a sticky
 `HasFailed()`, `MicrosSinceLastData()` for the no-data watchdog and a shared
-`TerminateFlag()`. `main.cpp` initialises the enabled drivers **sequentially**
+`TerminateFlag()`. `common::RunSession` initializes the enabled drivers **sequentially**
 (AsteRx first — its warm-up gate holds the whole rig until the receiver has GPS
 time), runs each `Run()` on its own thread, polls all terminate flags every
 100 ms together with the rig-wide guards, and propagates the first termination to
 everyone (orderly join + shutdown in reverse order).
 
-**Run results are explicit.** After shutdown, `main` evaluates driver failures,
+**Run results are explicit.** After shutdown, the coordinator evaluates driver failures,
 rig guards and status persistence before assigning the final result. A clean or
 signal-interrupted run exits `0`; a reported failure exits `1`. The session's
 `raw/drivers.json` records `completed`, `interrupted (signal N)` or a failure
 reason, together with final per-driver statistics. A missing final manifest is
 an unknown/incomplete result, even if the process has disappeared.
 
+Lifecycle ownership is explicit:
+
+- `main.cpp`: signals, main configuration and the process error exit.
+- `acquisition.cpp`: output/session creation, config snapshots and driver construction.
+- `common::RunSession`: sequential initialization, concurrent Run, guards, reverse
+  shutdown and final manifest. `Init` may start resources; even failed/partial
+  initialization must be followed by `Shutdown`. Every Run thread joins before
+  Shutdown drains internal workers/writers. An instance represents one epoch.
+- `fx10::Session`: device/receiver/recorder lifetime and counters;
+  `Fx10DriverApp` only adapts the common interface.
+- LMS `CommandChannel`: serialized CoLa transactions and uncertainty;
+  configuration, streaming and lifecycle have separate source files.
+- `AcquisitionController` in `app/services/process.py`: process identity,
+  tasks, stop latch and immutable recording snapshots; UI code observes state.
+
+The preview readers also have explicit boundaries: `app/formats/fx10.py`
+defines FX10 ENVI/capture/index rules, while `gox_driver/scripts/jai_raw/`
+defines Go-X record layouts and pixel decoding for both CLI and GUI.
+Services choose full, tail or streamed reads and render previews. The on-disk
+recording formats and existing CLI names remain unchanged.
+
+The existing Go-X RGB8 preview path still passes RGB arrays to OpenCV image
+writers that interpret channels as BGR. That display limitation is unchanged by
+this refactor; native sample accounting and raw recording bytes are unaffected.
+
 ### GUI and control service
 
-The NiceGUI interface and the acquisition controller can run together for local
-development or as separate services for deployment:
+The default deployment runs NiceGUI and the C++ acquisition program in one
+Ubuntu 22.04 container. NiceGUI's local control service manages the C++ process:
 
 ```text
-Browser → NiceGUI (app.main)
-             ├─ integrated: local control service → native / devcontainer tools
-             └─ remote: HTTP API → app.controller → AmigaDrivers / device tools
-                         GUI ← read-only shared config, logs and recordings
+Browser → amiga-drivers-dev container
+             └─ NiceGUI (app.main, Python 3.10)
+                  └─ local control service → AmigaDrivers / device tools (C++)
+                           shared configuration, logs and recordings
 ```
 
-The controller owns process identities, recording/tool reservations, configuration
-writes and request recovery. Preview and historical replay read recorded files;
-they do not replace the C++ recording path. New acquisition binaries publish the
-`amiga-run-v1` lifecycle protocol, while older binaries use labelled log
-compatibility mode. See [Web GUI](#web-gui) for operating modes and recovery.
+The control service owns process identities, recording/tool reservations,
+configuration writes and request recovery. Preview and historical replay read recorded files;
+they do not replace the C++ recording path. Acquisition binaries must publish the
+`amiga-run-v1` lifecycle protocol. Logs provide diagnostics and display statistics;
+they do not establish readiness or a successful recording result. The supported
+deployment is the single container shown above. See [Web GUI](#web-gui) for recovery.
 
 ### Targets and libraries
 
@@ -129,7 +161,7 @@ compatibility mode. See [Web GUI](#web-gui) for operating modes and recovery.
 | `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
 | `fx10_reference` | Collect Reference page: white then dark, each for `reference.duration_s` (default 5 s), with separate spectral plots and a persistent `reference_<UTC>` session using the FX10 ENVI recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
 | `asterx_lib`, `fx10_lib`, `gox_lib`, `lms4xxx_lib` | Per-driver static libraries |
-| `amiga_common` | Shared infrastructure: logging (file + non-blocking console sink), config schema helpers, signal handling, SPSC ring buffer, bounded queue, rotating file writer, rig guards, `drivers.json`, GUI marker contract |
+| `amiga_common` | SDK-independent infrastructure: session coordinator, logging, strict config loading, queues, rig guards, SensorSync host wrapper and `drivers.json` |
 | `amiga_ebus` | The eBUS-SDK-dependent layer shared by gox and fx10 (`common/include/ebus`): GenICam env bootstrap, PvResult errors, discovery, device IP configuration |
 
 ### Dependencies
@@ -144,13 +176,25 @@ compatibility mode. See [Web GUI](#web-gui) for operating modes and recovery.
 | doctest 2.4.11 | vendored `3rd_party/doctest/` | every unit-test suite (common + the four drivers) |
 | Boost (header-only) | system | lms4xxx (Asio TCP) |
 | Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
-| eBUS SDK (Pleora) 6.5.1 | installed in the devcontainer (single SDK, root `cmake/FindeBUS.cmake`) | gox + fx10 (GigE Vision) |
+| eBUS SDK (Pleora) 6.5.1-6797 | exact local package and SHA-256 checked by the Dockerfile; shared `cmake/FindeBUS.cmake` | gox + fx10 hardware adapters |
+| SensorSync host client | reviewed local source snapshot, four consumed files pinned by SHA-256 in `cmake/SensorTriggerSnapshot.cmake`; configure never updates it | shared camera trigger session |
 
-The GUI/controller use Python 3.12+ and the existing dependencies declared in
-[`pyproject.toml`](pyproject.toml): NiceGUI, PyYAML, NumPy and OpenCV. The controller
-uses FastAPI/Starlette/uvicorn supplied by the NiceGUI environment. The combined
-devcontainer Dockerfile prepares this runtime during image builds; the optional
-`deploy/` packaging recipes instead require an already prepared runtime image.
+The GUI/control service use Python 3.10+ and the direct dependency versions in
+[`requirements.txt`](requirements.txt): NiceGUI, PyYAML, NumPy and OpenCV.
+The C++ acquisition program does not need Python to record data. These are direct
+version pins, not a transitive Python lock or a fully hermetic OS image.
+
+Build boundaries are explicit (all default to `ON`):
+`AMIGA_ENABLE_EBUS` controls hardware camera adapters and device tools, while
+`jai_core`, `fx10_core` and their tests remain available with it off.
+`AMIGA_ENABLE_ASTERX` controls the Qt/ssnrx driver;
+`AMIGA_ENABLE_LMS4XXX` controls the LiDAR driver and HDF5/zlib dependency.
+A configuration enabling an excluded driver is rejected before initialization.
+`AMIGA_BUILD_TESTS=OFF` also omits contract-test registration.
+`AMIGA_BUILD_REVISION` supplies the recorded source identity (default `unknown`);
+configure does not query Git. The existing manifest field name `git_sha` is retained.
+SensorSync is pinned by local content, not an inferred upstream commit; missing or
+changed files stop configuration and require an explicit reviewed snapshot update.
 
 ## Quick start
 
@@ -158,8 +202,7 @@ devcontainer Dockerfile prepares this runtime during image builds; the optional
 
 The C++ side builds inside the `amiga-drivers-dev` devcontainer
 (`.devcontainer/`, repo mounted at `/workspace`), which brings the eBUS SDK,
-Qt5, Boost and zlib. `Build.bash` installs the SDK `.deb` from `resource/` if it
-is missing.
+Qt5, Boost and zlib. The Dockerfile installs the pinned SDK package from `resource/`.
 
 ### Build
 
@@ -189,36 +232,30 @@ log marks a clean exit.
 
 ### Web control panel
 
-The existing devcontainer Compose now starts both the driver/controller container
-and a separate GUI container. From the repository root, after ending any active
-recording and closing an older host-side GUI:
+The devcontainer Compose starts one container for the GUI and acquisition tools.
+From the repository root, after normally stopping any active recording and
+closing an older host-side GUI:
 
 ```bash
-docker compose -f .devcontainer/docker-compose.yml up -d --build
+docker compose -f .devcontainer/docker-compose.yml up -d --build --remove-orphans
 ```
 
 Open <http://localhost:8619>. Subsequent starts can omit `--build` when the image
-inputs have not changed. The controller creates its shared credential on first
-startup; no separate `deploy/.env`, manual token or copied configuration tree is
-needed. See [the two-container guide](.devcontainer/README.md) for prerequisites,
-logs and stop/restart commands. Building images prepares Python dependencies and
-the SDK environment; it does not compile the acquisition binaries.
+inputs have not changed. `--remove-orphans` removes the former separate `gui`
+container when migrating from the two-container configuration. No controller
+URL or shared API token is needed in this integrated setup. Building the image
+prepares Python dependencies and the SDK environment; it does not compile the
+acquisition binaries. See [Docker deployment](#docker-deployment) for mounts,
+logs and stop/restart behavior.
 
-For a separate native setup with no running controller, the existing project
-environment can still run the GUI directly:
-
-```bash
-AMIGA_GUI_MODE=native AMIGA_GUI_HOST=127.0.0.1 .venv/bin/python -B -m app.main
-```
-
-GUI/controller startup does not start a recording. See [Web GUI](#web-gui) for
-operating modes and [Docker deployment](#docker-deployment) for deployment details.
+GUI startup does not start a recording. See [Web GUI](#web-gui) for controls and
+[Docker deployment](#docker-deployment) for deployment details.
 
 ## Configuration
 
 The executable accepts one main configuration path, defaulting to
 `config/config-main.yaml`. It selects the drivers, their per-driver config paths
-and the output root. The GUI/controller can select that file through
+and the output root. The GUI can select that file through
 `AMIGA_MAIN_CONFIG`:
 
 ```yaml
@@ -243,10 +280,17 @@ Guards:                            # rig-wide, see Health guards below
     No Data Abort S: 60            # any sensor silent this long stops the run (0 = off)
 ```
 
-The `Guards:` values are range-checked at load, and a warning threshold that
-could never fire before its stop threshold is rejected rather than accepted and
-ignored — a guard that is silently misconfigured is worse than no guard, because
-the log still says it is armed.
+The main configuration requires a `General:` mapping and accepts only the
+`General`, `Guards`, and `Sensor Trigger` sections and their documented keys.
+An omitted device switch defaults to `false` for all four drivers, including
+LMS4xxx. Present but malformed values are startup errors, never a request to use
+a default. Paths must be nonblank; `Sensor Trigger.Port: ""` deliberately disables
+the board. Older unused sections such as `Logging System` are rejected.
+
+`Guards:` values must be finite and within their allowed ranges. Warning and
+stop thresholds are checked together. Low disk space at preflight produces a
+failed manifest and exit code 1 before driver initialization; failure to persist
+that result is reported separately.
 
 Each driver config is a heavily commented YAML template next to its driver. The
 templates are **part of the documentation** — every non-obvious value carries the
@@ -263,18 +307,19 @@ Saving checks both the resolved path and file modification time, so a stale page
 cannot silently overwrite another edit. Configuration changes apply at the next
 recording start; they do not reconfigure an active recording. Writes are blocked
 during acquisition initialization/stopping, device tool operations, or uncertain
-process ownership. In remote mode all GUI writes go through the controller,
-including Enable switches and Camera Tools' **Apply to config** actions.
+process ownership. All Enable switches and Camera Tools' **Apply to config**
+actions use the same local configuration service.
 
 Deployments can constrain resolved configuration paths with `AMIGA_CONFIG_ROOT`
-and recording output with `AMIGA_DATA_ROOT`. The two services must see shared
-configurations and recordings at the same absolute paths.
+and recording output with `AMIGA_DATA_ROOT`. The single container shares these
+paths between the GUI and acquisition tools.
 
-**One schema policy for all four drivers** (`common/include/config_util.h`):
+**One schema policy for the main config and all four drivers** (`common/include/config_util.h`):
 unknown keys are startup errors that name the key and list the accepted set,
 omitted keys keep the driver defaults, every error carries the dotted key path,
-and every numeric key is range-checked (a negative value into an unsigned slot is
-refused by name, never wrapped). The templates share one layout — banner,
+and floating-point values must be finite before range checks or conversion to
+durations. Numeric fields enforce their declared bounds; a negative value into
+an unsigned slot is refused by name, never wrapped. The driver templates share one layout — banner,
 `device:`/`cameras:`/`lidar:`, acquisition, driver extras, `output:`, `network:`,
 `logging:` — one comment style (short trailing notes: unit, range, allowed
 values) and one unit-suffix rule (`_s`, `_ms`, `_hz`, `_mb`, `_bytes`, `_deg`).
@@ -288,7 +333,7 @@ configuration snapshot and run metadata under `raw/`:
 ```
 <Output Directory>/<YYYYMMDD_HHMMSS>/
 └── raw/
-    ├── log_<ts>.log                  # diagnostics, live rates and legacy GUI health markers
+    ├── log_<ts>.log                  # diagnostics, live rates and diagnostic lifecycle messages
     ├── drivers.json                  # process/session identity, lifecycle, versions and final results
     ├── config/                       # snapshot of config-main + every enabled driver's config
     ├── sensor_trigger.log            # SensorSync timing log, one session per rig: trigger (T) and
@@ -305,12 +350,10 @@ configuration snapshot and run metadata under `raw/`:
 Controller journals and temporary previews are separate from acquisition data:
 
 ```text
-<AMIGA_RUNTIME_DIR>/                  # default: app/_runtime; production controller: /control
+<AMIGA_RUNTIME_DIR>/                  # default: app/_runtime
 ├── acquisition.json                 # current acquisition status rendezvous (amiga-run-v1)
 ├── tool-operation.json              # latest device tool identity and outcome
 ├── controller.lock                  # shared control ownership lock (unless overridden)
-├── controller-token                 # auto-created credential in the devcontainer setup only
-├── requests/                        # bounded standalone-controller request journals
 ├── snapshot/                        # Go-X preview work files
 └── snapshot_fx10/                    # FX10 preview work files
 ```
@@ -352,7 +395,7 @@ silently lost data because its socket was not being read.
 ## Health guards
 
 Recording silently producing nothing is the failure mode that matters. Two of
-those rules are rig-wide and live in `main.cpp`, driven by the `Guards:` block
+those rules are rig-wide and live in `common/src/session_runner.cpp`, driven by the `Guards:` block
 of `config/config-main.yaml`:
 
 | Guard | What it watches | Default |
@@ -370,15 +413,15 @@ Once recording, that same silence timer is fatal (fail-fast). A driver that is
 reports `nullopt` and is simply not watched while that lasts; deciding *that* is
 the one part the drivers keep, because only they know it. A watchdog trip is
 logged as `<Driver> driver stopped: no data (...)` and appears in the final run
-failure reason. New binaries supply GUI lifecycle state through the structured
-status protocol; older binaries use log markers to update sensor cards.
+failure reason. GUI lifecycle state comes exclusively from the structured
+status protocol.
 
 On top of the two, each driver keeps the guards that are specific to its device:
 
 | Driver | Guards |
 |---|---|
 | asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME before any block is recorded; a 30 s SBF silence timer that **reconnects before recording** and is **fatal while recording**; damaged blocks, link loss, a receiver reset and a full write queue while recording are fatal too (fail-fast) |
-| gox | PTP slave-status / clock-accuracy guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
+| gox | PTP slave-status admission / runtime guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
 | fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
 | lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
 
@@ -398,26 +441,14 @@ pipe (the GUI, `docker exec`) the console sink is non-blocking and drops lines
 rather than letting a stalled reader block a driver thread, and the final log
 lines report how many were dropped. On top of that, the drivers follow four rules.
 
-**1. Module tags are two-layered.** Only `*_driver_app.cpp` logs under the App
-token (`AsteRxApp` / `FX10App` / `GoXApp` / `LMS4xxxApp` from
-`driver_markers.h`). In legacy log compatibility mode, these are the lines the
-GUI health state machine reacts to (an App-level `error` marks the sensor FAILED).
-New `amiga-run-v1` runs use structured lifecycle state instead. Every other file in a driver logs
-under the short internal module (`AsteRx` / `FX10` / `GoX` / `LMS4xxx`), which
-the GUI displays but never routes: a transient internal warning must not flip a
-sensor's health. Shared `common/` components use neutral modules
-(`DriversJson`) — never a driver's name.
+**1. Module tags identify ownership.** Driver/session messages use
+`AsteRxApp`, `FX10App`, `GoXApp` or `LMS4xxxApp`; lower layers use their
+internal driver/subsystem tags. These names group diagnostics; log severity
+never determines lifecycle state.
 
 **2. Message prefixes identify the instance, then the subsystem.**
-Multi-instance drivers tag every line with the instance first: `[cam0] ...` (gox
-cameras), `[Front_Center_Laser] ...` (lms instances). On App-level `error` lines
-this leading tag routes legacy GUI failures to that instance (no tag = all
-instances). Subsystem files add a fixed second-level prefix after the
-instance tag: `[Writer]` (segment/file writers), `[eBUS]` (Pleora SDK
-control/stream code), `[TCP]` (socket transport). Special-purpose sidecars keep
-their own tag in the same style (`[Live]` asterx CSV feed, `[TriggerLog]` fx10
-SensorSync session). Example:
-`[LMS4xxx]: [Front_Center_Laser] [Writer] Recording to ...`.
+Multi-instance drivers tag lines with the camera/LiDAR ID, followed where useful
+by `[Writer]`, `[eBUS]`, `[TCP]`, `[Live]` or `[TriggerLog]`.
 
 **3. Statistics are uniform across drivers.** Periodic status lines start with
 `[Statistics]` (plus the instance tag where applicable), use double-space-separated
@@ -443,32 +474,18 @@ not yet plausible), `UNVERIFIED`, `UNKNOWN` (device warning status stale/unknown
 `NO-SIGNAL` (device NTP warning), `TIME-ANOMALY`, `NO-TS` or `UNREACH`.
 Host server reachability is a separate field; no token certifies absolute time accuracy.
 
-**4. Throwing is an app-layer decision.** `common::DriverLog` never throws by
-default; the explicit `g_log.Error(true, ...)` overload (log, then
-`std::runtime_error` with the formatted message) is the only sanctioned throw in
-driver code and is reserved for `*_driver_app.cpp`. Lower layers propagate
-failures upward instead — `std::error_code` returns (lms4xxx) or driver-internal
-exception types (`RecorderError`, `TransportError`, `SdkError`, …) that the app
-layer catches — and the app layer decides whether to abort.
-(`common::Log::LogAndThrow` remains, but only `main.cpp` and `common/` use it,
-and `main.cpp` turns every start-up failure into a logged exit code 1.)
-
-Lifecycle markers (`GoX driver initialized`, `LiDAR instance [x] initialized
-successfully`, …) remain verbatim contracts for legacy GUI compatibility.
-The structured lifecycle protocol does not depend on their wording; live `fps=`
-still comes from the statistics log. For lms4xxx the per-instance
-markers come from each instance app and the driver-level pair is aggregated by
-`main.cpp` once all instances are up / down.
+**4. Failures cross a defined boundary.** Lower layers return their native
+error codes or exception types. Device/session adapters latch integrity failures;
+the coordinator joins Run workers and shuts down every app before finalizing
+the manifest. Diagnostic lifecycle messages remain readable but are no longer
+a GUI protocol.
 
 ## Web GUI
 
-`app/` is a NiceGUI control panel (port 8619). It supports integrated native/docker
-control and a remote GUI mode using `AMIGA_CONTROLLER_URL`. In remote mode a
-single `app.controller` service owns acquisition, device tools and configuration
-writes; the GUI reads shared recordings without writing them. Production packaging,
-configuration for the standard two-service setup are in
-[.devcontainer/README.md](.devcontainer/README.md); the optional standalone
-production recipe and its acceptance plan remain in [deploy/README.md](deploy/README.md).
+`app/` is a NiceGUI control panel (port 8619). The default Compose configuration
+runs it alongside the C++ binaries in one container.
+Its local control service owns acquisition, device tools and configuration writes.
+See [Docker deployment](#docker-deployment) for the single-container configuration.
 
 ### Pages and workflows
 
@@ -557,7 +574,7 @@ The shared header displays the tool ID, status/error and **Stop tool** action.
 
 ### Lifecycle, results and recovery
 
-New acquisition binaries publish `status_schema: amiga-run-v1` in
+Acquisition binaries must publish `status_schema: amiga-run-v1` in
 `raw/drivers.json`, including process identity (`pid`, `start_ticks`, `boot_id`),
 session location and lifecycle transitions:
 `initializing → running → stopping → finished`. The controller passes
@@ -567,9 +584,9 @@ protocol after identity/schema checks; runtime `fps=` continues to come from the
 statistics log.
 
 Recovery checks process and session identity rather than assuming the newest
-folder belongs to the running process. Older binaries remain supported through
-explicitly labelled log compatibility mode. Invalid structured state cannot
-silently be treated as proof of readiness. An ended manifest, an explicit
+folder belongs to the running process. Binaries without this manifest are
+unsupported and cannot establish readiness or a successful result. Invalid
+structured state cannot silently be treated as proof of readiness. An ended manifest, an explicit
 `recording_failed: false` and a recognized completed/interrupted result are
 needed for a successful run result; an attached process must also exit cleanly.
 Overview exposes the final run metadata and per-driver counters.
@@ -582,73 +599,34 @@ controls remain locked and the uncertainty is shown to the operator.
 
 Only one control service should operate a device environment. All such services
 must use the same `AMIGA_CONTROL_LOCK` file. This application lock does not
-coordinate independently launched command-line device tools. A GUI reconnect or
-restart can recover the active session without starting another recording;
-restarting the standalone controller never automatically starts a new session.
+coordinate independently launched command-line device tools. A browser reconnect
+can recover the active session without starting another recording. Closing or
+refreshing the browser does not stop acquisition. Stopping or restarting the
+default container requests acquisition shutdown; a new container start does not
+automatically begin another recording.
 
-### Operating modes and settings
+### Single-container settings
 
-| Mode | Selection | Control owner |
-| --- | --- | --- |
-| Integrated native | `AMIGA_GUI_MODE=native`, no controller URL | GUI service starts prepared binaries in `build/bin/` locally. |
-| Integrated devcontainer | `AMIGA_GUI_MODE=docker`, no controller URL | GUI service executes tools in `amiga-drivers-dev`; shared paths use `app/constants.py`'s mount map. |
-| Integrated auto | No controller URL; `AMIGA_GUI_MODE=auto` (default) | Detects the devcontainer, otherwise uses native execution. |
-| Remote GUI | Set `AMIGA_CONTROLLER_URL` | A separate `app.controller` owns acquisition/tools/config writes; the GUI does not probe Docker or launch local device commands. |
-
-The combined devcontainer Compose uses remote GUI mode, with `app.controller`
-inside `amiga-drivers-dev`. Integrated modes are alternatives for environments
-without a running controller, not additional controllers for this stack. Start
-the services through Compose; the old GUI **Start container** action is removed.
-
-Both Python entry points run from the repository root in an existing environment:
-`.venv/bin/python -B -m app.main` and
-`.venv/bin/python -B -m app.controller`. Before starting a standalone controller,
-configure its token, backend and shared paths. A remote GUI requires the matching
-token and a reachable controller URL; the URL takes precedence over GUI backend
-selection. Do not set `AMIGA_CONTROLLER_URL` on the controller itself.
+The supported deployment is `amiga-drivers-dev`: `python -B -m app.main`
+starts prepared C++ binaries directly in the same container. Docker exec/auto
+backends and the standalone HTTP controller have been retired. Remove the old
+`AMIGA_GUI_MODE` and `AMIGA_CONTROLLER_*` settings when migrating.
+Do not run a second control service against the same devices.
 
 | Setting | Default / purpose |
 | --- | --- |
-| `AMIGA_GUI_HOST`, `AMIGA_GUI_PORT` | GUI and combined Compose default to `0.0.0.0:8619`, accepting connections through localhost, LAN and Tailscale IPv4 addresses. Set `AMIGA_GUI_HOST` to restrict the listening address. |
-| `AMIGA_CONTROLLER_HOST`, `AMIGA_CONTROLLER_PORT` | Standalone API bind: `127.0.0.1:8620`; production Compose overrides the host binding. |
-| `AMIGA_CONTROLLER_URL` | Unset: integrated mode. Set to the controller's base HTTP URL for remote mode. |
-| `AMIGA_CONTROLLER_TOKEN_FILE` | Existing shared secret file for controller and remote GUI; preferred over `AMIGA_CONTROLLER_TOKEN`. Token: 32–4096 printable ASCII characters without spaces. |
-| `AMIGA_CONTROLLER_BOOTSTRAP_TOKEN` | Controller-only opt-in (`1`) to create a missing token file atomically with mode `0600`; enabled by the combined devcontainer Compose. Existing credentials are never replaced. |
+| `AMIGA_GUI_HOST`, `AMIGA_GUI_PORT` | GUI and Compose default to `0.0.0.0:8619`, accepting connections through localhost, LAN and Tailscale IPv4 addresses. Set `AMIGA_GUI_HOST` to restrict the listening address. |
 | `AMIGA_MAIN_CONFIG` | Default `<repo>/config/config-main.yaml`; selects the actual per-driver config paths. |
 | `AMIGA_SNAPSHOT_CONFIG` | Default `<repo>/gox_driver/config/config-gox-snapshot.yaml`. |
-| `AMIGA_CONFIG_ROOT`, `AMIGA_DATA_ROOT` | Optional resolved configuration/output boundaries; production uses `/config` and `/workspace/dataset`. |
-| `AMIGA_RUNTIME_DIR` | Default `<repo>/app/_runtime`; operation journals and temporary previews. Use persistent storage for the standalone controller. |
-| `AMIGA_CONTROL_LOCK` | Default `<AMIGA_RUNTIME_DIR>/controller.lock`; host and container controllers must share the same underlying file for a common device environment. |
-| `AMIGA_PYTHON` | Preview decoder interpreter; default `<repo>/.venv/bin/python`, production default `/opt/venv/bin/python`. |
+| `AMIGA_CONFIG_ROOT`, `AMIGA_DATA_ROOT` | Optional resolved configuration/output boundaries; Compose sets both to `/workspace`. |
+| `AMIGA_RUNTIME_DIR` | Default `<repo>/app/_runtime`; operation journals and temporary previews; Compose keeps them on the workspace volume. |
+| `AMIGA_CONTROL_LOCK` | Default `<AMIGA_RUNTIME_DIR>/controller.lock`; exclusive local control ownership lock. |
 
-### Controller API
+GUI service shutdown always requests tool/acquisition stop and waits for cleanup.
+Browser disconnects do not trigger service shutdown. Preview decoding uses the
+shared in-process format libraries; no separate decoder interpreter is selected.
 
-The internal HTTP protocol is `amiga-control-v1`. The GUI keeps its Bearer token
-on the server; it is not sent to the browser. All `/v1` routes require it.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /healthz` | Public controller readiness; does not probe hardware or certify recording health. |
-| `GET /v1/state` | Controller/session state, runtime statistics, reference results and recent command summaries. |
-| `POST /v1/jobs` | Submit a fixed recording, camera, reference, tool-stop or configuration action with a request ID. |
-| `GET /v1/jobs/{id}` | Read the accepted/running/completed/failed request and retained result. |
-
-Commands carry a controller identity, and Stop also checks the session generation
-to reject a stale page's request. Request IDs are journaled before execution;
-while retained, the same ID/content is deduplicated and changed content with that
-ID is rejected. At most 32 requests are retained, with results bounded to 8 MiB.
-An unfinished request from an earlier controller instance reports an unknown
-outcome and is not automatically replayed. Evicted requests return 404; this is
-not permanent exactly-once delivery.
-
-On a connection error, keep the displayed request ID and inspect Overview's
-recent commands or the retained result before deciding what to do next. A lost
-response does not prove that the hardware command failed. The GUI does not
-automatically resubmit device commands. The API exposes fixed actions rather
-than arbitrary shell execution, and raw recordings stay on the shared volume.
-
-**Refresh.** Remote GUI state polling runs every second. Log/statistics updates
-also depend on the driver's log flush, `LOG_POLL_S` and the page refresh cadence
+**Refresh.** Log/statistics updates depend on the driver's log flush, `LOG_POLL_S` and the page refresh cadence
 in `app/constants.py`. These are display intervals, not sampling rates or timing
 accuracy guarantees. The GUI reads the session log file; stderr is a temporary
 feed until that file is available.
@@ -658,34 +636,67 @@ feed until that file is available.
 ### Standard workstation setup
 
 Use [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml) for
-both services. `amiga-drivers-dev` retains the existing C++/SDK development
-environment and runs the controller API; `gui` runs NiceGUI with read-only
-project/data mounts. Both use the existing project configuration and shared
-disk, and communicate over `127.0.0.1:8620` using Linux host networking. The GUI
-defaults to `0.0.0.0:8619`; `AMIGA_GUI_HOST` selects another listening address.
-Only the driver container retains device access.
+the single `amiga-drivers-dev` service. It includes the C++/SDK development
+environment, acquisition tools and NiceGUI. Its entry point is
+`/usr/bin/python3 -B -m app.main`, managing C++ processes locally. The GUI defaults to `0.0.0.0:8619` with Linux host networking;
+`AMIGA_GUI_HOST` selects another listening address. No controller URL, API port
+or shared API token is needed.
 
-One Dockerfile provides separate `drivers` and `gui` targets sharing a Python
-dependency layer. On an operator-initiated build it prepares `/opt/venv` from
-the existing `uv.lock`, outside the repository bind mount; startup never syncs
-the host `.venv`. The controller creates a missing shared token under
-`app/_runtime` with mode `0600`, and both containers use the same UID/GID.
-The default remains `1000:1000`; `AMIGA_UID`/`AMIGA_GID` can override build inputs.
+[`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) has one Ubuntu 22.04
+image stage, retaining the `drivers` target name. APT supplies Python 3.10 and
+pip, and Python's patch version follows Ubuntu package updates. The bundled
+Pleora eBUS 6.5.1 package targets the same Ubuntu release and retains its
+`/opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64` installation path. The application's
+C++ drivers use the SDK's acquisition core; the vendor Python binding is not
+used by the application.
+
+On an operator-initiated image build, pip installs the four pinned direct
+dependencies from [`requirements.txt`](requirements.txt). pip resolves their
+transitive dependencies for Python 3.10. This single file is copied into
+`/opt/amiga-python`, outside the repository bind mount. Keep its direct versions
+reviewed together when updating them. There is no UV step, virtual
+environment, constraints file or Python source build. Container startup does not
+install dependencies, and image builds do not compile the project's acquisition
+binaries.
+
+The container uses the existing repository, configuration and data mounts.
+The default UID/GID remains `1000:1000`; `AMIGA_UID`/`AMIGA_GID` can override the
+image build inputs. The mounted repository and recording directories must be
+writable by that identity. Runtime journals remain under `app/_runtime`.
+
+Before rebuilding, recreating or stopping the container, normally stop any
+active recording in the GUI and wait for its final result. The following are
+operator commands, not steps performed by this static review:
 
 ```bash
-docker compose -f .devcontainer/docker-compose.yml up -d --build
-docker compose -f .devcontainer/docker-compose.yml logs --tail=100 -f gui amiga-drivers-dev
-# Restart only the GUI, leaving controller-managed recording running:
-docker compose -f .devcontainer/docker-compose.yml restart gui
+docker compose -f .devcontainer/docker-compose.yml up -d --build --remove-orphans
+docker compose -f .devcontainer/docker-compose.yml logs --tail=100 -f amiga-drivers-dev
+docker compose -f .devcontainer/docker-compose.yml restart amiga-drivers-dev
+docker compose -f .devcontainer/docker-compose.yml stop amiga-drivers-dev
 ```
 
-This retains the workstation's existing shared-disk, X11 authorization and
-device mount prerequisites. `build/bin/` acquisition/tool binaries must be
-prepared separately. Container startup itself does not start recording, and
-the GUI can report missing binaries before acquisition is available. IDE
-integration starts both services and preserves the controller command.
-See [.devcontainer/README.md](.devcontainer/README.md) for details and the static
-validation boundary; these images/services have not been built or run here.
+`--remove-orphans` removes the old `gui` service container when migrating from the
+previous configuration. The workstation setup retains the existing shared disk
+at `/mnt/SharedData/Post_Processing_Data`, X11 socket and authorization file,
+user runtime and device mounts. These host paths must exist; the X11 bind mounts
+are configured to fail instead of creating missing source paths. The active
+desktop session's `DISPLAY` and `XAUTHORITY` values select GUI forwarding.
+
+`build/bin/` acquisition/tool binaries must be prepared separately. Startup does
+not start recording, and the GUI can report missing binaries before acquisition
+is available. IDE integration starts only `amiga-drivers-dev` and preserves the
+GUI entry point.
+
+Closing the browser leaves recording running. Stopping or restarting the unified
+container shuts down the GUI service, requests tool/acquisition stop and waits
+for cleanup. Compose grants 180 seconds before Docker may force termination;
+the actual maximum drain time has not been measured. The next startup does not
+automatically resume recording. Health checks inspect GUI readiness at
+`/healthz`; they do not connect to sensors or certify recording health.
+
+**Validation boundary:** these container changes have been inspected as text.
+Image builds, dependency installation, C++ compilation, service startup and
+hardware behavior have not been executed or verified here.
 
 ### Remote GUI access over Tailscale
 
@@ -695,23 +706,24 @@ required. An existing `AMIGA_GUI_HOST` environment value takes precedence over
 this default. With Linux host networking, Docker port mappings are not used.
 See [Docker host networking](https://docs.docker.com/engine/network/drivers/host/).
 
-Optionally, to restrict GUI access to the Tailscale interface, run from the
-remote Linux server's project root with Tailscale already connected:
+Optionally, to restrict GUI access to the Tailscale interface, first normally stop
+any active recording. Then run from the remote Linux server's project root with
+Tailscale already connected:
 
 ```bash
 export AMIGA_GUI_HOST="$(tailscale ip -4)"
 # Check that this is the remote server's Tailscale IPv4 address:
 printf '%s\n' "$AMIGA_GUI_HOST"
-docker compose -f .devcontainer/docker-compose.yml up -d --no-build --no-deps --force-recreate gui
+docker compose -f .devcontainer/docker-compose.yml up -d --no-build --force-recreate amiga-drivers-dev
 ```
 
 Open `http://<remote-server-tailscale-ip>:8619/` from your other Tailscale device.
 The GUI binds specifically to that address; use the same address for server-side
 curl checks instead of `localhost`. The health check runs
 [`.devcontainer/gui_healthcheck.py`](.devcontainer/gui_healthcheck.py), follows the
-selected bind address and requires `/healthz` to report `ready: true`, while
-controller communication remains at `127.0.0.1:8620`. Only the GUI
-container is recreated; no image build or controller restart is needed.
+selected bind address and requires `/healthz` to report `ready: true`.
+This recreates the unified GUI/acquisition container without building the image;
+it does not preserve an active recording across the restart.
 The [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli) documents
 `tailscale ip -4`; [Compose up](https://docs.docker.com/reference/cli/docker/compose/up/)
 documents the service recreation flags.
@@ -720,73 +732,16 @@ Keep this setting for future Compose invocations. For persistence, place
 `AMIGA_GUI_HOST=<remote-server-tailscale-ip>` in a local `.devcontainer/.env` file
 and use `docker compose --env-file .devcontainer/.env -f .devcontainer/docker-compose.yml ...`.
 An invocation without the setting reverts to the all-interface default when it
-recreates the GUI. Tailscale must have assigned the address before GUI startup.
+recreates the container. Tailscale must have assigned the address before GUI startup.
 
 Setting `AMIGA_GUI_HOST=0.0.0.0` explicitly restores the default on all IPv4
-interfaces. The GUI has no browser login, and its server-side API token does not
-authenticate browser users; select the listening scope appropriate to the deployment.
+interfaces. The GUI has no browser login; select the listening scope appropriate
+to the deployment.
 
 If access still fails, compare a server-side request to its Tailscale IP with a
 request from the client. If the server succeeds but the client fails, inspect
-Tailscale connectivity/access policy and the host firewall for TCP 8619. Do not
-change the controller's 8620 binding to solve a GUI connectivity issue. These
+Tailscale connectivity/access policy and the host firewall for TCP 8619. These
 remote network checks have not been performed from this workspace.
-
-### Optional standalone production recipe
-
-The separate [`deploy/`](deploy/README.md) recipe is retained for deployment
-from prebuilt images and independent configuration directories. It is an
-alternative to the workstation setup; do not run both against the same devices.
-It also targets one Linux host with two services:
-
-| Service | Responsibilities and mounts |
-| --- | --- |
-| `controller` | Runs acquisition/device tools and writes configs; host network; read/write `/config`, `/workspace/dataset` and persistent `/control`. |
-| `gui` | NiceGUI, log viewing and file previews/history; read-only `/config` and `/workspace/dataset`; no Docker socket or device-node mounts. |
-
-Both services use an explicit deployment UID/GID and read-only container root
-filesystems. The GUI publishes to host `127.0.0.1:8619` by default. The controller
-listens on host port 8620 with Bearer authentication, and the GUI reaches it via
-the host gateway. This is a single-host internal API design. Remote browser
-access needs an appropriate authenticated/TLS entry point; the GUI does not
-provide a user login system.
-
-Deployment inputs and files:
-
-- [`deploy/.env.example`](deploy/.env.example): existing image names, actual
-  UID/GID, prepared configuration/data/control directories and a private token
-  file. Bind source directories must already exist with suitable permissions.
-- [`deploy/config-main.example.yaml`](deploy/config-main.example.yaml): shared
-  container paths, with all four device types initially disabled. Supply the
-  actual device YAMLs and snapshot configuration under `/config`.
-- [`deploy/compose.production.yaml`](deploy/compose.production.yaml): two
-  services using existing images only (`pull_policy: never`, no build step).
-- [`deploy/gui.Dockerfile`](deploy/gui.Dockerfile) and
-  [`deploy/controller.Dockerfile`](deploy/controller.Dockerfile): packaging
-  recipes with no dependency installation or compilation. They require prepared
-  runtime base images; the controller also requires the six named binaries in
-  `build/bin/` and ABI/SDK-compatible libraries. A freshly prepared acquisition
-  binary containing the status-protocol changes is needed for `amiga-run-v1`.
-- [`deploy/compose.serial.yaml`](deploy/compose.serial.yaml): optional overlay
-  for a specific verified host serial device/group, exposed as `/dev/ttyAMIGA`.
-
-The production controller requests `NET_RAW`, `NET_ADMIN` and `SYS_NICE`;
-effective capabilities, SDK paths, network behavior and serial access still
-require validation under the chosen runtime UID. The GUI Start action does not
-change executable capabilities or prepare the host environment.
-
-Restarting the GUI leaves controller-managed acquisition running. Stopping the
-controller rejects new commands and requests orderly tool/acquisition shutdown.
-Compose allows 180 seconds for controller shutdown; the actual maximum drain
-time is unverified, and Docker may force termination after that deadline.
-Controller startup/restart does not automatically begin recording.
-
-**Validation status:** GUI-12–15 were checked statically (43 app Python files
-parsed as AST, three deployment YAML files parsed with duplicate-key checks).
-Those checks did not execute project modules. C++ compilation, tests, service
-startup, container builds and hardware acceptance have not been performed for
-these changes. See the [deployment acceptance plan](deploy/README.md#尚未执行的验收方案)
-for the remaining process-recovery, API, history and container scenarios.
 
 ## Development
 
@@ -815,34 +770,32 @@ tests fill a real pipe to prove the console sink never blocks.
 
 ### Contracts
 
-Three things are duplicated between C++ and Python by necessity, and a checker
-keeps them honest:
+A focused checker covers the remaining statistics-display contract:
 
 ```bash
-.venv/bin/python -B tools/check_contracts.py
+python -B tools/check_contracts.py
 ```
 
-It verifies the lifecycle markers (`common/include/driver_markers.h` ↔
-`app/services/markers.py`), the `[Statistics]` `fps=` field of every frame-based
-driver, and that the GUI's parser really reads a rendered line of each.
+It verifies the `[Statistics]` `fps=` field and module/instance routing of every
+frame-based driver, and that the GUI's parser reads a rendered line of each.
 `common_tests` additionally asserts the C++ log output matches the GUI's line
 regex, and that an error line reaches the file without an explicit flush.
 
-This is a suggested check after changes to marker or `[Statistics]` format
-strings; it does not validate the HTTP API or structured lifecycle protocol.
+This is a suggested check after changes to `[Statistics]` format strings; it does
+not validate the structured lifecycle protocol.
 The build/test commands above describe operator workflows and are not evidence
-that they were executed for GUI-12–15. Automated review sessions must respect
-the execution limits in [`AGENTS.md`](AGENTS.md).
+that they were executed for these container changes. Automated review sessions
+must respect the execution limits in [`AGENTS.md`](AGENTS.md).
 
 ## Repository layout
 
 ```
 amiga_drivers/
-├── main.cpp                  # unified entry point: session folder, guards, threads, exit status
-├── CMakeLists.txt            # top-level build (AMIGA_BUILD_TESTS, version + git SHA)
-├── Build.bash / Start.bash   # convenience wrappers (SDK install + build, setcap + run)
-├── .devcontainer/            # drivers + GUI image targets, shared Compose and workstation guide
-├── deploy/                   # separate GUI/controller packaging, Compose, config examples, acceptance plan
+├── main.cpp                  # process entry: signals, main config, error exit
+├── acquisition.cpp           # session folder, config snapshots, driver composition
+├── CMakeLists.txt            # build boundaries, tests and caller-supplied revision
+├── Start.bash               # convenience wrapper for setcap + command-line recording
+├── .devcontainer/            # one Ubuntu image, GUI/acquisition Compose service and IDE settings
 ├── cmake/                    # Dependencies.cmake (hdf5/spdlog/yaml-cpp/nlohmann) + FindeBUS.cmake
 ├── 3rd_party/                # FetchContent sources, External/sensor_trigger + vendored doctest
 ├── config/config-main.yaml   # driver selection, guards, output root
@@ -852,12 +805,13 @@ amiga_drivers/
 ├── fx10_driver/              # fx10_core (SDK-free) + fx10_ebus (eBUS glue) + tools/ + tests/
 ├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + scripts/ + tools/ + tests/
 ├── lms4xxx_driver/           # CoLa B driver, scan parser, HDF5 recorder, scripts/, tests/
-├── app/                      # Python GUI/control services (existing uv-managed .venv)
-│   ├── main.py               # NiceGUI entry point: integrated or remote mode
-│   ├── controller.py         # authenticated HTTP control service
+├── app/                      # Python GUI/control services (pip-managed dependencies)
+│   ├── main.py               # NiceGUI single-container entry point
+│   ├── formats/              # shared FX10 recording-format readers
 │   ├── services/             # process/tool lifecycle, config actions, status, file previews and replay
 │   └── ui/                   # Overview, Config, Logs, Live, AsteRx, History, Camera Tools, Reference
 ├── tools/                    # repo tooling (contract checker, …)
+├── requirements.txt          # pinned direct Python dependencies; pip resolves transitives
 └── AGENTS.md                 # review protocol for automated reviewers
 ```
 
@@ -865,10 +819,11 @@ amiga_drivers/
 
 | Document | Covers |
 |---|---|
-| [`.devcontainer/README.md`](.devcontainer/README.md) | Single Compose startup for driver/controller + GUI containers, shared paths, automatic credentials and validation limits |
-| [`deploy/README.md`](deploy/README.md) | GUI-12–15 implementation, controller API/recovery, two-container deployment inputs and unexecuted acceptance scenarios |
+| [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) | Ubuntu 22.04, eBUS SDK, C++ tools and system Python 3.10 with pip dependencies |
+| [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml) | One GUI/acquisition service, shared paths, host networking, device access and shutdown grace period |
+| [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json) | IDE attachment to the same running service |
 | [`asterx_driver/docs/DEVICE_CONFIG.md`](asterx_driver/docs/DEVICE_CONFIG.md) | Reset to `RxDefault` on every connect, account handling, the warm-up gate, the write queue and the fail-fast rules while recording |
-| [`gox_driver/docs/DEVICE_CONFIG.md`](gox_driver/docs/DEVICE_CONFIG.md) | `UserSetLoad Default` on every bring-up, the ordered apply plan, the raw-feature audit, PTP (grandmaster = AsteRx, L2-domain prerequisite), fail-fast and the on-disk residue after a crash |
+| [`gox_driver/docs/DEVICE_CONFIG.md`](gox_driver/docs/DEVICE_CONFIG.md) | `UserSetLoad Default` on every bring-up, the ordered apply plan, the raw-feature audit, PTP slave-status guards (user-confirmed sole grandmaster = AsteRx, identity not verified by the driver, L2-domain prerequisite), fail-fast and the on-disk residue after a crash |
 | [`fx10_driver/docs/DEVICE_CONFIG.md`](fx10_driver/docs/DEVICE_CONFIG.md) | Factory user set + calibration-ROI guard, the write-order plan, which parameters are exposed and why the rest stay at their factory values, the recording policy (time source, fail-fast, off-thread durability) |
 | [`lms4xxx_driver/docs/DEVICE_CONFIG.md`](lms4xxx_driver/docs/DEVICE_CONFIG.md) | `mSCloadappdef` baseline, every telegram with its page number, `sAN` status-byte polarity, the shutdown handshake, the device self-report, "Time": NTP routing prerequisite, time lock and step check |
 | [`lms4xxx_driver/docs/FORMAT_H5.md`](lms4xxx_driver/docs/FORMAT_H5.md) | The `lms4xxx-h5` layout, durability and completeness semantics, what the timestamps mean |

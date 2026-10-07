@@ -8,6 +8,7 @@
 #include <utility>
 #include <sys/types.h>
 #include <nlohmann/json.hpp>
+#include "accounting.h"
 
 
 namespace fx10 {
@@ -55,4 +56,5 @@ namespace fx10 {
     // Unknown/reset/wrapped counters never become zero or a negative delta.
     std::optional<std::int64_t> MissedTriggerDelta(const DeviceTelemetry &sample);
     nlohmann::json BuildTelemetryJson(const DeviceTelemetry &sample, const std::string &phase);
+    nlohmann::ordered_json FinalCountersJson(const Counters &counters);
 }

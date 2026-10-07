@@ -1,69 +1,20 @@
 #!/usr/bin/env python3
-"""Verify the C++/Python GUI-contract mirrors agree verbatim.
+"""Check the remaining C++/GUI statistics-display contract.
 
-Two contracts are checked:
-
-1. Markers — every constant in common/include/driver_markers.h against its
-   counterpart in app/services/markers.py (whose import also runs the internal
-   consistency asserts).
-2. [Statistics] write rate — the "fps=" field every frame-based driver prints
-   in its periodic status line, which app/services/driver_stats.py parses to
-   drive the dashboard cards.
-
-Run from anywhere:
-
-    uv run python tools/check_contracts.py
-
-Exit code 0 = PASS, 1 = mismatch or parse failure.
+Lifecycle and final results come only from amiga-run-v1; human-readable log
+messages are not a control protocol. This check covers fps fields, module routing
+and multi-instance tags used by app.services.driver_stats.
 """
 
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import re
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CPP_HEADER = REPO_ROOT / "common" / "include" / "driver_markers.h"
-PY_MIRROR = REPO_ROOT / "app" / "services" / "markers.py"
-
-# C++ constant name -> Python constant name
-PAIRS = {
-    "kModuleMain": "MODULE_MAIN",
-    "kModuleAsterx": "MODULE_ASTERX",
-    "kModuleFx10": "MODULE_FX10",
-    "kModuleGox": "MODULE_GOX",
-    "kModuleLms4xxx": "MODULE_LMS4XXX",
-    "kAsterxInitialized": "ASTERX_INITIALIZED",
-    "kAsterxShutdown": "ASTERX_SHUTDOWN",
-    "kAsterxSessionIssues": "ASTERX_SESSION_ISSUES",
-    "kFx10Initialized": "FX10_INITIALIZED",
-    "kFx10Shutdown": "FX10_SHUTDOWN",
-    "kFx10SessionIssues": "FX10_SESSION_ISSUES",
-    "kGoxInitialized": "GOX_INITIALIZED",
-    "kGoxShutdown": "GOX_SHUTDOWN",
-    "kGoxSessionIssues": "GOX_SESSION_ISSUES",
-    "kLmsInitialized": "LMS_INITIALIZED",
-    "kLmsShutdown": "LMS_SHUTDOWN",
-    "kGoxInitializedInstTpl": "GOX_INITIALIZED_INST_TPL",
-    "kGoxShutdownInstTpl": "GOX_SHUTDOWN_INST_TPL",
-    "kLmsInitializedInstTpl": "LMS_INITIALIZED_TPL",
-    "kLmsShutdownInstTpl": "LMS_SHUTDOWN_TPL",
-    "kStartingDrivers": "STARTING_DRIVERS",
-    "kReceivedSignalTpl": "RECEIVED_SIGNAL_TPL",
-    "kAllDriversShutDown": "ALL_DRIVERS_SHUT_DOWN",
-    "kAsterxInitFailed": "ASTERX_INIT_FAILED",
-    "kFx10InitFailed": "FX10_INIT_FAILED",
-    "kGoxInitFailed": "GOX_INIT_FAILED",
-    "kLms4xxxInitFailed": "LMS4XXX_INIT_FAILED",
-    "kGuardNoDataSuffix": "GUARD_NO_DATA_SUFFIX",
-    "kAsterxRunException": "ASTERX_RUN_EXCEPTION",
-    "kFx10RunException": "FX10_RUN_EXCEPTION",
-    "kGoxRunException": "GOX_RUN_EXCEPTION",
-    "kLms4xxxRunException": "LMS4XXX_RUN_EXCEPTION",
-}
 
 CPP_CONST_RE = re.compile(r'constexpr\s+std::string_view\s+(k\w+)\s*=\s*"((?:[^"\\]|\\.)*)"')
 
@@ -87,10 +38,11 @@ STATS_CONTRACT = {
         "fps": 24.0,
     },
     "fx10": {
-        # fx10 renders the line in stats_line.cpp and emits it from the app layer
+        # fx10 renders in stats_line.cpp and emits from the acquisition session
         "format_file": "fx10_driver/src/stats_line.cpp",
         "literal": "fps={:.1f}",
-        "emit_file": "fx10_driver/src/fx10_driver_app.cpp",
+        "emit_file": "fx10_driver/src/session_monitor.cpp",
+        "logger_file": "fx10_driver/src/session.cpp",
         "sample": "[Statistics] frames=1200  rate=50.0 Hz  fps=49.8  missed_triggers=0  "
                   "temp_pcb=41.2  temp_fpga=52.7",
         "instance": None,  # fx10 is single-instance: no [tag] prefix
@@ -123,13 +75,6 @@ def load_cpp_constants() -> dict[str, str]:
     return consts
 
 
-def load_py_mirror():
-    spec = importlib.util.spec_from_file_location("amiga_markers", PY_MIRROR)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # import-time asserts run here
-    return module
-
-
 def load_stats_parser():
     """Import app.services.driver_stats (implicit namespace package, stdlib-only
     dependencies — no nicegui is pulled in)."""
@@ -148,6 +93,9 @@ def check_stats_contract(cpp: dict[str, str]) -> list[str]:
     for driver, spec in STATS_CONTRACT.items():
         fmt_path = REPO_ROOT / spec["format_file"]
         emit_path = REPO_ROOT / spec["emit_file"]
+        logger_path = REPO_ROOT / spec.get("logger_file", spec["emit_file"])
+        if not emit_path.is_file():
+            failures.append(f"{spec['emit_file']}: not found")
         if not fmt_path.is_file():
             failures.append(f"{spec['format_file']}: not found")
             continue
@@ -158,9 +106,9 @@ def check_stats_contract(cpp: dict[str, str]) -> list[str]:
             )
 
         # The module token routes the line to a sensor in the GUI.
-        m = GLOG_RE.search(emit_path.read_text(encoding="utf-8")) if emit_path.is_file() else None
+        m = GLOG_RE.search(logger_path.read_text(encoding="utf-8")) if logger_path.is_file() else None
         if m is None:
-            failures.append(f"{spec['emit_file']}: no 'common::DriverLog g_log{{...}}' declaration found")
+            failures.append(f"{logger_path.relative_to(REPO_ROOT)}: no 'common::DriverLog g_log{{...}}' declaration found")
         else:
             token = m.group(1)
             module = cpp.get(token) if token.startswith("k") else token.strip('"')
@@ -187,36 +135,13 @@ def check_stats_contract(cpp: dict[str, str]) -> list[str]:
 
 
 def main() -> int:
-    cpp = load_cpp_constants()
-    py = load_py_mirror()
-    failures: list[str] = []
-
-    unknown = set(cpp) - set(PAIRS)
-    if unknown:
-        failures.append(f"C++ constants missing from PAIRS (update this script): {sorted(unknown)}")
-
-    for cpp_name, py_name in PAIRS.items():
-        cpp_value = cpp.get(cpp_name)
-        py_value = getattr(py, py_name, None)
-        if cpp_value is None:
-            failures.append(f"{cpp_name}: not found in {CPP_HEADER.name}")
-        elif py_value is None:
-            failures.append(f"{py_name}: not found in {PY_MIRROR.name}")
-        elif cpp_value != py_value:
-            failures.append(f"{cpp_name} != {py_name}:\n    C++: {cpp_value!r}\n    Py:  {py_value!r}")
-
-    failures.extend(check_stats_contract(cpp))
-
+    failures = check_stats_contract(load_cpp_constants())
     if failures:
-        print(f"FAIL: {len(failures)} contract mismatch(es):")
-        for f in failures:
-            print(f"  - {f}")
+        print(f"FAIL: {len(failures)} statistics contract mismatch(es):")
+        for failure in failures:
+            print(f"  - {failure}")
         return 1
-
-    print(f"PASS: {len(PAIRS)} marker constants agree verbatim "
-          f"({CPP_HEADER.relative_to(REPO_ROOT)} <-> {PY_MIRROR.relative_to(REPO_ROOT)})")
-    print(f"PASS: {len(STATS_CONTRACT)} drivers publish the [Statistics] 'fps=' write rate the GUI cards read "
-          f"({PY_STATS_PARSER.relative_to(REPO_ROOT)})")
+    print(f"PASS: {len(STATS_CONTRACT)} drivers publish the statistics display contract")
     return 0
 
 

@@ -1,7 +1,6 @@
 # Build inputs only; do not send recordings, credentials, host environments or
 # version-control internals to the builder. Source code is bind-mounted at runtime.
 **
-!pyproject.toml
-!uv.lock
+!requirements.txt
 !resource/
-!resource/eBUS_SDK_Ubuntu-22.04-x86_64-*.deb
+!resource/eBUS_SDK_Ubuntu-22.04-x86_64-6.5.1-6797.deb

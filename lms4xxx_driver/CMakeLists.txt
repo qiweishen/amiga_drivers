@@ -13,6 +13,9 @@ find_package(Boost REQUIRED)
 # Driver Library
 set(LIB_SOURCES
         src/driver.cpp
+        src/driver_configuration.cpp
+        src/driver_stream.cpp
+        src/command_channel.cpp
         src/tcp_client.cpp
         src/lms4xxx_driver_app.cpp
         src/scan_record.cpp
@@ -28,7 +31,6 @@ set(LIB_SOURCES
 )
 
 file(GLOB_RECURSE HEADERS
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
         ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
 )
 

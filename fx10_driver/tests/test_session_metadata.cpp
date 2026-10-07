@@ -52,6 +52,32 @@ TEST_CASE("Metadata: JsonIntegersAndPixelContractRetainTheirMeaning") {
     CHECK(fx10::RecordingContract("unknown")["storage_bytes_per_pixel"].is_null());
 }
 
+TEST_CASE("Metadata: final ledger keeps native counters and unknown missed-trigger state") {
+    fx10::Counters counters;
+    counters.frames_written = 9007199254740993ULL;
+    counters.retrieve_ok = 7;
+    counters.retrieve_timeouts = 8;
+    counters.op_errors = 1;
+    counters.recording_queue_drops = 2;
+    counters.recording_worker_unconfirmed = 3;
+    counters.frames_missed_rx = 4;
+    counters.size_mismatch_drops = 5;
+    counters.write_errors = 6;
+    const auto row = nlohmann::ordered_json::parse(fx10::FinalCountersJson(counters).dump());
+    CHECK(row["frames_written"].get<std::uint64_t>() == counters.frames_written);
+    CHECK(row["retrieve_ok"] == 7);
+    CHECK(row["retrieve_timeouts"] == 8);
+    CHECK(row["op_errors"] == 1);
+    CHECK(row["recording_queue_drops"] == 2);
+    CHECK(row["recording_worker_unconfirmed"] == 3);
+    CHECK(row["frames_missed_rx"] == 4);
+    CHECK(row["size_mismatch_drops"] == 5);
+    CHECK(row["write_errors"] == 6);
+    CHECK(row["missed_trigger_delta"].is_null());
+    counters.missed_trigger_delta = 9;
+    CHECK(fx10::FinalCountersJson(counters)["missed_trigger_delta"] == 9);
+}
+
 TEST_CASE("Metadata: AtomicPublishNeverClobbersExistingSnapshot") {
     const auto path = MetadataTestDir() / "device.json";
     fx10::PublishMetadata(path, {{"serial", "00123"}});

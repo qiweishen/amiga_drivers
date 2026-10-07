@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -163,7 +164,16 @@ namespace common {
                     } else if constexpr (std::is_same_v<T, std::string>) {
                         return n.Scalar();
                     } else if constexpr (std::is_floating_point_v<T>) {
-                        return static_cast<T>(n.as<double>());
+                        const double value = n.as<double>();
+                        // YAML accepts .nan/.inf. They must not bypass range
+                        // checks or reach durations and floating-to-int casts.
+                        if (!std::isfinite(value)) {
+                            Fail(full_path, "must be finite (" + Shown(n) + ")");
+                        }
+                        if (value < std::numeric_limits<T>::lowest() || value > std::numeric_limits<T>::max()) {
+                            Fail(full_path, "is out of range (" + Shown(n) + ")");
+                        }
+                        return static_cast<T>(value);
                     } else if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
                         const auto v = n.as<std::int64_t>();
                         if (v < static_cast<std::int64_t>(std::numeric_limits<T>::min()) ||

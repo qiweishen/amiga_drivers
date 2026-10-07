@@ -8,6 +8,7 @@
 #include "buffering.h"
 #include "logger.h"
 #include "util.h"
+#include "sensor_sync_quality.h"
 #include "ebus/sdk_error.h"
 
 namespace gox::ebus {
@@ -32,8 +33,13 @@ namespace gox::ebus {
 
     void CameraSession::Start(const std::string &session_dir) {
         camera_dir_ = session_dir + "/" + cfg_.id;
-        BringUpSession();
-        StartStreaming();
+        try {
+            BringUpSession();
+            StartStreaming();
+        } catch (const std::exception &e) {
+            startup_error_ = e.what();
+            throw;
+        }
     }
 
     void CameraSession::BringUpSession() {
@@ -83,7 +89,7 @@ namespace gox::ebus {
         // GenICam configuration (build_apply_plan order + read-back verification).
         try {
             applied_ = controller_->ApplyConfig(cfg_);
-            counter_bound_ = Counter0Bound(applied_);
+            counter_bound_ = controller_->TriggerCounterBound();
         } catch (const std::exception &e) {
             throw std::runtime_error("GenICam apply: " + std::string(e.what()));
         }
@@ -155,10 +161,15 @@ namespace gox::ebus {
             // and here would be counted without ever producing a frame
             // (CounterEventSource=Off stops a counter but does not clear it,
             // manual p.116).
-            if (counter_bound_ && !controller_->ResetTriggerCounter()) {
+            const bool reset_ok = counter_bound_ && controller_->ResetTriggerCounter();
+            if (counter_bound_ && !reset_ok) {
                 g_log.Warn("[{}] [eBUS] CounterReset failed; the missed-trigger count starts from an "
                            "unknown baseline", cfg_.id);
             }
+            const auto baseline = controller_->SampleTelemetry(counter_bound_);
+            trigger_input_verified_ = baseline.trig_input_verified;
+            trigger_accounting_.Begin(baseline.trig_binding_verified, reset_ok, baseline.trig,
+                baseline.trig_status_read ? std::optional<bool>(baseline.trig_overflow) : std::nullopt);
             controller_->AcquisitionStart();
         } catch (const std::exception &e) {
             throw std::runtime_error("AcquisitionStart: " + std::string(e.what()));
@@ -174,7 +185,9 @@ namespace gox::ebus {
         try {
             receiver_->RunAcquisition(*pool_, *queue_, app_.output.max_frames);
         } catch (const std::exception &e) {
+            acquisition_error_ = e.what();
             g_log.Error("[{}] [eBUS] acquisition thread failed: {}", cfg_.id, e.what());
+            worker_failed_.store(true, std::memory_order_relaxed);
             stop_->RequestStop(StopReason::kError);
         }
         // Whatever ended the loop, this camera is no longer acquiring: disarm
@@ -194,17 +207,22 @@ namespace gox::ebus {
                     recorder_->WriteFrame(chunk->meta, chunk->data.get(),
                                            static_cast<size_t>(chunk->meta.payload_size));
                 } catch (const IoError &e) {
+                    writer_error_ = e.what();
                     g_log.Error("[{}] [eBUS] write failed: {}", cfg_.id, e.what());
                     stop_->RequestStop(StopReason::kError);
                     io_failed = true; // keep draining to unblock the producer
+                    worker_failed_.store(true, std::memory_order_relaxed);
                 }
             }
+            if (io_failed) stats_.frames_write_unconfirmed.fetch_add(1, std::memory_order_relaxed);
             pool_->Release(std::move(chunk));
         }
         try {
             recorder_->close(!io_failed);
         } catch (const IoError &e) {
+            if (writer_error_.empty()) writer_error_ = e.what();
             g_log.Error("[{}] [eBUS] recorder close failed: {}", cfg_.id, e.what());
+            worker_failed_.store(true, std::memory_order_relaxed);
             stop_->RequestStop(StopReason::kError);
         }
     }
@@ -232,6 +250,19 @@ namespace gox::ebus {
         if (!started_) {
             // Failed bring-up: devices only, no threads.
             TeardownDevices();
+            if (recorder_) {
+                try { recorder_->close(false); }
+                catch (const IoError &e) {
+                    writer_error_ = e.what();
+                    worker_failed_.store(true, std::memory_order_relaxed);
+                    stop_->RequestStop(StopReason::kError);
+                }
+            }
+            if (telemetry_.is_open()) {
+                telemetry_.close();
+                telemetry_failed_ = !telemetry_;
+            }
+            workers_joined_ = true;
             return;
         }
 
@@ -250,12 +281,15 @@ namespace gox::ebus {
         if (acq_thread_.joinable()) {
             acq_thread_.join();
         }
+        // Thread construction itself can fail after AcquisitionStart. Closing
+        // here also permits synchronous draining when no writer was created.
+        queue_->close();
 
         // 3. final stream statistics (needs the open stream), then stream teardown
         receiver_->PollStreamStats();
         receiver_->DumpStreamParams(camera_dir_ + "/stream_stats.txt");
         // Last telemetry row while the control channel is still up: the final
-        // Counter0 value is what the Final line's missed= is computed against.
+        // Counter0 value completes the final accounting evidence.
         PollDeviceTelemetry();
         if (telemetry_.is_open()) {
             telemetry_.close();
@@ -270,7 +304,10 @@ namespace gox::ebus {
         // 4. writer drains the closed queue and closes the recorder
         if (writer_thread_.joinable()) {
             writer_thread_.join();
+        } else {
+            WriterThreadMain();
         }
+        workers_joined_ = true;
 
         // 5. control channel down last
         controller_->Disconnect();
@@ -294,9 +331,73 @@ namespace gox::ebus {
 
     bool CameraSession::Clean() const {
         const CameraStats::Snapshot s = stats_.GetSnapshot();
-        return !telemetry_failed_ && s.frames_incomplete == 0 && s.frames_error_dropped == 0 && s.frames_dropped_queue == 0 && s.
+        return startup_error_.empty() && !worker_failed_.load(std::memory_order_relaxed) && !telemetry_failed_ && !accounting_failed_ &&
+               s.frames_written == s.frames_retrieved_ok + s.frames_incomplete &&
+               s.frames_write_unconfirmed == 0 && s.frames_incomplete == 0 && s.frames_error_dropped == 0 && s.frames_dropped_queue == 0 && s.
                frames_lost_gap == 0 &&
                s.stream_blocks_dropped == 0;
+    }
+
+    void CameraSession::FinalizeAccounting(bool timing_started, bool timing_ok) {
+        if (accounting_finalized_) return;
+        accounting_finalized_ = true;
+        const auto s = stats_.GetSnapshot();
+        const uint64_t emitted = s.frames_retrieved_ok + s.frames_incomplete + s.frames_error_dropped +
+                                 s.frames_dropped_queue + s.frames_lost_gap + s.frames_limit_excluded;
+        const bool external = cfg_.acquisition.trigger.mode == TriggerMode::kExternal;
+        const bool participant = app_.sensor_trigger.enabled && !timing_log_path_.empty();
+        counter_result_ = trigger_accounting_.FinalJson(emitted,
+            started_ && external && participant && trigger_input_verified_ && timing_started && timing_ok);
+        counter_result_["shared_source_participant"] = participant;
+        counter_result_["trigger_input_verified_at_sampled_reads"] = trigger_input_verified_;
+        accounting_failed_ = counter_result_["failed"].get<bool>();
+        if (accounting_failed_) {
+            g_log.Error("[{}] trigger counter accounting failed: {}", cfg_.id, counter_result_.dump());
+        }
+        if (!started_ || !participant || !timing_started) {
+            timing_result_["status"] = participant ? "not_started" : "disabled";
+            if (started_ && participant) accounting_failed_ = true;
+            return;
+        }
+        try {
+            // Explicit max_frames exclusions are received frames, not invisible
+            // loss. Keep them separate from actual recordings in the result.
+            const auto quality = common::InspectSensorSync(timing_log_path_,
+                static_cast<unsigned>(cfg_.acquisition.trigger.sensor_channel), external,
+                s.frames_retrieved_ok + s.frames_limit_excluded, s.frames_lost_gap);
+            timing_result_ = quality.Json();
+            timing_result_["frames_written"] = s.frames_written;
+            timing_result_["frames_admitted_ok"] = s.frames_retrieved_ok;
+            timing_result_["frames_limit_excluded"] = s.frames_limit_excluded;
+            timing_result_["counts_include_limit_exclusions"] = true;
+            timing_result_["all_observed_frames_recorded"] =
+                s.frames_limit_excluded == 0 && s.frames_written == s.frames_retrieved_ok && Clean();
+            timing_result_["recording_limit_policy"] = "max_frames excludes only actual received drain frames after the configured limit";
+            timing_result_["semantics"] = "session counts and complete exposure edges; explicit max_frames exclusions included; no verified frame/trigger anchor";
+            PublishMetadata(camera_dir_ + "/timing_quality.json", timing_result_.dump(2) + "\n");
+            if (!quality.Ok()) {
+                accounting_failed_ = true;
+                g_log.Error("[{}] SensorSync exposure/frame accounting failed: {}", cfg_.id, timing_result_.dump());
+            }
+        } catch (const std::exception &e) {
+            accounting_failed_ = true;
+            timing_result_["status"] = "inspection_or_publication_failed";
+            timing_result_["error"] = e.what();
+            g_log.Error("[{}] cannot assess/persist SensorSync accounting: {}", cfg_.id, e.what());
+        }
+    }
+
+    nlohmann::ordered_json CameraSession::FinalStatistics() const {
+        return {{"camera_id", cfg_.id}, {"acquisition_started", started_}, {"stop_requested", stopped_},
+            {"workers_joined", workers_joined_},
+            {"accounting_finalized", accounting_finalized_},
+            {"clean", started_ && workers_joined_ && accounting_finalized_ && Clean()},
+            {"worker_failed", worker_failed_.load(std::memory_order_relaxed)},
+            {"startup_error", startup_error_},
+            {"acquisition_error", workers_joined_ ? nlohmann::ordered_json(acquisition_error_) : nlohmann::ordered_json(nullptr)},
+            {"writer_error", workers_joined_ ? nlohmann::ordered_json(writer_error_) : nlohmann::ordered_json(nullptr)},
+            {"telemetry_failed", telemetry_failed_}, {"counters", CameraStatsJson(stats_.GetSnapshot())},
+            {"trigger_counter", counter_result_}, {"sensor_sync", timing_result_}};
     }
 
     void CameraSession::PollStreamStats() {
@@ -349,19 +450,23 @@ namespace gox::ebus {
         // last row is written from stop_and_join, while the control channel is
         // still up. Connected() is what actually decides.
         if (!started_ || !controller_ || !controller_->Connected()) {
+            if (started_) {
+                trigger_accounting_.Observe(false, std::nullopt, std::nullopt);
+                trigger_input_verified_ = false;
+            }
             return;
         }
         try {
             TelemetrySample sample = controller_->SampleTelemetry(counter_bound_);
-            // PTP values come from the guard that ran on this same tick, not
+            trigger_input_verified_ = trigger_input_verified_ && sample.trig_input_verified;
+            trigger_accounting_.Observe(sample.trig_binding_verified, sample.trig,
+                sample.trig_status_read ? std::optional<bool>(sample.trig_overflow) : std::nullopt);
+            // PTP status comes from the guard that ran on this same tick, not
             // from a second round of GVCP reads.
             if (ptp_) {
                 const PtpSummary ptp = ptp_->Summary();
                 if (ptp.enabled) {
                     sample.ptp_status = ptp.status;
-                    if (ptp.accuracy >= 0) {
-                        sample.ptp_accuracy = ptp.accuracy;
-                    }
                 }
             }
 
@@ -401,6 +506,8 @@ namespace gox::ebus {
                 }
             }
         } catch (const std::exception &e) {
+            trigger_accounting_.Observe(false, std::nullopt, std::nullopt);
+            trigger_input_verified_ = false;
             g_log.Warn("[{}] [eBUS] device telemetry poll failed: {}", cfg_.id, e.what());
         }
     }

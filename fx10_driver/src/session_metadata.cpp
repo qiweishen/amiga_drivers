@@ -147,4 +147,18 @@ namespace fx10 {
                     {"binding_verified_at_start", s.counter_binding_verified},
                     {"semantics", "raw Counter1_Value; missed-trigger meaning requires verified binding; not total triggers; reset/wrap uncorrected"}}}};
     }
+
+    nlohmann::ordered_json FinalCountersJson(const Counters &c) {
+        return {{"retrieve_ok", c.retrieve_ok}, {"retrieve_timeouts", c.retrieve_timeouts},
+            {"op_errors", c.op_errors}, {"blockid_gap_events", c.blockid_gap_events},
+            {"frames_missed_rx", c.frames_missed_rx}, {"blockid_anomalies", c.blockid_anomalies},
+            {"recording_queue_drops", c.recording_queue_drops},
+            {"recording_worker_unconfirmed", c.recording_worker_unconfirmed},
+            {"size_mismatch_drops", c.size_mismatch_drops}, {"frames_written", c.frames_written},
+            {"gap_lines_padded", c.gap_lines_padded}, {"bytes_written", c.bytes_written},
+            {"write_errors", c.write_errors}, {"segments_finalized", c.segments_finalized},
+            {"missed_trigger_delta", c.missed_trigger_delta >= 0 ? nlohmann::ordered_json(c.missed_trigger_delta)
+                                                                 : nlohmann::ordered_json(nullptr)},
+            {"unconfirmed_semantics", "may overlap frames_written after a partial or durability failure; not additive loss"}};
+    }
 }

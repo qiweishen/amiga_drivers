@@ -10,6 +10,68 @@
 #include "util.h"
 
 namespace gox {
+    void TriggerCounterAccounting::Begin(bool bound, bool reset_ok, std::optional<int64_t> value,
+                                         std::optional<bool> overflow) {
+        *this = {};
+        bound_at_start = bound;
+        reset_acknowledged = reset_ok;
+        baseline = value;
+        Observe(bound, value, overflow);
+    }
+
+    void TriggerCounterAccounting::Observe(bool bound, std::optional<int64_t> value,
+                                           std::optional<bool> overflow) {
+        binding_lost = binding_lost || !bound;
+        status_unavailable = status_unavailable || !overflow.has_value();
+        overflow_seen = overflow_seen || overflow.value_or(false);
+        if (value && (*value < 0 || (previous_valid && *value < *previous_valid))) regressed = true;
+        if (value) previous_valid = value;
+        latest = value; // a failed final read must not reuse an old periodic sample
+    }
+
+    nlohmann::ordered_json TriggerCounterAccounting::FinalJson(uint64_t emitted, bool window_verified) const {
+        nlohmann::ordered_json out = {{"bound_at_start", bound_at_start},
+            {"reset_acknowledged", reset_acknowledged}, {"binding_lost", binding_lost},
+            {"overflow_seen", overflow_seen}, {"counter_regressed", regressed},
+            {"status_unavailable", status_unavailable}, {"window_verified", window_verified},
+            {"baseline", baseline ? nlohmann::ordered_json(*baseline) : nlohmann::ordered_json(nullptr)},
+            {"final_raw", latest ? nlohmann::ordered_json(*latest) : nlohmann::ordered_json(nullptr)},
+            {"frames_emitted_accounted", emitted}, {"trigger_delta", nullptr}, {"missing_frames", nullptr},
+            {"status", "unknown"}, {"unknown_reason", nullptr}, {"failed", false}, {"association_verified", false},
+            {"semantics", "Counter0 delta versus emitted-frame accounting after drain; no frame/trigger anchor"}};
+        std::string unknown;
+        if (!bound_at_start || binding_lost) unknown = "Counter0 FrameTrigger binding unavailable at one or more sampled reads";
+        else if (!reset_acknowledged) unknown = "CounterReset not acknowledged";
+        else if (overflow_seen || regressed) unknown = "counter overflow or regression invalidated the delta";
+        else if (status_unavailable) unknown = "counter overflow status unavailable";
+        else if (!baseline || !latest || *baseline < 0 || *latest < *baseline) unknown = "baseline or final counter reading unavailable/invalid";
+        else if (!window_verified) unknown = "acquisition counter window not bounded by the shared SensorSync source";
+        if (!unknown.empty()) { out["unknown_reason"] = unknown; return out; }
+        const auto delta = static_cast<uint64_t>(*latest - *baseline);
+        out["trigger_delta"] = delta;
+        out["status"] = delta == emitted ? "balanced" : delta > emitted ? "missing_frames" : "counter_disagreement";
+        out["failed"] = delta != emitted;
+        if (delta >= emitted) out["missing_frames"] = delta - emitted;
+        return out;
+    }
+
+    nlohmann::ordered_json CameraStatsJson(const CameraStats::Snapshot &s) {
+        return {{"frames_retrieved_ok", s.frames_retrieved_ok}, {"frames_incomplete", s.frames_incomplete},
+            {"frames_error_dropped", s.frames_error_dropped}, {"frames_dropped_queue", s.frames_dropped_queue},
+            {"blockid_gap_events", s.blockid_gap_events}, {"frames_lost_gap", s.frames_lost_gap},
+            {"frames_limit_excluded", s.frames_limit_excluded},
+            {"frames_written", s.frames_written}, {"bytes_written", s.bytes_written},
+            {"frames_write_unconfirmed", s.frames_write_unconfirmed},
+            {"unconfirmed_semantics", "failed or unattempted writes; may overlap frames_written after a durability failure; not additive loss"},
+            {"segments_created", s.segments_created}, {"stream_blocks_dropped", s.stream_blocks_dropped},
+            {"stream_error_count", s.stream_error_count}, {"queue_depth", s.queue_depth},
+            {"queue_capacity", s.queue_capacity},
+            {"sensor_temp_centi", s.sensor_temp_centi != INT32_MIN ? nlohmann::ordered_json(s.sensor_temp_centi) : nlohmann::ordered_json(nullptr)},
+            {"trigger_count_raw", s.trigger_count >= 0 ? nlohmann::ordered_json(s.trigger_count) : nlohmann::ordered_json(nullptr)},
+            {"trigger_overflow", s.trigger_overflow},
+            {"device_gauges_semantics", "last available sample; use trigger_counter for final-read availability and validated delta"}};
+    }
+
     CameraStats::Snapshot CameraStats::GetSnapshot() const {
         Snapshot s{};
         s.frames_retrieved_ok = frames_retrieved_ok.load(std::memory_order_relaxed);
@@ -18,7 +80,9 @@ namespace gox {
         s.frames_dropped_queue = frames_dropped_queue.load(std::memory_order_relaxed);
         s.blockid_gap_events = blockid_gap_events.load(std::memory_order_relaxed);
         s.frames_lost_gap = frames_lost_gap.load(std::memory_order_relaxed);
+        s.frames_limit_excluded = frames_limit_excluded.load(std::memory_order_relaxed);
         s.frames_written = frames_written.load(std::memory_order_relaxed);
+        s.frames_write_unconfirmed = frames_write_unconfirmed.load(std::memory_order_relaxed);
         s.bytes_written = bytes_written.load(std::memory_order_relaxed);
         s.segments_created = segments_created.load(std::memory_order_relaxed);
         s.stream_blocks_dropped = stream_blocks_dropped.load(std::memory_order_relaxed);
@@ -46,10 +110,11 @@ namespace gox {
             // queue, or lost on the wire (each buffer lands in exactly one of
             // these counters; lost_gap counts the ones that never arrived).
             const uint64_t emitted_cur = cur.frames_retrieved_ok + cur.frames_incomplete +
-                                         cur.frames_error_dropped + cur.frames_dropped_queue + cur.frames_lost_gap;
+                                         cur.frames_error_dropped + cur.frames_dropped_queue + cur.frames_lost_gap +
+                                         cur.frames_limit_excluded;
             const uint64_t emitted_prev = prev_.frames_retrieved_ok + prev_.frames_incomplete +
                                           prev_.frames_error_dropped + prev_.frames_dropped_queue +
-                                          prev_.frames_lost_gap;
+                                          prev_.frames_lost_gap + prev_.frames_limit_excluded;
             rate_hz = static_cast<double>(emitted_cur - emitted_prev) / interval_s;
             fps = static_cast<double>(cur.frames_written - prev_.frames_written) / interval_s;
             mbps = static_cast<double>(cur.bytes_written - prev_.bytes_written) / interval_s / 1e6;
@@ -97,16 +162,9 @@ namespace gox {
                  s.stream_error_count, s.frames_written, common::HumanBytes(s.bytes_written).c_str(), s.segments_created);
         std::string line = buf;
         if (s.trigger_count >= 0) {
-            // Triggers the camera received (Counter0) minus the frames it
-            // actually emitted: the only camera-side evidence of a trigger that
-            // was masked or arrived while the camera could not answer it.
-            // Signed on purpose - a negative value means the counter and the
-            // frame stream disagree and the number should not be trusted.
-            const int64_t emitted = static_cast<int64_t>(s.frames_retrieved_ok + s.frames_incomplete +
-                                                         s.frames_error_dropped + s.frames_dropped_queue +
-                                                         s.frames_lost_gap);
-            snprintf(buf, sizeof(buf), "  triggers=%" PRId64 "  missed=%" PRId64, s.trigger_count,
-                     s.trigger_count - emitted);
+            // The raw value alone has no verified baseline/window. Session
+            // final statistics carry the separately validated reconciliation.
+            snprintf(buf, sizeof(buf), "  triggers=%" PRId64 "  missed=unknown", s.trigger_count);
             line += buf;
         }
         return line;

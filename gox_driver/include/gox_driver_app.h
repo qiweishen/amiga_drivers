@@ -38,6 +38,7 @@ public:
     // no camera qualifies (bring-up, teardown, or every camera on an external
     // trigger, where silence only means the pulses stopped).
     std::optional<std::uint64_t> MicrosSinceLastData() const override;
+    nlohmann::ordered_json FinalStatistics() const override;
 
 private:
     std::string config_path_; // resolved: exe_dir/../../ + gox_config_path
@@ -48,8 +49,9 @@ private:
     std::shared_ptr<common::SensorSyncHub> sync_; // the rig's SensorSync session (main's), used when sensor_trigger.enabled
     std::unique_ptr<gox::CaptureRunner> runner_;
     std::vector<std::string> camera_ids_; // enabled cameras, for the per-instance markers
+    nlohmann::ordered_json final_statistics_ = {{"schema_version", 1}, {"initialized", false},
+        {"status", "not_started"}, {"cameras", nlohmann::ordered_json::array()}};
 
     std::atomic<bool> shutdown_called_{false};
 };
-
 

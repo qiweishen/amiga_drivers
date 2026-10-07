@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
-from . import camera_operations, fx10_tools, gox_tools, runtime, tool_jobs, control_client, wire
+from . import camera_operations, fx10_tools, gox_tools, runtime, tool_jobs
 
 SET_IP_TOOL = "ebus_set_ip"
 # GUI-side hard timeout; the tool's own budget is discovery (4 s) + the
@@ -92,8 +92,6 @@ def guard_reason_for(kind: str) -> str | None:
 
 
 async def discover(timeout_ms: int = 1500) -> DiscoverResult:
-    if control_client.enabled():
-        return wire.restore(DiscoverResult, await control_client.call("camera.discover", timeout_ms))
     return await camera_operations.run("discovery", lambda: _discover(timeout_ms), kind="discover")
 
 
@@ -144,9 +142,6 @@ async def _discover(timeout_ms: int) -> DiscoverResult:
 async def set_ip(mac: str, ip: str, subnet_mask: str, gateway: str = "0.0.0.0",
                  allow_foreign_subnet: bool = False, *, kind: str) -> SetIpResult:
     """Recheck recording ownership after dialogs and reserve before any await."""
-    if control_client.enabled():
-        return wire.restore(SetIpResult, await control_client.call("camera.set_ip", mac, ip, subnet_mask,
-                                                                   gateway, allow_foreign_subnet, kind=kind))
     driver = {"GoX": "gox", "FX10": "fx10"}.get(kind)
     return await camera_operations.run(
         driver, lambda: _set_ip(mac, ip, subnet_mask, gateway, allow_foreign_subnet), kind="set-ip")

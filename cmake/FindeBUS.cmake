@@ -6,11 +6,8 @@
 # Search order:
 #   1. EBUS_SDK_ROOT / EBUS_ROOT        (CMake cache variables, then environment)
 #   2. $ENV{PUREGEV_ROOT}               (set by the SDK's set_puregev_env.sh)
-#   3. /opt/pleora/ebus_sdk/<dist>      (generic Pleora eBUS SDK — the validated
-#                                        6.5.1 edition serving gox AND fx10)
-#   4. /opt/jai/ebus_sdk/<dist>         (legacy eBUS SDK for JAI; fallback only,
-#                                        so a stale 6.6.1 install cannot shadow
-#                                        the intended Pleora SDK)
+#   3. /opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64 (the pinned container SDK)
+# An explicit root that is invalid fails instead of selecting another SDK.
 #
 # Defines:
 #   eBUS_FOUND, EBUS_FOUND
@@ -35,9 +32,12 @@ endforeach()
 if(DEFINED ENV{PUREGEV_ROOT} AND NOT "$ENV{PUREGEV_ROOT}" STREQUAL "")
     list(APPEND _ebus_candidates "$ENV{PUREGEV_ROOT}")
 endif()
-file(GLOB _ebus_pleora_dirs "/opt/pleora/ebus_sdk/*")
-file(GLOB _ebus_jai_dirs "/opt/jai/ebus_sdk/*")
-list(APPEND _ebus_candidates ${_ebus_pleora_dirs} ${_ebus_jai_dirs})
+if(_ebus_candidates)
+    list(GET _ebus_candidates 0 _ebus_explicit_root)
+    set(_ebus_candidates "${_ebus_explicit_root}")
+else()
+    set(_ebus_candidates "/opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64")
+endif()
 
 set(EBUS_SDK_ROOT_DIR "")
 foreach(_cand IN LISTS _ebus_candidates)
@@ -52,7 +52,7 @@ if(EBUS_SDK_ROOT_DIR STREQUAL "")
     set(eBUS_FOUND FALSE)
     set(EBUS_FOUND FALSE)
     if(eBUS_FIND_REQUIRED)
-        message(FATAL_ERROR "eBUS SDK not found (searched EBUS_SDK_ROOT, EBUS_ROOT, PUREGEV_ROOT, /opt/jai/ebus_sdk/*, /opt/pleora/ebus_sdk/*)")
+        message(FATAL_ERROR "eBUS SDK not found at ${_ebus_candidates}; supply EBUS_SDK_ROOT or configure with AMIGA_ENABLE_EBUS=OFF")
     endif()
     return()
 endif()
@@ -115,7 +115,7 @@ foreach(_lib IN LISTS _ebus_optional_libs)
 endforeach()
 
 if(_ebus_missing)
-    message(WARNING "eBUS SDK at ${EBUS_SDK_ROOT_DIR} is missing expected libraries: ${_ebus_missing}")
+    message(FATAL_ERROR "eBUS SDK at ${EBUS_SDK_ROOT_DIR} is missing required libraries: ${_ebus_missing}")
 endif()
 
 if(NOT TARGET eBUS::eBUS)

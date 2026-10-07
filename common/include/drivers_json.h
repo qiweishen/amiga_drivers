@@ -17,7 +17,7 @@ namespace common {
         void SetRun(const std::string &timestamp, const std::string &output_directory);
 
         // Build identity of the whole AmigaDrivers process (project version +
-        // git SHA baked at configure time); call before WriteRunning()
+        // caller-supplied revision baked at configure time); call before WriteRunning()
         void SetVersion(const std::string &version, const std::string &git_sha);
 
         // One entry per driver: {"enabled": ..., "config": <path as configured>}

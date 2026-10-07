@@ -39,6 +39,8 @@ bool GoxDriverApp::Init(const std::function<bool()> &external_stop) {
     try {
         cfg = gox::LoadAppConfig(config_path_);
     } catch (const gox::ConfigError &e) {
+        final_statistics_["status"] = "config_error";
+        final_statistics_["error"] = e.what();
         g_log.Error("GoX config error: {}", e.what());
         return false;
     }
@@ -58,6 +60,8 @@ bool GoxDriverApp::Init(const std::function<bool()> &external_stop) {
     // pair); a freerun camera asks for no pulses and only has its strobes logged.
     if (cfg.sensor_trigger.enabled) {
         if (!sync_) {
+            final_statistics_["status"] = "startup_failed";
+            final_statistics_["error"] = "sensor_trigger.enabled but the host provides no SensorSync session";
             g_log.Error("GoX startup failed: sensor_trigger.enabled but the host provides no SensorSync session "
                         "(common::Config::sensor_sync is empty)");
             return false;
@@ -75,6 +79,8 @@ bool GoxDriverApp::Init(const std::function<bool()> &external_stop) {
             try {
                 sync_->Register(gox::SensorSyncOwner(cam.id), cam.acquisition.trigger.sensor_channel, pulse_hz);
             } catch (const common::SensorSyncError &e) {
+                final_statistics_["status"] = "startup_failed";
+                final_statistics_["error"] = e.what();
                 g_log.Error("GoX startup failed: {}", e.what());
                 return false;
             }
@@ -120,6 +126,9 @@ bool GoxDriverApp::Init(const std::function<bool()> &external_stop) {
     if (!bring_up_ok) {
         if (stop_->StopRequested() && stop_->Reason() == gox::StopReason::kExternal) {
             g_log.Warn("GoX bring-up interrupted by shutdown request");
+            runner_->Shutdown();
+            final_statistics_ = runner_->FinalStatistics();
+            final_statistics_["status"] = "startup_interrupted";
             runner_.reset(); // Init already unwound; interruption is not a recording error
         } else {
             g_log.Error("GoX startup failed: {}", runner_->LastError());
@@ -166,6 +175,7 @@ void GoxDriverApp::Shutdown() {
         return;
     }
     const bool clean = runner_->Shutdown();
+    final_statistics_ = runner_->FinalStatistics();
     if (clean) {
         for (const auto &id: camera_ids_) {
             g_log.Info(fmt::runtime(common::Markers::kGoxShutdownInstTpl), id);
@@ -175,4 +185,8 @@ void GoxDriverApp::Shutdown() {
         MarkFailed();
         g_log.Error("{} ({})", common::Markers::kGoxSessionIssues, runner_->LastError());
     }
+}
+
+nlohmann::ordered_json GoxDriverApp::FinalStatistics() const {
+    return runner_ ? runner_->FinalStatistics() : final_statistics_;
 }

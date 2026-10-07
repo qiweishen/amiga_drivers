@@ -1,19 +1,13 @@
-"""Recover a session from the acquisition's open log and recorded metadata."""
+"""Recover only the session identified by the current acquisition manifest."""
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import yaml
-
 from ..constants import DRIVERS
 from . import runtime, run_status
-
-_LOG = re.compile(r"/(\d{8}_\d{6})/raw/log_\1\.log$")
 
 
 @dataclass(frozen=True)
@@ -26,27 +20,16 @@ class SessionInfo:
 
 async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
     session = run_status.control_session(ref)
-    if session is not None:
-        info = read(session)
-        if not await runtime.is_process_alive(ref):
-            raise ValueError("Acquisition exited while its status was being read")
-        return info
-    candidates = {
-        runtime.to_host_path(path).parent.parent
-        for path in await runtime.process_files(ref)
-        if _LOG.search(path)
-    }
-    if len(candidates) != 1:
-        raise ValueError("The process does not identify exactly one acquisition session log")
-    session = candidates.pop()
-    info = read(session)
+    if session is None:
+        raise ValueError("Waiting for an amiga-run-v1 manifest matching this process")
+    info = read(session, ref)
     if not await runtime.is_process_alive(ref):
         raise ValueError("The acquisition exited while its session was being identified")
     return info
 
 
-def read(session: Path) -> SessionInfo:
-    doc = run_status.read_json(session / "raw" / "drivers.json")
+def read(session: Path, ref: runtime.ProcessIdentity) -> SessionInfo:
+    doc = run_status.read_session(session, ref)
     run = doc["run"]
     output_dir = runtime.to_host_path(run["output_directory"])
     if run["timestamp"] != session.name or output_dir.resolve() != session.parent.resolve():
@@ -63,20 +46,20 @@ def read(session: Path) -> SessionInfo:
         raise ValueError("The run manifest contains no enabled driver")
     names: list[str] = []
     if enables["lms4xxx"]:
-        config = session / "raw" / "config" / f"config-lms4xxx_{session.name}.yaml"
-        lidar_doc = yaml.safe_load(config.read_text(encoding="utf-8"))
-        names = [str(entry["id"]) for entry in lidar_doc["lidar"] if entry.get("enabled", True)]
-        if not names or len(set(names)) != len(names):
-            raise ValueError("Cannot identify enabled LiDAR instances from the recorded config")
+        names = [key.removeprefix("lms:") for key in doc["lifecycle"]["sensors"] if key.startswith("lms:")]
+        if not names or any(not name for name in names):
+            raise ValueError("Cannot identify enabled LiDAR instances from the lifecycle manifest")
+    run_status.sensor_update(doc, run_status.sensor_statuses(enables, names))
     started = datetime.fromisoformat(run["started"].replace("Z", "+00:00"))
     if started.tzinfo is None:
         raise ValueError("The recorded start time has no timezone")
     return SessionInfo(session, enables, names, started.timestamp())
 
 
-def finished_cleanly(session: Path) -> bool:
+def finished_cleanly(session: Path, ref: runtime.ProcessIdentity | None) -> bool:
     """Missing or unfinalized metadata cannot certify recording integrity."""
-    run = json.loads((session / "raw" / "drivers.json").read_text(encoding="utf-8"))["run"]
+    doc = run_status.read_session(session, ref)
+    run = doc["run"]
     status = str(run.get("status", ""))
-    return (run.get("recording_failed") is False and bool(run.get("ended"))
+    return (doc["lifecycle"]["phase"] == "finished" and run.get("recording_failed") is False and bool(run.get("ended"))
             and (status == "completed" or status.startswith("interrupted (signal ")))

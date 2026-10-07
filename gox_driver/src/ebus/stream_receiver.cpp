@@ -241,6 +241,8 @@ namespace gox::ebus {
         }
 
         if (max_frames > 0 && recorded_ok_ >= max_frames) {
+            if (op_result.IsOK()) stats_->frames_limit_excluded.fetch_add(1, std::memory_order_relaxed);
+            else stats_->frames_error_dropped.fetch_add(1, std::memory_order_relaxed);
             Requeue(buffer); // limit already reached (drain path)
             return true;
         }

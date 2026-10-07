@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..constants import REPO_ROOT
-from . import runtime
 from .asterx_live import AsterxTelemetry, CSV_COLUMNS, MAX_ROW_BYTES, TRACK_MAX, TRACK_MIN_STEP_DEG, csv_fields, csv_header
 
 _IO_SLOTS = asyncio.Semaphore(2)
@@ -45,8 +44,6 @@ def _sources(value: str) -> tuple[Path, ...]:
         raise ValueError("Enter a session directory, AsteRx CSV directory, or live CSV file")
     if not path.is_absolute():
         path = REPO_ROOT / path
-    if not path.exists() and runtime.is_docker() and str(path).startswith("/workspace/"):
-        path = runtime.to_host_path(str(path))
     path = path.resolve()
     if path.is_file():
         if path.name not in CSV_COLUMNS:

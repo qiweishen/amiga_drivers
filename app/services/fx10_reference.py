@@ -14,7 +14,7 @@ import yaml
 
 from ..constants import BIN_FX10_REFERENCE
 from ..state import STATE
-from . import camera_operations, config_store, runtime, tool_jobs, control_client, wire
+from . import camera_operations, config_store, runtime, tool_jobs
 from .fx10_reference_preview import ReferenceSpectrum, read_spectrum
 
 TOOL_NAME = "fx10_reference"
@@ -111,8 +111,6 @@ async def _terminate(proc: asyncio.subprocess.Process) -> None:
 
 
 async def collect_reference() -> ReferenceResult:
-    if control_client.enabled():
-        return wire.restore(ReferenceResult, await control_client.call("fx10.reference"))
     return await camera_operations.run(None, _collect, kind="fx10-reference")
 
 
@@ -142,8 +140,6 @@ async def _collect() -> ReferenceResult:
         config = config_store.get("fx10")
         settings = config_store.main_settings()
         output_root = settings["output_dir"]
-        if output_root is None:
-            raise ValueError("The configured output directory is outside the shared mounts")
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
         # The SensorSync board's port is the rig's (config-main.yaml), so the tool

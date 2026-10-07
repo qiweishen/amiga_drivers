@@ -70,8 +70,8 @@ namespace common {
         //
         // `name` identifies the sensor for the warning latch ONLY; the returned
         // message is a bare predicate ("silent for 31.0 s, ...") that the caller
-        // prefixes with the sensor's display name, because that prefix is also
-        // the GUI's routing key (markers.DRIVER_NAME_TO_SENSOR_KEY).
+        // prefixes with the sensor's display name for diagnostics. Lifecycle
+        // failures are published separately using the driver's stable slot key.
         Result CheckSensor(std::string_view name, std::optional<std::uint64_t> silent_us);
 
     private:

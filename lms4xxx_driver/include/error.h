@@ -29,6 +29,7 @@ namespace lms4xxx {
         kNotConnected = 501, ///< Operation requires an active connection
         kAlreadyScanning = 503, ///< StartScanning called while already scanning
         kNotScanning = 504, ///< StopScanning called while not scanning
+        kStandbyUnconfirmed = 505, ///< Standby did not receive its successful acknowledgement
     };
 
 
@@ -66,6 +67,8 @@ namespace lms4xxx {
                     return "already scanning";
                 case ErrorCode::kNotScanning:
                     return "not scanning";
+                case ErrorCode::kStandbyUnconfirmed:
+                    return "device standby was not confirmed";
                 default:
                     return "unknown LMS4xxx error";
             }

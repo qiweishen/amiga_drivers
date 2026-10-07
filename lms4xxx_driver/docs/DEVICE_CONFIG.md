@@ -129,14 +129,24 @@ drains before final statistics are published.
 | 2 | `sMN SetAccessMode 03 F4724744` | `sMN Run` logged this session out at bring-up, and standby needs Authorized Client again (p.74) |
 | 3 | `sMN LMCstandby` | laser off, motor keeps turning (p.74) |
 
-All three go out while the receive and parse threads are still running, because
+During normal acquisition all three go out while the receive and parse threads are still running, because
 the answers come back as ordinary frames on the same connection — after
 `ShutdownReceive()` the socket can no longer carry one. The `sAN` status bytes
-are checked (**standby succeeds on 0**, see the polarity table). This used to be
-two fire-and-forget writes issued while logged out, so the device almost
-certainly answered `sFA 1` and **the laser kept burning after every run** (p.17:
-permanent measurement shortens the laser diode's life) with nothing in the log
-to say so. If the handshake fails now, the log says the laser is still on.
+are checked (**standby succeeds on 0**, see the polarity table). Failed login,
+rejected commands, connection errors and missing answers leave standby
+unconfirmed; they do not prove either that the laser is on or that it is off.
+
+The cleanup obligation is armed before sending `LMCstartmeas` in `Configure()`:
+the command can take effect even if its answer is lost. Configuration failure,
+cancellation before streaming, writer startup failure and partial worker startup
+therefore use the same idempotent cleanup transaction. Before streaming, a healthy
+command channel performs login and standby synchronously. If the command channel
+is uncertain, streaming may have started without its acknowledgement, or the
+worker set cannot decode answers, cleanup joins all old workers first, closes the
+old connection, and makes one bounded connection attempt for login and standby
+only. It does not reconfigure the device or restart measurement. The cleanup
+result is retained across repeated `StopScanning()` and `Disconnect()` calls;
+failure is reported rather than silently retried or converted to success.
 
 After the stop handshake, the receive loop is stopped and joined, the parser
 drains its queue and joins, and the writer drains and closes its file. EOF caused
@@ -156,6 +166,13 @@ The LMS4xxx entry in `drivers.json` adds these statistics:
 
 * `shutdown_complete`: the receive/parse/writer teardown and disconnect returned.
   This describes resource teardown, not whether standby succeeded on the device.
+* `measurement_start_requested`: `LMCstartmeas` was about to be sent; this does
+  not assert that its answer arrived or that measurement actually started.
+* `measurement_cleanup_attempted`, `standby_command_attempted`,
+  `standby_confirmed`: distinguish attempting cleanup, attempting standby, and
+  receiving standby's successful answer. No requested measurement leaves all
+  three false. `measurement_cleanup_error` retains an unsuccessful cleanup's
+  error; an unconfirmed required standby fails the session verdict.
 * `data_integrity_failed`: observed receive/parse/writer loss, a writer failure,
   or disagreement between validated, queued and written scan totals after drain.
 * `time_quality_degraded`: an observed time-quality event or a bad final NTP

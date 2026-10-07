@@ -25,7 +25,9 @@ TEST_CASE("stats: snapshot copies every counter") {
     st.frames_dropped_queue.store(4);
     st.blockid_gap_events.store(5);
     st.frames_lost_gap.store(6);
+    st.frames_limit_excluded.store(7);
     st.frames_written.store(8);
+    st.frames_write_unconfirmed.store(17);
     st.bytes_written.store(9);
     st.segments_created.store(10);
     st.stream_blocks_dropped.store(12);
@@ -43,7 +45,9 @@ TEST_CASE("stats: snapshot copies every counter") {
     CHECK(s.frames_dropped_queue == 4u);
     CHECK(s.blockid_gap_events == 5u);
     CHECK(s.frames_lost_gap == 6u);
+    CHECK(s.frames_limit_excluded == 7u);
     CHECK(s.frames_written == 8u);
+    CHECK(s.frames_write_unconfirmed == 17u);
     CHECK(s.bytes_written == 9u);
     CHECK(s.segments_created == 10u);
     CHECK(s.stream_blocks_dropped == 12u);
@@ -177,12 +181,87 @@ TEST_CASE("stats: final_summary contains the session totals") {
     // No counter bound (freerun, or a camera without counters): no claim made.
     CHECK_FALSE(Contains(s, "triggers="));
 
-    // With Counter0 bound, missed = triggers - everything the camera emitted
-    // (1000 ok + 2 incomplete + 3 queue-dropped + 4 error-dropped + 6 lost).
+    // The raw gauge alone cannot prove a baseline, window, or absence of wrap.
     st.trigger_count.store(1020);
     const std::string with_counter = rep.FinalSummary(3661);
     CAPTURE(with_counter);
-    CHECK(Contains(with_counter, "triggers=1020  missed=5"));
+    CHECK(Contains(with_counter, "triggers=1020  missed=unknown"));
+}
+
+TEST_CASE("trigger accounting: only bounded valid evidence yields a delta") {
+    gox::TriggerCounterAccounting evidence;
+    evidence.Begin(true, true, 7, false);
+    evidence.Observe(true, 12, false);
+    auto result = evidence.FinalJson(5, true);
+    CHECK(result["status"] == "balanced");
+    CHECK(result["trigger_delta"] == 5);
+    CHECK(result["missing_frames"] == 0);
+    CHECK(result["failed"] == false);
+    CHECK(result["association_verified"] == false);
+
+    SUBCASE("one invisible leading or trailing frame is a failure despite contiguous BlockIDs") {
+        result = evidence.FinalJson(4, true);
+        CHECK(result["status"] == "missing_frames");
+        CHECK(result["missing_frames"] == 1);
+        CHECK(result["failed"] == true);
+    }
+    SUBCASE("an independently controlled source cannot prove the acquisition window") {
+        result = evidence.FinalJson(4, false);
+        CHECK(result["status"] == "unknown");
+        CHECK(result["trigger_delta"].is_null());
+        CHECK(result["missing_frames"].is_null());
+        CHECK_FALSE(result["unknown_reason"].get<std::string>().empty());
+    }
+    SUBCASE("more emitted frames than triggers is disagreement, never negative missing") {
+        result = evidence.FinalJson(6, true);
+        CHECK(result["status"] == "counter_disagreement");
+        CHECK(result["failed"] == true);
+        CHECK(result["missing_frames"].is_null());
+    }
+}
+
+TEST_CASE("trigger accounting: reset, binding, wrap and unavailable readings remain unknown") {
+    gox::TriggerCounterAccounting evidence;
+    evidence.Begin(true, true, 0, false);
+    evidence.Observe(true, 10, false);
+    SUBCASE("reset command failed") { evidence.reset_acknowledged = false; }
+    SUBCASE("final selector binding changed") { evidence.Observe(false, 10, false); }
+    SUBCASE("overflow latched even if a later reading clears it") {
+        evidence.Observe(true, 12, true);
+        evidence.Observe(true, 13, false);
+    }
+    SUBCASE("regression survives an unavailable intermediate sample") {
+        evidence.Observe(true, std::nullopt, false);
+        evidence.Observe(true, 2, false);
+        evidence.Observe(true, 12, false);
+    }
+    SUBCASE("overflow status unavailable") { evidence.Observe(true, 10, std::nullopt); }
+    SUBCASE("final read failed rather than reusing periodic value") {
+        evidence.Observe(true, std::nullopt, false);
+        CHECK(evidence.FinalJson(10, true)["final_raw"].is_null());
+    }
+    SUBCASE("baseline unavailable") {
+        evidence.Begin(true, true, std::nullopt, false);
+        evidence.Observe(true, 10, false);
+    }
+    const auto result = evidence.FinalJson(10, true);
+    CHECK(result["status"] == "unknown");
+    CHECK(result["trigger_delta"].is_null());
+    CHECK(result["missing_frames"].is_null());
+    CHECK_FALSE(result["unknown_reason"].get<std::string>().empty());
+}
+
+TEST_CASE("stats: final JSON retains native integer counts and policy exclusions") {
+    gox::CameraStats stats;
+    stats.frames_written.store(9007199254740993ULL);
+    stats.frames_write_unconfirmed.store(2);
+    stats.frames_limit_excluded.store(3);
+    auto row = nlohmann::ordered_json::parse(gox::CameraStatsJson(stats.GetSnapshot()).dump());
+    CHECK(row["frames_written"].get<uint64_t>() == 9007199254740993ULL);
+    CHECK(row["frames_write_unconfirmed"] == 2);
+    CHECK(row["frames_limit_excluded"] == 3);
+    CHECK(row["trigger_count_raw"].is_null());
+    CHECK_FALSE(row["unconfirmed_semantics"].get<std::string>().empty());
 }
 
 TEST_CASE("chunk_pool: acquire until exhaustion, release restores capacity") {

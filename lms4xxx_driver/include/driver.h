@@ -8,6 +8,7 @@
 #include "callbacks.h"
 #include "app_config.h"
 #include "device_report.h"
+#include "measurement_shutdown.h"
 #include "statistics.h"
 
 
@@ -45,10 +46,16 @@ namespace lms4xxx {
         // sEN LMDscandata 1
         std::error_code StartScanning();
 
-        // sEN LMDscandata 0
+        // Idempotent: stop/drain streaming and confirm standby. Also rolls back
+        // Configure() when measurement started before the stream was subscribed.
         std::error_code StopScanning();
 
-        void Disconnect();
+        // Always releases the connection; returns an unconfirmed-standby error.
+        std::error_code Disconnect();
+
+        // Owner thread only, valid after StopScanning()/Disconnect(). Resource
+        // teardown alone never implies that the device acknowledged standby.
+        [[nodiscard]] MeasurementShutdownStatus GetMeasurementShutdownStatus() const;
 
         // Invoked on the parse thread
         void SetScanCallback(ScanDataCallback callback);
@@ -89,4 +96,3 @@ namespace lms4xxx {
         std::unique_ptr<Impl> impl_;
     };
 } // namespace lms4xxx
-

@@ -1,37 +1,10 @@
-ARG UBUNTU_TAG=22.04
-ARG UV_VERSION=0.11.15
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-FROM docker.io/ubuntu:${UBUNTU_TAG} AS python-runtime
+FROM docker.io/ubuntu:22.04 AS drivers
 
-# Shared Python runtime for the GUI and the controller inside the driver image
+# GUI and C++ acquisition share this container; no virtual environment is used.
 ENV DEBIAN_FRONTEND=noninteractive \
-    UV_PYTHON_INSTALL_DIR=/opt/python \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_LINK_MODE=copy \
-    UV_NO_CACHE=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    AMIGA_PYTHON=/opt/venv/bin/python \
-    PATH="/opt/venv/bin:${PATH}"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libglib2.0-0 libgl1 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=uv /uv /usr/local/bin/uv
-ARG PYTHON_VERSION=3.12.13
-WORKDIR /opt/amiga-python
-COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project --python ${PYTHON_VERSION}
-
-FROM python-runtime AS gui
-ARG USER_UID=1000
-ARG USER_GID=${USER_UID}
-ENV HOME=/tmp NICEGUI_STORAGE_PATH=/tmp/nicegui
-WORKDIR /workspace
-USER ${USER_UID}:${USER_GID}
-CMD ["/opt/venv/bin/python", "-B", "-m", "app.main"]
-
-FROM python-runtime AS drivers
+    NICEGUI_STORAGE_PATH=/tmp/nicegui
 
 # =============================================================
 # Base development tools
@@ -42,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     pkg-config \
-	# ----- Version Control ----- \
+    # ----- Version Control ----- \
     git \
     # ----- Debugging & Analysis ----- \
     gdb \
@@ -50,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     valgrind \
     # ----- Code Formatting ----- \
     clang-format \
-	# ----- Utilities ----- \
+    # ----- Utilities ----- \
     wget \
     curl \
     ca-certificates \
@@ -58,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     sudo \
     locales \
+    # ----- Python and image runtime libraries ----- \
+    python3 \
+    python3-pip \
     # ----- 3rd_party libraries ----- \
     libboost-all-dev \
     libeigen3-dev \
@@ -85,18 +61,28 @@ RUN apt-get install -y --no-install-recommends \
 # =============================================================
 # eBUS SDK (single Pleora 6.5.1 edition for BOTH the JAI Go-X and the Specim FX10)
 # =============================================================
-COPY resource/eBUS_SDK_Ubuntu-22.04-x86_64-*.deb /tmp/ebus/
-RUN dpkg -i /tmp/ebus/eBUS_SDK_Ubuntu-22.04-x86_64-*.deb
+COPY resource/eBUS_SDK_Ubuntu-22.04-x86_64-6.5.1-6797.deb /tmp/ebus/
+RUN echo '79022f42a9e3896174b0906d7842fa9bd87ca6424866be5fbb34a4a73ad34789  /tmp/ebus/eBUS_SDK_Ubuntu-22.04-x86_64-6.5.1-6797.deb' | sha256sum -c - \
+    && dpkg -i /tmp/ebus/eBUS_SDK_Ubuntu-22.04-x86_64-6.5.1-6797.deb \
+    && ldconfig \
+    && rm -rf /tmp/ebus
 ENV EBUS_SDK_ROOT=/opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64
-# Fx10's FindeBUS reads PUREGEV_ROOT; Go-X's FindeBUS reads EBUS_SDK_ROOT
+# Shared cmake/FindeBUS.cmake reads EBUS_SDK_ROOT.
 ENV PUREGEV_ROOT=${EBUS_SDK_ROOT}
 ENV GENICAM_ROOT_V3_4=${EBUS_SDK_ROOT}/lib/genicam
 ENV LD_LIBRARY_PATH=${EBUS_SDK_ROOT}/lib:${EBUS_SDK_ROOT}/lib/genicam/bin/Linux64_x64
 
 # =============================================================
+# Python dependencies
+# =============================================================
+COPY requirements.txt /opt/amiga-python/
+RUN python3 -m pip install --no-cache-dir --ignore-installed \
+    -r /opt/amiga-python/requirements.txt
+
+# =============================================================
 # Load ld.so and clean up APT cache to reduce image size
 # =============================================================
-RUN ldconfig && apt-get clean && rm -rf /var/lib/apt/lists/* && rm -rf /tmp/ebus
+RUN ldconfig && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # =============================================================
 # Locale configuration
@@ -125,5 +111,5 @@ RUN chown ${USERNAME}:${USERNAME} /workspace
 
 USER ${USERNAME}
 
-# The API keeps the development container alive
-CMD ["/opt/venv/bin/python", "-B", "-m", "app.controller"]
+# The GUI manages acquisition locally in this same container.
+CMD ["/usr/bin/python3", "-B", "-m", "app.main"]

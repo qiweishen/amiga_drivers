@@ -1,15 +1,4 @@
-"""Execution backend abstraction: the C++ binaries either run inside the
-devcontainer (docker exec) or natively on this host. Every mode decision —
-process exec, pgrep/pkill, path namespace, environment health — lives here.
-
-Mode selection (once, at GUI startup):
-  AMIGA_GUI_MODE=docker|native forces a backend;
-  auto (default): if the docker CLI can see the amiga-drivers-dev container
-  (running or stopped) -> docker, otherwise -> native.
-Integrated Docker mode is for containers without an independent controller.
-The combined Compose stack runs this module natively inside the driver service
-and configures its separate GUI as a remote client.
-"""
+"""Process primitives for the GUI and acquisition in the same Linux container."""
 
 from __future__ import annotations
 
@@ -18,114 +7,43 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..constants import CONTAINER, REPO_ROOT, RUNTIME_DIR, to_container, to_host
-from .docker_runner import ExecResult
-from . import docker_runner
+from ..constants import REPO_ROOT, RUNTIME_DIR
 
 
-_mode: str = "docker"      # optimistic default; detect_mode() overwrites it
-_resolved: bool = False    # guards the cache — _mode alone can't say "unset"
-_lock = asyncio.Lock()
+@dataclass(frozen=True)
+class ExecResult:
+    code: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
 
 
-async def _probe_docker() -> str:
-    """One-shot probe: does docker know our container, running or not?"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            # --type container: without it, a same-named image could match
-            "docker", "inspect", "--type", "container",
-            "-f", "{{.State.Status}}", CONTAINER,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        # No docker CLI, or it won't spawn -> native by definition.
-        return "native"
-
-    try:
-        code = await asyncio.wait_for(proc.wait(), timeout=5)
-    except asyncio.TimeoutError:
-        # Daemon hung. Give up and treat as native.
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass           # exited on its own between timeout and kill
-        await proc.wait()  # reap, no zombie
-        return "native"
-
-    # Only the exit code is usable here — stdout goes to DEVNULL.
-    return "docker" if code == 0 else "native"
+def exec_path(path: Path | str) -> str:
+    """GUI and binaries share one filesystem namespace."""
+    return str(Path(path))
 
 
-async def detect_mode() -> str:
-    global _mode, _resolved
-    if _resolved:
-        return _mode
-
-    async with _lock:
-        if _resolved:  # another task resolved it while we waited
-            return _mode
-
-        forced = os.environ.get("AMIGA_GUI_MODE", "auto").strip().lower()
-        if os.environ.get("AMIGA_CONTROLLER_URL", "").strip():
-            _mode = "remote"
-        elif forced in ("docker", "native"):
-            _mode = forced
-        elif forced == "auto":
-            _mode = await _probe_docker()
-        else:
-            raise ValueError("AMIGA_GUI_MODE must be auto, native or docker")
-        _resolved = True
-        return _mode
-
-
-def mode() -> str:
-    return _mode
-
-
-def is_docker() -> bool:
-    return _mode == "docker"
-
-
-# --- path namespace ----------------------------------------------------------
-
-def exec_path(host_path: Path | str) -> str:
-    """The path string the BINARY will see for a host path."""
-    return to_container(host_path) if is_docker() else str(Path(host_path))
-
-
-def to_host_path(path_str: str) -> Path:
-    """Map a binary-emitted path (e.g. the SNAPSHOT: OK dir) back to the host."""
-    return to_host(path_str) if is_docker() else Path(path_str)
+def to_host_path(path: str) -> Path:
+    """A binary-emitted path is already in the GUI's namespace."""
+    return Path(path)
 
 
 def workdir() -> str:
-    """Working directory of every launched binary. Relative config entries
-    (e.g. Output Directory "./recordings") resolve against this on both
-    backends: /workspace in docker == REPO_ROOT natively."""
-    return "/workspace" if is_docker() else str(REPO_ROOT)
+    return str(REPO_ROOT)
 
 
-# --- process primitives ------------------------------------------------------
-
-def _sudo_prefix() -> list[str]:
-    # -n: never prompt — an interactive sudo would hang the GUI silently.
-    return [] if os.geteuid() == 0 else ["sudo", "-n"]
-
-
-async def exec_(args: list[str], *, root: bool = False, timeout: float | None = None) -> ExecResult:
-    """Run a command to completion in the execution environment."""
-    _require_local_execution()
-    if is_docker():
-        return await docker_runner.exec_(args, user="root" if root else None, timeout=timeout)
-    argv = (_sudo_prefix() + args) if root else args
+async def exec_(args: list[str], *, timeout: float | None = None) -> ExecResult:
+    """Run a local utility to completion with bounded waiting."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(REPO_ROOT),
+            *args, cwd=workdir(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-    except OSError as e:
-        return ExecResult(127, "", str(e))
+    except OSError as exc:
+        return ExecResult(127, "", str(exc))
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -134,54 +52,31 @@ async def exec_(args: list[str], *, root: bool = False, timeout: float | None = 
         except ProcessLookupError:
             pass
         await proc.wait()
-        return ExecResult(-1, "", f"timeout after {timeout}s: {' '.join(argv)}")
+        return ExecResult(-1, "", f"timeout after {timeout}s: {' '.join(args)}")
     return ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
 
 
 async def spawn(args: list[str]) -> asyncio.subprocess.Process:
-    """Attached launch for AmigaDrivers: stdout discarded (spinner noise),
-    stderr piped. Stopping targets the verified acquisition identity, never
-    the docker-exec handle. start_new_session detaches the native child from the
-    GUI's terminal process group so Ctrl+C on (or death of) the GUI does not
-    take the acquisition down — matching the docker-exec semantics that the
-    reattach story depends on."""
-    _require_local_execution()
+    """Launch acquisition; server shutdown requests an orderly stop/drain.
+
+    A separate process group prevents a terminal signal bypassing the owner's
+    stop sequence. Reattachment still handles an interrupted GUI server.
+    """
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    status_file = exec_path(RUNTIME_DIR / "acquisition.json")
-    if is_docker():
-        return await docker_runner.spawn(args, environment={"AMIGA_STATUS_FILE": status_file})
     return await asyncio.create_subprocess_exec(
-        *args, cwd=str(REPO_ROOT),
+        *args, cwd=workdir(),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "AMIGA_STATUS_FILE": status_file},
+        env={**os.environ, "AMIGA_STATUS_FILE": str(RUNTIME_DIR / "acquisition.json")},
         start_new_session=True,
     )
 
 
-async def popen(args: list[str]) -> asyncio.subprocess.Process:
-    """Short-lived tool launch with BOTH pipes captured (jai_snapshot marker
-    parsing needs stdout)."""
-    _require_local_execution()
-    if is_docker():
-        return await asyncio.create_subprocess_exec(
-            "docker", "exec", "-w", "/workspace", CONTAINER, *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-    return await asyncio.create_subprocess_exec(
-        *args, cwd=str(REPO_ROOT),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-
-
 async def gated_tool(args: list[str]) -> asyncio.subprocess.Process:
-    _require_local_execution()
+    # The PID survives exec; tool_jobs journals it before sending GO.
     gate = 'printf "%s\\n" "$$"; IFS= read -r permit && [ "$permit" = GO ] && exec "$@"'
-    argv = ["/bin/sh", "-c", gate, "amiga-tool", *args]
-    if is_docker():
-        argv = ["docker", "exec", "-i", "-w", "/workspace", CONTAINER, *argv]
     return await asyncio.create_subprocess_exec(
-        *argv, cwd=str(REPO_ROOT), stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        "/bin/sh", "-c", gate, "amiga-tool", *args, cwd=workdir(),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
 
@@ -257,49 +152,11 @@ async def signal_process(ref: ProcessIdentity, *, signal: str = "TERM") -> ExecR
     return await exec_(["kill", f"-{signal}", "--", str(ref.pid)], timeout=5)
 
 
-async def process_files(ref: ProcessIdentity) -> list[str]:
-    """Read open-file targets in the same namespace as the acquisition.
+async def binary_exists(path: Path | str) -> bool:
+    file = Path(path)
+    return file.is_file() and os.access(file, os.X_OK)
 
-    File capabilities can make /proc/PID/fd unreadable to the same UID. Try
-    the existing noninteractive privileged backend only for this read.
-    Failure is reported as unknown ownership, never as an idle camera.
-    """
-    args = ["find", f"/proc/{ref.pid}/fd", "-mindepth", "1", "-maxdepth", "1", "-printf", "%l\\n"]
-    result = await exec_(args, timeout=5)
-    if not result.ok:
-        result = await exec_(args, root=True, timeout=5)
-    if not result.ok or not await is_process_alive(ref):
-        raise RuntimeError("Cannot verify the acquisition's open session files")
-    return result.stdout.splitlines()
-
-
-async def pkill(name: str, signal: str = "TERM") -> ExecResult:
-    if is_docker():
-        return await docker_runner.pkill(name, signal)
-    return await exec_(["pkill", f"-{signal}", "-x", name], timeout=5)
-
-
-async def binary_exists(host_path: Path | str) -> bool:
-    if is_docker():
-        return await docker_runner.binary_exists(to_container(host_path))
-    p = Path(host_path)
-    return p.is_file() and os.access(p, os.X_OK)
-
-
-# --- environment health ------------------------------------------------------
 
 async def env_check() -> tuple[bool, str]:
-    """(ok, detail). Docker: the container must be running. Native: always ok
-    (missing binaries are caught by preflight per-binary checks)."""
-    if mode() == "remote":
-        from ..state import STATE
-        return STATE.env_ok, STATE.env_detail
-    if is_docker():
-        up = await docker_runner.is_container_up()
-        return up, "" if up else f"Container {CONTAINER} is not running"
+    """Preflight checks each executable in this process's environment."""
     return True, ""
-
-
-def _require_local_execution() -> None:
-    if os.environ.get("AMIGA_CONTROLLER_URL", "").strip():
-        raise RuntimeError("The remote GUI cannot execute local device commands")

@@ -1,5 +1,5 @@
 """GoX helpers: the snapshot pipeline (jai_snapshot in the container ->
-unpack_raw.py on the host -> 8-bit JPEG for the browser + brightness
+shared jai_raw decoder -> 8-bit JPEG for the browser + brightness
 histogram). Device discovery is driver-neutral: services/ebus_tools.py."""
 
 from __future__ import annotations
@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import shutil
-import subprocess
 import time
 from dataclasses import dataclass, field
 
@@ -19,17 +18,15 @@ from ..constants import (
     SNAPSHOT_CONFIG,
     SNAPSHOT_DIR,
     SNAPSHOT_KEEP,
-    UNPACK_SCRIPT,
-    VENV_PYTHON,
 )
-from . import camera_operations, runtime, tool_jobs, control_client, wire
+from gox_driver.scripts.jai_raw import pixels, recording
+
+from . import camera_operations, runtime, tool_jobs
 
 SNAPSHOT_TOOL = "jai_snapshot"
 # GUI-side hard timeout; must stay strictly greater than the in-tool
 # acquisition.max_duration_s (15 s) so the tool gets to fail first.
 SNAPSHOT_TIMEOUT_S = 30.0
-UNPACK_TIMEOUT_S = 30.0
-CLIP_THRESHOLD = 0xFFF0  # a saturated 12-bit pixel after --shift-to-16bit
 
 
 @dataclass(frozen=True)
@@ -45,9 +42,9 @@ class SnapshotResult:
     reason: str = ""  # FAIL reason / pipeline error
     jpeg_b64: str = ""  # data-URL payload for ui.image
     histogram: list[int] = field(default_factory=list)  # 64 bins over 16-bit range
-    clipped_pct: float = 0.0
+    clipped_pct: float = 0.0  # native samples at full scale, before demosaic/brightness conversion
     mean_16: float = 0.0
-    decode_name: str = ""  # e.g. BayerRG12Packed (from the PNG filename)
+    decode_name: str = ""  # e.g. BayerRG12Packed (from the shared PFNC registry)
     incomplete: bool = False
     elapsed_s: float = 0.0
     raw_output: str = ""
@@ -66,8 +63,6 @@ def guard_reason() -> str | None:
 
 
 async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
-    if control_client.enabled():
-        return wire.restore(SnapshotResult, await control_client.call("gox.snapshot", ip, exposure_ms, gain))
     request = SnapshotRequest(ip, exposure_ms, gain)
 
     async def capture() -> SnapshotResult:
@@ -125,45 +120,43 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
         return SnapshotResult(False, reason=str(e), raw_output=raw_output,
                               elapsed_s=time.monotonic() - t0)
 
-    # Decode on the host (venv has numpy + opencv): 16-bit color PNG.
-    try:
-        unpack = await asyncio.to_thread(
-            subprocess.run,
-            [str(VENV_PYTHON), str(UNPACK_SCRIPT), str(camera_dir),
-             "--format", "png", "--demosaic", "--shift-to-16bit",
-             "--limit", "1", "--pad-incomplete", "-o", str(out_host)],
-            capture_output=True, text=True, timeout=UNPACK_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as e:
-        partial = "\n".join(value.decode(errors="replace") if isinstance(value, bytes) else value or ""
-                            for value in (e.stdout, e.stderr)).strip()
-        return SnapshotResult(False, reason=f"Decode timed out (>{UNPACK_TIMEOUT_S:.0f}s)",
-                              raw_output=raw_output + "\n--- unpack (timeout) ---\n" + partial,
-                              elapsed_s=time.monotonic() - t0)
-    raw_output += "\n--- unpack ---\n" + (unpack.stdout + unpack.stderr).strip()
-    incomplete = "INCOMPLETE" in unpack.stderr
-    pngs = sorted(out_host.glob("seq*_*.png"))
-    if unpack.returncode != 0 or not pngs:
-        return SnapshotResult(False, reason=f"Decode failed: {unpack.stderr.strip()[-300:]}",
-                              raw_output=raw_output, incomplete=incomplete,
-                              elapsed_s=time.monotonic() - t0)
-    png = pngs[0]
-    decode_name = png.stem.split("_", 1)[1] if "_" in png.stem else ""
-
-    result = await asyncio.to_thread(_encode_and_histogram, png)
-    result.decode_name = decode_name
-    result.incomplete = incomplete
-    result.raw_output = raw_output
+    # Decode in-process through the same pure library as the CLI and live view.
+    result = await asyncio.to_thread(_decode_snapshot, camera_dir, out_host)
+    result.raw_output = raw_output + "\n--- unpack ---\n" + result.raw_output
     result.elapsed_s = time.monotonic() - t0
-
-    await asyncio.to_thread(_cleanup_old)
+    if result.ok:
+        await asyncio.to_thread(_cleanup_old)
     return result
 
 
-def _encode_and_histogram(png_path) -> SnapshotResult:
-    img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return SnapshotResult(False, reason="Cannot read the decoded PNG")
+def _decode_snapshot(camera_dir, output_dir) -> SnapshotResult:
+    try:
+        frame, payload, incomplete = recording.first_preview_frame(camera_dir)
+        image, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
+        # Retain the existing native PNG artifact and filename; statistics use
+        # the native array directly instead of decoding that PNG a second time.
+        png = output_dir / f"seq{frame.seq:08d}_{name}.png"
+        if not cv2.imwrite(str(png), image):
+            raise ValueError("Cannot write the decoded PNG")
+        result = _encode_and_histogram(image, name)
+        result.decode_name = name
+        result.incomplete = incomplete
+        result.raw_output = (f"seq={frame.seq} bid={frame.bid} {name} {frame.w}x{frame.h} "
+                             f"dts={frame.dts} -> {png}\nunpacked 1 frame(s) into {output_dir.resolve()}")
+        return result
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, cv2.error) as error:
+        return SnapshotResult(False, reason=f"Decode failed: {error}")
+
+
+# Keep the service-level helper name for callers; its rules live only in pixels.
+_prepare_snapshot_image = pixels.prepare_snapshot_image
+
+
+def _encode_and_histogram(img: np.ndarray, decode_name: str) -> SnapshotResult:
+    try:
+        img, clipped_pct = _prepare_snapshot_image(img, decode_name)
+    except (ValueError, cv2.error) as e:
+        return SnapshotResult(False, reason=f"Cannot prepare snapshot: {e}")
     if img.dtype == np.uint16:
         img8 = (img >> 8).astype(np.uint8)
         gray16 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
@@ -179,7 +172,7 @@ def _encode_and_histogram(png_path) -> SnapshotResult:
         ok=True,
         jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
         histogram=[int(v) for v in hist],
-        clipped_pct=float((gray16 >= CLIP_THRESHOLD).mean() * 100.0),
+        clipped_pct=clipped_pct,
         mean_16=float(gray16.mean()),
     )
 

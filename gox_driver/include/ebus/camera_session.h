@@ -68,6 +68,9 @@ namespace gox::ebus {
 
         // True when the capture had zero drops / incompletes / gaps (exit code 0).
         bool Clean() const;
+        // After all cameras have drained and the shared timing log has closed.
+        void FinalizeAccounting(bool timing_started, bool timing_ok);
+        nlohmann::ordered_json FinalStatistics() const;
 
         // Main-thread periodic hooks.
         void PollStreamStats();
@@ -128,6 +131,7 @@ namespace gox::ebus {
         std::string timing_log_path_; // rig-wide SensorSync log; empty = no SensorSync
         bool started_ = false;
         bool stopped_ = false;
+        bool workers_joined_ = false;
 
         // Bring-up results kept for the sidecars: device.json is written after
         // the recorder created <cam>/, which is later than the apply.
@@ -135,6 +139,16 @@ namespace gox::ebus {
         std::vector<AppliedFeature> applied_;
         RuntimeShape runtime_shape_;
         bool counter_bound_ = false;
+        TriggerCounterAccounting trigger_accounting_;
+        nlohmann::ordered_json counter_result_ = {{"status", "not_finalized"}};
+        nlohmann::ordered_json timing_result_ = {{"status", "not_inspected"}, {"association_verified", false}};
+        bool accounting_finalized_ = false;
+        bool accounting_failed_ = false;
+        bool trigger_input_verified_ = false; // latched false on an unavailable/mismatched sample
+        std::atomic<bool> worker_failed_{false};
+        std::string startup_error_; // owner thread
+        std::string acquisition_error_; // acquisition thread, read only after join
+        std::string writer_error_; // writer thread, read only after join
         std::ofstream telemetry_; // <cam>/telemetry.jsonl, one JSON object per line
         bool telemetry_failed_ = false; // owner thread; included in final Clean()
         bool over_temperature_ = false; // latched so the warning fires once per excursion

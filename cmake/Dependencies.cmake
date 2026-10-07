@@ -6,13 +6,9 @@ set(FETCHCONTENT_QUIET FALSE)
 
 
 ################################################################################
-# SensorSync-Logger - Not CMake project
-FetchContent_Declare(sensor_trigger
-        GIT_REPOSITORY https://github.com/qiweishen/sensor_trigger.git
-        GIT_TAG main
-        GIT_SHALLOW TRUE
-        SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd_party/External/sensor_trigger)
-FetchContent_Populate(sensor_trigger)
+# SensorSync host API is supplied as a reviewed local source snapshot. Never
+# update it from a moving branch during configure; verify every consumed file.
+include(${CMAKE_CURRENT_LIST_DIR}/SensorTriggerSnapshot.cmake)
 
 
 ################################################################################
@@ -40,7 +36,9 @@ function(amiga_add_hdf5)
     FetchContent_MakeAvailable(hdf5)
     set(hdf5_SOURCE_DIR "${hdf5_SOURCE_DIR}" PARENT_SCOPE)
 endfunction()
-amiga_add_hdf5()
+if (AMIGA_ENABLE_LMS4XXX)
+    amiga_add_hdf5()
+endif ()
 
 
 ################################################################################

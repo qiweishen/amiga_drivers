@@ -372,23 +372,15 @@ int main(int argc, char **argv) {
         return Fail(5, "recorder: " + recorder.ErrorMessage());
     }
 
-    // The recorder silently drops 0-line segments, so `.hdr` present <=> at
-    // least one line finalized on disk. This also catches the case where frames
-    // arrived but none of them reached the file.
-    bool have_hdr = false;
-    std::error_code walk_ec;
-    for (std::filesystem::directory_iterator it(session_dir, walk_ec), end; !walk_ec && it != end;
-         it.increment(walk_ec)) {
-        if (it->path().extension() == ".hdr") {
-            have_hdr = true;
-            break;
-        }
-    }
-    if (!have_hdr) {
+    const auto outcome = fx10::ClassifySnapshot(counters, frames, timed_out);
+    if (outcome == fx10::SnapshotStatus::kNoFrames) {
         const std::string why = starved
                                     ? fmt::format(" (the camera delivered nothing in {:.0f} s)", kNoFrameTimeoutS)
                                     : (timed_out ? std::string(" (hard timeout)") : std::string());
         return Fail(7, "no-frames" + why + " — see " + session_dir);
+    }
+    if (outcome == fx10::SnapshotStatus::kIncomplete) {
+        return Fail(5, "incomplete snapshot (timeout, frame limit not reached, or lost/unconfirmed data) — see " + session_dir);
     }
 
     std::printf("SNAPSHOT: OK %s\n", session_dir.c_str());

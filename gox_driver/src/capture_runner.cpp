@@ -54,6 +54,7 @@ namespace gox {
         std::error_code ec;
         std::filesystem::create_directories(session_dir_, ec);
         if (ec) {
+            last_error_ = "Cannot create output directory: " + ec.message();
             g_log.Error("Cannot create output directory: {}", ec.message());
             return false;
         }
@@ -93,6 +94,7 @@ namespace gox {
                 if (!interrupted) {
                     stop_->RequestStop(StopReason::kError);
                 }
+                if (sync_) sync_->Disarm("gox:startup-failed");
                 for (auto &s: sessions_) {
                     s->StopAndJoin();
                 }
@@ -105,6 +107,7 @@ namespace gox {
                 // not running and leave the GUI showing a healthy driver.
                 last_error_ = "interrupted during bring-up (" + std::string(StopReasonName(stop_->Reason())) + ")";
                 g_log.Warn("Startup interrupted: {}", last_error_);
+                if (sync_) sync_->Disarm("gox:startup-interrupted");
                 for (auto &s: sessions_) {
                     s->StopAndJoin();
                 }
@@ -198,10 +201,9 @@ namespace gox {
             }
             // Device poll. Two jobs on one tick, guard first so the telemetry
             // row carries the status the guard just read:
-            //  1. PTP guard - the camera must stay in "slave" with a usable
-            //     clock accuracy, otherwise the device timestamps stop being
-            //     traceable to the grandmaster and the recording is no longer
-            //     what it claims.
+            //  1. PTP guard - the camera must stay in "slave". Its advertised
+            //     grandmaster accuracy does not describe synchronization to
+            //     AsteRx and is neither read nor used as a health criterion.
             //  2. telemetry.jsonl - temperatures, Counter0, PAUSE frames.
             // The ptp.enabled gate sits on the guard call, not on the tick:
             // ptp.enabled=false is a warned configuration (no absolute time), and
@@ -234,7 +236,7 @@ namespace gox {
 
     bool CaptureRunner::Shutdown() {
         if (shutdown_done_) {
-            return clean_;
+            return shutdown_complete_ && clean_;
         }
         shutdown_done_ = true;
         // Pulses stop before the cameras do: a camera stopped under a running pulse
@@ -243,15 +245,12 @@ namespace gox {
         if (sync_) {
             sync_->Disarm(sessions_.empty() ? std::string("gox") : SensorSyncOwner(sessions_.front()->id()));
         }
-        if (!initialized_) {
-            // Init() already tore down, logged and kept the concrete error.
-            clean_ = false;
-            return clean_;
-        }
-
         g_log.Info("stopping (reason: {})", StopReasonName(stop_->Reason()));
         for (auto &s: sessions_) {
             s->StopAndJoin();
+        }
+        for (auto &s: sessions_) {
+            s->FinalizeAccounting(sync_ && sync_->Started(), sync_ && sync_->Ok());
         }
         const uint64_t uptime_s = capture_start_mono_ != 0
                                       ? (common::TimeUtil::MonotonicNowNs() - capture_start_mono_) / 1000000000ull
@@ -262,19 +261,30 @@ namespace gox {
             all_clean = all_clean && s->Clean();
         }
 
-        if (stop_->Reason() == StopReason::kError) {
+        if (!initialized_) {
+            clean_ = false;
+        } else if (stop_->Reason() == StopReason::kError) {
             if (last_error_.empty()) {
                 last_error_ = "session stopped on an error (see the log above for the concrete cause)";
             }
             clean_ = false;
         } else if (!all_clean) {
-            last_error_ = "frame drops / incomplete frames / stream errors detected (see the final statistics above)";
+            last_error_ = "frame loss, trigger/exposure accounting or recording errors detected (see final statistics)";
             clean_ = false;
         } else if (sync_ && !sync_->Ok()) {
             // The frames are complete but their timing observations are not
             last_error_ = "SensorSync timing session failed integrity checks (" + sync_->LastError() + ")";
             clean_ = false;
         }
+        shutdown_complete_ = true;
         return clean_;
+    }
+
+    nlohmann::ordered_json CaptureRunner::FinalStatistics() const {
+        nlohmann::ordered_json cameras = nlohmann::ordered_json::array();
+        for (const auto &session : sessions_) cameras.push_back(session->FinalStatistics());
+        return {{"schema_version", 1}, {"initialized", initialized_}, {"shutdown_started", shutdown_done_},
+            {"shutdown_complete", shutdown_complete_}, {"clean", shutdown_complete_ && clean_}, {"stop_reason", StopReasonName(stop_->Reason())},
+            {"error", last_error_}, {"cameras", std::move(cameras)}};
     }
 } // namespace gox

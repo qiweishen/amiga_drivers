@@ -661,7 +661,13 @@ namespace gox::ebus {
 
 
     bool CameraController::ResetTriggerCounter() {
-        return ExecuteCommandFeature(Params(), "CounterReset");
+        return TriggerCounterBound() && ExecuteCommandFeature(Params(), "CounterReset");
+    }
+
+    bool CameraController::TriggerCounterBound() {
+        int64_t selector = -1, source = -1;
+        return ReadEnumIntFeature(Params(), "CounterSelector", selector) && selector == 0 &&
+               ReadEnumIntFeature(Params(), "CounterEventSource", source) && source == 1;
     }
 
 
@@ -675,7 +681,7 @@ namespace gox::ebus {
         r.created_realtime_ns = common::TimeUtil::RealtimeNowNs();
         r.factory_load = factory_load;
         r.runtime = runtime;
-        r.runtime.counter0_bound = Counter0Bound(applied);
+        r.runtime.counter0_bound = TriggerCounterBound();
         r.ptp = ptp;
         r.applied = std::move(applied);
 
@@ -824,15 +830,24 @@ namespace gox::ebus {
         }
 
         if (want_counter && have_counter_) {
+            s.trig_binding_verified = TriggerCounterBound();
+            std::string selector, mode;
+            int64_t source = -1;
+            // Same FrameStart and Line5 mapping as BuildApplyPlan and the
+            // rig wiring contract (manual p.141), after features.raw overrides.
+            s.trig_input_verified = ReadEnumFeature(p, "TriggerSelector", selector) && selector == "FrameStart" &&
+                ReadEnumFeature(p, "TriggerMode", mode) && mode == "On" &&
+                ReadEnumIntFeature(p, "TriggerSource", source) && source == 24;
             int64_t value = 0;
-            if (ReadIntFeature(p, "CounterValue", value)) {
+            if (s.trig_binding_verified && ReadIntFeature(p, "CounterValue", value)) {
                 s.trig = value;
             }
             // CounterStatus 4 = CounterOverflow (manual p.160): the counter is
             // 32-bit, so a long external-trigger session can wrap it.
-            std::string status;
-            if (ReadFeatureAsString(p, "CounterStatus", status)) {
-                s.trig_overflow = common::StringUtil::EqualsCi(common::StringUtil::Trim(status), "CounterOverflow");
+            int64_t status = -1;
+            if (s.trig_binding_verified && ReadEnumIntFeature(p, "CounterStatus", status) && status >= 0 && status <= 4) {
+                s.trig_status_read = true;
+                s.trig_overflow = status == 4;
             }
         }
 

@@ -15,15 +15,14 @@ def acquire() -> None:
     global _file
     if _file is not None:
         return
-    # The host GUI and the in-container controller see the same bind-mounted
-    # inode. Backend-specific /tmp locks would allow both to claim the devices.
+    # Every GUI server in the container must share this stable lock inode.
     path = Path(os.environ.get("AMIGA_CONTROL_LOCK", str(RUNTIME_DIR / "controller.lock")))
     handle = path.open("a+")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BaseException:
         handle.close()
-        raise RuntimeError(f"Another control server owns {path}; use its GUI/API instead") from None
+        raise RuntimeError(f"Another control server owns {path}; use its GUI instead") from None
     _file = handle  # Never unlink a lock file: another process may already have it open.
 
 

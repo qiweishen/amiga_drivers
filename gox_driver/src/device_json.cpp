@@ -371,7 +371,9 @@ namespace gox {
         ptp["written"] = r.ptp.written;
         ptp["synchronized"] = r.ptp.synchronized;
         ptp["status"] = r.ptp.status;
-        ptp["accuracy"] = r.ptp.accuracy >= 0 ? ordered_json(r.ptp.accuracy) : ordered_json(nullptr);
+        // Preserve the v1 field shape. Camera grandmaster accuracy is not
+        // sampled or used to assess a slave's synchronization in this rig.
+        ptp["accuracy"] = nullptr;
         ptp["lock_wait_ms"] = r.ptp.lock_wait_ms;
         // The manual documents neither the grandmaster's timescale nor a leap
         // second count (p.121), and no host clock is consulted to guess it.
@@ -426,10 +428,13 @@ namespace gox {
         row["temp"] = std::move(temp);
         row["trig"] = OptInt(s.trig);
         row["trig_overflow"] = s.trig_overflow;
+        row["trig_status_read"] = s.trig_status_read;
+        row["trig_binding_verified"] = s.trig_binding_verified;
+        row["trig_input_verified"] = s.trig_input_verified;
         row["pause_rx"] = OptInt(s.pause_rx);
         ordered_json ptp;
         ptp["status"] = OptString(s.ptp_status);
-        ptp["accuracy"] = OptInt(s.ptp_accuracy);
+        ptp["accuracy"] = nullptr; // retained field; camera grandmaster accuracy is not sampled
         row["ptp"] = std::move(ptp);
         return row.dump();
     }

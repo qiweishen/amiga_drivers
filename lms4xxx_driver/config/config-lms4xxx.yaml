@@ -43,7 +43,7 @@ scan:
 # from its own subnet: see docs/DEVICE_CONFIG.md, "Time".
 ntp:
     enabled: true
-    server: "10.95.76.28"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
+    server: "10.95.76.57"               # IPv4; required when enabled (AsteRx RBi3 Pro+ NTP server)
     sync_interval_s: 1                  # 1..3600
     check_status_s: 5                   # 1..3600; server probe period while scanning
     lock_timeout_s: 60                  # 1..3600; plausible date deadline; earlier scans retained with quality flags

@@ -179,24 +179,38 @@ directory and before `AcquisitionStart`):
 | `derived` | `exposure_time_us` read back, `exposure_offset_us` = 2.45 (p.38/p.171 — note p.164's chunk formula prints 2 µs), their sum, the black-level strings verbatim from p.172 with the 12-bit figure flagged `derived_by_driver`, and the thermal limit |
 | `transport` | `PayloadSize`, `GevSCPSPacketSize`, `GevSCPD`, the throughput margin and the frame rate, with the frame rate's node min/max |
 | `runtime` | what "auto" resolved to: buffer count, queue frames, socket RX requested vs effective, negotiated packet size, whether Counter0 bound |
-| `ptp` | enable result, lock time, last status/accuracy, and a `timescale` note: the grandmaster's timescale is a rig property the driver does not verify (p.121 only documents a 1 ns count with a 1970 origin), and no host clock is consulted to guess it |
+| `ptp` | enable result, lock time, last status, and a `timescale` note: the grandmaster's timescale is a rig property the driver does not verify (p.121 only documents a 1 ns count with a 1970 origin), and no host clock is consulted to guess it. The compatibility key `accuracy` is always `null`: it is not sampled or used as a synchronization quality criterion |
 | `timing` | the trigger path: `mode`, `trigger_source`, whether this process commands the SensorSync board, the camera's `sensor_channel`, the `expected_pulse_rate_hz` (commanded, not measured), whether Line2 carries ExposureActive, the ExposureActive semantics (width = ExposureTime + 2.45 µs, p.38; opto-out delays, p.19) and `observations_file` — the rig's shared timing log relative to `<cam>/`. `association_verified` is always false: the frame ↔ strobe association is an offline step |
 
 `<cam>/telemetry.jsonl`, one JSON object per device-poll tick (5 s) plus a
 first and a last row: `hrt` (host CLOCK_REALTIME ns, the same key `idx.jsonl`
 uses), the three `DeviceTemperature` readings (p.125), `trig`/`trig_overflow`
 (Counter0), `pause_rx` (`aPAUSEMACCtrlFramesReceived`, p.130) and the PTP
-status/accuracy the guard read on the same tick. Unavailable values are
-`null`; the row shape never changes. p.173 caution: the internal temperature
+status the guard read on the same tick. `ptp.accuracy` remains in the row for
+compatibility but is always `null` (not sampled, not a degraded reading).
+Unavailable values are `null`; the row shape never changes. p.173 caution: the internal temperature
 must stay below 72 °C, and about 30 min of warm-up is needed for the specified
 performance — an excursion warns once (re-armed at 67 °C) and never stops the
 capture.
 
 `[Statistics]` lines gain `temp=` (sensor die, when polled) and `trig=`
 (Counter0, external trigger only; `(ovf)` when the 32-bit counter wrapped); the
-Final line gains `triggers=` and `missed=`. All are appended after the existing
+Final line gains `triggers=` and `missed=unknown`: the raw gauge alone does not
+prove a delta. All are appended after the existing
 keys, so `app/services/driver_stats.py` and `tools/check_contracts.py` are
 unaffected.
+
+The rig manifest retains per-camera native counters, worker errors, and
+`trigger_counter` evidence. A numeric missing-frame result requires an acknowledged
+reset, usable baseline/final reads, verified Counter0/FrameTrigger and external
+Line5 binding at sampled reads, no observed overflow/regression, and the shared
+SensorSync source bounding the capture window. Otherwise the delta remains null
+with an `unknown_reason`; this never establishes a frame/trigger association.
+When SensorSync ran, `<cam>/timing_quality.json` also reconciles its complete
+exposure edges with admitted frames and actual drain frames excluded by
+`max_frames`. `frames_written` and `frames_limit_excluded` remain separate: an
+intentional limit does not mean every observed frame was recorded. Missing,
+unreconciled or incomplete required timing causes the session to fail.
 
 Together the two files cost ~5 KB plus ~200 B / 5 s (≈3.5 MB/day). They are
 counted by the GUI's directory-size poll, so an idle external-trigger session
@@ -276,7 +290,7 @@ JAI pair's 1..10 Hz range is not all usable at full resolution.
 
 ## PTP
 
-The GO-X is a slave-only PTP node with exactly one feature pair,
+The GO-X is used as a PTP slave in this rig. The driver uses the feature pair
 `GevIEEE1588` / `GevIEEE1588Status` (p.121, p.128) — there is no SFNC
 `PtpEnable`/`PtpStatus`, no servo status and no `PtpOffsetFromMaster`, so the
 driver targets those two names directly. Time synchronization is performed but
@@ -287,42 +301,37 @@ PTP is the camera's **only** absolute time: no host time is used as a time
 source anywhere on this platform (the host clock is not trusted). The current
 capture YAML sets `ptp.enabled: false`, which is accepted as a warned
 configuration — the frames then carry free-running ticks that cannot be
-associated with anything offline. The grandmaster is the AsteRx RBi3 Pro+
-(its own address, GPS timescale per the rig configuration); the driver records
-that as an unverified note in `device.json` rather than measuring it against
-the host clock (the former host/device cross-check and its 37 s TAI
+associated with anything offline. The user-confirmed topology has the
+AsteRx RBi3 Pro+ as its sole grandmaster (its own address, GPS timescale per
+the rig configuration). The driver does not verify the grandmaster's identity
+or timescale; it records the timescale assumption as an unverified note in
+`device.json` rather than measuring it against the host clock (the former
+host/device cross-check and its 37 s TAI
 assumption are gone). Prerequisite, not verified on hardware: the grandmaster
 must share the camera's L2 domain — PTP multicast does not cross subnets, and
 with one host NIC per device subnet that means a common switch or host-side
 bridging.
 
-While synchronized, the capture loop calls `PtpManager::check_health()` on the
+Startup still waits for `GevIEEE1588Status` to reach `slave`. A timeout or
+startup `Master` / `Faulty` state follows the configured `on_timeout` policy:
+abort, or continue with `ptp_synced=false` and free-running device ticks.
+
+While synchronized, the capture loop calls `PtpManager::CheckHealth()` on the
 **5 s device-poll tick** (`kDevicePollIntervalS` in `src/capture_runner.cpp`,
 shared with the telemetry row, guard first so the row carries what the guard
-just read): `GevIEEE1588Status` must still read `slave` and
-`GevIEEE1588ClockAccuracy` must stay within **0..9** — that window is the
-driver's choice, not the register's range: p.128 gives it as 0..20 with a
-factory value of 19 (Unknown), so an un-synced camera reads outside the window
-by construction (Within25ns … Within1ms are 0..9; 10-18 are 2.5 ms or worse,
-20 is Reserved). A failing reading is
-re-checked three times one second apart before the session is stopped, so a
-poll that lands mid-BMCA does not end a recording. If the accuracy register is
-not readable at all the guard says so once and continues on the status alone.
+just read): `GevIEEE1588Status` must remain readable and report `slave`.
+A failing reading is re-checked three times one second apart before the
+session is stopped, so a poll that lands mid-BMCA does not end a recording.
 
-`GevIEEE1588ClockAccuracy` is an *enumeration*, which the eBUS
-`GetIntegerValue` helper cannot read (it rejects a node of the wrong type), so
-the read goes integer → enum entry value (`PvGenEnum::GetValue`, the number the
-manual prints) → entry name mapped back through
-`ptp_clock_accuracy_from_name()`. Getting that order wrong is not a loud
-failure: the accuracy half of the guard simply never runs and every recorded
-`ptp.accuracy` is `null`.
-
-> First run on hardware: `GevIEEE1588ClockAccuracy` is defined by GigE Vision
-> as the accuracy a device *advertises* as a potential grandmaster, and the
-> GO-X ships at 19 (Unknown). If this firmware never updates the register while
-> slaved, the guard will trip right after the first sync — in that case either
-> the threshold or the guard's scope needs revisiting against the observed
-> values.
+`GevIEEE1588ClockAccuracy` describes the camera's expected accuracy when it
+is, or becomes, a grandmaster; it does not measure the camera's synchronization
+quality as a slave. The driver does not read that node, apply an accuracy
+threshold, or use it to decide whether the camera is synchronized. Existing
+`ptp.accuracy` keys in `device.json` and `telemetry.jsonl` are retained for
+format compatibility and are always `null`, meaning not sampled / not
+applicable, rather than degraded synchronization. Slave status itself does
+not establish a measured synchronization error or verify the sole
+grandmaster's identity.
 
 ## Fail-fast and on-disk residue
 
@@ -384,7 +393,6 @@ damage, but cannot reconstruct SDK metadata lost with an index tail.
   command is taken as complete once `Execute` returned).
 * Whether `DeviceUserID` survives the load is not documented; the driver does
   not depend on it (connect by MAC/IP).
-* `GevIEEE1588ClockAccuracy` while slaved (see the PTP section above).
 * `TriggerSource` is written as the manual's integer enum value (24 = Line5
   Opt In) because the symbolic entry name is not printed anywhere in the
   manual. A symbolic name can be configured instead if the camera's own
@@ -417,10 +425,10 @@ damage, but cannot reconstruct SDK metadata lost with an index tail.
   reproduce the interpolation itself; zero means switching correction off
   discards information the camera will not hand out. The manual does not say
   which it is — `device.json`'s `identity` block answers it on the first run.
-* **Does Counter0 count while acquisition is stopped?** `CounterReset` runs
-  immediately before `AcquisitionStart` precisely because the manual does not
-  say. If `missed=` comes out systematically negative or inflated, this is the
-  first thing to check.
+* **Does Counter0 count while acquisition is stopped?** `CounterReset` and its
+  baseline read run before `AcquisitionStart`. This remains a hardware check;
+  independently controlled pulses cannot establish a bounded acquisition
+  window and therefore leave the final counter delta unknown.
 * **`DeviceTemperatureSelector` while streaming.** It is a DeviceControl
   selector for a read-only float, so it should not be affected by
   TLParamsLocked, and the telemetry poll writes it every 5 s. A firmware that

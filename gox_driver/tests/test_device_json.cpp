@@ -157,7 +157,6 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
     r.ptp.enabled = true;
     r.ptp.synchronized = true;
     r.ptp.status = "slave";
-    r.ptp.accuracy = 6;
     r.timing.mode = "external";
     r.timing.trigger_source = "24";
     r.timing.sensor_trigger_enabled = true;
@@ -227,8 +226,10 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
 
     // PTP: no host-clock cross-check exists any more; the timescale is a rig
     // property the driver states as unverified rather than guessing.
+    CHECK(doc["ptp"]["synchronized"] == true);
     CHECK(doc["ptp"]["status"] == "slave");
-    CHECK(doc["ptp"]["accuracy"] == 6);
+    // A slave's synchronization is not judged by its grandmaster advertisement.
+    CHECK(doc["ptp"]["accuracy"].is_null());
     CHECK(doc["ptp"]["timescale"] == gox::kPtpTimescaleNote);
     CHECK_FALSE(doc["ptp"].contains("raw_offset_ns"));
     CHECK_FALSE(doc["ptp"].contains("assumed_tai_utc_offset_s"));
@@ -264,7 +265,7 @@ TEST_CASE("device_json: an empty report still has every key, with nulls") {
     CHECK(doc["timing"]["observations_file"].is_null());
     CHECK(doc["derived"]["black_level"]["black_level_register"].is_null());
     CHECK(doc["transport"]["AcquisitionFrameRateMin"].is_null());
-    CHECK(doc["ptp"]["accuracy"].is_null()); // -1 = never read
+    CHECK(doc["ptp"]["accuracy"].is_null()); // not sampled, including when PTP is disabled
     CHECK(doc["ptp"]["timescale"].is_string());
 }
 
@@ -278,7 +279,6 @@ TEST_CASE("device_json: build_telemetry_line is one parseable row per poll") {
     s.trig_overflow = false;
     s.pause_rx = 0;
     s.ptp_status = "slave";
-    s.ptp_accuracy = 6;
 
     const std::string line = gox::BuildTelemetryLine(s);
     CHECK(line.find('\n') == std::string::npos); // the writer adds the newline
@@ -290,7 +290,7 @@ TEST_CASE("device_json: build_telemetry_line is one parseable row per poll") {
     CHECK(row["trig_overflow"] == false);
     CHECK(row["pause_rx"] == 0);
     CHECK(row["ptp"]["status"] == "slave");
-    CHECK(row["ptp"]["accuracy"] == 6);
+    CHECK(row["ptp"]["accuracy"].is_null()); // v1 shape retained; not a slave-health measurement
     CHECK_FALSE(row["ptp"].contains("offset_ns")); // the host-clock cross-check is gone
 }
 
@@ -302,6 +302,9 @@ TEST_CASE("device_json: a telemetry row keeps its shape when the camera answers 
     CHECK(row["temp"]["mainboard"].is_null());
     CHECK(row["temp"]["fpga"].is_null());
     CHECK(row["trig"].is_null()); // freerun, or the counter never bound
+    CHECK(row["trig_status_read"] == false);
+    CHECK(row["trig_binding_verified"] == false);
+    CHECK(row["trig_input_verified"] == false);
     CHECK(row["pause_rx"].is_null());
     CHECK(row["ptp"]["status"].is_null());
     CHECK(row["ptp"]["accuracy"].is_null());

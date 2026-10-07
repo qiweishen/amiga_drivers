@@ -1,4 +1,4 @@
-"""Shared constants: paths, container identity, config registry, mount map."""
+"""Shared paths, configuration registry, and presentation settings."""
 
 from __future__ import annotations
 
@@ -9,49 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# --- Docker ------------------------------------------------------------------
-CONTAINER = "amiga-drivers-dev"
-
-# Host path <-> container path. Order matters: longest host prefix first.
-# Only paths under one of these mounts are visible on both sides.
-MOUNT_MAP: list[tuple[Path, str]] = [
-    (Path("/mnt/SharedData/Post_Processing_Data"), "/workspace/dataset"),
-    (REPO_ROOT, "/workspace"),
-]
-
-
-def to_container(host_path: Path | str) -> str:
-    """Map a host path to its in-container path. Raises ValueError if unmapped."""
-    p = Path(host_path).resolve()
-    for host_root, cont_root in MOUNT_MAP:
-        try:
-            rel = p.relative_to(host_root)
-        except ValueError:
-            continue
-        return cont_root if str(rel) == "." else f"{cont_root}/{rel.as_posix()}"
-    raise ValueError(f"path is outside the container mounts: {p}")
-
-
-def to_host(container_path: str) -> Path:
-    """Map an in-container path back to the host. Raises ValueError if unmapped."""
-    for host_root, cont_root in MOUNT_MAP:
-        if container_path == cont_root:
-            return host_root
-        if container_path.startswith(cont_root + "/"):
-            return host_root / container_path[len(cont_root) + 1 :]
-    raise ValueError(f"container path is outside the known mounts: {container_path}")
-
-
-def mapped_on_both_sides(host_path: Path | str) -> bool:
-    try:
-        to_container(host_path)
-        return True
-    except ValueError:
-        return False
-
-
-# --- Binaries & configs (HOST paths; convert per execution backend via
-# services.runtime.exec_path) -------------------------------------------------
+# GUI and binaries run in one container and share these paths.
 BUILD_BIN = REPO_ROOT / "build" / "bin"
 BIN_AMIGA = BUILD_BIN / "AmigaDrivers"
 BIN_EBUS_DISCOVER = BUILD_BIN / "ebus_discover"  # common/: GigE enumeration for both camera drivers
@@ -89,10 +47,8 @@ PALETTE = {
 }
 
 # --- refresh cadence ---------------------------------------------------------
-# End-to-end latency of a sensor state change is the sum of three stages:
-#   driver logs it  ->  spdlog flushes (<=200 ms, common/src/logger.cpp)
-#                   ->  LOG_POLL_S     (session_tailer reads the new bytes)
-#                   ->  UI_TICK_S      (the page renders it)
+# Lifecycle changes are read from the run manifest by AcquisitionController;
+# LOG_POLL_S affects diagnostics and Statistics write-rate updates only.
 # Ticks are cheap by construction: every page updates its elements in place
 # (nothing is rebuilt per tick) and NiceGUI drops setter calls that would not
 # change anything, so an idle tick sends nothing at all. Lowering these past the
@@ -107,9 +63,6 @@ SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs
 
-UNPACK_SCRIPT = REPO_ROOT / "gox_driver" / "scripts" / "unpack_raw.py"
-VENV_PYTHON = Path(os.environ.get("AMIGA_PYTHON", str(REPO_ROOT / ".venv" / "bin" / "python")))
-
 SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 
 
@@ -118,7 +71,7 @@ SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 class ConfigFile:
     id: str
     label: str
-    path: Path  # host path; all configs are YAML
+    path: Path  # container path; all configs are YAML
 
 
 CONFIG_FILES: dict[str, ConfigFile] = {

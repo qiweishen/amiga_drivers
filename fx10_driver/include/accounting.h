@@ -77,4 +77,9 @@ namespace fx10 {
     RunStatus Classify(const Counters &counters);
 
     const char *ToString(RunStatus status);
+
+    enum class SnapshotStatus { kComplete, kNoFrames, kIncomplete };
+    // Artifact existence is insufficient: an event-only ENVI segment has a
+    // header too. The caller separately reports transport/writer fatal causes.
+    SnapshotStatus ClassifySnapshot(const Counters &counters, std::uint64_t requested_frames, bool timed_out);
 } // namespace fx10

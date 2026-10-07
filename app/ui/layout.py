@@ -42,7 +42,6 @@ def frame(title: str):
             for path, label in _NAV:
                 ui.link(label, path).classes("text-white no-underline hover:underline")
         with ui.row().classes("items-center gap-2"):
-            mode_badge = ui.badge("").props('color="white" outline').classes("px-2 py-1 text-xs")
             badge = ui.badge("").props("floating=false").classes("px-3 py-1 text-sm")
 
     banner_row = ui.row().classes("w-full")
@@ -61,7 +60,6 @@ def frame(title: str):
     banner_key: list[tuple] = [()]  # last rendered banner state
 
     def refresh_header() -> None:
-        mode_badge.set_text({"docker": "Docker", "native": "Native", "remote": "Controller API"}.get(STATE.mode, "…"))
         operation = STATE.tool_operation
         tool_label.set_text(" · ".join(str(v) for v in
                             (operation.get("kind"), operation.get("id"), operation.get("state"), operation.get("error")) if v))
@@ -76,7 +74,7 @@ def frame(title: str):
         badge.props(f'color="{color}"')
         # Rebuild the banner only when its state actually changed — a clear()
         # every tick would unnecessarily recreate the warning content.
-        key = (STATE.env_ok, STATE.env_detail, STATE.mode, STATE.pending_config_notice)
+        key = (STATE.env_ok, STATE.env_detail, STATE.pending_config_notice)
         if key == banner_key[0]:
             return
         banner_key[0] = key
@@ -86,8 +84,6 @@ def frame(title: str):
                 with ui.row().classes("w-full items-center bg-red-100 text-red-900 px-4 py-2 rounded"):
                     ui.icon("error")
                     ui.label(f"{STATE.env_detail or 'Runtime environment unavailable'} — device controls unavailable; offline views remain available")
-                    if STATE.mode == "docker":
-                        ui.label("Manage the two Docker services from the terminal and open their GUI.")
         elif STATE.pending_config_notice:
             with banner_row:
                 with ui.row().classes("w-full items-center bg-amber-100 text-amber-900 px-4 py-2 rounded"):

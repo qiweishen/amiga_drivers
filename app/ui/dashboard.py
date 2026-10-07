@@ -94,7 +94,7 @@ def dashboard_page() -> None:
             if shown_result[0] != STATE.run_result:
                 run_result.set_text(json.dumps(STATE.run_result, indent=2, ensure_ascii=False) if STATE.run_result else "No recorded result available")
                 shown_result[0] = STATE.run_result
-            recent = STATE.recent_commands or ([{
+            recent = ([{
                 "id": STATE.tool_operation.get("id", ""), "action": STATE.tool_operation.get("kind", ""),
                 "state": STATE.tool_operation.get("state", ""), "error": STATE.tool_operation.get("error", "")
             }] if STATE.tool_operation else [])
@@ -200,14 +200,14 @@ async def _on_start() -> None:
 
 
 async def _confirm_stop() -> None:
-    generation = STATE.controller_id, STATE.session_generation
+    generation = STATE.session_generation
     with ui.dialog() as dialog, ui.card():
         ui.label("Stop recording? All sensors shut down together in order.")
         with ui.row():
             ui.button("Stop", color="negative", on_click=lambda: dialog.submit(True))
             ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
     if await dialog:
-        if generation != (STATE.controller_id, STATE.session_generation):
+        if generation != STATE.session_generation:
             ui.notify("The recording changed while this dialog was open; review the current session first",
                       type="warning")
             return
