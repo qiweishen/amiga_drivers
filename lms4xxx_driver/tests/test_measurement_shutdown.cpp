@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
