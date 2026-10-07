@@ -208,6 +208,27 @@ The C++ side builds inside the `amiga-drivers-dev` devcontainer
 (`.devcontainer/`, repo mounted at `/workspace`), which brings the eBUS SDK,
 Qt5, Boost and zlib. The Dockerfile installs the pinned SDK package from `resource/`.
 
+For eBUS user-mode camera reception, the host's `net.core.rmem_max` must allow
+the configured `network.socket_rx_buffer_mb` request. The shipped FX10 config
+requests 32 MiB (33554432 bytes); Go-X requests 16 MiB per camera. These are
+per-socket limits, so use the largest configured request, not their sum.
+The container uses `network_mode: host`, so check and provision this on the
+**host**, before starting acquisition:
+
+```bash
+sysctl net.core.rmem_max
+# Only if below 33554432 for the shipped configs; keep any higher existing limit:
+sudo sysctl -w net.core.rmem_max=33554432
+```
+
+The write above lasts until reboot; persistent host provisioning can set
+`net.core.rmem_max = 33554432` in `/etc/sysctl.d/`. Adjust this value when requesting
+larger buffers. The SDK sets each socket's buffer explicitly, so raising
+`rmem_default` is not required for this error. The application and container
+startup do not change these host settings. FX10 rejects a capped request before
+acquisition; changing the limit resolves that admission failure but does not
+establish loss-free throughput.
+
 ### Build
 
 ```bash

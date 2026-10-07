@@ -97,7 +97,12 @@ class AcquisitionController:
             self._update(last_error="")
         if not clean:
             err = BUFFER.last_error_line()
-            self._report(err.raw if err else "Recording failed or its final integrity result is unavailable")
+            if err is not None:
+                # This diagnostic is already in the feed. Expose it in the
+                # status summary without replaying it as another log event.
+                self._update(last_error=err.raw)
+            else:
+                self._report("Recording failed or its final integrity result is unavailable")
 
     async def preflight(self) -> tuple[list[str], list[str]]:
         errors: list[str] = []

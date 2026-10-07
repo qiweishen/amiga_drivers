@@ -115,10 +115,16 @@ namespace fx10 {
         const std::uint32_t rx_bytes = static_cast<std::uint32_t>(network_.socket_rx_buffer_mb) * 1024u * 1024u;
         const PvResult rx_result = stream->SetUserModeSocketRxBufferSize(rx_bytes);
         if (rx_result.GetCode() == PvResult::Code::INVALID_PARAMETER) {
+            // Diagnose in the acquisition process's network namespace; do not
+            // change the host limit or silently lower the configured request.
+            std::ifstream rmem_max_file("/proc/sys/net/core/rmem_max");
+            std::uint64_t rmem_max = 0;
+            const std::string limit = (rmem_max_file >> rmem_max) ? std::to_string(rmem_max) : "unknown";
             throw TransportError(fmt::format("[eBUS] SetUserModeSocketRxBufferSize({} bytes): {}. On Linux, eBUS 6.5.1 "
-                       "uses net.core.rmem_max and returns INVALID_PARAMETER when the request exceeds that limit; "
-                       "requested receive buffering is unavailable; acquisition not started",
-                       rx_bytes, common::Ebus::PvResultToString(rx_result)));
+                       "caps the request at net.core.rmem_max (current={} bytes). The limit must be at least {} bytes. "
+                       "For the host-network container, raise it on the HOST with 'sudo sysctl -w net.core.rmem_max={}' "
+                       "if it is lower, then retry; acquisition not started",
+                       rx_bytes, common::Ebus::PvResultToString(rx_result), limit, rx_bytes, rx_bytes));
         } else if (!rx_result.IsOK() && rx_result.GetCode() != PvResult::Code::NOT_SUPPORTED) {
             throw TransportError(fmt::format("[eBUS] Cannot configure receive buffering ({} bytes): {}",
                                              rx_bytes, common::Ebus::PvResultToString(rx_result)));

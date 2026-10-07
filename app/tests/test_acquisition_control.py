@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.state import AppState, ProcState
 from app.services import control_service, process, run_status, runtime, session_info
+from app.services.log_buffer import LogBuffer, parse_line
 
 
 class RecordingViewTests(unittest.TestCase):
@@ -151,6 +152,41 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_status.sensor_update(self.doc, sensors)
         self.assertEqual(sensors["gox"].state.value, "waiting")
+
+    def test_failed_finish_preserves_result_without_repeating_existing_log(self):
+        owner = process.AcquisitionController()
+        owner._ref = self.ref
+        owner._update(active_session=self.path)
+        self.doc["run"].update(recording_failed=True, status="failed (gox)")
+        self.doc["lifecycle"]["sensors"]["gox"] = {"state": "failed", "error": "startup failed"}
+        display = AppState()
+        display.sensors = run_status.sensor_statuses({"gox": True}, [])
+        buffer = LogBuffer()
+        diagnostic = "[10:21:08] [error] [MainApp]: Run failed; recording is INCOMPLETE"
+        buffer.append(parse_line(diagnostic))
+
+        with patch.object(process, "STATE", display), patch.object(process, "BUFFER", buffer), \
+                patch.object(run_status, "read_json", return_value=self.doc):
+            owner._finish(1, clean=False)
+
+        final = owner.snapshot()
+        self.assertEqual([line.raw for line in buffer.snapshot()], [diagnostic])
+        self.assertEqual(final.last_error, diagnostic)
+        self.assertEqual(final.process_state, ProcState.FAILED)
+        self.assertEqual(final.exit_code, 1)
+        self.assertTrue(final.run_result["run"]["recording_failed"])
+        self.assertEqual(final.run_result["run"]["status"], "failed (gox)")
+        self.assertEqual(display.sensors["gox"].state.value, "failed")
+
+    def test_failed_finish_without_log_emits_one_fallback_diagnostic(self):
+        owner = process.AcquisitionController()
+        buffer = LogBuffer()
+        with patch.object(process, "BUFFER", buffer):
+            owner._finish(1, clean=False)
+            owner._finish(1, clean=False)
+        self.assertEqual(len(buffer.snapshot()), 1)
+        self.assertEqual(owner.snapshot().last_error, buffer.snapshot()[0].raw)
+        self.assertEqual(owner.snapshot().process_state, ProcState.FAILED)
 
 
 if __name__ == "__main__":

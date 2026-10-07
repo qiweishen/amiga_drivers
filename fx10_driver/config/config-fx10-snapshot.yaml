@@ -55,7 +55,7 @@ output:
 # --- Network ---
 network:
     packet_size: 0                      # 0 = negotiate
-    socket_rx_buffer_mb: 32             # 1..1024
+    socket_rx_buffer_mb: 32             # 1..1024; host net.core.rmem_max must allow 33554432 bytes
     buffer_count: auto                  # auto (= 0): 16 SDK buffers; explicit >= 1 (subject to SDK/memory caps)
     stall_budget_s: 2.0                 # >= 0; sizes the owned application frame queue
     max_buffer_memory_mb: 512           # >= 1; combined SDK + application payload buffers + unpack scratch

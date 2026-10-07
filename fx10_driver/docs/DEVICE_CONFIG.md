@@ -133,6 +133,16 @@ other readback errors fail startup. Linux SO_RCVBUF includes bookkeeping and is
 not directly the payload capacity. No sysctl, interface MTU, packet size, or
 resend-policy changes are applied to compensate automatically.
 
+With the shipped `network.socket_rx_buffer_mb: 32`, Linux
+`net.core.rmem_max` must be at least 33554432 bytes. eBUS 6.5.1 documents that
+a larger request is capped at this limit and returns `INVALID_PARAMETER`.
+The error reports the limit read by the acquisition process (or `unknown` if
+unreadable). The single container shares the host network namespace: provision
+the limit on the host as described in the root README's prerequisites, then
+retry. Reducing the configured buffer is not an equivalent fix for a given
+capture workload. An SDK `SO_RCVBUF` readback may include doubled bookkeeping;
+the host limit is compared with the original request, without doubling it.
+
 ### Mandatory mechanical-shutter action
 
 The operator supplied the following FX10e control definition. The supplied FX10
