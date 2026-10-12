@@ -1,5 +1,7 @@
 #include "command_channel.h"
 
+#include <chrono>
+
 #include "command_builder.h"
 #include "error.h"
 #include "logger.h"
@@ -134,9 +136,14 @@ namespace lms4xxx {
     std::error_code CommandChannel::CallMethod(TcpClient *tcp_client, const std::vector<std::uint8_t> &frame, std::string_view name,
                                              std::optional<std::uint8_t> ok_byte) {
         ColaBMessage r;
-        auto ec = SendAndReceive(tcp_client, frame, r, MethodTimeout());
+        const int timeout_ms = MethodTimeout(name);
+        const auto started = std::chrono::steady_clock::now();
+        auto ec = SendAndReceive(tcp_client, frame, r, timeout_ms);
         if (ec) {
-            g_log.Error("[{}] {} failed: {}", Tag(), name, ec.message());
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            g_log.Error("[{}] {} failed after {} ms (response read timeout={} ms): {}",
+                        Tag(), name, elapsed_ms, timeout_ms, ec.message());
             return ec;
         }
         ec = ValidateResponse(r, CommandType::kMethodAnswer, name);

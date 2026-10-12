@@ -34,4 +34,14 @@ TEST_CASE("A missing command transport is rejected without a read or write") {
 TEST_CASE("CoLa method deadlines retain the method floor and longer configured waits") {
     CHECK(lms4xxx::CommandChannel(100, "test").MethodTimeout() == 5000);
     CHECK(lms4xxx::CommandChannel(6000, "test").MethodTimeout() == 6000);
+
+    // Full motor shutdown needs a separate startup budget without extending
+    // login, startup cleanup, or ordinary configuration method waits.
+    const lms4xxx::CommandChannel channel(200, "test");
+    CHECK(channel.MethodTimeout("LMCstartmeas") == 60000);
+    CHECK(channel.MethodTimeout("LMCstopmeas") == 5000);
+    CHECK(channel.MethodTimeout("SetAccessMode") == 5000);
+    CHECK(channel.MethodTimeout("mSCloadappdef") == 5000);
+    CHECK(channel.MethodTimeout("Run") == 5000);
+    CHECK(lms4xxx::CommandChannel(6000, "test").MethodTimeout("LMCstopmeas") == 6000);
 }

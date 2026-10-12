@@ -8,7 +8,9 @@
 
 namespace {
     common::DriverLog g_log{"LMS4xxx"};
-    constexpr int kReadyTimeoutMs = 10000;
+    // Separate from the LMCstartmeas reply wait: a successful command is not
+    // proof that the motor is ready. This is a host policy, not a device spec.
+    constexpr int kReadyTimeoutMs = 60000;
     constexpr int kReadyPollMs = 200;
 
     // "01 00 0D .." for readback-mismatch diagnostics
@@ -231,6 +233,7 @@ namespace lms4xxx {
     std::error_code Lms4xxxDriver::Impl::WaitDeviceReady(int timeout_ms) {
         const auto started = std::chrono::steady_clock::now();
         const auto deadline = started + std::chrono::milliseconds(kReadyTimeoutMs);
+        g_log.Info("[{}] Waiting for device ready (poll window={} ms)", Tag(), kReadyTimeoutMs);
         while (true) {
             std::vector<std::uint8_t> p;
             auto ec = commands.ReadVariable(tcp_client.get(), "SCdevicestate", p, std::max(timeout_ms, commands.MethodTimeout()));
@@ -242,7 +245,7 @@ namespace lms4xxx {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started).count();
             if (state == 1) {
-                g_log.Trace("[{}] Device ready after {} ms", Tag(), elapsed);
+                g_log.Info("[{}] Device ready after {} ms", Tag(), elapsed);
                 return {};
             }
             if (state == 2) {
@@ -421,9 +424,15 @@ namespace lms4xxx {
         // 5. Arm rollback BEFORE the request: losing its answer does not prove
         // that measurement stayed off. Run applies configuration and logs out.
         impl_->measurement_shutdown.Arm();
+        const auto measurement_start = std::chrono::steady_clock::now();
+        g_log.Info("[{}] Starting measurement (response read timeout={} ms; motor may need to restart)",
+                   impl_->Tag(), impl_->commands.MethodTimeout("LMCstartmeas"));
         if (auto ec = impl_->commands.CallMethod(impl_->tcp_client.get(), CommandBuilder::BuildStartMeasurement(), "LMCstartmeas", 0x00)) {
             return fail(ec);
         }
+        g_log.Info("[{}] LMCstartmeas acknowledged after {} ms", impl_->Tag(),
+                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - measurement_start).count());
         if (auto ec = impl_->commands.CallMethod(impl_->tcp_client.get(), CommandBuilder::BuildRun(), "Run", 0x01)) {
             return fail(ec);
         }

@@ -62,7 +62,7 @@ attributes (`device_*`, `FORMAT_H5.md`).
 | 13 | NTP on (shipped default): `sWN TSCRole 01`, `sWN TSCTCSrvAddr a b c d`, `sWN TSCTCupdatetime <s>`; NTP off: `sWN TSCRole 00` | per `ntp:` in the yaml; the server is probed with an SNTP query and watched while scanning; the device time itself is checked by the time lock (see "Time" below) | tolerate-sFA | 96–102 |
 | 14 | `sMN LMCstartmeas` | laser and motor on | `sAN 00` | 75 |
 | 15 | `sMN Run` | activates all parameters, logs out, laser on | `sAN 01` | 83 |
-| 16 | `sRN SCdevicestate` every 200 ms, up to 10 s | wait for `01` Ready (p.46); `02` Error → messages logged, fatal | — | 124 |
+| 16 | `sRN SCdevicestate` with 200 ms between polls, 60 s polling window | wait for `01` Ready (p.46); `02` Error → messages logged, fatal | — | 125 |
 
 The device clock is never set from the host (`LSPsetdatetime` is not sent):
 the host clock is not trusted. With NTP on the device synchronises to the
@@ -215,11 +215,26 @@ undecodable, dropped and unprocessed complete frames remain in this denominator.
 rate. CRC/framing errors and missing telegrams retain their separate counters.
 The live `rate` counts validated scans per second; `fps` still counts written scans.
 
-Timeouts: variable reads/writes use `network.response_timeout_ms` (shipped at
-1000 ms; the socket's `SO_RCVTIMEO` follows it as the poll granularity, and
-`SO_SNDTIMEO` is set from it so a peer that stops reading cannot block the
-control thread forever). Methods (`SetAccessMode`, `mSCloadappdef`,
-`LMCstartmeas`, `Run`) use at least 5 s.
+Timeouts: configuration variable reads/writes use `network.config_timeout_ms`
+(shipped at 2000 ms); scanning-time access uses `network.response_timeout_ms`
+(200 ms). Nonblocking socket I/O enforces read/write deadlines; the kernel
+`SO_RCVTIMEO`/`SO_SNDTIMEO` settings are defensive, not the poll granularity.
+Command-phase methods use at least 5 s per response read, except `LMCstartmeas`,
+which uses at least 60 s. Larger `network.response_timeout_ms` values are retained.
+This longer startup allowance does not apply to login, `Run` or `LMCstopmeas`.
+
+After a full `LMCstopmeas`, starting measurement includes restarting the motor
+(p.75). The 60 s startup allowance and the separate 60 s Ready polling window are
+host timeout policies, not manufacturer timing guarantees: the manual does not
+specify the maximum `LMCstartmeas` reply latency. Only a successful `sAN` permits
+`Run`, followed by the Ready check. The startup reply and Ready elapsed times are
+logged separately; a timeout still fails configuration and triggers stop cleanup.
+
+The response header and body each have a read deadline, so a partially delivered
+reply can take two such waits. The Ready window is checked between transactions
+and may be exceeded by the final read. Configuration I/O is synchronous and does
+not observe the application's stop predicate mid-command; signal cancellation can
+therefore wait for the current command/readiness check before cleanup begins.
 
 A command-phase timeout is fatal, and it now also *realigns*: `TCPClient::Read`
 returns the bytes it already took off the wire instead of reporting 0, and the

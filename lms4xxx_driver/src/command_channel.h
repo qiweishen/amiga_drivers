@@ -21,7 +21,10 @@ namespace lms4xxx {
         static constexpr std::uint32_t kMaxFrameBytes = 64 * 1024;
         CommandChannel(int response_timeout_ms, std::string tag)
             : response_timeout_ms_(response_timeout_ms), tag_(std::move(tag)) {}
-        [[nodiscard]] int MethodTimeout() const { return std::max(response_timeout_ms_, kMethodTimeoutMs); }
+        [[nodiscard]] int MethodTimeout(std::string_view name = {}) const {
+            return std::max(response_timeout_ms_,
+                            name == "LMCstartmeas" ? kStartMeasurementTimeoutMs : kMethodTimeoutMs);
+        }
         [[nodiscard]] bool Uncertain() const { return uncertain_; }
         void Reset() { uncertain_ = false; }
 
@@ -35,8 +38,11 @@ namespace lms4xxx {
                                         std::string_view expected_name) const;
 
     private:
-        // Methods (login, Run, LMCstartmeas) can take longer than variable access.
+        // Methods can take longer than variable access. After LMCstopmeas,
+        // LMCstartmeas also starts the motor (manual p.75). Give that command
+        // its own operational margin; the manual specifies no reply deadline.
         static constexpr int kMethodTimeoutMs = 5000;
+        static constexpr int kStartMeasurementTimeoutMs = 60000;
         void DrainStaleBytes(TcpClient *tcp_client) const;
         [[nodiscard]] const std::string &Tag() const { return tag_; }
         int response_timeout_ms_;
