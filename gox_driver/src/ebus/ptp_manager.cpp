@@ -51,6 +51,8 @@ namespace gox::ebus {
         feature_found_ = false;
         enabled_ = false;
         synchronized_ = false;
+        last_status_.clear();
+        lock_wait_ms_ = 0;
 
         if (!cfg_.enabled) {
             // Host time is never recorded as a time source on this platform; PTP is the
@@ -76,21 +78,32 @@ namespace gox::ebus {
         feature_found_ = true;
 
         // GevIEEE1588 is a boolean, "0: False / 1: True", factory FALSE (p.128).
-        // The shared write path dispatches on the node's real type and verifies
-        // the read-back; required=false keeps the on_timeout policy in charge of
-        // what a failure means.
+        // Always write and verify false before writing and verifying true,
+        // even if the camera was already disabled. GevIEEE1588Status is a
+        // read-only state, checked separately by WaitForSync(). The shared
+        // write path verifies each read-back; required=false keeps the
+        // on_timeout policy in charge of what a failure means.
         FeatureWrite enable_write;
         enable_write.name = kEnableFeature;
-        enable_write.value = "true";
+        enable_write.value = "false";
         enable_write.value_is_string = false;
         enable_write.strict = true;
         if (!apply_genicam_feature(params_, enable_write, "[" + camera_id_ + "] [eBUS] PTP",
                                    /*required=*/false)) {
+            return degrade(std::string("Disabling PTP via ") + kEnableFeature +
+                           " failed write/read-back verification; device state is unconfirmed, skipping enable");
+        }
+        g_log.Info("[{}] [eBUS] {}=false written and read-back verified", camera_id_, kEnableFeature);
+
+        enable_write.value = "true";
+        if (!apply_genicam_feature(params_, enable_write, "[" + camera_id_ + "] [eBUS] PTP",
+                                   /*required=*/false)) {
             return degrade(std::string("Enabling PTP via ") + kEnableFeature +
-                           " failed (see the warning above); PTP is not running");
+                           " failed write/read-back verification; device state is unconfirmed");
         }
         enabled_ = true;
-        g_log.Info("[{}] [eBUS] PTP enabled via {}; Waiting for status \"slave\"", camera_id_, kEnableFeature);
+        g_log.Info("[{}] [eBUS] {}=true written and read-back verified; Waiting for status \"slave\"",
+                   camera_id_, kEnableFeature);
         return true;
     }
 

@@ -108,7 +108,7 @@ namespace gox {
     struct PtpSummary {
         bool enabled = false; // config asked for PTP
         bool feature_found = false;
-        bool written = false; // GevIEEE1588 = true accepted
+        bool written = false; // GevIEEE1588=false then true, both write/readback verified
         bool synchronized = false; // status reached "slave"
         std::string status; // last GevIEEE1588Status text
         uint64_t lock_wait_ms = 0;

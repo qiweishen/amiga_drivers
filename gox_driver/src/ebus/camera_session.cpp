@@ -68,8 +68,8 @@ namespace gox::ebus {
             throw std::runtime_error("Factory defaults: " + std::string(e.what()));
         }
 
-        // PTP: enable first so BMCA/servo convergence overlaps the rest of
-        // the bring-up as little as the task ordering allows, then wait
+        // PTP: disable/enable with readback at each step, then wait for slave
+        // before opening the stream and applying the acquisition settings.
         ptp_ = std::make_unique<PtpManager>(cfg_.id, controller_->Params(), app_.ptp);
         if (!ptp_->Enable()) {
             throw std::runtime_error("PTP enable failed (on_timeout=abort)");

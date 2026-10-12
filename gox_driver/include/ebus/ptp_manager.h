@@ -1,7 +1,7 @@
 #pragma once
 
 // PTP slave management: GevIEEE1588 / GevIEEE1588Status (manual p.128), 1 GHz ticks (p.121).
-// The rig's grandmaster is AsteRx; enable PTP, wait for slave status, and guard
+// The rig's grandmaster is AsteRx; disable/enable PTP with readback, wait for slave status, and guard
 // that status. The camera's advertised grandmaster accuracy is not assessed.
 
 #include <PvGenParameterArray.h>
@@ -19,7 +19,8 @@ namespace gox::ebus {
         // `params` must outlive the manager
         PtpManager(std::string camera_id, PvGenParameterArray *params, PtpConfig cfg);
 
-        // GevIEEE1588 = true. False only under on_timeout=abort when the feature is missing or refused
+        // When configured on: GevIEEE1588=false + verify, then true + verify.
+        // A failed disable verification skips enable. Failures follow on_timeout.
         bool Enable();
 
         // Polls GevIEEE1588Status until "slave" (sync_timeout_s); "master"/"faulty" fail immediately.
@@ -41,7 +42,7 @@ namespace gox::ebus {
         PtpConfig cfg_;
 
         bool feature_found_ = false; // GevIEEE1588 + GevIEEE1588Status both present
-        bool enabled_ = false; // GevIEEE1588 was written successfully
+        bool enabled_ = false; // both GevIEEE1588=false and true writes/readbacks succeeded
         bool synchronized_ = false; // WaitForSync() reached "slave"
         std::string last_status_;
         uint64_t lock_wait_ms_ = 0;

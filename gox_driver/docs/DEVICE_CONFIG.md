@@ -51,7 +51,7 @@ GO-X series (Pregius S, PGE) user manual (`docs/Manual_Go-X-Series-PregiusS-PGE.
 |---|---|---|
 | 1 | connect | `PvDeviceGEV::Connect(target, PvAccessControl)`; identity read from `DeviceModelName/SerialNumber/VendorName/Version/UserID` |
 | 2 | factory defaults | `CameraController::load_factory_defaults()`: probe `UserSetSelector`/`UserSetLoad` (implemented + available, entry named `Default`) → `AcquisitionStop` → `UserSetSelector=Default` → `UserSetLoad` → `IsDone` → `InvalidateCache` → readback. Log: `Factory defaults loaded (UserSetSelector=Default, N ms)` |
-| 3 | PTP | `GevIEEE1588=true` + wait for `GevIEEE1588Status` = slave (when `ptp.enabled`) |
+| 3 | PTP | write `GevIEEE1588=false` → verify readback → write `true` → verify readback → wait for `GevIEEE1588Status` = slave (when `ptp.enabled`) |
 | 4 | stream open | rx buffer, `NegotiatePacketSize`/`SetPacketSize`, `SetStreamDestination`, receiver tuning. **No device feature is written here** — their legal ranges depend on the format/ROI writes that follow (p.130) |
 | 5 | `ApplyConfig` | walks `BuildApplyPlan()` (see below). Every write is read back; the read-backs become device.json's `applied` block |
 | 6 | streaming | buffers → recorder (creates `<cam>/`) → **`device.json`** → `StreamEnable` → `CounterReset` (external only) → `AcquisitionStart` → **first `telemetry.jsonl` row** → **SensorSync arm** (`sensor_trigger.enabled`: the rig's shared session starts pulsing once every registered camera has armed, see "External trigger and SensorSync") |
@@ -312,7 +312,15 @@ must share the camera's L2 domain — PTP multicast does not cross subnets, and
 with one host NIC per device subnet that means a common switch or host-side
 bridging.
 
-Startup still waits for `GevIEEE1588Status` to reach `slave`. A timeout or
+When PTP is enabled in the configuration, startup always writes
+`GevIEEE1588=false` and verifies its boolean readback before writing
+`GevIEEE1588=true` and verifying that readback. Both writes are performed even
+if the camera was initially disabled. A failed write, failed read or mismatched
+readback follows `on_timeout`; failure at the false step skips the true step.
+`GevIEEE1588Status` is a read-only state, not the boolean enable switch.
+With `ptp.enabled=false`, this sequence is skipped.
+
+After both readbacks succeed, startup waits for `GevIEEE1588Status` to reach `slave`. A timeout or
 startup `Master` / `Faulty` state follows the configured `on_timeout` policy:
 abort, or continue with `ptp_synced=false` and free-running device ticks.
 
