@@ -459,7 +459,7 @@ namespace asterx {
         plain(login);
 
         // 2) Reset the running configuration to the receiver defaults.
-        plain("exeCopyConfigFile, "", Current");
+        plain("exeCopyConfigFile, Boost, Current");
 
         // 3) Check dual-antenna and multi-band capacities.
         cmds.push_back({"getReceiverCapabilities", CommandKind::kCheckCapabilities, {}, {}});
