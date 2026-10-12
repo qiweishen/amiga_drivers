@@ -94,15 +94,25 @@ for device scan time.
   independently of host NTP probes. Missing, malformed, or >30-second-old warning
   readbacks produce `UNKNOWN`. A clear fresh warning list yields `SYNCHRONIZED`,
   not an accuracy guarantee. Disabling telemetry leaves device health unknown.
-* **Step check.** Once locked, the device time must advance in step with the
-  device uptime: between consecutive recorded scans
-  `|Δdevice_time − Δuptime|` (uptime taken modulo 2^32 µs) above
-  `ntp.max_time_step_ms` is an NTP step or a clock fault while recording and
-  faults the run; the largest value seen is reported as `tstep_max_us=`. A
+* **Time anomaly.** Between consecutive plausible timestamps, `TIME-ANOMALY`
+  is triggered when **either** `ΔUTC < -1000 us` (actual UTC regression greater
+  than 1 ms) **or** `|ΔUTC − Δuptime| > 10000 us` (relative step greater than
+  10 ms, with continuous uptime). Both comparisons are strict: exactly -1 ms
+  does not meet the first condition, and exactly ±10 ms does not meet the second.
+  The other condition can still trigger the anomaly. An unusable uptime delta
+  does not prevent assessment of an actual UTC regression. The anomaly is latched
+  for the run; `NO-SIGNAL` and `UNREACH` can take precedence in the status text.
+  `time_anomaly_events` counts qualifying scans once each, even if both conditions
+  hold, and degrades the final session verdict even if another status is displayed.
+  Every negative UTC delta still increments `utc_back` and sets the HDF5 backward
+  flag; that raw count alone no longer degrades the verdict. Device NTP-loss
+  reports also degrade the final verdict.
+* **Step fault.** With continuous uptime, `|ΔUTC − Δuptime|` (uptime taken
+  modulo 2^32 µs) above `ntp.max_time_step_ms` requests a time-fault stop. This
+  configured limit (shipped value: 1000 ms) is independent of the fixed anomaly
+  thresholds above. The largest relative step seen is reported as `tstep_max_us=`. A
   device time that falls below the floor again after first plausibility faults
-  as well. Every UTC regression is separately flagged/counted even below this
-  threshold; equal UTC samples are counted without being mistaken for lost scans.
-  Regressions and device NTP-loss reports degrade the final session verdict.
+  as well. Equal UTC samples are counted without being mistaken for lost scans.
   `ntp_device_loss` counts entering the device's No NTP signal warning state,
   including the first such report after starting; it does not prove a previously
   locked clock lost lock. A later recovery does not erase an event from the run.
@@ -110,7 +120,15 @@ for device scan time.
   triggering scan and queued valid scan payloads remain recordable with their
   original timestamp and quality flags. No synthetic corrected time is written.
 
-The first UTC-regression warning in each acquisition includes `utc_offset_us`
+Every UTC regression is logged. With continuous uptime, every observed
+`abs(delta UTC - delta uptime) >= 1000 us` is also logged, in either direction,
+including repeated UTC when it meets that threshold. This fixed 1 ms diagnostic
+threshold is independent of both the anomaly thresholds and
+`ntp.max_time_step_ms`. First/invalid timestamps have no
+comparable delta and do not produce a change warning. An uptime discontinuity
+continues to follow the existing time-fault policy.
+
+Each warning includes `utc_offset_us`
 (current UTC minus previous UTC, also shown in milliseconds), `uptime_delta_us`
 (the unsigned modulo-2^32 uptime delta), and `clock_step_us`
 (`utc_offset_us - uptime_delta_us`). If uptime is discontinuous, `clock_step_us`
@@ -118,9 +136,16 @@ is logged as `n/a`; the UTC offset is still reported. Previous/current Unix UTC
 microseconds and the current `scan_counter` locate the event in the recording.
 For example, a 19 ms UTC regression while uptime advances by 1644 us produces
 `utc_offset_us=-19000` and `clock_step_us=-20644`. These describe changes between
-scans, not an offset measured against the NTP server or another sensor. The
-existing first-warning-only policy is retained; all regressions are still
-counted in `utc_back` and flagged in the HDF5 scan metadata.
+scans, not an offset measured against the NTP server or another sensor.
+`Device UTC moved backwards` identifies an actual negative UTC delta; otherwise
+`Device UTC/uptime disagreement` reports the signed discrepancy, with
+`direction=forward` for a positive clock step and `backward` for a negative one.
+The latter can occur while UTC itself still increases. Each frame produces at
+most one change warning, with no first-event-only suppression. The running
+`utc_back` count, `log_threshold_us=1000`, and `time_anomaly` are included;
+`time_anomaly` indicates whether this scan meets either anomaly condition, not
+the latched state from earlier scans. Only actual UTC regressions increment
+`utc_back`. All regressions remain flagged in HDF5.
 
 After `Run`, `sEN LMDscandata 1` starts the stream. The first telegram is the
 proof that everything took effect: DIST1 + RSSI1/REFL1 + ANGL1 + QLTY1, exactly

@@ -290,7 +290,7 @@ void Lms4xxxDriverApp::Run() {
             g_log.Info("[Statistics] [{}] up={}  rate={:.1f} Hz  fps={:.1f}  ntp={}  frames={}  parsed={}  "
                        "drop_ring={}  gaps={}  crc={}  frame_err={}  parse_err={}  written={}  drop_q={}  files={}  "
                        "bytes={}  queued={:.1f}  temp={}  unexpected={}  prelock={}  tstep_max_us={}  "
-                       "utc_back={}  utc_repeat={}  ntp_device_loss={}  ntp_server_reachable={}",
+                       "utc_back={}  utc_repeat={}  ntp_device_loss={}  ntp_server_reachable={}  time_anomaly_events={}",
                        instance_name_, common::TimeUtil::HumanDuration(uptime_s), scan_hz, write_fps,
                        NtpStatusText(drv.ntp_status),
                        drv.frames_received, drv.frames_parsed, drv.frames_dropped, drv.counter_gaps, drv.crc_errors,
@@ -300,7 +300,8 @@ void Lms4xxxDriverApp::Run() {
                            ? fmt::format("{:.1f}", *impl_->last_telemetry.temperature_c)
                            : "n/a",
                        drv.unexpected_replies, drv.prelock_scans_discarded, drv.max_time_step_us,
-                       drv.utc_backwards, drv.utc_repeated, drv.device_no_ntp_events, drv.ntp_server_reachable);
+                       drv.utc_backwards, drv.utc_repeated, drv.device_no_ntp_events, drv.ntp_server_reachable,
+                       drv.time_anomaly_events);
         }
     }
 
@@ -365,6 +366,7 @@ void Lms4xxxDriverApp::Shutdown() {
         {"prelock_scans_discarded", drv.prelock_scans_discarded}, {"max_time_step_us", drv.max_time_step_us},
         {"utc_backwards", drv.utc_backwards}, {"utc_repeated", drv.utc_repeated},
         {"clock_step_events", drv.clock_step_events}, {"device_no_ntp_events", drv.device_no_ntp_events},
+        {"time_anomaly_events", drv.time_anomaly_events},
         {"ntp_server_reachable", drv.ntp_server_reachable}, {"absolute_time_verified", false},
         {"non_scan_frames", drv.non_scan_frames}, {"scan_candidates", drv.ScanCandidateFrames()},
         {"shutdown_complete", false}, {"data_integrity_failed", result.data_integrity_failed},
@@ -385,14 +387,14 @@ void Lms4xxxDriverApp::Shutdown() {
                "dropped_ring={}  counter_gaps={}  crc_errors={}  framing_errors={}  parse_errors={}  "
                "unexpected_replies={}  frames_written={}  dropped_queue={}  bytes={}  files={}  prelock={}  "
                "tstep_max_us={}  utc_back={}  utc_repeat={}  clock_step_events={}  ntp_device_loss={}  "
-               "ntp_server_reachable={}  control_frames={}  scan_candidates={}",
+               "ntp_server_reachable={}  control_frames={}  scan_candidates={}  time_anomaly_events={}",
                instance_name_, common::TimeUtil::HumanDuration(duration_s), drv.frames_received, drv.frames_parsed,
                drv.DeliveryRate(), NtpStatusText(drv.ntp_status), drv.frames_dropped, drv.counter_gaps,
                drv.crc_errors, drv.framing_errors, drv.parse_errors, drv.unexpected_replies,
                wr.frames_written, wr.frames_dropped, common::HumanBytes(wr.bytes_written), wr.files_created,
                drv.prelock_scans_discarded, drv.max_time_step_us, drv.utc_backwards, drv.utc_repeated,
                drv.clock_step_events, drv.device_no_ntp_events, drv.ntp_server_reachable,
-               drv.non_scan_frames, drv.ScanCandidateFrames());
+               drv.non_scan_frames, drv.ScanCandidateFrames(), drv.time_anomaly_events);
 
     impl_->driver.reset(); // Makes the destructor and repeated Shutdown() no-ops.
     final_statistics_["shutdown_complete"] = true;

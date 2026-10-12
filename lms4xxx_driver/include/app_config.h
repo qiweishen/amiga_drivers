@@ -68,8 +68,8 @@ namespace lms4xxx {
         // Deadline for a plausible device date, not proof of an NTP lock.
         // Earlier scans remain recorded with invalid-time flags.
         std::uint32_t lock_timeout_s = 60; // 1..3600
-        // Large UTC/uptime disagreement requests a time-fault stop. Every UTC
-        // regression is also recorded/counted independently of this threshold.
+        // Large UTC/uptime disagreement requests a time-fault stop. This limit
+        // is independent of the fixed TIME-ANOMALY and diagnostic log thresholds.
         std::uint32_t max_time_step_ms = 1000; // 1..60000
     };
 

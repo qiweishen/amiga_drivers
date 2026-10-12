@@ -26,6 +26,36 @@ namespace lms4xxx {
         std::uint32_t uptime_delta_us = 0; // raw modulo-2^32 delta; inspect kUptimeDiscontinuity
     };
 
+    // Diagnostic logging only; independent of the configured time-fault limit.
+    inline constexpr std::int64_t kClockStepLogThresholdUs = 1000;
+    // TIME-ANOMALY uses strict limits, independently of logging and fault stops.
+    inline constexpr std::int64_t kUtcRegressionAnomalyThresholdUs = 1000;
+    inline constexpr std::int64_t kClockStepAnomalyThresholdUs = 10000;
+
+    inline bool IsTimeAnomaly(const ClockObservation &observation) {
+        if (!(observation.flags & ClockFlag::kAssessed) ||
+            (observation.flags & (ClockFlag::kFirstSample | ClockFlag::kInvalidTimestamp | ClockFlag::kNtpDisabled))) {
+            return false;
+        }
+        // The UTC delta remains meaningful even if uptime is discontinuous.
+        if (observation.utc_delta_us < -kUtcRegressionAnomalyThresholdUs) return true;
+        if (observation.flags & ClockFlag::kUptimeDiscontinuity) return false;
+        return observation.step_us > kClockStepAnomalyThresholdUs ||
+               observation.step_us < -kClockStepAnomalyThresholdUs;
+    }
+
+    inline bool ShouldLogClockChange(const ClockObservation &observation) {
+        if (!(observation.flags & ClockFlag::kAssessed) ||
+            (observation.flags & (ClockFlag::kFirstSample | ClockFlag::kInvalidTimestamp | ClockFlag::kNtpDisabled))) {
+            return false;
+        }
+        // Every actual UTC regression is observable even if uptime reset.
+        if (observation.flags & ClockFlag::kBackwardUtc) return true;
+        if (observation.flags & ClockFlag::kUptimeDiscontinuity) return false;
+        return observation.step_us >= kClockStepLogThresholdUs ||
+               observation.step_us <= -kClockStepLogThresholdUs;
+    }
+
     // Parse-thread owned. No clock correction, sorting, or fabricated samples.
     class ClockQualityTracker {
     public:

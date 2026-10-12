@@ -82,7 +82,7 @@ namespace lms4xxx {
             result.failure_reasons.emplace_back(std::string(name) + "=" + std::to_string(count));
         };
         time_error("device reported No NTP signal: ntp_device_loss", drv.device_no_ntp_events);
-        time_error("UTC regression: utc_back", drv.utc_backwards);
+        time_error("device time anomaly: time_anomaly_events", drv.time_anomaly_events);
         time_error("device clock discontinuity: clock_step_events", drv.clock_step_events);
         if (driver_fault) result.failure_reasons.emplace_back("driver fault (see preceding driver error)");
         if (already_failed && !result.Failed())

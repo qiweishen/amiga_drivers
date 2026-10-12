@@ -57,14 +57,39 @@ TEST_CASE("Transport loss and clock anomalies retain independent failure reasons
     lms4xxx::DriverStatistics::Snapshot drv{};
     drv.frames_dropped = 2;
     drv.utc_backwards = 1;
+    drv.time_anomaly_events = 1;
     drv.clock_step_events = 3;
     const auto result = lms4xxx::AssessRecording(drv, {}, true, false, true);
     CHECK(result.data_integrity_failed);
     CHECK(result.time_quality_degraded);
     REQUIRE(result.failure_reasons.size() == 4);
     CHECK(result.Summary().find("dropped_ring=2") != std::string::npos);
-    CHECK(result.Summary().find("utc_back=1") != std::string::npos);
+    CHECK(result.Summary().find("time_anomaly_events=1") != std::string::npos);
     CHECK(result.Summary().find("clock_step_events=3") != std::string::npos);
+}
+
+TEST_CASE("UTC regressions below the anomaly thresholds remain diagnostic counts") {
+    lms4xxx::DriverStatistics::Snapshot drv{};
+    drv.utc_backwards = 3;
+    drv.ntp_status = lms4xxx::DriverStatistics::NtpStatus::kUnverified;
+    const auto result = lms4xxx::AssessRecording(drv, {}, false, false, false);
+    CHECK_FALSE(result.Failed());
+    CHECK_FALSE(result.data_integrity_failed);
+    CHECK_FALSE(result.time_quality_degraded);
+}
+
+TEST_CASE("A recorded time anomaly rejects final time quality without payload loss") {
+    lms4xxx::DriverStatistics::Snapshot drv{};
+    drv.time_anomaly_events = 1;
+    // The event remains authoritative even if a later status obscures it;
+    // a forward UTC/uptime jump need not increment utc_backwards.
+    drv.ntp_status = lms4xxx::DriverStatistics::NtpStatus::kUnverified;
+    const auto result = lms4xxx::AssessRecording(drv, {}, false, false, false);
+    CHECK(result.Failed());
+    CHECK_FALSE(result.data_integrity_failed);
+    CHECK(result.time_quality_degraded);
+    REQUIRE(result.failure_reasons.size() == 1);
+    CHECK(result.Summary() == "device time anomaly: time_anomaly_events=1");
 }
 
 TEST_CASE("An earlier failure is not cleared by an otherwise clean final snapshot") {

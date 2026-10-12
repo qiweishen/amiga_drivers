@@ -306,29 +306,36 @@ namespace lms4xxx {
         if (!warnings_fresh) observation.flags |= ClockFlag::kDeviceNtpUnknown;
         else if (device_no_ntp) observation.flags |= ClockFlag::kDeviceNoNtp;
 
-        if (observation.flags & ClockFlag::kBackwardUtc) {
-            const auto count = stats.utc_backwards.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (count == 1) {
-                // UTC regression and UTC/uptime disagreement are different
-                // quantities. An uptime reset still has a measurable UTC offset,
-                // but no interpretable clock step relative to uptime.
-                const auto clock_step = (observation.flags & ClockFlag::kUptimeDiscontinuity)
-                    ? std::string("n/a") : std::to_string(observation.step_us);
-                g_log.Warn("[{}] Device UTC moved backwards: utc_offset_us={} ({:.3f} ms), "
-                           "uptime_delta_us={}, clock_step_us={}, previous_utc_us={}, current_utc_us={}, "
-                           "scan_counter={}; raw scan order/time retained, timing quality degraded",
-                           Tag(), observation.utc_delta_us, observation.utc_delta_us / 1000.0,
-                           observation.uptime_delta_us, clock_step,
-                           device_time_us - observation.utc_delta_us, device_time_us, scan.scan_counter);
-            }
+        const bool backward_utc = (observation.flags & ClockFlag::kBackwardUtc) != 0;
+        if (backward_utc) {
+            stats.utc_backwards.fetch_add(1, std::memory_order_relaxed);
+        }
+        const bool time_anomaly = IsTimeAnomaly(observation);
+        if (time_anomaly) {
+            stats.time_anomaly_events.fetch_add(1, std::memory_order_relaxed);
             gate.anomaly_seen = true;
+        }
+        if (ShouldLogClockChange(observation)) {
+            // UTC regression and UTC/uptime disagreement are different
+            // quantities. An uptime reset still has a measurable UTC offset,
+            // but no interpretable clock step relative to uptime.
+            const auto clock_step = (observation.flags & ClockFlag::kUptimeDiscontinuity)
+                ? std::string("n/a") : std::to_string(observation.step_us);
+            const char *event = backward_utc ? "Device UTC moved backwards" : "Device UTC/uptime disagreement";
+            const char *direction = backward_utc || observation.step_us < 0 ? "backward" : "forward";
+            g_log.Warn("[{}] {}: direction={}, utc_offset_us={} ({:.3f} ms), "
+                       "uptime_delta_us={}, clock_step_us={}, previous_utc_us={}, current_utc_us={}, "
+                       "scan_counter={}, utc_back={}, log_threshold_us={}, time_anomaly={}; raw scan order/time retained",
+                       Tag(), event, direction, observation.utc_delta_us, observation.utc_delta_us / 1000.0,
+                       observation.uptime_delta_us, clock_step,
+                       device_time_us - observation.utc_delta_us, device_time_us, scan.scan_counter,
+                       stats.utc_backwards.load(std::memory_order_relaxed), kClockStepLogThresholdUs, time_anomaly);
         }
         if (observation.flags & ClockFlag::kRepeatedUtc)
             stats.utc_repeated.fetch_add(1, std::memory_order_relaxed);
         const bool large_step = (observation.flags & (ClockFlag::kStepExceeded | ClockFlag::kUptimeDiscontinuity)) != 0;
         if (large_step) {
             stats.clock_step_events.fetch_add(1, std::memory_order_relaxed);
-            gate.anomaly_seen = true;
         }
         const auto step_us = observation.step_us;
         const std::int64_t magnitude = step_us < 0 ? -step_us : step_us;

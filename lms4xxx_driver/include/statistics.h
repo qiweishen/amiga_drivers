@@ -30,6 +30,8 @@ namespace lms4xxx {
         std::atomic<std::uint64_t> utc_backwards{0};
         std::atomic<std::uint64_t> utc_repeated{0};
         std::atomic<std::uint64_t> clock_step_events{0};
+        // Scans with UTC regression > 1 ms or usable UTC/uptime disagreement > 10 ms.
+        std::atomic<std::uint64_t> time_anomaly_events{0};
         std::atomic<std::uint64_t> device_no_ntp_events{0};
         std::atomic<bool> ntp_server_reachable{false};
 
@@ -51,7 +53,7 @@ namespace lms4xxx {
             kNotLocked = 5, ///< no plausible device calendar timestamp seen yet
             kNoSignal = 6, ///< device explicitly reports No NTP signal
             kStale = 7, ///< device warning readback absent, malformed or older than 30 seconds
-            kClockAnomaly = 8, ///< observed UTC regression, uptime discontinuity or excessive step
+            kClockAnomaly = 8, ///< UTC regression > 1 ms or usable UTC/uptime disagreement > 10 ms
         };
 
         std::atomic<NtpStatus> ntp_status{NtpStatus::kOff};
@@ -80,6 +82,7 @@ namespace lms4xxx {
             std::uint64_t device_no_ntp_events;
             bool ntp_server_reachable;
             std::uint64_t non_scan_frames;
+            std::uint64_t time_anomaly_events;
 
             // Exclude only frames positively identified as non-scan replies.
             // Undecodable, dropped and pending frames remain candidates, so a
@@ -123,6 +126,7 @@ namespace lms4xxx {
                 device_no_ntp_events.load(std::memory_order_relaxed),
                 ntp_server_reachable.load(std::memory_order_relaxed),
                 non_scan_frames.load(std::memory_order_relaxed),
+                time_anomaly_events.load(std::memory_order_relaxed),
             };
         }
 
@@ -142,6 +146,7 @@ namespace lms4xxx {
             utc_backwards.store(0, std::memory_order_relaxed);
             utc_repeated.store(0, std::memory_order_relaxed);
             clock_step_events.store(0, std::memory_order_relaxed);
+            time_anomaly_events.store(0, std::memory_order_relaxed);
             device_no_ntp_events.store(0, std::memory_order_relaxed);
             last_frame_time_us.store(0, std::memory_order_relaxed);
             last_telegram_counter.store(0, std::memory_order_relaxed);

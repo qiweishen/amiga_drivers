@@ -137,6 +137,13 @@ evidence for the actual clock source, time scale, and device relationship.
 | 512 | Uptime did not advance or cannot be unwrapped reliably |
 | 1024 | Absolute time accuracy unverified (always set by this driver) |
 
+Bit 16 records every UTC regression, including changes of 1 ms or less; bit 32
+uses the configured stop threshold. Neither bit alone represents the live
+`TIME-ANOMALY` rule: that status uses an actual UTC regression greater than 1 ms
+or an absolute UTC/uptime discrepancy greater than 10 ms. Both limits are strict;
+the relative-step comparison requires a usable uptime delta. The session
+statistics record qualifying scans as `time_anomaly_events`.
+
 The clean-close marker describes file finalization, not timing quality. Read the
 per-scan flags and final driver statistics before using UTC for association.
 
