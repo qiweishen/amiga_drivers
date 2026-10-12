@@ -129,7 +129,8 @@ namespace lms4xxx {
     };
 
     // Strict schema: unknown keys are errors, omitted keys keep the defaults. Throws ConfigError.
-    AppConfig LoadAppConfig(std::string_view path);
+    // Startup cleanup may read all devices even when none is enabled for acquisition.
+    AppConfig LoadAppConfig(std::string_view path, bool require_enabled_lidar = true);
 
-    AppConfig LoadAppConfigText(const std::string &yaml_text);
+    AppConfig LoadAppConfigText(const std::string &yaml_text, bool require_enabled_lidar = true);
 } // namespace lms4xxx

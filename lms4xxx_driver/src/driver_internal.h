@@ -121,6 +121,6 @@ namespace lms4xxx {
         void ParseLoop();
 
         // Lifecycle cleanup (driver.cpp); reconnect requires all workers joined.
-        std::error_code ParkMeasurement(bool streaming, bool reconnect);
+        std::error_code StopMeasurement(bool streaming, bool reconnect);
     };
 } // namespace lms4xxx

@@ -34,10 +34,10 @@ namespace lms4xxx::CommandBuilder {
     // sRN <name>
     std::vector<std::uint8_t> BuildReadVariable(std::string_view name);
 
-    // sMN LMCstartmeas / LMCstandby
+    // sMN LMCstartmeas / LMCstopmeas (laser and motor off; Authorized Client required)
     std::vector<std::uint8_t> BuildStartMeasurement();
 
-    std::vector<std::uint8_t> BuildStandby();
+    std::vector<std::uint8_t> BuildStopMeasurement();
 
     // sMN mSCloadappdef: application defaults, interface/IP settings untouched (manual p.79)
     std::vector<std::uint8_t> BuildLoadAppDefaults();

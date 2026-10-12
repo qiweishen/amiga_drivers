@@ -35,7 +35,7 @@ Modularization roadmap (decided 2026-07; details in the session notes):
       `.git-blame-ignore-revs`
 - [x] Tests: every driver and common on the vendored doctest, one
       `<driver>_tests` binary each with one ctest entry per source file; tests
-      build in every configuration (`AMIGA_BUILD_TESTS`, default ON)
+      build in every configuration
 - [ ] fx10: `tools/snapshot_main.cpp` duplicates the `bringUpSession_()`
       sequence (connect → factory load → stream open → apply → geometry). The
       two are cross-referenced by comment for now; unify only if a third caller
@@ -70,7 +70,7 @@ ___
       `TCPClient::Read` keeps the bytes it already took off the wire and the
       command path realigns, so one slow answer no longer wedges the control
       channel; `SO_SNDTIMEO`/`SO_RCVTIMEO` are reachable from the yaml at last;
-      the shutdown standby is now a checked handshake (it used to be issued while
+      shutdown stop measurement is now a checked handshake (it used to be issued while
       logged out and refused in silence, leaving the laser on after every run);
       HDF5 gained `fdatasync`, a checked `H5Fclose`, a `closed_cleanly` +
       `frames_total` completeness marker and `H5F_ACC_EXCL`; `fps=` now means

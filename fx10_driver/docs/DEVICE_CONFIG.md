@@ -447,7 +447,7 @@ the device/telemetry/stream sidecars belong to the main capture session.
 | File | Contents and publication point |
 |---|---|
 | `capture.json` | Existing dimensions, pixel format, wavelength axis and preview fields, plus a versioned `recording_contract`. Written before the first segment. |
-| `device.json` | One snapshot after receive buffers are allocated and before `StreamEnable`/`AcquisitionStart`: identity/firmware nodes, ordered configuration requests, attempted values after clamping, immediate readbacks, optional-write failures, final readable settings, transport, actual buffer allocation and socket readback, calibration reference and timing intent. Published atomically without overwriting an existing snapshot. |
+| `device.json` | One snapshot after receive buffers are allocated and before `StreamEnable`/`AcquisitionStart`: identity/firmware nodes, ordered configuration requests, attempted values after clamping, immediate readbacks, optional-write failures, final readable settings (including the selected line's source/mode/polarity/status), transport, receive endpoint, actual buffer allocation and socket readback, calibration reference and timing intent. Published atomically without overwriting an existing snapshot. |
 | `telemetry.jsonl` | `fx10-telemetry-v1` rows at start (before acquisition), each existing 60 s device-poll tick and stop (or `startup-failed` during partial startup). ProcPCB/FPGA temperatures, raw Counter1 value, baseline, delta, binding verification and regression flag. Each row includes host realtime/monotonic read-start and monotonic read-finish times and whether acquisition was started. |
 | `stream_stats.txt` | Full readable `PvStream` parameter dump after receive-thread shutdown and before stream disconnect. Unreadable/error values are explicit. This is an SDK snapshot, not the application's frame ledger. |
 | `segment_NNNN.lines.csv` | `fx10-line-index-v2`: original ten columns retain their order/meaning; twelve appended columns retain SDK layout and operation metadata for accepted and rejected buffers. |
@@ -477,6 +477,24 @@ Camera firmware/version readbacks are separate. `factory_preparation.completed` 
 commands and subsequent control readiness, not proof of every factory setting.
 MROI writes retain their selector context through the ordered apply log; that
 log is not a reread of every region after arbitrary raw overrides.
+
+The startup log displays trigger/exposure and output-line values from this same
+snapshot, including explicit absent/unreadable states. Output-line reads describe
+only the final `LineSelector` context. `LineStatus` is an idle sample before
+`AcquisitionStart`, not evidence of an exposure or a verified connector pin.
+`runtime.stream_local_ip` / `stream_local_port` record the receive endpoint passed
+to `SetStreamDestination`; successful command acknowledgement does not prove
+that GVSP packets reach it.
+
+For a zero-frame run, retain `device.json`, `stream_stats.txt`, `telemetry.jsonl`
+and the shared `sensor_trigger.log`. Compare final trigger/exposure values and
+the selected output line with the actual device's node-map/pin mapping; inspect
+stream receive/error counters independently. SensorSync `T` records are PWM
+interrupt observations, not voltage measurements at the camera connector. Zero
+`S` edges can mean no exposure or missing/misrouted feedback; zero missed-trigger
+events does not establish that the camera received a trigger. These observations
+alone do not justify changing the trigger source, strobe polarity or calibration
+ROI, or weakening the final timing checks.
 
 Telemetry reuses the existing monitor-thread reads; it adds no device reads in
 the image callback. Its persistence is independent of `logging.stats_interval_s`.
@@ -538,10 +556,10 @@ part of this implementation's static-only validation.
   entry means the corresponding `temp_*` field reads `n/a`, never a wrong
   number.
 * **Whether `LineSelector` exists, and the strobe entry if it does.** The current
-  acquisition template writes only `LineSource = ExposureActive`.
-  `CameraControl` permits that when the device has no `LineSelector`; otherwise
-  it stops before the `LineSource` write and requires an explicit preceding
-  selector from the actual node map. Every configured enum write is read back.
+  acquisition template writes `LineSelector = LineOut0`, then
+  `LineSource = ExposureActive`. `CameraControl` also permits a direct source
+  write on a device without `LineSelector`; when a selector exists it requires
+  an explicit preceding selector write. Every configured enum write is read back.
   Neither the template nor a unit test proves routing to `ISO_STROBE` pin 2.
 * **Mechanical-shutter completion timing.** The operator supplied the numeric
   `MotorShutter_PulseRev` / `MotorShutter_PulseFwd` actions (255 opens/closes),

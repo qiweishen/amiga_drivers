@@ -19,7 +19,7 @@ acquisition:
     spectral_binning: 2                 # 1 | 2 | 4 | 8 -> 448 | 224 | 112 | 56 bands; 2 = factory (p.44); mroi needs 1
     pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
     exposure_ms: 10.0                   # > 0 (camera range 0.01..419)
-    frame_rate_hz: 50.0                 # > 0; freerun rate, or the expected pulse rate under external trigger
+    frame_rate_hz: 51.0                 # > 0; freerun rate, or the expected pulse rate under external trigger
     status_line: false                  # true replaces the last image row with camera status (p.34)
     image_enhancement: true             # AIE (p.32); only true is supported (node name unknown, use features.raw)
     trigger:

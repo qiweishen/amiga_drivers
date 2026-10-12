@@ -344,7 +344,7 @@ void Lms4xxxDriverApp::Shutdown() {
         impl_->writer->Stop();
     }
 
-    const auto cleanup_ec = impl_->driver->Disconnect(); // idempotent; preserves the standby result
+    const auto cleanup_ec = impl_->driver->Disconnect(); // idempotent; preserves the stop-measurement result
     if (cleanup_ec) MarkFailed();
     const auto shutdown = impl_->driver->GetMeasurementShutdownStatus();
     const auto drv = impl_->driver->GetStatistics();
@@ -352,7 +352,7 @@ void Lms4xxxDriverApp::Shutdown() {
             impl_->writer ? impl_->writer->GetStatistics() : lms4xxx::ScanRecordWriter::Statistics{};
     auto result = lms4xxx::AssessRecording(drv, wr, impl_->driver->HasFault(),
                                          impl_->writer && impl_->writer->HasFailed(), HasFailed());
-    if (cleanup_ec) result.failure_reasons.push_back("device standby not confirmed: " + cleanup_ec.message());
+    if (cleanup_ec) result.failure_reasons.push_back("device stop measurement not confirmed: " + cleanup_ec.message());
     if (result.Failed()) MarkFailed();
     final_statistics_ = {
         {"instance", instance_name_}, {"frames_received", drv.frames_received},
@@ -370,8 +370,8 @@ void Lms4xxxDriverApp::Shutdown() {
         {"shutdown_complete", false}, {"data_integrity_failed", result.data_integrity_failed},
         {"measurement_start_requested", shutdown.measurement_start_requested},
         {"measurement_cleanup_attempted", shutdown.cleanup_attempted},
-        {"standby_command_attempted", shutdown.standby_command_attempted},
-        {"standby_confirmed", shutdown.standby_confirmed},
+        {"stop_measurement_command_attempted", shutdown.stop_measurement_command_attempted},
+        {"stop_measurement_confirmed", shutdown.stop_measurement_confirmed},
         {"measurement_cleanup_error", cleanup_ec ? cleanup_ec.message() : ""},
         {"time_quality_degraded", result.time_quality_degraded}, {"failure_reasons", result.failure_reasons},
         {"recording_incomplete", HasFailed()}

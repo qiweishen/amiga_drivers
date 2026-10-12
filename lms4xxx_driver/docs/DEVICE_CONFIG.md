@@ -121,29 +121,50 @@ Protocol/content faults stop parsing. Time faults instead allow the parser to
 drain scans and shutdown replies while the owner stops the stream; the writer
 drains before final statistics are published.
 
+## Stop measurement before rig startup
+
+Before constructing any sensor driver, `main.cpp` loads the LMS configuration
+selected by the main config, snapshots it, and visits every `lidar[].device`
+IP/port. This includes disabled entries and runs even when `Enable LMS4XXX` is
+false. All entries may be disabled for this preliminary stop; enabling LMS
+acquisition still requires at least one enabled entry.
+
+Each address gets one connection attempt using `network.connect_timeout_ms`.
+An unreachable device is silently skipped. A connected device receives
+`sMN SetAccessMode 03 F4724744` and, after successful login, `sMN LMCstopmeas`.
+Authorized Client access is required; the stop command shuts off the laser and
+stops the motor (manual p.76, tables 35–38). Its successful response is
+`sAN LMCstopmeas` with status `0`. Command waits remain bounded by the existing
+method timeout, at least 5 s per response read; connected-device command errors
+remain diagnostic and do not prevent trying the remaining addresses or starting
+the rig. No configuration reset, `Run`, or measurement-start command is sent.
+The temporary connection is released before moving to the next device. A
+shutdown request ends the loop before the next device and prevents driver startup.
+An invalid or unreadable LMS configuration is still a configuration error.
+
 ## Shutdown
 
 | # | Telegram | Why |
 |---|---|---|
 | 1 | `sEN LMDscandata 00` | stop the measured-value stream |
-| 2 | `sMN SetAccessMode 03 F4724744` | `sMN Run` logged this session out at bring-up, and standby needs Authorized Client again (p.74) |
-| 3 | `sMN LMCstandby` | laser off, motor keeps turning (p.74) |
+| 2 | `sMN SetAccessMode 03 F4724744` | `sMN Run` logged this session out at bring-up; stopping measurement requires Authorized Client again (p.76) |
+| 3 | `sMN LMCstopmeas` | shut off the laser and stop the motor (p.76) |
 
 During normal acquisition all three go out while the receive and parse threads are still running, because
 the answers come back as ordinary frames on the same connection — after
 `ShutdownReceive()` the socket can no longer carry one. The `sAN` status bytes
-are checked (**standby succeeds on 0**, see the polarity table). Failed login,
-rejected commands, connection errors and missing answers leave standby
-unconfirmed; they do not prove either that the laser is on or that it is off.
+are checked (**LMCstopmeas succeeds on 0**, see the polarity table). Failed login,
+rejected commands, connection errors and missing answers leave measurement stop
+unconfirmed; they do not establish the laser or motor state.
 
 The cleanup obligation is armed before sending `LMCstartmeas` in `Configure()`:
 the command can take effect even if its answer is lost. Configuration failure,
 cancellation before streaming, writer startup failure and partial worker startup
 therefore use the same idempotent cleanup transaction. Before streaming, a healthy
-command channel performs login and standby synchronously. If the command channel
+command channel performs login and stop measurement synchronously. If the command channel
 is uncertain, streaming may have started without its acknowledgement, or the
 worker set cannot decode answers, cleanup joins all old workers first, closes the
-old connection, and makes one bounded connection attempt for login and standby
+old connection, and makes one bounded connection attempt for login and stop measurement
 only. It does not reconfigure the device or restart measurement. The cleanup
 result is retained across repeated `StopScanning()` and `Disconnect()` calls;
 failure is reported rather than silently retried or converted to success.
@@ -165,14 +186,14 @@ Successful-session markers keep their existing meaning.
 The LMS4xxx entry in `drivers.json` adds these statistics:
 
 * `shutdown_complete`: the receive/parse/writer teardown and disconnect returned.
-  This describes resource teardown, not whether standby succeeded on the device.
+  This describes resource teardown, not whether stopping measurement succeeded on the device.
 * `measurement_start_requested`: `LMCstartmeas` was about to be sent; this does
   not assert that its answer arrived or that measurement actually started.
-* `measurement_cleanup_attempted`, `standby_command_attempted`,
-  `standby_confirmed`: distinguish attempting cleanup, attempting standby, and
-  receiving standby's successful answer. No requested measurement leaves all
+* `measurement_cleanup_attempted`, `stop_measurement_command_attempted`,
+  `stop_measurement_confirmed`: distinguish attempting cleanup, sending `LMCstopmeas`, and
+  receiving its successful answer. No requested measurement leaves all
   three false. `measurement_cleanup_error` retains an unsuccessful cleanup's
-  error; an unconfirmed required standby fails the session verdict.
+  error; an unconfirmed required measurement stop fails the session verdict.
 * `data_integrity_failed`: observed receive/parse/writer loss, a writer failure,
   or disagreement between validated, queued and written scan totals after drain.
 * `time_quality_degraded`: an observed time-quality event or a bad final NTP
@@ -216,7 +237,7 @@ is an easy place to write a check that always passes:
 | `sMN SetAccessMode` | **1** | 73 |
 | `sMN Run` | **1** | 83 |
 | `sMN mEEwriteall` | **1** | 82 |
-| `sMN LMCstartmeas` / `LMCstopmeas` / `LMCstandby` | **0** | 75, 76, 75 |
+| `sMN LMCstartmeas` / `LMCstopmeas` | **0** | 75, 76 |
 | `sMN mSCloadappdef` / `mSCloadfacdef` | *no status byte at all* | 78, 79 |
 
 ### Reads before login are best-effort by design

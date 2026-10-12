@@ -22,8 +22,8 @@ namespace asterx {
     struct WarmupGate {
         static constexpr std::uint32_t kFineTime = 1u << 6; // ReceiverStatus.RxState bit 6
 
-        int min_uptime_s{1200};
-        bool require_finetime{true};
+        int min_uptime_s{90};
+        bool require_finetime{false};
 
         std::optional<std::uint32_t> up_time_s; // last ReceiverStatus.UpTime
         bool finetime{false};

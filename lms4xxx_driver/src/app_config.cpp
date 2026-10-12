@@ -120,7 +120,7 @@ namespace lms4xxx {
             }
         }
 
-        AppConfig ParseRoot(const YAML::Node &root) {
+        AppConfig ParseRoot(const YAML::Node &root, bool require_enabled_lidar) {
             CheckKeys(root, "", {"lidar", "scan", "ntp", "network", "output", "telemetry", "logging"});
             AppConfig cfg;
             ParseLidars(root, cfg.lidars);
@@ -132,7 +132,7 @@ namespace lms4xxx {
             ReadRange<double>(telemetry, "telemetry", "interval_s", 0.0, 3600.0, cfg.telemetry_interval_s);
             const YAML::Node logging = OptionalMap(root, "", "logging", {"stats_interval_s"});
             ReadRange<double>(logging, "logging", "stats_interval_s", 0.0, 3600.0, cfg.stats_interval_s);
-            if (cfg.EnabledLidars().empty()) {
+            if (require_enabled_lidar && cfg.EnabledLidars().empty()) {
                 Fail("lidar", "at least one entry must be enabled");
             }
             return cfg;
@@ -162,12 +162,12 @@ namespace lms4xxx {
     }
 
 
-    AppConfig LoadAppConfig(std::string_view path) {
-        return ParseRoot(LoadFile(path));
+    AppConfig LoadAppConfig(std::string_view path, bool require_enabled_lidar) {
+        return ParseRoot(LoadFile(path), require_enabled_lidar);
     }
 
 
-    AppConfig LoadAppConfigText(const std::string &yaml_text) {
-        return ParseRoot(LoadText(yaml_text));
+    AppConfig LoadAppConfigText(const std::string &yaml_text, bool require_enabled_lidar) {
+        return ParseRoot(LoadText(yaml_text), require_enabled_lidar);
     }
 } // namespace lms4xxx

@@ -10,6 +10,10 @@ from ..constants import DRIVERS
 from . import runtime, run_status
 
 
+class SessionMetadataPending(ValueError):
+    """The current process has not published its session rendezvous yet."""
+
+
 @dataclass(frozen=True)
 class SessionInfo:
     path: Path
@@ -21,7 +25,7 @@ class SessionInfo:
 async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
     session = run_status.control_session(ref)
     if session is None:
-        raise ValueError("Waiting for an amiga-run-v1 manifest matching this process")
+        raise SessionMetadataPending("Waiting for an amiga-run-v1 manifest matching this process")
     info = read(session, ref)
     if not await runtime.is_process_alive(ref):
         raise ValueError("The acquisition exited while its session was being identified")

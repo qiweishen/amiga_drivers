@@ -89,22 +89,17 @@ int Execute(std::vector<DriverSlot> &drivers, const Config &main_config,
             DriversJson &drivers_json, std::atomic<bool> &g_terminate,
             std::atomic<int> &g_signal_received, Cleanup &cleanup,
             std::vector<bool> &published) {
-    // Rig-wide guards. Every driver writes under data_folder_path, so one
-    // statvfs covers them all; the no-data watchdog polls each driver's own
-    // MicrosSinceLastData().
-    common::RunGuards guards(main_config.guards);
+    // Rig-wide guards
+    RunGuards guards(main_config.guards);
 
     // Pre-flight, BEFORE bring-up: Init() is sequential and can take minutes
-    // (discovery retries, PTP convergence, a receiver warm-up), and nothing
-    // supervises it. Refusing here costs nothing; finding out afterwards costs
-    // the session.
-    if (const auto verdict = guards.CheckDisk(common::FreeSpaceGiB(main_config.data_folder_path));
-        verdict.verdict == common::RunGuards::Verdict::kStop) {
-        common::Log::LogMessage(spdlog::level::err, kModule,
+    if (const auto verdict = guards.CheckDisk(FreeSpaceGiB(main_config.data_folder_path));
+        verdict.verdict == RunGuards::Verdict::kStop) {
+        Log::LogMessage(spdlog::level::err, kModule,
                                fmt::format("{} under '{}' — not starting", verdict.message,
                                            main_config.data_folder_path.string()));
         if (!drivers_json.Finalize("failed (disk)")) {
-            common::Log::LogMessage(spdlog::level::err, kModule, "Final run manifest could not be persisted");
+            Log::LogMessage(spdlog::level::err, kModule, "Final run manifest could not be persisted");
         }
         return 1;
     }
@@ -117,7 +112,9 @@ int Execute(std::vector<DriverSlot> &drivers, const Config &main_config,
     std::size_t initialized = 0;
     bool lifecycle_ok = true;
     auto sensor_states = nlohmann::ordered_json::object();
-    for (const auto &d : drivers) sensor_states[d.key] = {{"state", "waiting"}, {"error", ""}};
+    for (const auto &d : drivers) {
+        sensor_states[d.key] = {{"state", "waiting"}, {"error", ""}};
+    }
     const auto publish_lifecycle = [&](const char *phase, bool configuration_read) {
         for (const auto &d : drivers) {
             if (d.app->HasFailed()) {
@@ -143,20 +140,20 @@ int Execute(std::vector<DriverSlot> &drivers, const Config &main_config,
             ready = d.app->Init(external_stop);
         } catch (const std::exception &e) {
             d.app->RequestFailure();
-            common::Log::LogMessage(spdlog::level::err, kModule, d.init_failed, e.what());
+            Log::LogMessage(spdlog::level::err, kModule, d.init_failed, e.what());
         } catch (...) {
             d.app->RequestFailure();
-            common::Log::LogMessage(spdlog::level::err, kModule, d.init_failed, "unknown exception");
+            Log::LogMessage(spdlog::level::err, kModule, d.init_failed, "unknown exception");
         }
         if (!ready) {
             if (external_stop()) {
                 g_terminate.store(true, std::memory_order_release);
-                common::Log::LogMessage(spdlog::level::warn, kModule,
+                Log::LogMessage(spdlog::level::warn, kModule,
                                          fmt::format("{} bring-up interrupted, shutting down", d.name));
                 break;
             }
             d.app->RequestFailure();
-            common::Log::LogMessage(spdlog::level::err, kModule, d.init_failed);
+            Log::LogMessage(spdlog::level::err, kModule, d.init_failed);
             g_terminate.store(true, std::memory_order_release);
             break; // all partial and initialized drivers are shut down below
         }
@@ -169,7 +166,7 @@ int Execute(std::vector<DriverSlot> &drivers, const Config &main_config,
     // driver has declared its needs (the pulses themselves start once the cameras
     // are armed; the per-driver [TriggerLog] lines above show each registration)
     if (main_config.sensor_sync && main_config.sensor_sync->HasParticipants()) {
-        common::Log::LogMessage(spdlog::level::info, kModule,
+        Log::LogMessage(spdlog::level::info, kModule,
                                  "SensorSync: " + main_config.sensor_sync->Describe());
     }
 
@@ -377,7 +374,9 @@ int RunSession(std::vector<DriverSlot> drivers, const Config &config,
         cleanup.Stop();
         // Preserve every available result even when a monitor/status callback
         // failed. Already published results must not be appended twice.
-        try { CollectResults(drivers, manifest, published); } catch (...) {}
+        try {
+            CollectResults(drivers, manifest, published);
+        } catch (...) {}
         Log::LogMessage(spdlog::level::err, kModule, "Session coordinator failed; recording is incomplete");
         if (!manifest.Finalize("failed (session coordinator)")) {
             Log::LogMessage(spdlog::level::err, kModule, "Final run manifest could not be persisted");

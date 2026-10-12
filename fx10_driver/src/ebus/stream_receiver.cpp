@@ -179,7 +179,12 @@ namespace fx10 {
         if (!dest.IsOK()) {
             throw TransportError("[eBUS] SetStreamDestination failed: " + pv(dest.GetCodeString()));
         }
-        g_log.Trace("[eBUS] Stream open on {}:{}", pv(stream->GetLocalIPAddress()), stream->GetLocalPort());
+        runtime_metadata_["stream_local_ip"] = pv(stream->GetLocalIPAddress());
+        runtime_metadata_["stream_local_port"] = stream->GetLocalPort();
+        runtime_metadata_["stream_destination_semantics"] =
+            "local receive endpoint passed to SetStreamDestination; SDK command acknowledged, packet delivery unverified";
+        g_log.Info("[eBUS] Stream destination configured: {}:{} (SDK command acknowledged; "
+                   "packet delivery is not yet verified)", pv(stream->GetLocalIPAddress()), stream->GetLocalPort());
         stream_gev_ = stream.get();
         stream_ = stream.release();
     }

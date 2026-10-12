@@ -48,10 +48,6 @@ namespace asterx {
                                                                    this, [this] { OnWriteFailed(); },
                                                                    Qt::QueuedConnection);
                                                            }),
-                                                       prewarm_writer_(SbfWriter::Config{
-                                                           cfg_.output_dir / "prewarm", cfg_.file_prefix,
-                                                           cfg_.rotate_bytes,
-                                                           std::chrono::seconds(cfg_.rotate_interval_seconds)}),
                                                        live_(SbfLiveRecorder::Config{cfg_.output_dir, cfg_.live_csv}) {
         connect_timer_.setSingleShot(true);
         retry_timer_.setSingleShot(true);
@@ -344,8 +340,8 @@ namespace asterx {
         warmup_.require_finetime = cfg_.receiver.warmup.require_finetime;
         warmup_.Reset();
         watchdog_timer_.start(kWatchdogMs);
-        // Main's no-data watchdog stays off through warm-up: the receiver is
-        // legitimately not producing recordable data yet.
+        // Main's no-data watchdog stays off until the rig is ready. SBF is
+        // already recorded; the local watchdog above covers warm-up silence.
         PublishLiveness(0);
         if (warmup_.Ready()) {
             EnterRecording();
@@ -359,10 +355,7 @@ namespace asterx {
 
 
     void Session::EnterRecording() {
-        if (!prewarm_writer_.EndSegment()) {
-            FailStartup("cannot finish prewarm SBF context segment");
-            return;
-        }
+        // Readiness changes, but the SBF queue and current file stay open.
         recovery_timer_.stop();
         state_ = State::kRecording;
         command_timer_.stop();
@@ -371,10 +364,10 @@ namespace asterx {
         // Arms Main's no-data watchdog: from here on silence means lost data.
         PublishLiveness(common::TimeUtil::SteadyNowUs());
         if (warmup_.up_time_s) {
-            g_log.Info("Acquisition started (receiver up {}, FINETIME {})", FormatHms(*warmup_.up_time_s),
+            g_log.Info("Warm-up complete; rig ready (receiver up {}, FINETIME {})", FormatHms(*warmup_.up_time_s),
                        warmup_.finetime ? "set" : "not set");
         } else {
-            g_log.Info("Acquisition started (warm-up gate off)");
+            g_log.Info("Rig ready (warm-up gate off)");
         }
         emit Configured();
     }
@@ -396,6 +389,11 @@ namespace asterx {
         const std::uint32_t previous = warmup_.up_time_s.value_or(0);
         const bool went_back = warmup_.Observe(status.up_time, status.rx_status);
         if (state_ == State::kWarmingUp) {
+            if (went_back) {
+                ++recording_errors_;
+                g_log.Warn("Receiver up-time went backwards ({} -> {}) during warm-up; recording is INCOMPLETE",
+                           FormatHms(previous), FormatHms(status.up_time));
+            }
             if (warmup_.Ready()) {
                 EnterRecording();
             }
@@ -421,23 +419,9 @@ namespace asterx {
         }
         const auto *bytes = reinterpret_cast<const std::uint8_t *>(block.constData());
         const auto size = static_cast<std::size_t>(block.size());
-        bool opened_gate = false;
-        if (state_ != State::kRecording) {
-            // Preserve low-frequency metadata/ephemerides before the acceptance
-            // gate as native SBF in prewarm/. Never replay old blocks as new samples.
-            live_.OnBlock(bytes, size);
-            if (state_ == State::kWarmingUp) {
-                watchdog_timer_.start(kWatchdogMs);
-                OnReceiverStatus(block);
-            }
-            if (state_ != State::kRecording) {
-                if (state_ != State::kStopping && !prewarm_writer_.WriteBlock(block)) {
-                    FailStartup("cannot write prewarm SBF context");
-                }
-                return;
-            }
-            opened_gate = true; // the ReceiverStatus that opened the gate is recorded too
-        }
+        // Preserve every SDK-delivered block in arrival order, including startup
+        // and warm-up. Enqueue the gate-opening ReceiverStatus exactly once before
+        // it can release the other drivers through Configured().
         if (!writer_.Enqueue(block)) {
             // Refused: the disk fell behind for longer than the queue budget, or a
             // write already failed. Neither is survivable for a recorder (a dropped
@@ -448,13 +432,13 @@ namespace asterx {
             emit FatalError();
             return;
         }
-        if (!opened_gate) {
-            // Live CSV side channel: noexcept, degrades itself; the .sbf path stays authoritative
-            live_.OnBlock(bytes, size);
+        // Live CSV side channel: noexcept, degrades itself; the .sbf path stays authoritative
+        live_.OnBlock(bytes, size);
+        if (state_ == State::kWarmingUp || state_ == State::kRecording) {
+            watchdog_timer_.start(kWatchdogMs);
             OnReceiverStatus(block);
         }
         if (state_ == State::kRecording) {
-            watchdog_timer_.start(kWatchdogMs);
             PublishLiveness(common::TimeUtil::SteadyNowUs());
         }
     }
@@ -480,13 +464,14 @@ namespace asterx {
         if (state_ == State::kStopping) {
             return;
         }
+        // All phases share the SBF recording, so damage before rig readiness
+        // must not disappear from its integrity result.
+        ++recording_errors_;
         if (state_ != State::kRecording) {
-            // Only the prewarm context is affected; the parser resyncs on the next block
-            g_log.Warn("[TCP] {} before recording (total {}); prewarm context only", what, total);
+            g_log.Warn("[TCP] {} before rig readiness (total {}); recording is INCOMPLETE", what, total);
             return;
         }
         // A damaged block is a lost block: the .sbf is incomplete from here on
-        ++recording_errors_;
         g_log.Critical("{} during recording (total {}): a block is lost — stopping the rig (fail-fast: the SBF "
                        "recording would be incomplete)", what, total);
         Shutdown();
@@ -510,6 +495,9 @@ namespace asterx {
         if (state_ == State::kStopping || state_ == State::kBackoff) {
             return;
         }
+        // SBF can arrive even during the initial configuration, so every link
+        // or configuration failure belongs to the unified recording's verdict.
+        ++recording_errors_;
         if (!ever_configured_) {
             FailStartup(reason);
             return;
@@ -517,7 +505,6 @@ namespace asterx {
         if (state_ == State::kRecording) {
             // Fail-fast: the SBF stream has a gap from here on. Reconnecting would
             // resurrect a recording that is already incomplete, so end the rig now
-            ++recording_errors_;
             g_log.Critical("Link failure during recording: {} — stopping the rig (fail-fast: the SBF recording "
                            "would be incomplete; no reconnect)", reason);
             Shutdown();
@@ -525,7 +512,7 @@ namespace asterx {
             return;
         }
         ++recovery_events_; // reconnect may recover transport, never the missing observations
-        g_log.Warn("Connect Failed: {} — reconnecting in {} s", reason, kRetryDelayMs / 1000);
+        g_log.Warn("Connect Failed: {} — reconnecting in {} s; recording is INCOMPLETE", reason, kRetryDelayMs / 1000);
         // Backoff before closing: closeConnection() may re-emit connectionClosed synchronously
         state_ = State::kBackoff;
         connect_timer_.stop();
@@ -541,12 +528,8 @@ namespace asterx {
         if (rx_) {
             rx_->closeConnection(); // the socket may still be open (e.g. prompt failure)
         }
-        // Only the prewarm context is open before Recording (the main writer has
-        // not been fed yet), so that is the segment a reconnect closes
-        if (!prewarm_writer_.EndSegment()) {
-            FailStartup("cannot finish prewarm SBF segment during recovery");
-            return;
-        }
+        // Keep the unified SBF queue/file open across warm-up recovery. The gap
+        // is counted above; reconnecting must not split the recording by phase.
         live_.Flush(); // keep the GUI tail current across the link gap; files stay open
         retry_timer_.start(kRetryDelayMs);
     }
@@ -587,15 +570,18 @@ namespace asterx {
 
     void Session::OnStatsTimer() {
         if (state_ == State::kWarmingUp) {
+            const auto s = writer_.GetStats();
             g_log.Info(
-                "[Statistics] warmup={}  finetime={}  crc_fail={}  length_errors={}  discarded_bytes={}  temperature={}°C",
+                "[Statistics] warmup={}  finetime={}  crc_fail={}  length_errors={}  discarded_bytes={}  temperature={}°C  "
+                "blocks={}  bytes={}  files={}  queue_pending={}  queue_max={}",
                 warmup_.up_time_s
                     ? FormatHms(*warmup_.up_time_s) + "/" +
                       (warmup_.min_uptime_s > 0
                            ? FormatHms(static_cast<std::uint32_t>(warmup_.min_uptime_s))
                            : "off")
                     : std::string("waiting"),
-                warmup_.finetime ? 1 : 0, crc_errors_, length_errors_, discarded_bytes_, temperature_);
+                warmup_.finetime ? 1 : 0, crc_errors_, length_errors_, discarded_bytes_, temperature_,
+                s.records_written, s.bytes_written, s.files_opened, s.pending_bytes, s.max_pending_bytes);
             return;
         }
         if (state_ != State::kRecording) {
@@ -612,11 +598,9 @@ namespace asterx {
 
     nlohmann::ordered_json Session::FinalStatistics() const {
         const auto s = writer_.GetStats();
-        const auto &pre = prewarm_writer_.Stats();
         return {{"blocks_written", s.records_written}, {"bytes_written", s.bytes_written},
                 {"files_opened", s.files_opened}, {"write_queue_max_pending_bytes", s.max_pending_bytes},
-                {"prewarm_blocks", pre.records_written},
-                {"prewarm_bytes", pre.bytes_written}, {"crc_errors", crc_errors_},
+                {"crc_errors", crc_errors_},
                 {"length_errors", length_errors_}, {"discarded_stream_bytes", discarded_bytes_},
                 {"recovery_events", recovery_events_}, {"recording_errors", recording_errors_},
                 {"known_acquisition_incomplete", RecordingIncomplete()}};
@@ -640,18 +624,14 @@ namespace asterx {
         }
         // Drains the queue (every accepted block reaches the disk) and joins the writer thread
         const bool clean = writer_.Close();
-        const bool prewarm_clean = prewarm_writer_.close();
         live_.close();
-        if (!clean || !prewarm_clean) {
+        if (!clean) {
             ++recording_errors_;
             g_log.Error("SBF final flush/close failed ({}); recording is INCOMPLETE", writer_.LastError());
             emit FatalError();
         }
         const auto s = writer_.GetStats();
         const auto &lv = live_.GetStats();
-        const auto &prewarm = prewarm_writer_.Stats();
-        g_log.Info("[Statistics] Prewarm context: blocks={} bytes={} files={} (separate prewarm/ SBF, not accepted samples)",
-                   prewarm.records_written, prewarm.bytes_written, prewarm.files_opened);
         g_log.Info("Acquisition stopped ({} blocks delivered)", s.records_written);
         g_log.Info(
             "[Statistics] Final: blocks={}  bytes={}  files={}  crc_fail={}  length_errors={}  discarded_bytes={}  "

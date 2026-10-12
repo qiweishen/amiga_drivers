@@ -40,61 +40,57 @@ target_link_libraries(amiga_common PUBLIC
 
 ################################################################################
 # Tests (doctest, vendored in 3rd_party/)
-if (AMIGA_BUILD_TESTS)
-    add_subdirectory(tests)
-endif ()
+add_subdirectory(tests)
 
 
 ################################################################################
 # amiga_ebus - the eBUS-SDK-dependent layer shared by gox_driver and fx10_driver
-if (AMIGA_ENABLE_EBUS)
-    find_package(eBUS)
-    if (NOT eBUS_FOUND)
-        message(FATAL_ERROR
-                "eBUS SDK not found "
-                "(expected under /opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64) "
-                "or pass -DEBUS_SDK_ROOT=/path/to/sdk. The devcontainer installs it from "
-                "resource/ (see .devcontainer/Dockerfile).")
-    endif ()
-
-    add_library(amiga_ebus STATIC
-            src/ebus/discovery.cpp
-            src/ebus/env_bootstrap.cpp
-            src/ebus/ip_config.cpp
-            src/ebus/sdk_error.cpp
-    )
-
-    set_target_properties(amiga_ebus PROPERTIES
-            CXX_EXTENSIONS OFF
-    )
-
-    # Warnings stay target-scoped; eBUS headers are SYSTEM via eBUS::eBUS.
-    target_compile_options(amiga_ebus PRIVATE -Wall -Wextra -Wpedantic)
-
-    # Compile-time GenICam env constants for src/ebus/env_bootstrap.cpp; values
-    # come from root cmake/FindeBUS.cmake (directory-scoped, hence set here).
-    target_compile_definitions(amiga_ebus PRIVATE
-            AMIGA_EBUS_GENICAM_ENV_NAME="${EBUS_GENICAM_ENV_NAME}"
-            AMIGA_EBUS_GENICAM_ROOT="${EBUS_GENICAM_ROOT_DIR}"
-    )
-
-    # RPATH to the SDK/GenICam lib dirs propagates from eBUS::eBUS
-    # (INTERFACE_LINK_OPTIONS, see cmake/FindeBUS.cmake) to every consumer.
-    target_link_libraries(amiga_ebus PUBLIC
-            amiga_common
-            eBUS::eBUS
-    )
-
-    # Tools for the web GUI (app/constants.py binds build/bin/<name>):
-    #   ebus_discover  GigE enumeration, --json for the Camera Tools scan table
-    #   ebus_set_ip    FORCEIP + persistent IP write, Camera Tools > Set IP
-    add_executable(ebus_discover src/ebus/discover_main.cpp)
-    add_executable(ebus_set_ip src/ebus/set_ip_main.cpp)
-    target_link_libraries(ebus_discover PRIVATE amiga_ebus)
-    target_link_libraries(ebus_set_ip PRIVATE amiga_ebus)
-    target_compile_options(ebus_discover PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(ebus_set_ip PRIVATE -Wall -Wextra -Wpedantic)
-    set_target_properties(ebus_discover ebus_set_ip PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
+find_package(eBUS)
+if (NOT eBUS_FOUND)
+    message(FATAL_ERROR
+            "eBUS SDK not found "
+            "(expected under /opt/pleora/ebus_sdk/Ubuntu-22.04-x86_64) "
+            "or pass -DEBUS_SDK_ROOT=/path/to/sdk. The devcontainer installs it from "
+            "resource/ (see .devcontainer/Dockerfile).")
 endif ()
+
+add_library(amiga_ebus STATIC
+        src/ebus/discovery.cpp
+        src/ebus/env_bootstrap.cpp
+        src/ebus/ip_config.cpp
+        src/ebus/sdk_error.cpp
+)
+
+set_target_properties(amiga_ebus PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+# Warnings stay target-scoped; eBUS headers are SYSTEM via eBUS::eBUS.
+target_compile_options(amiga_ebus PRIVATE -Wall -Wextra -Wpedantic)
+
+# Compile-time GenICam env constants for src/ebus/env_bootstrap.cpp; values
+# come from root cmake/FindeBUS.cmake (directory-scoped, hence set here).
+target_compile_definitions(amiga_ebus PRIVATE
+        AMIGA_EBUS_GENICAM_ENV_NAME="${EBUS_GENICAM_ENV_NAME}"
+        AMIGA_EBUS_GENICAM_ROOT="${EBUS_GENICAM_ROOT_DIR}"
+)
+
+# RPATH to the SDK/GenICam lib dirs propagates from eBUS::eBUS
+# (INTERFACE_LINK_OPTIONS, see cmake/FindeBUS.cmake) to every consumer.
+target_link_libraries(amiga_ebus PUBLIC
+        amiga_common
+        eBUS::eBUS
+)
+
+# Tools for the web GUI (app/constants.py binds build/bin/<name>):
+#   ebus_discover  GigE enumeration, --json for the Camera Tools scan table
+#   ebus_set_ip    FORCEIP + persistent IP write, Camera Tools > Set IP
+add_executable(ebus_discover src/ebus/discover_main.cpp)
+add_executable(ebus_set_ip src/ebus/set_ip_main.cpp)
+target_link_libraries(ebus_discover PRIVATE amiga_ebus)
+target_link_libraries(ebus_set_ip PRIVATE amiga_ebus)
+target_compile_options(ebus_discover PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(ebus_set_ip PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(ebus_discover ebus_set_ip PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)

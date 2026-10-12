@@ -8,8 +8,8 @@ namespace lms4xxx {
         // A start command may take effect even if its acknowledgement is lost.
         bool measurement_start_requested = false;
         bool cleanup_attempted = false;
-        bool standby_command_attempted = false;
-        bool standby_confirmed = false;
+        bool stop_measurement_command_attempted = false;
+        bool stop_measurement_confirmed = false;
     };
 
     // Owner-thread policy shared by command-phase rollback and streaming shutdown.
@@ -27,16 +27,17 @@ namespace lms4xxx {
         }
 
         template<typename CallMethod>
-        std::error_code Park(CallMethod &&call) {
+        std::error_code Stop(CallMethod &&call) {
             if (!Pending()) return result_;
             status_.cleanup_attempted = true;
             try {
-                // Run logs out. Login succeeds on 1; LMCstandby succeeds on 0.
+                // Run logs out. Login succeeds on 1; LMCstopmeas succeeds on 0.
+                // Authorized Client is required (manual p.76, tables 35-38).
                 result_ = call(std::string_view{"SetAccessMode"}, 0x01);
                 if (!result_) {
-                    status_.standby_command_attempted = true;
-                    result_ = call(std::string_view{"LMCstandby"}, 0x00);
-                    status_.standby_confirmed = !result_;
+                    status_.stop_measurement_command_attempted = true;
+                    result_ = call(std::string_view{"LMCstopmeas"}, 0x00);
+                    status_.stop_measurement_confirmed = !result_;
                 }
             } catch (...) {
                 // Cleanup must remain unsuccessful if transport/setup throws.

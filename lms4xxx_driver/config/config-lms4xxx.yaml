@@ -4,12 +4,14 @@
 
 # SICK LMS4xxx 2D LiDAR (CoLa B over TCP), one lidar[] entry per device.
 # Referenced by config/config-main.yaml ("LMS4XXX Driver Config Path").
+# Before any driver starts, all listed IP/ports receive a best-effort LMCstopmeas,
+# including disabled entries and runs with the main LMS acquisition switch off.
 
 
 # --- LiDARs ---
 lidar:
     -   id: Front_Left_Laser            # 1..63 chars [A-Za-z0-9_-]; log tag and file name
-        enabled: true                  # at least one must be enabled
+        enabled: true                  # at least one must be enabled when LMS acquisition is enabled
         device:
             ip: "10.95.76.101"          # IPv4, unique among enabled entries
             port: 2111                  # 1..65535; CoLa B

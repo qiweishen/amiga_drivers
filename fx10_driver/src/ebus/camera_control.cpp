@@ -646,8 +646,12 @@ namespace fx10 {
                 node::kStatusLine, node::kMroiEnable, node::kExposureMode, node::kExposureTime,
                 node::kFrameRateEnable, node::kFrameRate, node::kTriggerSelector, node::kTriggerMode,
                 node::kTriggerSource, node::kTriggerActivation, node::kTriggerDelay,
-                node::kMissedTriggerSource, "UserSetSelector"})
+                node::kMissedTriggerSource, "UserSetSelector", "LineSelector", "LineSource",
+                "LineMode", "LineInverter", "LineStatus"})
             doc["final_readback"][name] = ReadNodeMetadata(name);
+        doc["line_readback_semantics"] =
+            "final LineSelector context only; not an audit of all lines or a verified physical pin mapping; "
+            "LineStatus is one idle sample before AcquisitionStart, not an exposure observation";
         for (const char *name : {"PayloadSize", "GevSCPSPacketSize", "GevSCPD"})
             doc["transport"][name] = ReadNodeMetadata(name);
         doc["sdk"] = {{"name", "Pleora eBUS"}, {"header_version", NVERSION_STRING},

@@ -70,9 +70,7 @@ target_link_libraries(asterx_lib PUBLIC
 
 ################################################################################
 # Tests (doctest; enable_testing() is called at the top level)
-if (AMIGA_BUILD_TESTS)
-    add_subdirectory(tests)
-endif ()
+add_subdirectory(tests)
 
 
 ################################################################################
@@ -83,6 +81,5 @@ message(STATUS "   AsteRx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Qt5:              ${Qt5_VERSION} (${Qt5_DIR})")
-message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

@@ -13,6 +13,11 @@
 
 
 namespace lms4xxx {
+    // One bounded connection/login/LMCstopmeas sequence without configuration or
+    // measurement startup. Connection failures are quiet; success requires sAN
+    // LMCstopmeas status 0. The temporary connection is always released.
+    std::error_code StopMeasurement(const DeviceConfig &device, const NetworkConfig &network);
+
     // Read-only identity (sRN DeviceIdent / DIornr / DItype / LocationName), valid after Configure()
     struct DeviceIdentity {
         std::string firmware_designation;
@@ -46,15 +51,15 @@ namespace lms4xxx {
         // sEN LMDscandata 1
         std::error_code StartScanning();
 
-        // Idempotent: stop/drain streaming and confirm standby. Also rolls back
+        // Idempotent: stop/drain streaming and confirm laser/motor shutdown. Also rolls back
         // Configure() when measurement started before the stream was subscribed.
         std::error_code StopScanning();
 
-        // Always releases the connection; returns an unconfirmed-standby error.
+        // Always releases the connection; returns an unconfirmed-stop-measurement error.
         std::error_code Disconnect();
 
         // Owner thread only, valid after StopScanning()/Disconnect(). Resource
-        // teardown alone never implies that the device acknowledged standby.
+        // teardown alone never implies that the device acknowledged LMCstopmeas.
         [[nodiscard]] MeasurementShutdownStatus GetMeasurementShutdownStatus() const;
 
         // Invoked on the parse thread

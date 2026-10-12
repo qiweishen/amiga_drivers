@@ -56,6 +56,10 @@ namespace lms4xxx {
             // Absolute Write deadline; <= 0 is clamped to 1 ms. A timeout
             // invalidates the connection: a partial command cannot be retried.
             int send_timeout_ms = 1000;
+
+            // Optional startup cleanup may target devices that are absent.
+            // Keep normal acquisition connection diagnostics enabled by default.
+            bool quiet_connect_errors = false;
         };
 
         explicit TcpClient(Options options);

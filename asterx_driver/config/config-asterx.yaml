@@ -18,8 +18,8 @@ device:
 # --- Receiver ---
 receiver:
     warmup:
-        min_uptime_s: 0              # >= 0; 0 = no uptime gate (PTP reaches spec after ~20 min (1200), p.47)
-        require_finetime: false          # ReceiverStatus FINETIME bit (p.374)
+        min_uptime_s: 90                # >= 0; 0 = no uptime gate (Need some time to track all satellites, or p.47)
+        require_finetime: false         # ReceiverStatus FINETIME bit (p.374)
 
     ntrip:
         enabled: false
@@ -36,7 +36,7 @@ receiver:
         main_antenna_type: Unknown      # exact lstAntennaInfo name or Unknown (p.66)
         aux_antenna_type: Unknown
         attitude_offset_deg:            # Main->Aux1 baseline vs vehicle axis
-            heading: 0.0                # -360..360
+            heading: 90.0                # -360..360
             pitch: 0.0                  # -90..90
         antenna_lever_arm_m:            # IMU reference -> main ARP; X fwd, Y right, Z down (p.113)
             x: 0.0                      # -100..100

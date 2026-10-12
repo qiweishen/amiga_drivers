@@ -172,7 +172,9 @@ namespace asterx {
             const int n = std::stoi(digits);
             switch (sys) {
                 case 'G':
-                    if (digits.size() != 2) return false;
+                    if (digits.size() != 2) {
+                        return false;
+                    }
                     // The tracking list has a gap: G37 does not exist (p.96)
                     return gps_max >= 38 ? ((n >= 1 && n <= 36) || n == 38 || n == 39) : (n >= 1 && n <= gps_max);
                 case 'R': return digits.size() == 2 && n >= 1 && n <= 30;
@@ -437,9 +439,6 @@ namespace asterx {
         std::vector<Command> cmds;
         cmds.reserve(64);
 
-        // Long form (p.18): creates User1 on a receiver without a full-control account, plain login otherwise
-        const std::string login = "login, " + settings.user + ", " + settings.password + ", RxAdmin, S3pt3ntr10";
-
         const auto plain = [&cmds](std::string text) {
             cmds.push_back({std::move(text), CommandKind::kPlain, {}, {}});
         };
@@ -456,25 +455,16 @@ namespace asterx {
         };
 
         // 1) Authenticate.
+        const std::string login = "login, " + settings.user + ", " + settings.password;
         plain(login);
 
         // 2) Reset the running configuration to the receiver defaults.
-        plain("exeCopyConfigFile, RxDefault, Current");
+        plain("exeCopyConfigFile, "", Current");
 
-        // 3) The reset wiped the accounts and this session's authorisation; the same login re-creates User1.
-        plain(login);
-
-        // 4) Check dual-antenna and multi-band capacities.
+        // 3) Check dual-antenna and multi-band capacities.
         cmds.push_back({"getReceiverCapabilities", CommandKind::kCheckCapabilities, {}, {}});
 
-        // 5) Antenna names must exist on the receiver (read-only, before they are used).
-        const bool check_antennas = !EqualsCi(settings.antenna.main_type, "Unknown") ||
-                                    !EqualsCi(settings.antenna.aux_type, "Unknown");
-        if (check_antennas) {
-            cmds.push_back({"lstAntennaInfo, Overview", CommandKind::kListAntennaInfo, {}, {}});
-        }
-
-        // 6) Time: PPS output, NTP/PTP servers.
+        // 4) Time: PPS output, NTP/PTP servers.
         const auto &ts = settings.time_system;
         set_and_echo(BuildPpsCommand(ts.pps), "getPPSParameters", "PPSParameters", {
                          ts.pps.interval, ts.pps.polarity, FmtCommandDecimal(ts.pps.delay_ns, 2),
@@ -486,7 +476,7 @@ namespace asterx {
         set_and_echo(std::string("setPTPServer, ") + OnOff(ts.ptp_server), "getPTPServer",
                      "PTPServer", {OnOff(ts.ptp_server)});
 
-        // 7) NMEA sentence output on fixed receiver ports (external hardware).
+        // 5) NMEA sentence output on fixed receiver ports (external hardware).
         std::vector<std::string> nmea_ports;
         for (const auto &s: settings.nmea_streams) {
             const bool port_enabled = std::any_of(
@@ -503,12 +493,12 @@ namespace asterx {
                          {"Stream" + std::to_string(s.stream_id), s.descriptor, "", s.interval});
         }
 
-        // 8) Enable SBF output on our own connection.
-        // Only the port field is deterministic (the output mode may already carry NMEA)
-        set_and_echo("setDataInOut, " + descriptor + ", , +SBF", "getDataInOut, " + descriptor, "DataInOut",
-                     {descriptor});
+        // 6) Antenna names must exist on the receiver (read-only, before they are used).
+        if (!EqualsCi(settings.antenna.main_type, "Unknown") || !EqualsCi(settings.antenna.aux_type, "Unknown")) {
+            cmds.push_back({"lstAntennaInfo, Overview", CommandKind::kListAntennaInfo, {}, {}});
+        }
 
-        // 9) Antennas: PCV model, attitude offset, IMU -> main antenna lever arm.
+        // 7) Antennas: PCV model, attitude offset, IMU -> main antenna lever arm.
         const auto &a = settings.antenna;
         set_and_echo(BuildAntennaTypeCommand("Main", a.main_type), "getAntennaType, Main",
                      "AntennaType", {"Main", a.main_type});
@@ -527,7 +517,7 @@ namespace asterx {
                          FmtCommandDecimal(a.lever_arm_m.z)
                      });
 
-        // 10) GNSS tracking and usage.
+        // 8) GNSS tracking and usage.
         const auto &g = settings.gnss;
         const auto none_or_blank = [](const std::string &v) {
             return EqualsCi(v, "none") ? std::string("none") : std::string();
@@ -546,7 +536,7 @@ namespace asterx {
         set_and_echo("setSignalTracking, " + g.signal_tracking, "getSignalTracking", "SignalTracking", {});
         set_and_echo("setSignalUsage, " + g.signal_usage + ", " + g.signal_usage, "getSignalUsage", "SignalUsage", {});
 
-        // 11) IMU.
+        // 9) IMU.
         const auto &imu = settings.imu;
         set_and_echo("setIMUStartupDataMode, " + imu.startup_data_mode, "getIMUStartupDataMode",
                      "IMUStartupDataMode", {imu.startup_data_mode});
@@ -558,26 +548,10 @@ namespace asterx {
                              FmtCommandDecimal(imu.theta_y_deg), FmtCommandDecimal(imu.theta_z_deg)
                          });
 
-        // 12) Dual-antenna attitude is always on.
+        // 10) Dual-antenna attitude is always on.
         set_and_echo("setGNSSAttitude, MultiAntenna", "getGNSSAttitude", "GNSSAttitude", {"MultiAntenna"});
 
-        // 13) Navigation: what the baseline solution is made of.
-        const auto &nav = settings.navigation;
-        set_and_echo("setPVTMode, Rover, " + nav.pvt_mode, "getPVTMode", "PVTMode", {"Rover"});
-        set_and_echo("setReceiverDynamics, " + nav.receiver_dynamics, "getReceiverDynamics",
-                     "ReceiverDynamics", {nav.receiver_dynamics});
-        set_and_echo("setVehicleApplication, " + nav.vehicle_application, "getVehicleApplication",
-                     "VehicleApplication", {nav.vehicle_application});
-        set_and_echo("setClockSyncThreshold, " + nav.clock_sync_threshold, "getClockSyncThreshold",
-                     "ClockSyncThreshold", {nav.clock_sync_threshold});
-        set_and_echo(std::string("setMultipathMitigation, ") + OnOff(nav.multipath_mitigation) + ", " +
-                     OnOff(nav.multipath_mitigation),
-                     "getMultipathMitigation", "MultipathMitigation",
-                     {OnOff(nav.multipath_mitigation), OnOff(nav.multipath_mitigation)});
-        set_and_echo("setINSNavConfig, on, all, " + nav.ins_output_location,
-                     "getINSNavConfig", "INSNavConfig", {"on", "", nav.ins_output_location});
-
-        // 14) NTRIP client.
+        // 11) NTRIP client.
         {
             const auto &n = settings.ntrip;
             const auto ntrip_cmds = BuildNtripCommands(n);
@@ -594,10 +568,31 @@ namespace asterx {
             }
         }
 
-        // 15) Proof: the running configuration now holds only our commands
+        // 12) Navigation: what the baseline solution is made of.
+        const auto &nav = settings.navigation;
+        set_and_echo("setPVTMode, Rover, " + nav.pvt_mode, "getPVTMode", "PVTMode", {"Rover"});
+        set_and_echo("setReceiverDynamics, " + nav.receiver_dynamics, "getReceiverDynamics",
+                     "ReceiverDynamics", {nav.receiver_dynamics});
+        set_and_echo("setVehicleApplication, " + nav.vehicle_application, "getVehicleApplication",
+                     "VehicleApplication", {nav.vehicle_application});
+        set_and_echo("setClockSyncThreshold, " + nav.clock_sync_threshold, "getClockSyncThreshold",
+                     "ClockSyncThreshold", {nav.clock_sync_threshold});
+        set_and_echo(std::string("setMultipathMitigation, ") + OnOff(nav.multipath_mitigation) + ", " +
+                     OnOff(nav.multipath_mitigation),
+                     "getMultipathMitigation", "MultipathMitigation",
+                     {OnOff(nav.multipath_mitigation), OnOff(nav.multipath_mitigation)});
+        set_and_echo("setINSNavConfig, on, all, " + nav.ins_output_location,
+                     "getINSNavConfig", "INSNavConfig", {"on", "", nav.ins_output_location});
+
+        // 13) Enable SBF output on our own connection.
+        // Only the port field is deterministic (the output mode may already carry NMEA)
+        set_and_echo("setDataInOut, " + descriptor + ", , +SBF", "getDataInOut, " + descriptor, "DataInOut",
+                     {descriptor});
+
+        // 14) Proof: the running configuration now holds only our commands
         cmds.push_back({"lstConfigFile, Current", CommandKind::kListConfig, {}, {}});
 
-        // 16) SBF stream membership + intervals, targeted at our own connection.
+        // 15) SBF stream membership + intervals, targeted at our own connection.
         for (const auto &s: settings.sbf_streams) {
             set_and_echo(BuildSbfOutputCommand(s, descriptor), "getSBFOutput, Stream" + std::to_string(s.stream_id),
                          "SBFOutput", {"Stream" + std::to_string(s.stream_id), descriptor, "", s.interval});
@@ -790,7 +785,8 @@ namespace asterx {
         // escaping, so the credential charset is the plain message charset (p.64).
         const auto credential = [](const char *key, const std::string &v, std::size_t max_length) {
             if (v.empty() || v.size() > max_length) {
-                throw ConfigError(std::string(key) + " must be 1.." + std::to_string(max_length) + " characters (p.87)");
+                throw ConfigError(
+                    std::string(key) + " must be 1.." + std::to_string(max_length) + " characters (p.87)");
             }
             if (!ReceiverTextOk(v, false)) {
                 throw ConfigError(std::string(key) +
@@ -820,7 +816,7 @@ namespace asterx {
         RequireRange(a.lever_arm_m.y, -100.0, 100.0, "receiver.antenna.antenna_lever_arm_m.y");
         RequireRange(a.lever_arm_m.z, -100.0, 100.0, "receiver.antenna.antenna_lever_arm_m.z");
         RequireRange(a.attitude_offset_deg.heading_deg, -360.0, 360.0,
-                      "receiver.antenna.attitude_offset_deg.heading");
+                     "receiver.antenna.attitude_offset_deg.heading");
         RequireRange(a.attitude_offset_deg.pitch_deg, -90.0, 90.0, "receiver.antenna.attitude_offset_deg.pitch");
 
         // gnss

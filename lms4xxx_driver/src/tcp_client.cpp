@@ -190,7 +190,9 @@ namespace lms4xxx {
         const auto address = asio::ip::make_address(impl_->options.host, bec);
 
         if (bec) {
-            g_log.Error("[TCP] Invalid numeric device address: {}", bec.message());
+            if (!impl_->options.quiet_connect_errors) {
+                g_log.Error("[TCP] Invalid numeric device address: {}", bec.message());
+            }
             return make_error_code(TcpError::kConnectionFailed);
         }
 
@@ -213,11 +215,15 @@ namespace lms4xxx {
             impl_->socket.close(bec);
             impl_->io_context.restart();
             impl_->io_context.poll(); // drain the aborted handler now, not inside the next Connect()
-            g_log.Error("[TCP] Connection timed out after {}ms", timeout_ms);
+            if (!impl_->options.quiet_connect_errors) {
+                g_log.Error("[TCP] Connection timed out after {}ms", timeout_ms);
+            }
             return make_error_code(TcpError::kConnectionTimeout);
         }
         if (state->ec) {
-            g_log.Error("[TCP] Connection failed: {}", state->ec.message());
+            if (!impl_->options.quiet_connect_errors) {
+                g_log.Error("[TCP] Connection failed: {}", state->ec.message());
+            }
             return make_error_code(TcpError::kConnectionFailed);
         }
 

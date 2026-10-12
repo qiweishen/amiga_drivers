@@ -271,7 +271,7 @@ namespace lms4xxx {
         const auto fail = [this](std::error_code ec) {
             // LMCstartmeas may have taken effect even when its answer was lost.
             // Preserve the original configuration error; cleanup has its own status.
-            impl_->ParkMeasurement(false, impl_->commands.Uncertain() ||
+            impl_->StopMeasurement(false, impl_->commands.Uncertain() ||
                                    !impl_->tcp_client || !impl_->tcp_client->IsConnected());
             impl_->SetState(ConnectionState::kError);
             return ec;

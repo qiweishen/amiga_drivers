@@ -99,6 +99,19 @@ TEST_CASE("The shipped-shape document loads and disabled entries are kept but no
     CHECK(d.ntp.max_time_step_ms == 1000);
 }
 
+TEST_CASE("Startup stop can load every disabled device without weakening acquisition validation") {
+    const auto text = With("        enabled: true", "        enabled: false");
+    CHECK_THROWS_AS(LoadAppConfigText(text), ConfigError);
+    const auto cfg = LoadAppConfigText(text, false);
+    REQUIRE(cfg.lidars.size() == 2);
+    CHECK(cfg.EnabledLidars().empty());
+    CHECK(cfg.lidars[0].device.ip == "10.95.76.101");
+    CHECK(cfg.lidars[1].device.ip == "10.95.76.103");
+    CHECK(cfg.lidars[1].device.port == 2111);
+    CHECK_THROWS_AS(LoadAppConfigText(With("            ip: \"10.95.76.101\"",
+                                         "            ip: \"10.95.76.999\""), false), ConfigError);
+}
+
 TEST_CASE("The shipped config file itself loads") {
     const auto shipped = fs::path(LMS4XXX_CONFIG_DIR) / "config-lms4xxx.yaml";
     REQUIRE(fs::exists(shipped));

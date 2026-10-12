@@ -1,11 +1,13 @@
 # AsteRx receiver configuration
 
-On every connection (first start and every reconnect before recording) the
+On every connection (first start and every reconnect during warm-up) the
 driver resets the receiver's running configuration to the factory defaults,
 applies exactly what
-`config/config-asterx.yaml` lists, verifies it, and starts recording only once
-the receiver has warmed up. A setting left behind by a previous user can never
-influence a recording. Page numbers refer to the AsteRx RBi3 Pro+ Firmware
+`config/config-asterx.yaml` lists and verifies it. Every SDK-delivered SBF block
+is recorded, including blocks arriving during configuration and warm-up, in
+the same file sequence used after readiness. Blocks arriving before the reset
+can still reflect the receiver's previous settings; the warm-up gate controls
+when the other rig drivers may start. Page numbers refer to the AsteRx RBi3 Pro+ Firmware
 v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.pdf`).
 
 ## Rules
@@ -60,11 +62,11 @@ v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.p
 * **The yaml is the single source of truth.** Every documented key is
   required, and an unknown or misspelled key is a startup error — a typo can
   never leave a compiled-in default in force.
-* **Warm-up gate.** Recording starts only when `ReceiverStatus.UpTime` ≥
-  `receiver.warmup.min_uptime_s` (default 1200 s: PTP accuracy reaches
-  0.1 ms P99 only after 20 minutes, p.47) **and** `RxState` bit 6 FINETIME is
-  set (receiver time synchronised to within the `setClockSyncThreshold` limit,
-  p.45/p.374; sticky until the next reset). `init()` blocks until then.
+* **Warm-up gate.** Rig readiness requires `ReceiverStatus.UpTime` ≥
+  `receiver.warmup.min_uptime_s`, plus `RxState` bit 6 FINETIME when
+  `receiver.warmup.require_finetime` is enabled. The shipped YAML uses 90 s
+  and does not require FINETIME. `Init()` blocks until the configured conditions
+  hold, while AsteRx already records all received SBF blocks through the shared writer.
 * **A failed disk write stops the driver.** `SbfWriter::WriteBlock` reports
   failure, the Session logs it at critical level, emits `FatalError` and the
   rig shuts down. The .sbf file is the record of truth; a write that cannot
@@ -79,14 +81,18 @@ v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.p
   the run ends (`queue_pending=`/`queue_max=` in the status line show how far
   the disk lags). Every accepted block reaches the disk before `Shutdown()`
   returns.
-* **Fail-fast while recording.** Once the gate has opened, a link loss, a
+* **Fail-fast after rig readiness.** Once the gate has opened, a link loss, a
   damaged block (CRC/length), a receiver reset (`UpTime` going backwards) or a
   write failure ends the whole rig at once — the `.sbf` would be incomplete
   either way, and the operator restarts immediately. Reconnect and re-warm-up
-  only exist *before* recording, where nothing accepted can be lost; damaged
-  blocks in that phase are counted (`crc_errors`, `length_errors`) but only
-  touch the prewarm context. `recording_errors` in `drivers.json` is the
-  number of fatal events (0 or 1).
+  only exist before the gate opens, and keep the same SBF writer/file open.
+  Damage, link gaps and receiver resets in that phase also increment
+  `recording_errors` and leave `known_acquisition_incomplete` true even if
+  recovery succeeds. CRC/length diagnostics retain their separate counters.
+  Write failure or queue overflow is fatal in every phase. The final
+  `blocks_written`, `bytes_written` and `files_opened` include all phases;
+  `recording_errors` counts integrity failures, including recoverable startup
+  events, rather than only fatal events.
 
 ## Sequence
 
@@ -125,7 +131,7 @@ Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
 `Verified running configuration: M command(s), all ours` →
 `Streams enabled — warming up (min uptime 20:00, FINETIME required)` → every
 30 s `Receiver warming up: up 07:12 / 20:00, FINETIME not yet set` →
-`Acquisition started (receiver up 20:01, FINETIME set)`.
+`Warm-up complete; rig ready (receiver up 20:01, FINETIME set)`.
 
 ## Warm-up gate
 
@@ -134,16 +140,21 @@ Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
   (p.373); `RxState` bit 6 FINETIME (p.374). The yaml must therefore keep
   `ReceiverStatus` (or the `Status` group) in a stream at an interval other
   than `off`; validation enforces both.
-* During the warm-up the streams already flow: the live `live_*.csv` are
-  written (the GUI shows the progress), the `.sbf` writer is not fed, the
-  watchdog stays armed. `[Statistics] warmup=07:12/20:00  finetime=0 …` is
-  printed instead of the recording line.
-* `init()` blocks until the gate opens. `main.cpp` initialises the drivers
-  sequentially with AsteRx first, so the whole rig's recording start waits for
-  the receiver warm-up (up to 20 minutes after a cold start). Ctrl+C aborts.
-* A receiver reset before recording normally drops the TCP session: the
-  reconnect path reconfigures and warms up again. A drop of `UpTime` while
-  recording is fatal (fail-fast, see the rules above).
+* During warm-up every SDK-delivered SBF block, including unknown block IDs,
+  enters the same asynchronous queue as later data, and the live `live_*.csv`
+  sidecars continue to update. The block that opens the gate is recorded once.
+  The local SBF watchdog stays armed. `[Statistics] warmup=07:12/20:00
+  finetime=0 …` also includes cumulative write and queue counters.
+* `Init()` blocks until the gate opens. The session coordinator initialises
+  the drivers sequentially with AsteRx first, so the other drivers wait for
+  receiver warm-up while AsteRx is already recording. Ctrl+C aborts and drains
+  the queued warm-up blocks to disk.
+* Warm-up completion and warm-up reconnects never force a new SBF file. Normal
+  `output.rotation.max_bytes`/`max_interval_s` limits still apply across all phases.
+* A receiver reset during warm-up normally drops the TCP session: the
+  reconnect path reconfigures and warms up again, while marking the recording
+  incomplete. An observed drop of `UpTime` during warm-up also marks it
+  incomplete; after the gate opens, that drop is fatal (see the rules above).
 * `receiver.warmup.min_uptime_s: 0` with `require_finetime: false` disables
   the gate (bench tests).
 

@@ -25,8 +25,9 @@ namespace asterx {
     // Fail-fast: once Recording, a link loss, a damaged block, a receiver reset or
     // a write failure ends the rig (FatalError) instead of reconnecting; the SBF
     // recording would be incomplete either way, and the operator restarts at once.
-    // Recording itself runs on SbfWriteQueue's thread so a disk stall never blocks
-    // the socket reader.
+    // Every received SBF block, including configuration and warm-up, goes through
+    // the same SbfWriteQueue and file sequence; the gate only releases rig startup.
+    // Disk writes run on the queue's thread so a disk stall never blocks the socket reader.
     class Session : public QObject {
         Q_OBJECT
 
@@ -42,9 +43,8 @@ namespace asterx {
         void Shutdown();
 
         // Qt-thread-only; collect after Shutdown and publish after joining that thread.
-        // True when anything went wrong WHILE recording (damaged block, link loss,
-        // receiver reset, write failure); errors before the gate opened only touch
-        // the prewarm context and are reported separately.
+        // Includes damaged blocks, link gaps, receiver resets and write failures
+        // before and after the warm-up gate opens: all phases share one recording.
         bool RecordingIncomplete() const { return recording_errors_ != 0; }
         nlohmann::ordered_json FinalStatistics() const;
 
@@ -68,8 +68,8 @@ namespace asterx {
             kConnecting,
             kWaitingDescriptor,
             kConfiguring,
-            kWarmingUp, // raw blocks preserved under prewarm/; main .sbf gate is ReceiverStatus
-            kRecording,
+            kWarmingUp, // SBF recording is active; ReceiverStatus gates rig readiness
+            kRecording, // warm-up complete; SBF recording continues in the same file
             kBackoff,
             kStopping,
         };
@@ -100,14 +100,15 @@ namespace asterx {
 
         void OnCommunicationError(const std::string &message);
 
-        // A damaged block (CRC/length): fatal while Recording, counted before it
+        // A damaged block (CRC/length): always marks the recording incomplete;
+        // fatal after the warm-up gate, counted while startup can still recover.
         void OnStreamDamage(const char *what, std::uint64_t total);
 
         // Writer-thread failure marshalled onto the Qt thread (queued invoke)
         void OnWriteFailed();
 
         // Any post-startup failure: close the socket (it may still be open),
-        // close the segment, back off, retry with a fresh SsnRx. Before the
+        // mark the gap, back off, retry with a fresh SsnRx in the same file. Before the
         // first successful configure it delegates to fail_startup_ instead;
         // while Recording it is fatal (fail-fast, no reconnect).
         void HandleFailure(const std::string &reason);
@@ -125,8 +126,7 @@ namespace asterx {
 
         AppConfig cfg_;
         std::unique_ptr<SSN::SsnRx> rx_; // recreated per connection attempt
-        SbfWriteQueue writer_; // accepted recording; its own thread feeds the disk
-        SbfWriter prewarm_writer_; // preserve configuration/warm-up context, separate from accepted recording
+        SbfWriteQueue writer_; // all phases share one queue and file sequence
         SbfLiveRecorder live_; // real-time CSV side channel (never fatal)
 
         State state_{State::kIdle};
@@ -157,7 +157,7 @@ namespace asterx {
         std::uint64_t crc_errors_{0}; // all phases
         std::uint64_t length_errors_{0}; // all phases
         std::uint64_t discarded_bytes_{0};
-        std::uint64_t recovery_events_{0}; // reconnects before Recording (context only)
-        std::uint64_t recording_errors_{0}; // failures while Recording (each one is fatal)
+        std::uint64_t recovery_events_{0}; // reconnects before the warm-up gate opens
+        std::uint64_t recording_errors_{0}; // integrity failures across all recorded phases
     };
 } // namespace asterx

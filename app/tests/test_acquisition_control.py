@@ -78,6 +78,51 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             read.assert_not_called()
         self.assertIsNone(owner.snapshot().active_session)
 
+    async def test_initial_manifest_wait_does_not_become_a_persistent_log_error(self):
+        owner = process.AcquisitionController()
+        owner._ref = runtime.ProcessIdentity(42, "123", "boot")
+        owner._update(process_state=ProcState.STARTING)
+        path = Path("/data/20261007_120000")
+        info = session_info.SessionInfo(path, {"gox": True}, [], 1.0)
+        doc = {"run": {"status": "running"},
+               "lifecycle": {"phase": "running", "configuration_read": True,
+                             "sensors": {"gox": {"state": "running"}}}}
+        proc = SimpleNamespace(stderr=None, returncode=None, wait=AsyncMock(return_value=1))
+        buffer = LogBuffer()
+        polls = 0
+
+        async def next_poll(_delay):
+            nonlocal polls
+            polls += 1
+            if polls == 1:
+                self.assertEqual(buffer.snapshot(), [])
+                self.assertEqual(owner.snapshot().last_error, "")
+                self.assertTrue(owner.snapshot().control_uncertain)
+                self.assertTrue(owner.snapshot().config_locked)
+                self.assertFalse(owner.snapshot().ownership_verified)
+            else:
+                self.assertEqual(owner.snapshot().process_state, ProcState.RUNNING)
+                self.assertTrue(owner.snapshot().ownership_verified)
+                self.assertFalse(owner.snapshot().control_uncertain)
+                self.assertEqual(buffer.snapshot(), [])
+                proc.returncode = 1
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(process, "STATE", AppState()))
+            stack.enter_context(patch.object(process, "BUFFER", buffer))
+            for name in ("TAILER", "ASTERX_LIVE", "STATS"):
+                stack.enter_context(patch.object(process, name))
+            stack.enter_context(patch.object(session_info, "recover", side_effect=[
+                session_info.SessionMetadataPending("Waiting for matching session metadata"), info]))
+            stack.enter_context(patch.object(run_status, "read_session", return_value=doc))
+            stack.enter_context(patch.object(process.asyncio, "sleep", side_effect=next_poll))
+            await owner._watch(proc, 0)
+
+        self.assertEqual(polls, 2)
+        self.assertEqual(owner.snapshot().process_state, ProcState.FAILED)
+        self.assertEqual(owner.snapshot().exit_code, 1)
+        self.assertEqual(len(buffer.snapshot()), 1)  # the actual failed exit, not startup waiting
+
     async def test_old_stop_worker_cannot_signal_new_generation(self):
         owner = process.AcquisitionController()
         owner._update(session_generation=2, stop_requested=True)

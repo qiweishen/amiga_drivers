@@ -57,9 +57,7 @@ target_link_libraries(lms4xxx_lib PRIVATE hdf5-static)
 
 ################################################################################
 # Tests
-if (AMIGA_BUILD_TESTS)
-    add_subdirectory(tests)
-endif ()
+add_subdirectory(tests)
 
 
 ################################################################################
@@ -69,6 +67,5 @@ message(STATUS "----------------------------------------")
 message(STATUS "   LMS4xxx_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

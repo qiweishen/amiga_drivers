@@ -30,10 +30,7 @@ public:
     void Shutdown() override;
     nlohmann::ordered_json FinalStatistics() const override { return final_statistics_; }
 
-    // Silence since the last recorded SBF block, for Main's no-data watchdog.
-    // nullopt outside the Recording state: connecting, warming up and the
-    // reconnect backoff are all silences this driver expects and handles
-    // itself (its own 30 s QTimer triggers a RECONNECT, not a run abort).
+    // Silence since the last recorded SBF block, for Main's no-data watchdog
     [[nodiscard]] std::optional<std::uint64_t> MicrosSinceLastData() const override;
 
 private:
@@ -54,10 +51,5 @@ private:
 
     std::atomic<bool> shutdown_called_{false};
 
-    // Steady-clock micros of the last recorded SBF block, or of the moment
-    // recording started; 0 = the watchdog does not apply. Written by the Qt
-    // thread (Session::PublishLiveness), read by Main's poll loop. It lives
-    // here, not on the Session, because the Session is a stack object on the Qt
-    // thread and must not be reachable from another thread.
     std::atomic<std::uint64_t> data_reference_us_{0};
 };

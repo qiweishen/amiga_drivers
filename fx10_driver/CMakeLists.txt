@@ -12,9 +12,7 @@ target_compile_options(fx10_warnings INTERFACE -Wall -Wextra -Wpedantic)
 # eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake).
 # The GenICam env bootstrap, discovery and PvResult plumbing come from common/ (amiga_ebus);
 # this call only (re)creates the directory-scoped eBUS::eBUS target.
-if (AMIGA_ENABLE_EBUS)
-    find_package(eBUS REQUIRED)
-endif ()
+find_package(eBUS REQUIRED)
 
 
 ################################################################################
@@ -47,58 +45,54 @@ target_link_libraries(fx10_core
 
 ################################################################################
 # fx10_ebus - eBUS SDK glue (camera control + streaming)
-if (AMIGA_ENABLE_EBUS)
-    add_library(fx10_ebus STATIC
-        src/ebus/camera_control.cpp
-        src/ebus/stream_receiver.cpp
-    )
-    target_link_libraries(fx10_ebus
-        PUBLIC fx10_core amiga_ebus eBUS::eBUS
-        PRIVATE fx10_warnings
-    )
+add_library(fx10_ebus STATIC
+    src/ebus/camera_control.cpp
+    src/ebus/stream_receiver.cpp
+)
+target_link_libraries(fx10_ebus
+    PUBLIC fx10_core amiga_ebus eBUS::eBUS
+    PRIVATE fx10_warnings
+)
 
 
-    ################################################################################
-    # fx10_session - acquisition lifecycle, independent of IDriverApp and common::Config
-    add_library(fx10_session STATIC
-        src/session.cpp
-        src/session_setup.cpp
-        src/session_monitor.cpp
-    )
-    target_link_libraries(fx10_session PUBLIC fx10_core PRIVATE fx10_ebus fx10_warnings)
+################################################################################
+# fx10_session - acquisition lifecycle, independent of IDriverApp and common::Config
+add_library(fx10_session STATIC
+    src/session.cpp
+    src/session_setup.cpp
+    src/session_monitor.cpp
+)
+target_link_libraries(fx10_session PUBLIC fx10_core PRIVATE fx10_ebus fx10_warnings)
 
-    # fx10_lib - Amiga-facing IDriverApp adapter
-    add_library(fx10_lib STATIC
-        src/fx10_driver_app.cpp
-    )
-    target_link_libraries(fx10_lib PUBLIC
-        fx10_session
-        amiga_common
-    )
+# fx10_lib - Amiga-facing IDriverApp adapter
+add_library(fx10_lib STATIC
+    src/fx10_driver_app.cpp
+)
+target_link_libraries(fx10_lib PUBLIC
+    fx10_session
+    amiga_common
+)
 
 
-    ################################################################################
-    # fx10_snapshot - one-shot GUI preview grab
-    add_executable(fx10_snapshot tools/snapshot_main.cpp)
-    target_link_libraries(fx10_snapshot PRIVATE fx10_ebus fx10_warnings)
-    set_target_properties(fx10_snapshot PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
+################################################################################
+# fx10_snapshot - one-shot GUI preview grab
+add_executable(fx10_snapshot tools/snapshot_main.cpp)
+target_link_libraries(fx10_snapshot PRIVATE fx10_ebus fx10_warnings)
+set_target_properties(fx10_snapshot PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
 
-    # Paired white/dark reference capture, preserving the saved acquisition settings.
-    add_executable(fx10_reference tools/reference_main.cpp)
-    target_link_libraries(fx10_reference PRIVATE fx10_ebus fx10_warnings)
-    set_target_properties(fx10_reference PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
-endif ()
+# Paired white/dark reference capture, preserving the saved acquisition settings.
+add_executable(fx10_reference tools/reference_main.cpp)
+target_link_libraries(fx10_reference PRIVATE fx10_ebus fx10_warnings)
+set_target_properties(fx10_reference PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
 
 
 ################################################################################
 # Tests (doctest, SDK-free; enable_testing() is called at the top level)
-if (AMIGA_BUILD_TESTS)
-    add_subdirectory(tests)
-endif ()
+add_subdirectory(tests)
 
 
 ################################################################################
@@ -109,6 +103,5 @@ message(STATUS "   Fx10_Driver Configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  eBUS SDK:         ${EBUS_SDK_ROOT_DIR}")
-message(STATUS "  Build Tests:      ${AMIGA_BUILD_TESTS}")
 message(STATUS "----------------------------------------")
 message(STATUS "")

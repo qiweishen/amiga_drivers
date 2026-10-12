@@ -74,8 +74,8 @@ namespace lms4xxx::CommandBuilder {
         return ColaBCodec::Encode(CommandType::kMethodByName, "LMCstartmeas");
     }
 
-    std::vector<std::uint8_t> BuildStandby() {
-        return ColaBCodec::Encode(CommandType::kMethodByName, "LMCstandby");
+    std::vector<std::uint8_t> BuildStopMeasurement() {
+        return ColaBCodec::Encode(CommandType::kMethodByName, "LMCstopmeas");
     }
 
     std::vector<std::uint8_t> BuildLoadAppDefaults() {

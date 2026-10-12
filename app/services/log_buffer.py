@@ -15,6 +15,10 @@ LINE_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] \[(\w+)\] \[([^\]]+)\]: (.*)$")
 
 LEVELS = ("trace", "debug", "info", "warning", "error", "critical")
 
+# Only the bounded startup overlap between the pipe and session file is tracked.
+# This is not a global text-deduplication cache: repeated file events stay visible.
+STDERR_HANDOFF_LINES = 500
+
 
 @dataclass
 class LogLine:
@@ -36,11 +40,13 @@ def parse_line(raw: str, *, fallback_module: str = "") -> LogLine:
 class LogBuffer:
     def __init__(self, maxlen: int = 5000) -> None:
         self._lines: deque[LogLine] = deque(maxlen=maxlen)
+        self._stderr_pending: deque[str] = deque(maxlen=STDERR_HANDOFF_LINES)
         self._subscribers: list[Callable[[LogLine], None]] = []
         self.modules_seen: set[str] = set()
 
     def clear(self) -> None:
         self._lines.clear()
+        self._stderr_pending.clear()
         self.modules_seen.clear()
 
     def append(self, line: LogLine) -> None:
@@ -52,6 +58,25 @@ class LogBuffer:
                 cb(line)
             except Exception:
                 pass  # a broken page subscriber must never break the feed
+
+    def append_stderr(self, line: LogLine) -> None:
+        """Show startup diagnostics immediately and remember their file copies."""
+        if line.ts and line.level and line.module:
+            self._stderr_pending.append(line.raw)
+        self.append(line)
+
+    def append_session(self, line: LogLine) -> None:
+        """Display a file event unless its pipe copy was already displayed.
+
+        Consume one structured occurrence, not every equal message. Bare SDK or
+        loader stderr is never deduplicated against unrelated file diagnostics.
+        Matching continues after replay because the file sink flushes later than
+        the pipe and can initially end before the last visible startup message.
+        """
+        try:
+            self._stderr_pending.remove(line.raw)
+        except ValueError:
+            self.append(line)
 
     def subscribe(self, cb: Callable[[LogLine], None]) -> Callable[[], None]:
         self._subscribers.append(cb)

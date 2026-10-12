@@ -26,7 +26,7 @@ class ApplicationServices:
         control_owner.acquire()
         if not self._subscribed:
             TAILER.subscribe(STATS.on_line)
-            TAILER.subscribe(BUFFER.append)
+            TAILER.subscribe(BUFFER.append_session)
             self._subscribed = True
         STATE.env_ok, STATE.env_detail = await runtime.env_check()
         await tool_jobs.reconcile()

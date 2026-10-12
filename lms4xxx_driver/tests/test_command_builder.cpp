@@ -99,7 +99,9 @@ TEST_CASE("Frames match the manual's CoLa B examples byte for byte") {
     // Table 79: sRN LMPoutputRange
     CHECK(B::BuildReadVariable("LMPoutputRange") ==
         Hex("02 02 02 02 00 00 00 12 73 52 4E 20 4C 4D 50 6F 75 74 70 75 74 52 61 6E 67 65 5E"));
-    CHECK(Name(B::BuildStandby()) == "LMCstandby");
+    // Table 36: sMN LMCstopmeas (laser and motor off)
+    CHECK(B::BuildStopMeasurement() ==
+        Hex("02 02 02 02 00 00 00 0F 73 4D 4E 20 4C 4D 43 73 74 6F 70 6D 65 61 73 10"));
 }
 
 

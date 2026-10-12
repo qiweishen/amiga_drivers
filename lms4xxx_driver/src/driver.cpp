@@ -1,5 +1,7 @@
 #include "driver_internal.h"
 
+#include <utility>
+
 #include "command_builder.h"
 #include "error.h"
 #include "logger.h"
@@ -13,6 +15,26 @@ namespace {
 }
 
 namespace lms4xxx {
+    std::error_code StopMeasurement(const DeviceConfig &device, const NetworkConfig &network) {
+        try {
+            auto options = MakeTcpOptions(device, network);
+            options.quiet_connect_errors = true;
+            TcpClient tcp_client(std::move(options));
+            if (const auto ec = tcp_client.Connect(network.connect_timeout_ms)) return ec;
+
+            CommandChannel commands(network.response_timeout_ms, device.ip);
+            if (const auto ec = commands.CallMethod(&tcp_client, CommandBuilder::BuildLogin(),
+                                                    "SetAccessMode", 0x01)) return ec;
+            return commands.CallMethod(&tcp_client, CommandBuilder::BuildStopMeasurement(),
+                                       "LMCstopmeas", 0x00);
+        } catch (const std::system_error &e) {
+            return e.code();
+        } catch (...) {
+            return std::make_error_code(std::errc::io_error);
+        }
+    }
+
+
     Lms4xxxDriver::Impl::Impl(const DriverConfig &cfg)
         : config(cfg), commands(cfg.network.response_timeout_ms, cfg.name.empty() ? cfg.device.ip : cfg.name) {
         if (config.name.empty()) config.name = config.device.ip;
@@ -34,10 +56,10 @@ namespace lms4xxx {
     }
 
 
-    std::error_code Lms4xxxDriver::Impl::ParkMeasurement(bool streaming, bool reconnect) {
+    std::error_code Lms4xxxDriver::Impl::StopMeasurement(bool streaming, bool reconnect) {
         const bool pending = measurement_shutdown.Pending();
         bool connection_prepared = false;
-        const auto ec = measurement_shutdown.Park([&](std::string_view name, int expected_status) {
+        const auto ec = measurement_shutdown.Stop([&](std::string_view name, int expected_status) {
             if (reconnect && !connection_prepared) {
                 if (tcp_client) tcp_client->Disconnect();
                 tcp_client = std::make_unique<TcpClient>(MakeTcpOptions(config.device, config.network));
@@ -48,19 +70,19 @@ namespace lms4xxx {
                 connection_prepared = true;
             }
             const auto frame = name == "SetAccessMode" ? CommandBuilder::BuildLogin()
-                                                       : CommandBuilder::BuildStandby();
+                                                       : CommandBuilder::BuildStopMeasurement();
             if (streaming) {
                 constexpr int kShutdownMethodTimeoutMs = 1000;
                 return CallMethodStreaming(frame, std::string(name), expected_status, kShutdownMethodTimeoutMs)
-                    ? std::error_code{} : make_error_code(ErrorCode::kStandbyUnconfirmed);
+                    ? std::error_code{} : make_error_code(ErrorCode::kStopMeasurementUnconfirmed);
             }
             return commands.CallMethod(tcp_client.get(), frame, name, static_cast<std::uint8_t>(expected_status));
         });
         if (pending) {
-            if (measurement_shutdown.Status().standby_confirmed) {
-                g_log.Info("[{}] Laser parked (standby confirmed); the motor keeps turning", Tag());
+            if (measurement_shutdown.Status().stop_measurement_confirmed) {
+                g_log.Info("[{}] Stop measurement confirmed; laser and motor shut down", Tag());
             } else {
-                g_log.Warn("[{}] Device standby was not confirmed ({}); the laser may still be on", Tag(),
+                g_log.Warn("[{}] Device stop measurement was not confirmed ({}); the laser or motor may still be on", Tag(),
                            ec.message());
             }
         }
@@ -202,7 +224,7 @@ namespace lms4xxx {
         if (!have_workers && !impl_->scanning.load(std::memory_order_relaxed)) {
             // Configure succeeded but the owner cancelled or its writer failed,
             // or StartStream's reply was lost before the workers were constructed.
-            return impl_->ParkMeasurement(false, impl_->stream_start_requested ||
+            return impl_->StopMeasurement(false, impl_->stream_start_requested ||
                                           impl_->commands.Uncertain() || !impl_->tcp_client ||
                                           !impl_->tcp_client->IsConnected());
         }
@@ -210,7 +232,7 @@ namespace lms4xxx {
         g_log.Trace("[{}] Stopping scan...", impl_->Tag());
 
         // Preserve the normal drain path: responses are decoded by the existing
-        // workers until standby has been acknowledged or its bounded wait ends.
+        // workers until stop measurement has been acknowledged or its bounded wait ends.
         impl_->stop_stream_requested.store(true, std::memory_order_release);
         if (impl_->tcp_client && impl_->tcp_client->IsConnected()) {
             if (const auto ec = impl_->tcp_client->Write(CommandBuilder::BuildStopStream())) {
@@ -219,7 +241,7 @@ namespace lms4xxx {
             if (impl_->receive_thread.joinable() && impl_->parse_thread.joinable() &&
                 impl_->parse_running.load(std::memory_order_acquire) &&
                 (!impl_->fault.load(std::memory_order_acquire) || impl_->time_fault.load(std::memory_order_acquire))) {
-                impl_->ParkMeasurement(true, false);
+                impl_->StopMeasurement(true, false);
             }
         }
 
@@ -254,7 +276,7 @@ namespace lms4xxx {
 
         // A failed parser or incomplete worker set cannot receive a command
         // answer. Only after joining every worker may cleanup replace the socket.
-        const auto cleanup_ec = impl_->ParkMeasurement(false, true);
+        const auto cleanup_ec = impl_->StopMeasurement(false, true);
         impl_->SetState(ConnectionState::kConnected);
         g_log.Trace("[{}] Scanning stopped", impl_->Tag());
         return cleanup_ec;

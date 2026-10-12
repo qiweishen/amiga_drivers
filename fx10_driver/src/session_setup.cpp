@@ -213,6 +213,21 @@ bool Session::StartStreaming() {
         s.control->OpenShutter([this] { return StopRequested(); });
         s.receiver.Start(*s.recorder, expected, cfg.acquisition.frame_rate_hz, [&] {
             auto device = s.control->CollectDeviceMetadata();
+            const auto readback = [&device](const char *name) {
+                const auto &node = device["final_readback"][name];
+                return node["status"] == "ok" ? node["value"].dump()
+                    : "<" + node["status"].get<std::string>() + ">";
+            };
+            g_log.Info("[eBUS] Trigger final readback: selector={} mode={} source={} activation={} "
+                       "delay_us={} exposure_mode={} exposure_us={}",
+                       readback(fx10::node::kTriggerSelector), readback(fx10::node::kTriggerMode),
+                       readback(fx10::node::kTriggerSource), readback(fx10::node::kTriggerActivation),
+                       readback(fx10::node::kTriggerDelay), readback(fx10::node::kExposureMode),
+                       readback(fx10::node::kExposureTime));
+            g_log.Info("[eBUS] Output line final readback: selector={} source={} mode={} inverted={} "
+                       "idle_status={}; physical pin routing and exposure feedback remain unverified",
+                       readback("LineSelector"), readback("LineSource"), readback("LineMode"),
+                       readback("LineInverter"), readback("LineStatus"));
             const auto &counter_source = device["final_readback"][fx10::node::kMissedTriggerSource];
             s.counter_binding_verified = counter_source["status"] == "ok" && counter_source["value"] == "MissedTrigger";
             device["created_realtime_ns"] = common::TimeUtil::RealtimeNowNs();

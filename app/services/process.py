@@ -55,6 +55,16 @@ class AcquisitionController:
             self._update(last_error=message)
             BUFFER.append(parse_line(message, fallback_module="gui"))
 
+    def _metadata_unavailable(self, error: Exception) -> None:
+        pending = isinstance(error, session_info.SessionMetadataPending)
+        self._update(control_uncertain=True, config_locked=True,
+                     status_detail=str(error) if pending else "Status not verified")
+        # The watcher can run before the child publishes its first manifest.
+        # Keep ownership unverified while waiting, without turning that normal
+        # startup interval into a persistent error in the diagnostic feed.
+        if not pending:
+            self._report(f"Waiting for verified session metadata: {error}")
+
     def _background(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
@@ -237,7 +247,7 @@ class AcquisitionController:
                 line = parse_line(data.decode(errors="replace"), fallback_module="stderr")
                 self.launch_stderr.append(line.raw)
                 if not TAILER.ready:
-                    BUFFER.append(line)
+                    BUFFER.append_stderr(line)
 
         drain = self._background(drain_stderr())
         try:
@@ -252,10 +262,7 @@ class AcquisitionController:
                         await self._observe_session(self._ref, generation)
                 except Exception as e:
                     if generation == self._state.session_generation:
-                        self._update(control_uncertain=True)
-                        self._update(config_locked=True)
-                        self._update(status_detail="Status not verified")
-                        self._report(f"Waiting for verified session metadata: {e}")
+                        self._metadata_unavailable(e)
                 await asyncio.sleep(0.5)
             if generation != self._state.session_generation:
                 return
@@ -403,9 +410,9 @@ class AcquisitionController:
             try:
                 await self._observe_session(ref, generation)
             except Exception as e:
-                self._update(control_uncertain=True)
-                self._update(config_locked=True)
-                self._report(f"Waiting for verified session metadata: {e}")
+                if generation != self._state.session_generation:
+                    return
+                self._metadata_unavailable(e)
             await asyncio.sleep(1.0)
         if generation != self._state.session_generation:
             return

@@ -32,11 +32,6 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 
 
 ################################################################################
-# Build boundaries (defaults preserve the complete rig)
-option(AMIGA_BUILD_TESTS "Build unit tests" ON)
-option(AMIGA_ENABLE_EBUS "Build eBUS camera acquisition and device tools" ON)
-option(AMIGA_ENABLE_ASTERX "Build AsteRx acquisition and its Qt/ssnrx SDK" ON)
-option(AMIGA_ENABLE_LMS4XXX "Build LMS acquisition and its HDF5 recorder" ON)
 # Caller-provided application identity; no version-control query for metadata.
 set(AMIGA_BUILD_REVISION "unknown" CACHE STRING "Source revision recorded in drivers.json")
 if (NOT AMIGA_BUILD_REVISION MATCHES "^[A-Za-z0-9._+-]+$")
@@ -57,13 +52,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 
 ################################################################################
-# Build Testings
-if (AMIGA_BUILD_TESTS)
-    enable_testing()
-    find_package(Python3 COMPONENTS Interpreter)
-    if (Python3_FOUND)
-        add_test(NAME contract_check COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/check_contracts.py)
-    endif ()
+# Tests
+enable_testing()
+find_package(Python3 COMPONENTS Interpreter)
+if (Python3_FOUND)
+    add_test(NAME contract_check COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/check_contracts.py)
 endif ()
 
 ################################################################################
@@ -73,37 +66,26 @@ add_subdirectory(common)
 
 ################################################################################
 # Driver Subdirectories
-if (AMIGA_ENABLE_LMS4XXX)
-    add_subdirectory(lms4xxx_driver)
-endif ()
+add_subdirectory(lms4xxx_driver)
 add_subdirectory(gox_driver)
-if (AMIGA_ENABLE_ASTERX)
-    add_subdirectory(asterx_driver)
-endif ()
+add_subdirectory(asterx_driver)
 add_subdirectory(fx10_driver)
 
 
 ################################################################################
-# Unified executable: composition depends only on enabled hardware adapters.
-# Camera format/recorder cores and their tests remain available with eBUS off.
-add_executable(AmigaDrivers main.cpp acquisition.cpp)
+# Unified executable: all four hardware adapters are always included.
+add_executable(AmigaDrivers main.cpp)
 target_compile_definitions(AmigaDrivers PRIVATE
         AMIGA_DRIVERS_VERSION="${PROJECT_VERSION}"
         AMIGA_DRIVERS_GIT_SHA="${AMIGA_BUILD_REVISION}"
-        AMIGA_ENABLE_EBUS=$<BOOL:${AMIGA_ENABLE_EBUS}>
-        AMIGA_ENABLE_ASTERX=$<BOOL:${AMIGA_ENABLE_ASTERX}>
-        AMIGA_ENABLE_LMS4XXX=$<BOOL:${AMIGA_ENABLE_LMS4XXX}>
 )
-target_link_libraries(AmigaDrivers PRIVATE amiga_common)
-if (AMIGA_ENABLE_ASTERX)
-    target_link_libraries(AmigaDrivers PRIVATE asterx_lib)
-endif ()
-if (AMIGA_ENABLE_LMS4XXX)
-    target_link_libraries(AmigaDrivers PRIVATE lms4xxx_lib)
-endif ()
-if (AMIGA_ENABLE_EBUS)
-    target_link_libraries(AmigaDrivers PRIVATE fx10_lib gox_lib)
-endif ()
+target_link_libraries(AmigaDrivers PRIVATE
+        amiga_common
+        asterx_lib
+        lms4xxx_lib
+        fx10_lib
+        gox_lib
+)
 
 set_target_properties(AmigaDrivers PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin

@@ -56,7 +56,7 @@ are named at second resolution and an existing one is refused, never reused.
 
 | Sensor | Driver | Transport | Records |
 |---|---|---|---|
-| Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (+ `prewarm/` context) + `live_*.csv` telemetry sidecar |
+| Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (including warm-up) + `live_*.csv` telemetry sidecar |
 | JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `jai-raw-seg` segments + `idx.jsonl` + `device.json` + `telemetry.jsonl` per camera; its channel in `raw/sensor_trigger.log` |
 | Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP), SensorSync-triggered | ENVI BIL `.bil`/`.hdr` + `.lines.csv`; its channel in `raw/sensor_trigger.log` |
 | SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | `scan_<id>_<ts>_NNN.h5` (`lms4xxx-h5` v3) |
@@ -108,10 +108,17 @@ signal-interrupted run exits `0`; a reported failure exits `1`. The session's
 reason, together with final per-driver statistics. A missing final manifest is
 an unknown/incomplete result, even if the process has disappeared.
 
+Before any sensor driver starts, `main.cpp` attempts an authorized
+`LMCstopmeas` on every IP/port in the LMS config, including disabled entries and
+runs with LMS acquisition disabled. Unreachable devices are silently skipped
+after the configured connection timeout. Each temporary connection closes before
+driver startup. LMS acquisition shutdown also uses `LMCstopmeas` to shut off
+the laser and stop the motor. See the [LMS lifecycle details](lms4xxx_driver/docs/DEVICE_CONFIG.md#stop-measurement-before-rig-startup).
+
 Lifecycle ownership is explicit:
 
-- `main.cpp`: signals, main configuration and the process error exit.
-- `acquisition.cpp`: output/session creation, config snapshots and driver construction.
+- `main.cpp`: signals, main configuration, output/session creation, config snapshots,
+  driver construction and the process error exit.
 - `common::RunSession`: sequential initialization, concurrent Run, guards, reverse
   shutdown and final manifest. `Init` may start resources; even failed/partial
   initialization must be followed by `Shutdown`. Every Run thread joins before
@@ -184,13 +191,10 @@ The GUI/control service use Python 3.10+ and the direct dependency versions in
 The C++ acquisition program does not need Python to record data. These are direct
 version pins, not a transitive Python lock or a fully hermetic OS image.
 
-Build boundaries are explicit (all default to `ON`):
-`AMIGA_ENABLE_EBUS` controls hardware camera adapters and device tools, while
-`jai_core`, `fx10_core` and their tests remain available with it off.
-`AMIGA_ENABLE_ASTERX` controls the Qt/ssnrx driver;
-`AMIGA_ENABLE_LMS4XXX` controls the LiDAR driver and HDF5/zlib dependency.
-A configuration enabling an excluded driver is rejected before initialization.
-`AMIGA_BUILD_TESTS=OFF` also omits contract-test registration.
+The unified build always includes all four drivers, their device tools and unit
+tests. The eBUS SDK, Qt/ssnrx and HDF5/zlib are required for the complete driver
+set. The main YAML configuration selects which drivers run in a session.
+The contract checker is registered when a Python interpreter is available.
 `AMIGA_BUILD_REVISION` supplies the recorded source identity (default `unknown`);
 configure does not query Git for this identity. The existing manifest field name
 `git_sha` is retained.
@@ -237,7 +241,7 @@ docker exec -w /workspace amiga-drivers-dev bash -lc \
 ```
 
 Binaries land in `build/bin/`, the test binaries in `build/bin/tests/`. Unit
-tests build in every configuration (`AMIGA_BUILD_TESTS`, default `ON`) — see
+tests build in every configuration — see
 [Development](#development).
 
 ### Run
@@ -360,11 +364,11 @@ configuration snapshot and run metadata under `raw/`:
 └── raw/
     ├── log_<ts>.log                  # diagnostics, live rates and diagnostic lifecycle messages
     ├── drivers.json                  # process/session identity, lifecycle, versions and final results
-    ├── config/                       # snapshot of config-main + every enabled driver's config
+    ├── config/                       # config-main + LMS startup-stop config + enabled drivers' configs
     ├── sensor_trigger.log            # SensorSync timing log, one session per rig: trigger (T) and
     │                                 #   exposure (S) edges of every channel, PPS (P) and NMEA (Z)
-    ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; prewarm/ holds the
-    │                                 #   SBF context streamed before the warm-up gate opened
+    ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; warm-up and ready
+    │                                 #   phases share the same SBF file sequence
     ├── gox/<cam>/                    # seg_NNNNN.raw (jai-raw-seg) + seg_NNNNN.idx.jsonl + segments.jsonl
     │                                 #   + device.json (one-shot audit, timing block) + telemetry.jsonl + stream_stats.txt
     ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv
@@ -392,8 +396,10 @@ The recording formats are self-describing enough to read without this repository
 
 - **SBF** (asterx) — the receiver's own binary format, block for block as it
   arrived (CRC-checked by the SDK, never re-serialised); RxTools / `sbf2rin`
-  read it directly. Blocks streamed before the warm-up gate opened live in
-  `prewarm/`, never in the accepted files.
+  read it directly. All SDK-delivered blocks from configuration, warm-up and
+  the ready phase use the same writer. Opening the warm-up gate does not split
+  the file; the configured size/time rotation still applies. Warm-up blocks
+  retain their original device time and validity fields.
 - **`jai-raw-seg`** (gox) — 12-bit packed Bayer payloads verbatim from the SDK
   buffer behind a 96-byte CRC-protected frame header; `gox_driver/scripts/`
   `inspect_raw.py` / `unpack_raw.py` are the reference readers, and the index
@@ -431,11 +437,12 @@ of `config/config-main.yaml`:
 They are rig-wide because every driver writes under
 `<Output Directory>/<timestamp>/raw/` (one filesystem, one number), and because
 one dead sensor already makes the session incomplete. The abort default is 60 s
-rather than something snappier because AsteRx repairs a 30 s SBF silence *before
-recording* (warm-up) by reconnecting: a rig-wide abort at 30 s would race that.
-Once recording, that same silence timer is fatal (fail-fast). A driver that is
-*legitimately* quiet — an external trigger with no pulses, a receiver warm-up —
-reports `nullopt` and is simply not watched while that lasts; deciding *that* is
+rather than something snappier because AsteRx retries a 30 s SBF silence during
+warm-up by reconnecting: a rig-wide abort at 30 s would race that. Such a gap
+still marks the unified SBF recording incomplete. Once the warm-up gate opens,
+that same silence timer is fatal (fail-fast). A driver that is not yet ready for
+the rig-wide watchdog — an external trigger with no pulses, a receiver warming up —
+reports `nullopt` and is not watched by that guard while it lasts; deciding that is
 the one part the drivers keep, because only they know it. A watchdog trip is
 logged as `<Driver> driver stopped: no data (...)` and appears in the final run
 failure reason. GUI lifecycle state comes exclusively from the structured
@@ -445,12 +452,12 @@ On top of the two, each driver keeps the guards that are specific to its device:
 
 | Driver | Guards |
 |---|---|
-| asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME before any block is recorded; a 30 s SBF silence timer that **reconnects before recording** and is **fatal while recording**; damaged blocks, link loss, a receiver reset and a full write queue while recording are fatal too (fail-fast) |
+| asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME controls rig readiness; SBF is recorded throughout. A 30 s SBF silence timer reconnects during warm-up and is fatal after the gate opens. Damage, link gaps and receiver resets always mark the recording incomplete and are fatal after readiness; write failures and queue overflow are fatal in every phase. |
 | gox | PTP slave-status admission / runtime guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
 | fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
 | lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
 
-Any of these ends the whole rig's run — and says so in the exit status
+Fatal guard failures end the whole rig's run — and say so in the exit status
 (`drivers.json` records `failed (<driver>)`, or `failed (disk)`).
 
 The two snapshot tools (`fx10_snapshot`, `jai_snapshot`) do not run under
@@ -494,7 +501,7 @@ interleaved. The shutdown totals line is `[Statistics] [inst] Final: ...`.
 dashboard's per-sensor cards, and `tools/check_contracts.py` fails if either side
 renames it. AsteRx records a byte stream rather than frames, so it has no `fps=`;
 during the receiver warm-up its line carries `warmup=<up>/<min>  finetime=0|1`
-instead. The lms4xxx `ntp=` token is `OFF`, `NO-LOCK` (streaming, device clock
+alongside cumulative SBF write and queue counters. The lms4xxx `ntp=` token is `OFF`, `NO-LOCK` (streaming, device clock
 not yet plausible), `UNVERIFIED`, `UNKNOWN` (device warning status stale/unknown),
 `NO-SIGNAL` (device NTP warning), `TIME-ANOMALY`, `NO-TS` or `UNREACH`.
 Host server reachability is a separate field; no token certifies absolute time accuracy.
@@ -772,7 +779,7 @@ remote network checks have not been performed from this workspace.
 
 ### Tests
 
-Unit tests build in every configuration (`-DAMIGA_BUILD_TESTS=OFF` to skip them):
+Unit tests build in every configuration:
 
 ```bash
 docker exec -w /workspace amiga-drivers-dev bash -lc \
@@ -816,9 +823,8 @@ must respect the execution limits in [`AGENTS.md`](AGENTS.md).
 
 ```
 amiga_drivers/
-├── main.cpp                  # process entry: signals, main config, error exit
-├── acquisition.cpp           # session folder, config snapshots, driver composition
-├── CMakeLists.txt            # build boundaries, tests and caller-supplied revision
+├── main.cpp                  # process entry, session setup, config snapshots, driver composition
+├── CMakeLists.txt            # unified driver build, tests and caller-supplied revision
 ├── Start.bash               # convenience wrapper for setcap + command-line recording
 ├── .devcontainer/            # one Ubuntu image, GUI/acquisition Compose service and IDE settings
 ├── cmake/                    # Dependencies.cmake (hdf5/spdlog/yaml-cpp/nlohmann) + FindeBUS.cmake

@@ -40,7 +40,6 @@ _COLUMNS = [
     {"name": "detail", "label": "Details", "field": "detail", "align": "left"},
 ]
 
-_FX10_DEFAULT_IP = "10.95.0.100"
 _BINNING = [1, 2, 4, 8]
 _CONFIG_KINDS = {"GoX": "gox", "FX10": "fx10"}  # kinds that have a driver config to point at the camera
 
@@ -213,7 +212,7 @@ def camera_page() -> None:
             row = _selected("FX10")
             if row:
                 return row.get("ip", "")
-            return app.storage.general.get("fx10_target_ip", _FX10_DEFAULT_IP)
+            return app.storage.general.get("fx10_target_ip", "")
 
         def refresh_guard() -> None:
             # Pure state reads, and NiceGUI drops setter calls that change

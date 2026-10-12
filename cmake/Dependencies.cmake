@@ -44,9 +44,7 @@ function(amiga_add_hdf5)
     FetchContent_MakeAvailable(hdf5)
     set(hdf5_SOURCE_DIR "${hdf5_SOURCE_DIR}" PARENT_SCOPE)
 endfunction()
-if (AMIGA_ENABLE_LMS4XXX)
-    amiga_add_hdf5()
-endif ()
+amiga_add_hdf5()
 
 
 ################################################################################

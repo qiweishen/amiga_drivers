@@ -10,10 +10,10 @@
 // deliberately not covered: their constants are not injectable and wall-clock
 // waits do not belong in a unit test.
 
-#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -72,15 +72,18 @@ namespace {
         }
     }
 
-    // One complete ReceiverStatus frame with a CRC the SsnRx parser accepts
-    std::vector<std::uint8_t> ReceiverStatusFrame(std::uint32_t up_time, std::uint32_t rx_status) {
-        asterx_test::FrameBuilder fb;
-        asterx_test::rxs_fixed_body(fb, /*n=*/0, /*sb_length=*/0, up_time, rx_status);
-        auto f = fb.finalize(4014, 0);
+    std::vector<std::uint8_t> WithCrc(std::vector<std::uint8_t> f) {
         const auto crc = CRC_compute16CCITT(f.data() + 4, f.size() - 4);
         f[2] = static_cast<std::uint8_t>(crc & 0xFF);
         f[3] = static_cast<std::uint8_t>(crc >> 8);
         return f;
+    }
+
+    // One complete ReceiverStatus frame with a CRC the SsnRx parser accepts
+    std::vector<std::uint8_t> ReceiverStatusFrame(std::uint32_t up_time, std::uint32_t rx_status) {
+        asterx_test::FrameBuilder fb;
+        asterx_test::rxs_fixed_body(fb, /*n=*/0, /*sb_length=*/0, up_time, rx_status);
+        return WithCrc(fb.finalize(4014, 0));
     }
 
     QStringList SplitArgs(const QString &command) {
@@ -312,6 +315,32 @@ namespace {
         int configured{0};
         bool fatal{false};
     };
+
+    // Call after Shutdown: all stages must have reached the same file exactly
+    // once, with the SDK-delivered bytes and order unchanged.
+    void CheckSingleRecording(const asterx::Session &session, const std::filesystem::path &dir,
+                              const std::vector<std::vector<std::uint8_t>> &frames) {
+        CHECK_FALSE(std::filesystem::exists(dir / "prewarm"));
+        std::vector<std::filesystem::path> files;
+        for (const auto &entry: std::filesystem::directory_iterator(dir)) {
+            if (entry.path().extension() == ".sbf") {
+                files.push_back(entry.path());
+            }
+        }
+        REQUIRE(files.size() == 1);
+        std::ifstream input(files.front(), std::ios::binary);
+        REQUIRE(input.is_open());
+        const std::vector<std::uint8_t> data{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        std::vector<std::uint8_t> expected;
+        for (const auto &frame: frames) {
+            expected.insert(expected.end(), frame.begin(), frame.end());
+        }
+        CHECK(data == expected);
+        const auto stats = session.FinalStatistics();
+        CHECK(stats.at("blocks_written").get<std::uint64_t>() == frames.size());
+        CHECK(stats.at("bytes_written").get<std::uint64_t>() == expected.size());
+        CHECK(stats.at("files_opened").get<std::uint64_t>() == 1);
+    }
 } // namespace
 
 
@@ -430,14 +459,16 @@ TEST_CASE("Session: ReplyThatEchoesAnotherCommandIsIgnored") {
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("Session: SbfArrivingBeforeTheResetIsIgnored") {
+TEST_CASE("Session: SbfArrivingBeforeTheResetIsPreservedInTheRecording") {
     // The previous session's setSBFOutput lines are still armed on this IPxx
     // until the reset runs, so blocks interleave with the first replies.
     const auto dir = Scratch("early_sbf");
     FakeReceiver rx;
     const auto frame = ReceiverStatusFrame(500, 0);
-    rx.after_command = [&rx, frame](const QString &cmd) {
-        if (cmd.startsWith("login")) {
+    bool sent = false;
+    rx.after_command = [&rx, frame, &sent](const QString &cmd) {
+        if (!sent && cmd.startsWith("login")) {
+            sent = true;
             rx.SendSbf(frame);
             rx.SendSbf(frame);
         }
@@ -448,12 +479,15 @@ TEST_CASE("Session: SbfArrivingBeforeTheResetIsIgnored") {
     REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
     CHECK_FALSE(h.fatal);
     CHECK(h.configured == 1);
+    REQUIRE(sent);
 
     h.session.Shutdown();
+    CheckSingleRecording(h.session, dir, {frame, frame});
+    CHECK_FALSE(h.session.RecordingIncomplete());
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("Session: WarmUpGateHoldsRecordingUntilUptimeAndFinetime") {
+TEST_CASE("Session: WarmUpGateDelaysConfiguredButKeepsAllSbfInOneFile") {
     const auto dir = Scratch("warmup");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
@@ -462,7 +496,7 @@ TEST_CASE("Session: WarmUpGateHoldsRecordingUntilUptimeAndFinetime") {
     Harness h(std::move(cfg));
     h.session.Start();
 
-    // The whole sequence runs, but recording waits for ReceiverStatus
+    // ReceiverStatus gates Configured; raw recording already accepts every block.
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange"); }));
     Pump(200); // let any pending signal land
     CHECK(h.configured == 0);
@@ -470,28 +504,99 @@ TEST_CASE("Session: WarmUpGateHoldsRecordingUntilUptimeAndFinetime") {
 
     constexpr std::uint32_t kFineTime = 1u << 6;
     const auto prewarm_block = ReceiverStatusFrame(600, kFineTime);
-    rx.SendSbf(prewarm_block); // too young; must still survive in native SBF context
+    asterx_test::FrameBuilder unknown_builder;
+    unknown_builder.U32(0xFEDCBA98);
+    const auto unknown_block = WithCrc(unknown_builder.finalize(8190, 3));
+    const auto no_finetime_block = ReceiverStatusFrame(1300, 0);
+    const auto ready_block = ReceiverStatusFrame(1300, kFineTime);
+    const auto recording_block = ReceiverStatusFrame(1301, kFineTime);
+    rx.SendSbf(unknown_block); // valid SDK payload with no application decoder
+    rx.SendSbf(prewarm_block); // too young; already part of the same recording
     Pump(200);
     CHECK(h.configured == 0);
 
-    rx.SendSbf(ReceiverStatusFrame(1300, 0)); // old enough, but no FINETIME
+    rx.SendSbf(no_finetime_block); // old enough, but no FINETIME
     Pump(200);
     CHECK(h.configured == 0);
 
-    rx.SendSbf(ReceiverStatusFrame(1300, kFineTime));
-    REQUIRE(SpinUntil([&] { return h.configured > 0; }));
-    CHECK_FALSE(h.fatal);
+    rx.SendSbf(ready_block);
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 1);
+    rx.SendSbf(recording_block);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 5 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
 
     h.session.Shutdown();
-    bool preserved = false;
-    for (const auto &entry : std::filesystem::directory_iterator(dir / "prewarm")) {
-        if (entry.path().extension() != ".sbf") continue;
-        std::ifstream input(entry.path(), std::ios::binary);
-        const std::vector<std::uint8_t> data{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-        if (data.size() >= prewarm_block.size() &&
-            std::equal(prewarm_block.begin(), prewarm_block.end(), data.begin())) preserved = true;
-    }
-    CHECK(preserved);
+    CheckSingleRecording(h.session, dir,
+                         {unknown_block, prewarm_block, no_finetime_block, ready_block, recording_block});
+    CHECK_FALSE(h.session.RecordingIncomplete());
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: ShutdownBeforeWarmUpCompletesPreservesTheRecording") {
+    const auto dir = Scratch("warmup-shutdown");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    const auto frame = ReceiverStatusFrame(100, 1u << 6);
+    rx.SendSbf(frame);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 1 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 0);
+
+    h.session.Shutdown();
+    h.session.Shutdown(); // repeated shutdown must not append or lose anything
+    CheckSingleRecording(h.session, dir, {frame});
+    CHECK_FALSE(h.session.RecordingIncomplete());
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: QueueRefusalBeforeWarmUpCompletesDoesNotOpenTheGate") {
+    const auto dir = Scratch("warmup-queue-refusal");
+    FakeReceiver rx;
+    const auto ready_block = ReceiverStatusFrame(1300, 1u << 6);
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.write_queue_bytes = ready_block.size() - 1; // deterministic refusal, even with an empty queue
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50); // let the final configuration reply enter WarmingUp
+    rx.SendSbf(ready_block);
+
+    REQUIRE(SpinUntil([&] { return h.fatal; }));
+    CHECK(h.configured == 0); // a refused block must not announce readiness
+    CHECK(h.session.RecordingIncomplete());
+    const auto stats = h.session.FinalStatistics();
+    CHECK(stats.at("blocks_written").get<std::uint64_t>() == 0);
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() >= 1);
+    CHECK_FALSE(std::filesystem::exists(dir / "prewarm"));
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: DiskFailureBeforeWarmUpCompletesIsFatal") {
+    const auto dir = Scratch("warmup-disk");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50);
+    std::filesystem::remove_all(dir); // the first queued prewarm block cannot open its file
+    rx.SendSbf(ReceiverStatusFrame(100, 1u << 6));
+
+    REQUIRE(SpinUntil([&] { return h.fatal; }));
+    CHECK(h.configured == 0);
+    CHECK(h.session.RecordingIncomplete());
+    CHECK(h.session.FinalStatistics().at("recording_errors").get<std::uint64_t>() >= 1);
     std::filesystem::remove_all(dir);
 }
 
@@ -535,9 +640,9 @@ TEST_CASE("Session: CrcErrorDuringRecordingIsFatal") {
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("Session: CrcErrorBeforeRecordingOnlyCountsAgainstThePrewarmContext") {
-    // Nothing accepted is lost while the gate is still closed, so the session
-    // keeps going and still opens the gate afterwards.
+TEST_CASE("Session: CrcErrorDuringWarmUpMarksTheRecordingIncompleteButAllowsReadiness") {
+    // Prewarm is part of the recording. A damaged block marks it incomplete,
+    // while the existing warm-up recovery policy still permits the gate to open.
     const auto dir = Scratch("crc-prewarm");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
@@ -552,15 +657,79 @@ TEST_CASE("Session: CrcErrorBeforeRecordingOnlyCountsAgainstThePrewarmContext") 
     rx.SendSbf(damaged);
     Pump(200);
     CHECK_FALSE(h.fatal);
-    CHECK_FALSE(h.session.RecordingIncomplete());
-    rx.SendSbf(ReceiverStatusFrame(1300, 1u << 6)); // the gate opens as usual
+    CHECK(h.session.RecordingIncomplete());
+    const auto ready_block = ReceiverStatusFrame(1300, 1u << 6);
+    rx.SendSbf(ready_block); // the gate opens as usual
     REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
     CHECK_FALSE(h.fatal);
     h.session.Shutdown();
     const auto stats = h.session.FinalStatistics();
     CHECK(stats.at("crc_errors").get<std::uint64_t>() >= 1);
-    CHECK(stats.at("recording_errors").get<std::uint64_t>() == 0);
-    CHECK_FALSE(h.session.RecordingIncomplete());
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() >= 1);
+    CHECK(h.session.RecordingIncomplete());
+    CheckSingleRecording(h.session, dir, {ready_block});
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: UptimeResetDuringWarmUpPreservesAllFramesAndMarksIncomplete") {
+    const auto dir = Scratch("warmup-reset");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50); // ReceiverStatus must reach the warm-up gate after configuration
+    const auto before_reset = ReceiverStatusFrame(500, 1u << 6);
+    const auto after_reset = ReceiverStatusFrame(100, 1u << 6);
+    const auto ready_block = ReceiverStatusFrame(1300, 1u << 6);
+    rx.SendSbf(before_reset);
+    rx.SendSbf(after_reset);
+    REQUIRE(SpinUntil([&] { return h.session.RecordingIncomplete() || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 0);
+    rx.SendSbf(ready_block);
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 1);
+
+    h.session.Shutdown();
+    CheckSingleRecording(h.session, dir, {before_reset, after_reset, ready_block});
+    CHECK(h.session.RecordingIncomplete());
+    const auto stats = h.session.FinalStatistics();
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() >= 1);
+    CHECK(stats.at("known_acquisition_incomplete").get<bool>());
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Session: LinkLossDuringWarmUpPreservesTheRecordingAndMarksIncomplete") {
+    const auto dir = Scratch("warmup-link");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_uptime_s = 1200;
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50);
+    const auto frame = ReceiverStatusFrame(500, 1u << 6);
+    rx.SendSbf(frame);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 1 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    rx.CloseLink();
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("recovery_events").get<std::uint64_t>() >= 1 || h.fatal; }, 1000));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 0);
+
+    h.session.Shutdown(); // stop in backoff; do not wait for the 5 s reconnect timer
+    CheckSingleRecording(h.session, dir, {frame});
+    CHECK_FALSE(h.fatal);
+    CHECK(h.session.RecordingIncomplete());
+    const auto stats = h.session.FinalStatistics();
+    CHECK(stats.at("recovery_events").get<std::uint64_t>() >= 1);
+    CHECK(stats.at("recording_errors").get<std::uint64_t>() >= 1);
+    CHECK(stats.at("known_acquisition_incomplete").get<bool>());
     std::filesystem::remove_all(dir);
 }
 
