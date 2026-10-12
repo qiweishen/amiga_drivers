@@ -92,7 +92,7 @@ for device scan time.
   No plausible timestamp within `ntp.lock_timeout_s` still requests a time-fault stop.
 * **Device health.** Device warning 38 (No NTP signal) produces `NO-SIGNAL`,
   independently of host NTP probes. Missing, malformed, or >30-second-old warning
-  readbacks produce `UNKNOWN`. A clear fresh warning list yields `UNVERIFIED`,
+  readbacks produce `UNKNOWN`. A clear fresh warning list yields `SYNCHRONIZED`,
   not an accuracy guarantee. Disabling telemetry leaves device health unknown.
 * **Step check.** Once locked, the device time must advance in step with the
   device uptime: between consecutive recorded scans
@@ -109,6 +109,18 @@ for device scan time.
 * **Time-fault stop.** A severe time fault requests orderly rig shutdown. The
   triggering scan and queued valid scan payloads remain recordable with their
   original timestamp and quality flags. No synthetic corrected time is written.
+
+The first UTC-regression warning in each acquisition includes `utc_offset_us`
+(current UTC minus previous UTC, also shown in milliseconds), `uptime_delta_us`
+(the unsigned modulo-2^32 uptime delta), and `clock_step_us`
+(`utc_offset_us - uptime_delta_us`). If uptime is discontinuous, `clock_step_us`
+is logged as `n/a`; the UTC offset is still reported. Previous/current Unix UTC
+microseconds and the current `scan_counter` locate the event in the recording.
+For example, a 19 ms UTC regression while uptime advances by 1644 us produces
+`utc_offset_us=-19000` and `clock_step_us=-20644`. These describe changes between
+scans, not an offset measured against the NTP server or another sensor. The
+existing first-warning-only policy is retained; all regressions are still
+counted in `utc_back` and flagged in the HDF5 scan metadata.
 
 After `Run`, `sEN LMDscandata 1` starts the stream. The first telegram is the
 proof that everything took effect: DIST1 + RSSI1/REFL1 + ANGL1 + QLTY1, exactly

@@ -22,7 +22,7 @@ namespace {
     const char *NtpStatusText(lms4xxx::DriverStatistics::NtpStatus status) {
         switch (status) {
             case lms4xxx::DriverStatistics::NtpStatus::kUnverified:
-                return "UNVERIFIED";
+                return "SYNCHRONIZED";
             case lms4xxx::DriverStatistics::NtpStatus::kNoSignal:
                 return "NO-SIGNAL";
             case lms4xxx::DriverStatistics::NtpStatus::kStale:

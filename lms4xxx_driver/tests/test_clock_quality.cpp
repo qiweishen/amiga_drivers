@@ -15,6 +15,8 @@ TEST_CASE("LiDAR recorded 19 ms UTC regression is visible below the old 1000 ms 
     lms4xxx::ClockQualityTracker tracker;
     tracker.Observe(1789103434333000LL, true, 100000, 1000);
     const auto observation = tracker.Observe(1789103434314000LL, true, 101644, 1000);
+    CHECK(observation.utc_delta_us == -19000);
+    CHECK(observation.uptime_delta_us == 1644);
     CHECK(observation.step_us == -20644);
     CHECK((observation.flags & lms4xxx::ClockFlag::kBackwardUtc) != 0);
     CHECK((observation.flags & lms4xxx::ClockFlag::kStepExceeded) == 0);
@@ -26,6 +28,8 @@ TEST_CASE("LiDAR distinguishes timestamp quantization, uptime rollover and reset
     const auto first = tracker.Observe(1000000, true, 0xffffff00u, 1000);
     CHECK((first.flags & lms4xxx::ClockFlag::kFirstSample) != 0);
     const auto rollover = tracker.Observe(1001000, true, 744, 1000);
+    CHECK(rollover.utc_delta_us == 1000);
+    CHECK(rollover.uptime_delta_us == 1000);
     CHECK(rollover.step_us == 0);
     CHECK((rollover.flags & lms4xxx::ClockFlag::kUptimeDiscontinuity) == 0);
     const auto repeated = tracker.Observe(1001000, true, 1744, 1000);
@@ -35,6 +39,23 @@ TEST_CASE("LiDAR distinguishes timestamp quantization, uptime rollover and reset
     CHECK((reset.flags & lms4xxx::ClockFlag::kUptimeDiscontinuity) != 0);
     CHECK((tracker.Observe(0, false, 100, 1000).flags & lms4xxx::ClockFlag::kInvalidTimestamp) != 0);
     CHECK((tracker.Observe(2000000, true, 1000, 1000).flags & lms4xxx::ClockFlag::kFirstSample) != 0);
+}
+
+TEST_CASE("LiDAR UTC regression offset survives an unusable uptime delta") {
+    lms4xxx::ClockQualityTracker tracker;
+    tracker.Observe(1789103434333000LL, true, 100000, 1000);
+    const auto observation = tracker.Observe(1789103434314000LL, true, 100000, 1000);
+    CHECK(observation.utc_delta_us == -19000);
+    CHECK(observation.uptime_delta_us == 0);
+    CHECK((observation.flags & lms4xxx::ClockFlag::kBackwardUtc) != 0);
+    CHECK((observation.flags & lms4xxx::ClockFlag::kUptimeDiscontinuity) != 0);
+
+    const auto invalid = tracker.Observe(0, false, 100100, 1000);
+    CHECK(invalid.utc_delta_us == 0);
+    const auto fresh = tracker.Observe(1789103434343000LL, true, 100200, 1000);
+    CHECK((fresh.flags & lms4xxx::ClockFlag::kFirstSample) != 0);
+    CHECK(fresh.utc_delta_us == 0); // no fabricated offset across an invalid sample
+    CHECK(fresh.uptime_delta_us == 0);
 }
 
 TEST_CASE("LiDAR quality metadata accompanies unmodified scan data into the writer record") {

@@ -308,7 +308,19 @@ namespace lms4xxx {
 
         if (observation.flags & ClockFlag::kBackwardUtc) {
             const auto count = stats.utc_backwards.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (count == 1) g_log.Warn("[{}] Device UTC moved backwards; raw scan order/time retained, timing quality degraded", Tag());
+            if (count == 1) {
+                // UTC regression and UTC/uptime disagreement are different
+                // quantities. An uptime reset still has a measurable UTC offset,
+                // but no interpretable clock step relative to uptime.
+                const auto clock_step = (observation.flags & ClockFlag::kUptimeDiscontinuity)
+                    ? std::string("n/a") : std::to_string(observation.step_us);
+                g_log.Warn("[{}] Device UTC moved backwards: utc_offset_us={} ({:.3f} ms), "
+                           "uptime_delta_us={}, clock_step_us={}, previous_utc_us={}, current_utc_us={}, "
+                           "scan_counter={}; raw scan order/time retained, timing quality degraded",
+                           Tag(), observation.utc_delta_us, observation.utc_delta_us / 1000.0,
+                           observation.uptime_delta_us, clock_step,
+                           device_time_us - observation.utc_delta_us, device_time_us, scan.scan_counter);
+            }
             gate.anomaly_seen = true;
         }
         if (observation.flags & ClockFlag::kRepeatedUtc)

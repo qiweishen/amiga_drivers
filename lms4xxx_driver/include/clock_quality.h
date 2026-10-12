@@ -20,6 +20,10 @@ namespace lms4xxx {
     struct ClockObservation {
         std::uint16_t flags = 0; // 0 = not assessed (e.g. a parser-only consumer)
         std::int64_t step_us = 0; // UTC delta minus unsigned device uptime delta; only valid after first sample
+        // Diagnostics between consecutive plausible timestamps; zero on a
+        // first/invalid sample. Preserve UTC offset even if uptime is unusable.
+        std::int64_t utc_delta_us = 0; // current UTC minus previous UTC (negative = regression)
+        std::uint32_t uptime_delta_us = 0; // raw modulo-2^32 delta; inspect kUptimeDiscontinuity
     };
 
     // Parse-thread owned. No clock correction, sorting, or fabricated samples.
@@ -37,6 +41,8 @@ namespace lms4xxx {
             else {
                 const std::uint32_t du = uptime - previous_uptime_;
                 const auto dt = utc - previous_utc_;
+                out.utc_delta_us = dt;
+                out.uptime_delta_us = du;
                 if (dt < 0) out.flags |= ClockFlag::kBackwardUtc;
                 if (dt == 0) out.flags |= ClockFlag::kRepeatedUtc;
                 // A normal rollover gives a small positive unsigned delta. A
