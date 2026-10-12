@@ -18,7 +18,7 @@ device:
 # --- Receiver ---
 receiver:
     warmup:
-        min_uptime_s: 90                # >= 0; 0 = no uptime gate (Need some time to track all satellites, or p.47)
+        min_recording_s: 90             # >= 0; host monotonic seconds since first queued SBF block; 0 = no duration gate
         require_finetime: false         # ReceiverStatus FINETIME bit (p.374)
 
     ntrip:
@@ -105,7 +105,7 @@ receiver:
             blocks: [ Time ]                                                # time / sync status, PPS offset
             interval: OnChange
         -   id: 8
-            blocks: [ Status ]                                              # ReceiverStatus for the warm-up gate
+            blocks: [ Status ]                                              # ReceiverStatus for FINETIME and reset diagnostics
             interval: OnChange
         -   id: 9
             blocks: [ ReceiverSetup, RxComponents, RxMessage, Commands, Comment, InterfaceStats ]

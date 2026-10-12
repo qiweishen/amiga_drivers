@@ -96,8 +96,8 @@ Every driver app derives from `common::IDriverApp` (`common/include/driver_app.h
 `bool Init(external_stop)` / `void Run()` / `void Shutdown()`, a sticky
 `HasFailed()`, `MicrosSinceLastData()` for the no-data watchdog and a shared
 `TerminateFlag()`. `common::RunSession` initializes the enabled drivers **sequentially**
-(AsteRx first — its warm-up gate holds the whole rig until the receiver has GPS
-time), runs each `Run()` on its own thread, polls all terminate flags every
+(AsteRx first — its warm-up gate holds the whole rig for the configured SBF
+recording duration and optional FINETIME condition), runs each `Run()` on its own thread, polls all terminate flags every
 100 ms together with the rig-wide guards, and propagates the first termination to
 everyone (orderly join + shutdown in reverse order).
 
@@ -436,9 +436,8 @@ of `config/config-main.yaml`:
 
 They are rig-wide because every driver writes under
 `<Output Directory>/<timestamp>/raw/` (one filesystem, one number), and because
-one dead sensor already makes the session incomplete. The abort default is 60 s
-rather than something snappier because AsteRx retries a 30 s SBF silence during
-warm-up by reconnecting: a rig-wide abort at 30 s would race that. Such a gap
+one dead sensor already makes the session incomplete. AsteRx has a separate
+3 s SBF silence timer that reconnects during warm-up. Such a gap
 still marks the unified SBF recording incomplete. Once the warm-up gate opens,
 that same silence timer is fatal (fail-fast). A driver that is not yet ready for
 the rig-wide watchdog — an external trigger with no pulses, a receiver warming up —
@@ -452,7 +451,7 @@ On top of the two, each driver keeps the guards that are specific to its device:
 
 | Driver | Guards |
 |---|---|
-| asterx | Warm-up gate on `ReceiverStatus` up-time / FINETIME controls rig readiness; SBF is recorded throughout. A 30 s SBF silence timer reconnects during warm-up and is fatal after the gate opens. Damage, link gaps and receiver resets always mark the recording incomplete and are fatal after readiness; write failures and queue overflow are fatal in every phase. |
+| asterx | Warm-up gate on host monotonic time since the first queued SBF block, plus optional `ReceiverStatus` FINETIME, controls rig readiness; SBF is recorded throughout. The duration clock continues across warm-up reconnects and file rotation. A 3 s SBF silence timer reconnects during warm-up and is fatal after the gate opens. Damage, link gaps and receiver resets always mark the recording incomplete and are fatal after readiness; write failures and queue overflow are fatal in every phase. |
 | gox | PTP slave-status admission / runtime guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
 | fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
 | lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
@@ -500,7 +499,7 @@ interleaved. The shutdown totals line is `[Statistics] [inst] Final: ...`.
 `fps=` is a GUI contract: `app/services/driver_stats.py` parses it into the
 dashboard's per-sensor cards, and `tools/check_contracts.py` fails if either side
 renames it. AsteRx records a byte stream rather than frames, so it has no `fps=`;
-during the receiver warm-up its line carries `warmup=<up>/<min>  finetime=0|1`
+during the receiver warm-up its line carries `warmup=<recorded>/<min>  finetime=0|1`
 alongside cumulative SBF write and queue counters. The lms4xxx `ntp=` token is `OFF`, `NO-LOCK` (streaming, device clock
 not yet plausible), `SYNCHRONIZED`, `UNKNOWN` (device warning status stale/unknown),
 `NO-SIGNAL` (device NTP warning), `TIME-ANOMALY`, `NO-TS` or `UNREACH`.

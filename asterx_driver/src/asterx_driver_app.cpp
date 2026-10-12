@@ -59,8 +59,9 @@ void AsterxDriverApp::QtThreadMain(asterx::AppConfig cfg) {
         asterx::Session session(std::move(cfg)); // ctor throws if the output dir cannot be created
         session.SetLivenessSlot(&data_reference_us_); // outlives the session
 
-        QObject::connect(&session, &asterx::Session::Configured, &session,
-                         [this] { NotifyBringUp(BringUp::Recording); });
+        QObject::connect(&session, &asterx::Session::Configured, &session, [this] {
+            NotifyBringUp(BringUp::Recording);
+        });
         QObject::connect(&session, &asterx::Session::FatalError, &session, [this, &app] {
             MarkFailed();
             if (BringUpOutcome() == BringUp::Recording) {
@@ -86,7 +87,9 @@ void AsterxDriverApp::QtThreadMain(asterx::AppConfig cfg) {
         app.exec();
         session.Shutdown(); // idempotent: no-op on the fatal path, flush on the quit path
         final_statistics_ = session.FinalStatistics();
-        if (session.RecordingIncomplete()) MarkFailed();
+        if (session.RecordingIncomplete()) {
+            MarkFailed();
+        }
     } catch (const std::exception &e) {
         MarkFailed();
         g_log.Error("AsteRx session error: {}", e.what());

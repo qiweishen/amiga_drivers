@@ -68,7 +68,7 @@ namespace asterx {
             kConnecting,
             kWaitingDescriptor,
             kConfiguring,
-            kWarmingUp, // SBF recording is active; ReceiverStatus gates rig readiness
+            kWarmingUp, // SBF recording duration and optional FINETIME gate rig readiness
             kRecording, // warm-up complete; SBF recording continues in the same file
             kBackoff,
             kStopping,
@@ -90,7 +90,8 @@ namespace asterx {
 
         void EnterRecording();
 
-        // ReceiverStatus blocks drive the warm-up gate (and detect a receiver reset)
+        // ReceiverStatus supplies optional FINETIME and detects a receiver reset;
+        // warm-up duration is measured from the first recorded SBF block.
         void OnReceiverStatus(const QByteArray &block);
 
         void HandleCommandReply(const std::string &reply, bool error);

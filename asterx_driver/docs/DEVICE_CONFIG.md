@@ -62,11 +62,13 @@ v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.p
 * **The yaml is the single source of truth.** Every documented key is
   required, and an unknown or misspelled key is a startup error — a typo can
   never leave a compiled-in default in force.
-* **Warm-up gate.** Rig readiness requires `ReceiverStatus.UpTime` ≥
-  `receiver.warmup.min_uptime_s`, plus `RxState` bit 6 FINETIME when
-  `receiver.warmup.require_finetime` is enabled. The shipped YAML uses 90 s
-  and does not require FINETIME. `Init()` blocks until the configured conditions
-  hold, while AsteRx already records all received SBF blocks through the shared writer.
+* **Warm-up gate.** Rig readiness requires at least
+  `receiver.warmup.min_recording_s` of host monotonic time since the first
+  nonempty SBF block is accepted by the recording queue, plus `RxState` bit 6
+  FINETIME when `receiver.warmup.require_finetime` is enabled. The shipped YAML
+  uses 90 s and does not require FINETIME. `Init()` blocks until the configured
+  conditions hold, while AsteRx already records all received SBF blocks through
+  the shared writer. Receiver uptime does not advance or satisfy this duration.
 * **A failed disk write stops the driver.** `SbfWriter::WriteBlock` reports
   failure, the Session logs it at critical level, emits `FatalError` and the
   rig shuts down. The .sbf file is the record of truth; a write that cannot
@@ -129,17 +131,24 @@ Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
 `Configuring receiver on IPxx (N commands)` → `AsteRx Capabilities: …` →
 `Antenna types verified …` → one `Verified <Key> (<payload>)` per readback →
 `Verified running configuration: M command(s), all ours` →
-`Streams enabled — warming up (min uptime 20:00, FINETIME required)` → every
-30 s `Receiver warming up: up 07:12 / 20:00, FINETIME not yet set` →
-`Warm-up complete; rig ready (receiver up 20:01, FINETIME set)`.
+`Streams enabled — warming up (min SBF recording 20:00, FINETIME required)` → every
+3 s `Receiver warming up: recorded 07:12 / 20:00, FINETIME not yet set` →
+`Warm-up complete; rig ready (SBF recorded 20:01, FINETIME set)`.
 
 ## Warm-up gate
 
-* Source: `ReceiverStatus` (4014, 1 Hz at `OnChange`) — `UpTime` = "Number of
-  seconds elapsed since the start-up of the receiver, or since the last reset"
-  (p.373); `RxState` bit 6 FINETIME (p.374). The yaml must therefore keep
-  `ReceiverStatus` (or the `Status` group) in a stream at an interval other
-  than `off`; validation enforces both.
+* Duration source: the host monotonic clock, starting when the first nonempty
+  SBF block is successfully accepted by the shared recording queue. Blocks
+  received during receiver configuration count; starting the session or
+  connecting the socket does not start this clock. The configured interval is
+  elapsed time from this first block, not accumulated block transmission or
+  disk-write time. A rejected block cannot start the clock.
+* `ReceiverStatus` (4014, 1 Hz at `OnChange`) supplies `RxState` bit 6 FINETIME
+  (p.374) when that condition is enabled. This requires a fresh status after
+  configuration completes; a status received during configuration cannot
+  satisfy FINETIME readiness. Its `UpTime` field (p.373) remains a receiver-reset
+  diagnostic only. The yaml must keep `ReceiverStatus` (or the `Status` group)
+  in a stream at an interval other than `off`; validation enforces both.
 * During warm-up every SDK-delivered SBF block, including unknown block IDs,
   enters the same asynchronous queue as later data, and the live `live_*.csv`
   sidecars continue to update. The block that opens the gate is recorded once.
@@ -149,14 +158,21 @@ Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
   the drivers sequentially with AsteRx first, so the other drivers wait for
   receiver warm-up while AsteRx is already recording. Ctrl+C aborts and drains
   the queued warm-up blocks to disk.
-* Warm-up completion and warm-up reconnects never force a new SBF file. Normal
-  `output.rotation.max_bytes`/`max_interval_s` limits still apply across all phases.
+* Warm-up completion and warm-up reconnects never force a new SBF file or
+  restart the elapsed-time clock. Normal `output.rotation.max_bytes`/
+  `max_interval_s` limits still apply across all phases; file rotation also
+  leaves the clock running.
 * A receiver reset during warm-up normally drops the TCP session: the
-  reconnect path reconfigures and warms up again, while marking the recording
-  incomplete. An observed drop of `UpTime` during warm-up also marks it
-  incomplete; after the gate opens, that drop is fatal (see the rules above).
-* `receiver.warmup.min_uptime_s: 0` with `require_finetime: false` disables
-  the gate (bench tests).
+  reconnect path reconfigures and reevaluates readiness, while marking the
+  recording incomplete. The duration continues across the gap, but receiver
+  status and FINETIME are reset for the new connection. An observed drop of
+  `UpTime` during warm-up also marks it incomplete; after the gate opens, that
+  drop is fatal (see the rules above).
+* `receiver.warmup.min_recording_s: 0` with `require_finetime: false` disables
+  the gate immediately (bench tests).
+* The duration key was renamed from `receiver.warmup.min_uptime_s` to
+  `receiver.warmup.min_recording_s`. Update existing configurations: the old
+  key is rejected by strict schema validation and has no compatibility alias.
 
 ## Antenna types
 

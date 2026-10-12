@@ -6,9 +6,10 @@
 // cover reply<->command binding, listing completion and the stray prompts SsnRx
 // generates on its own.
 //
-// Timer-driven paths (15 s command timeout, 30 s SBF watchdog, 5 s backoff) are
-// deliberately not covered: their constants are not injectable and wall-clock
-// waits do not belong in a unit test.
+// Timer-driven failure paths (15 s command timeout, 3 s SBF watchdog, 5 s backoff)
+// are deliberately not covered: their constants are not injectable. The short
+// recording-duration integration cases below use 1 s waits to exercise Session;
+// WarmupGate boundary tests use explicit time_points without wall-clock waits.
 
 #include <filesystem>
 #include <fstream>
@@ -284,7 +285,7 @@ namespace {
         s.password = "secret";
         s.antenna.lever_arm_m = asterx::Vec3{0.1, -0.2, 0.3};
         s.sbf_streams = {{1, {"Status"}, "OnChange"}};
-        s.warmup.min_uptime_s = 0; // most tests are about the command sequence
+        s.warmup.min_recording_s = 0; // most tests are about the command sequence
         s.warmup.require_finetime = false;
         return s;
     }
@@ -473,16 +474,32 @@ TEST_CASE("Session: SbfArrivingBeforeTheResetIsPreservedInTheRecording") {
             rx.SendSbf(frame);
         }
     };
-    Harness h(MakeConfig(dir, rx.Port()));
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_recording_s = 1;
+    cfg.receiver.warmup.require_finetime = false;
+    Harness h(std::move(cfg));
     h.session.Start();
 
-    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }));
-    CHECK_FALSE(h.fatal);
-    CHECK(h.configured == 1);
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 2 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
     REQUIRE(sent);
+    QElapsedTimer recorded;
+    recorded.start(); // conservatively measure from writes, after queue acceptance
+    Pump(50); // finish the last configuration reply and enter WarmingUp
+    CHECK(h.configured == 0);
+    REQUIRE(SpinUntil([&] { return recorded.elapsed() >= 1100 || h.fatal; }, 2000));
+    REQUIRE_FALSE(h.fatal);
+    rx.SendSbf(frame); // re-evaluate the duration that began during configuration
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }, 500));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 1);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 3 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
 
     h.session.Shutdown();
-    CheckSingleRecording(h.session, dir, {frame, frame});
+    CheckSingleRecording(h.session, dir, {frame, frame, frame});
     CHECK_FALSE(h.session.RecordingIncomplete());
     std::filesystem::remove_all(dir);
 }
@@ -491,19 +508,19 @@ TEST_CASE("Session: WarmUpGateDelaysConfiguredButKeepsAllSbfInOneFile") {
     const auto dir = Scratch("warmup");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 1;
     cfg.receiver.warmup.require_finetime = true;
     Harness h(std::move(cfg));
     h.session.Start();
 
-    // ReceiverStatus gates Configured; raw recording already accepts every block.
+    // Waiting before the first SBF block must not count as recording time.
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange"); }));
-    Pump(200); // let any pending signal land
+    Pump(1100);
     CHECK(h.configured == 0);
     CHECK_FALSE(h.fatal);
 
     constexpr std::uint32_t kFineTime = 1u << 6;
-    const auto prewarm_block = ReceiverStatusFrame(600, kFineTime);
+    const auto prewarm_block = ReceiverStatusFrame(1300, kFineTime);
     asterx_test::FrameBuilder unknown_builder;
     unknown_builder.U32(0xFEDCBA98);
     const auto unknown_block = WithCrc(unknown_builder.finalize(8190, 3));
@@ -511,12 +528,20 @@ TEST_CASE("Session: WarmUpGateDelaysConfiguredButKeepsAllSbfInOneFile") {
     const auto ready_block = ReceiverStatusFrame(1300, kFineTime);
     const auto recording_block = ReceiverStatusFrame(1301, kFineTime);
     rx.SendSbf(unknown_block); // valid SDK payload with no application decoder
-    rx.SendSbf(prewarm_block); // too young; already part of the same recording
+    rx.SendSbf(prewarm_block); // a high receiver uptime must not open the gate early
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 2 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    QElapsedTimer recorded;
+    recorded.start(); // file writes follow queue acceptance, so this is conservative
     Pump(200);
     CHECK(h.configured == 0);
 
-    rx.SendSbf(no_finetime_block); // old enough, but no FINETIME
-    Pump(200);
+    rx.SendSbf(no_finetime_block);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 3 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    REQUIRE(SpinUntil([&] { return recorded.elapsed() >= 1100 || h.fatal; }, 2000));
+    REQUIRE_FALSE(h.fatal);
+    // Enough recording time has elapsed, but FINETIME is still required.
     CHECK(h.configured == 0);
 
     rx.SendSbf(ready_block);
@@ -534,11 +559,48 @@ TEST_CASE("Session: WarmUpGateDelaysConfiguredButKeepsAllSbfInOneFile") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("Session: RecordingDurationGateCanOpenWithoutReceiverStatus") {
+    const auto dir = Scratch("warmup-no-status");
+    FakeReceiver rx;
+    auto cfg = MakeConfig(dir, rx.Port());
+    cfg.receiver.warmup.min_recording_s = 1;
+    cfg.receiver.warmup.require_finetime = false;
+    Harness h(std::move(cfg));
+    h.session.Start();
+    REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    Pump(50);
+
+    asterx_test::FrameBuilder unknown_builder;
+    unknown_builder.U32(0xFEDCBA98);
+    const auto unknown_block = WithCrc(unknown_builder.finalize(8190, 3));
+    rx.SendSbf(unknown_block);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 1 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 0);
+
+    QElapsedTimer recorded;
+    recorded.start();
+    REQUIRE(SpinUntil([&] { return recorded.elapsed() >= 1100 || h.fatal; }, 2000));
+    REQUIRE_FALSE(h.fatal);
+    rx.SendSbf(unknown_block); // any valid SBF block can re-evaluate elapsed time
+    REQUIRE(SpinUntil([&] { return h.configured > 0 || h.fatal; }, 1000));
+    REQUIRE_FALSE(h.fatal);
+    CHECK(h.configured == 1);
+    REQUIRE(SpinUntil([&] { return h.session.FinalStatistics().at("blocks_written").get<std::uint64_t>() == 2 || h.fatal; }));
+    REQUIRE_FALSE(h.fatal);
+
+    h.session.Shutdown();
+    CheckSingleRecording(h.session, dir, {unknown_block, unknown_block});
+    CHECK_FALSE(h.session.RecordingIncomplete());
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("Session: ShutdownBeforeWarmUpCompletesPreservesTheRecording") {
     const auto dir = Scratch("warmup-shutdown");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 1200;
     Harness h(std::move(cfg));
     h.session.Start();
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
@@ -561,7 +623,8 @@ TEST_CASE("Session: QueueRefusalBeforeWarmUpCompletesDoesNotOpenTheGate") {
     FakeReceiver rx;
     const auto ready_block = ReceiverStatusFrame(1300, 1u << 6);
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 0;
+    cfg.receiver.warmup.require_finetime = true;
     cfg.write_queue_bytes = ready_block.size() - 1; // deterministic refusal, even with an empty queue
     Harness h(std::move(cfg));
     h.session.Start();
@@ -584,7 +647,7 @@ TEST_CASE("Session: DiskFailureBeforeWarmUpCompletesIsFatal") {
     const auto dir = Scratch("warmup-disk");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 1200;
     Harness h(std::move(cfg));
     h.session.Start();
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
@@ -646,7 +709,8 @@ TEST_CASE("Session: CrcErrorDuringWarmUpMarksTheRecordingIncompleteButAllowsRead
     const auto dir = Scratch("crc-prewarm");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 0;
+    cfg.receiver.warmup.require_finetime = true;
     Harness h(cfg);
     h.session.Start();
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
@@ -675,14 +739,15 @@ TEST_CASE("Session: UptimeResetDuringWarmUpPreservesAllFramesAndMarksIncomplete"
     const auto dir = Scratch("warmup-reset");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 0;
+    cfg.receiver.warmup.require_finetime = true;
     Harness h(std::move(cfg));
     h.session.Start();
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));
     REQUIRE_FALSE(h.fatal);
     Pump(50); // ReceiverStatus must reach the warm-up gate after configuration
-    const auto before_reset = ReceiverStatusFrame(500, 1u << 6);
-    const auto after_reset = ReceiverStatusFrame(100, 1u << 6);
+    const auto before_reset = ReceiverStatusFrame(500, 0);
+    const auto after_reset = ReceiverStatusFrame(100, 0);
     const auto ready_block = ReceiverStatusFrame(1300, 1u << 6);
     rx.SendSbf(before_reset);
     rx.SendSbf(after_reset);
@@ -707,7 +772,7 @@ TEST_CASE("Session: LinkLossDuringWarmUpPreservesTheRecordingAndMarksIncomplete"
     const auto dir = Scratch("warmup-link");
     FakeReceiver rx;
     auto cfg = MakeConfig(dir, rx.Port());
-    cfg.receiver.warmup.min_uptime_s = 1200;
+    cfg.receiver.warmup.min_recording_s = 1200;
     Harness h(std::move(cfg));
     h.session.Start();
     REQUIRE(SpinUntil([&] { return rx.Saw("setSBFOutput, Stream1, IP10, Status, OnChange") || h.fatal; }));

@@ -17,7 +17,7 @@ device:
     user: "amiga"
     password: "secret"
 receiver:
-    warmup: { min_uptime_s: 1200, require_finetime: true }
+    warmup: { min_recording_s: 1200, require_finetime: true }
     ntrip: { enabled: false, caster: www.example.com, port: 2101, username: "<?>", password: "<?>", mount_point: MP, version: v2, tls: false, send_gga_to_caster: auto }
     antenna:
         main_antenna_type: Unknown
@@ -79,7 +79,7 @@ TEST_CASE("config: the complete schema loads") {
     CHECK(cfg.ctrl_port == 28784);
     CHECK(cfg.receiver.user == "amiga");
     CHECK(cfg.receiver.password == "secret");
-    CHECK(cfg.receiver.warmup.min_uptime_s == 1200);
+    CHECK(cfg.receiver.warmup.min_recording_s == 1200);
     CHECK(cfg.receiver.warmup.require_finetime);
     CHECK_FALSE(cfg.receiver.ntrip.enabled);
     CHECK(cfg.receiver.ntrip.version == "v2");
@@ -107,9 +107,9 @@ TEST_CASE("config: the shipped yaml loads and drives the real sequence") {
     const auto cfg = LoadAppConfig(std::string(ASTERX_CONFIG_DIR) + "/config-asterx.yaml");
     CHECK(cfg.receiver.time_system.pps.polarity == "Low2High");
     CHECK_FALSE(cfg.receiver.ntrip.enabled); // placeholders until credentials are filled in
-    // This profile explicitly opts out of both gates; omitted-key defaults
-    // remain 1200 s / FINETIME and are tested independently below.
-    CHECK(cfg.receiver.warmup.min_uptime_s == 0);
+    // This profile requires 90 s of recording but does not require FINETIME;
+    // omitted-key defaults remain 1200 s / FINETIME and are tested below.
+    CHECK(cfg.receiver.warmup.min_recording_s == 90);
     CHECK_FALSE(cfg.receiver.warmup.require_finetime);
     CHECK(cfg.stats_period_ms == 2500);
     CHECK(cfg.rotate_bytes == 1073741824ull);
@@ -136,7 +136,9 @@ TEST_CASE("config: unknown keys are errors naming the key and the accepted set")
     CHECK(Mentions(err, "unknown key 'receiver.time_system.ptp_sever'"));
     CHECK(Mentions(err, "accepts only: ptp_server, ntp_server, pps"));
 
-    CHECK(Mentions(ErrorOf(Replaced("min_uptime_s: 1200", "min_uptime_sec: 1200")), "receiver.warmup.min_uptime_sec"));
+    CHECK(Mentions(ErrorOf(Replaced("min_recording_s: 1200", "min_recording_sec: 1200")), "receiver.warmup.min_recording_sec"));
+    CHECK(Mentions(ErrorOf(Replaced("min_recording_s: 1200", "min_uptime_s: 1200")),
+                   "unknown key 'receiver.warmup.min_uptime_s'"));
     CHECK(Mentions(ErrorOf(Replaced("    navigation:", "    navigatoin:")), "unknown key 'receiver.navigatoin'"));
     CHECK(Mentions(ErrorOf(std::string(kBase) + "unexpected_top_level: 1\n"), "unknown key 'unexpected_top_level'"));
     CHECK(Mentions(ErrorOf(std::string(kBase) + "stats_period_s: 1\n"), "unknown key 'stats_period_s'"));
@@ -163,7 +165,7 @@ TEST_CASE("config: required keys, blank and null values") {
     CHECK(Mentions(ErrorOf("receiver:\n    sbf_streams: []\n"), "device: is required"));
     CHECK(Mentions(ErrorOf(Replaced("{ x: 0.1, y: -0.2, z: 0.3 }", "{ x: 0.1, y: -0.2, w: 1 }")),
                    "unknown key 'receiver.antenna.antenna_lever_arm_m.w'"));
-    CHECK(Mentions(ErrorOf(Replaced("min_uptime_s: 1200", "min_uptime_s:")), "receiver.warmup.min_uptime_s: has an invalid value"));
+    CHECK(Mentions(ErrorOf(Replaced("min_recording_s: 1200", "min_recording_s:")), "receiver.warmup.min_recording_s: has an invalid value"));
 }
 
 TEST_CASE("config: omitted optional blocks keep the defaults") {
@@ -176,7 +178,7 @@ receiver:
     CHECK(cfg.ctrl_port == 28784);
     CHECK(cfg.receiver.antenna.aux_type == "Unknown");
     CHECK(cfg.receiver.antenna.lever_arm_m.z == doctest::Approx(0.0));
-    CHECK(cfg.receiver.warmup.min_uptime_s == 1200);
+    CHECK(cfg.receiver.warmup.min_recording_s == 1200);
     CHECK(cfg.receiver.time_system.pps.interval == "sec1");
     CHECK(cfg.receiver.warmup.require_finetime);
     CHECK(cfg.receiver.sbf_streams[0].interval == "OnChange");
@@ -208,8 +210,8 @@ TEST_CASE("config: invalid values are rejected with the key path") {
     CHECK_FALSE(ErrorOf(Replaced("satellite_tracking: all", "satellite_tracking: G37")).empty());
     CHECK_FALSE(ErrorOf(Replaced("satellite_usage: all", "satellite_usage: G33")).empty()); // usage stops at G32
     CHECK(ErrorOf(Replaced("satellite_tracking: all", "satellite_tracking: G38")).empty());
-    CHECK_FALSE(ErrorOf(Replaced("min_uptime_s: 1200", "min_uptime_s: -1")).empty());
-    CHECK(ErrorOf(Replaced("min_uptime_s: 1200", "min_uptime_s: 0")).empty());
+    CHECK_FALSE(ErrorOf(Replaced("min_recording_s: 1200", "min_recording_s: -1")).empty());
+    CHECK(ErrorOf(Replaced("min_recording_s: 1200", "min_recording_s: 0")).empty());
     CHECK_FALSE(ErrorOf(Replaced("theta_y_deg: 0.0", "theta_y_deg: 91.0")).empty());
     CHECK_FALSE(ErrorOf(Replaced("theta_x_deg: 0.0", "theta_x_deg: 181.0")).empty());
     CHECK(Mentions(ErrorOf(Replaced("z: 0.3 }", "z: 101 }")), "antenna_lever_arm_m.z"));
@@ -220,7 +222,7 @@ TEST_CASE("config: invalid values are rejected with the key path") {
 }
 
 TEST_CASE("config: stream rules") {
-    // At least one stream must carry ReceiverStatus for the warm-up gate
+    // ReceiverStatus supplies optional FINETIME readiness and receiver-reset diagnostics.
     CHECK(Mentions(ErrorOf(Replaced("        - { id: 8, blocks: [ Status ], interval: OnChange }\n", "")), "ReceiverStatus"));
     CHECK_FALSE(ErrorOf(Replaced("- { id: 1, blocks: [ Measurements ], interval: OnChange }",
                                  "- { id: 8, blocks: [ Measurements ], interval: OnChange }")).empty());

@@ -18,9 +18,9 @@ namespace asterx {
         constexpr int kConnectTimeoutMs = 5000; // TCP connect deadline (QTcpSocket's own timeout is ~30 s)
         constexpr int kRetryDelayMs = 5000; // fixed backoff: the peer is a LAN receiver
         constexpr int kRecoveryTimeoutMs = 60000; // total, including reconfiguration and warm-up
-        constexpr int kWatchdogMs = 30000; // link up but no SBF -> reconnect
+        constexpr int kWatchdogMs = 3000; // link up but no SBF -> reconnect
         constexpr int kCommandTimeoutMs = 15000; // no reply to a configure command
-        constexpr int kWarmupLogMs = 30000; // warm-up progress line
+        constexpr int kWarmupLogMs = 3000; // warm-up progress line
 
         // Command replies can be multi-line; compact them for single-line logging.
         using common::StringUtil::EqualsCi;
@@ -75,7 +75,8 @@ namespace asterx {
         connect(&stats_timer_, &QTimer::timeout, this, [this]() { OnStatsTimer(); });
         connect(&warmup_log_timer_, &QTimer::timeout, this, [this]() {
             if (state_ == State::kWarmingUp) {
-                g_log.Info("Receiver warming up: {}", warmup_.Progress());
+                if (warmup_.Ready()) EnterRecording();
+                else g_log.Info("Receiver warming up: {}", warmup_.Progress());
             }
         });
     }
@@ -171,6 +172,9 @@ namespace asterx {
 
 
     void Session::Start() {
+        warmup_.min_recording_s = cfg_.receiver.warmup.min_recording_s;
+        warmup_.require_finetime = cfg_.receiver.warmup.require_finetime;
+        warmup_.Reset();
         writer_.Start();
         stats_timer_.start(cfg_.stats_period_ms);
         StartConnect();
@@ -179,6 +183,7 @@ namespace asterx {
 
     void Session::StartConnect() {
         state_ = State::kConnecting;
+        warmup_.ResetReceiverStatus();
         descriptor_.clear();
         cmds_.clear();
         cmd_index_ = 0;
@@ -336,9 +341,10 @@ namespace asterx {
         // The configure sequence succeeded: a link loss from here on reconnects instead of failing startup
         ever_configured_ = true;
         command_timer_.stop();
-        warmup_.min_uptime_s = cfg_.receiver.warmup.min_uptime_s;
-        warmup_.require_finetime = cfg_.receiver.warmup.require_finetime;
-        warmup_.Reset();
+        // SBF may already have been queued during configuration. Its first-block
+        // timestamp is the warm-up origin and must survive this phase transition.
+        // FINETIME still requires fresh receiver status after configuration.
+        warmup_.ResetReceiverStatus();
         watchdog_timer_.start(kWatchdogMs);
         // Main's no-data watchdog stays off until the rig is ready. SBF is
         // already recorded; the local watchdog above covers warm-up silence.
@@ -347,14 +353,21 @@ namespace asterx {
             EnterRecording();
             return;
         }
-        g_log.Info("Streams enabled — warming up (min uptime {}, FINETIME {})",
-                   warmup_.min_uptime_s > 0 ? FormatHms(static_cast<std::uint32_t>(warmup_.min_uptime_s)) : "off",
+        g_log.Info("Streams enabled — warming up (min SBF recording {}, FINETIME {})",
+                   warmup_.min_recording_s > 0 ? FormatHms(static_cast<std::uint32_t>(warmup_.min_recording_s)) : "off",
                    warmup_.require_finetime ? "required" : "not required");
         warmup_log_timer_.start(kWarmupLogMs);
     }
 
 
     void Session::EnterRecording() {
+        if (state_ != State::kWarmingUp) return;
+        // Readiness can be checked by a timer without a new Enqueue(). Honor
+        // writer failure even if its queued Qt notification has not run yet.
+        if (writer_.Failed()) {
+            OnWriteFailed();
+            return;
+        }
         // Readiness changes, but the SBF queue and current file stay open.
         recovery_timer_.stop();
         state_ = State::kRecording;
@@ -363,8 +376,8 @@ namespace asterx {
         watchdog_timer_.start(kWatchdogMs);
         // Arms Main's no-data watchdog: from here on silence means lost data.
         PublishLiveness(common::TimeUtil::SteadyNowUs());
-        if (warmup_.up_time_s) {
-            g_log.Info("Warm-up complete; rig ready (receiver up {}, FINETIME {})", FormatHms(*warmup_.up_time_s),
+        if (const auto elapsed = warmup_.RecordingElapsedSeconds()) {
+            g_log.Info("Warm-up complete; rig ready (SBF recorded {}, FINETIME {})", FormatHms(*elapsed),
                        warmup_.finetime ? "set" : "not set");
         } else {
             g_log.Info("Rig ready (warm-up gate off)");
@@ -394,9 +407,6 @@ namespace asterx {
                 g_log.Warn("Receiver up-time went backwards ({} -> {}) during warm-up; recording is INCOMPLETE",
                            FormatHms(previous), FormatHms(status.up_time));
             }
-            if (warmup_.Ready()) {
-                EnterRecording();
-            }
             return;
         }
         if (state_ == State::kRecording && went_back) {
@@ -420,7 +430,7 @@ namespace asterx {
         const auto *bytes = reinterpret_cast<const std::uint8_t *>(block.constData());
         const auto size = static_cast<std::size_t>(block.size());
         // Preserve every SDK-delivered block in arrival order, including startup
-        // and warm-up. Enqueue the gate-opening ReceiverStatus exactly once before
+        // and warm-up. Enqueue the gate-opening block exactly once before
         // it can release the other drivers through Configured().
         if (!writer_.Enqueue(block)) {
             // Refused: the disk fell behind for longer than the queue budget, or a
@@ -432,12 +442,16 @@ namespace asterx {
             emit FatalError();
             return;
         }
+        if (!block.isEmpty()) warmup_.StartRecording();
         // Live CSV side channel: noexcept, degrades itself; the .sbf path stays authoritative
         live_.OnBlock(bytes, size);
         if (state_ == State::kWarmingUp || state_ == State::kRecording) {
             watchdog_timer_.start(kWatchdogMs);
             OnReceiverStatus(block);
         }
+        // Time readiness does not require a new ReceiverStatus when other SBF
+        // blocks are arriving and FINETIME is already satisfied or optional.
+        if (state_ == State::kWarmingUp && warmup_.Ready()) EnterRecording();
         if (state_ == State::kRecording) {
             PublishLiveness(common::TimeUtil::SteadyNowUs());
         }
@@ -571,13 +585,14 @@ namespace asterx {
     void Session::OnStatsTimer() {
         if (state_ == State::kWarmingUp) {
             const auto s = writer_.GetStats();
+            const auto elapsed = warmup_.RecordingElapsedSeconds();
             g_log.Info(
                 "[Statistics] warmup={}  finetime={}  crc_fail={}  length_errors={}  discarded_bytes={}  temperature={}°C  "
                 "blocks={}  bytes={}  files={}  queue_pending={}  queue_max={}",
-                warmup_.up_time_s
-                    ? FormatHms(*warmup_.up_time_s) + "/" +
-                      (warmup_.min_uptime_s > 0
-                           ? FormatHms(static_cast<std::uint32_t>(warmup_.min_uptime_s))
+                elapsed
+                    ? FormatHms(*elapsed) + "/" +
+                      (warmup_.min_recording_s > 0
+                           ? FormatHms(static_cast<std::uint32_t>(warmup_.min_recording_s))
                            : "off")
                     : std::string("waiting"),
                 warmup_.finetime ? 1 : 0, crc_errors_, length_errors_, discarded_bytes_, temperature_,

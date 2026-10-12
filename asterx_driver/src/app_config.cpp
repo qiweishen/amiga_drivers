@@ -40,8 +40,8 @@ namespace asterx {
         }
 
         void ParseWarmup(const YAML::Node &r, WarmupSettings &w) {
-            const YAML::Node n = OptionalMap(r, "receiver", "warmup", {"min_uptime_s", "require_finetime"});
-            Read(n, "receiver.warmup", "min_uptime_s", w.min_uptime_s);
+            const YAML::Node n = OptionalMap(r, "receiver", "warmup", {"min_recording_s", "require_finetime"});
+            Read(n, "receiver.warmup", "min_recording_s", w.min_recording_s);
             Read(n, "receiver.warmup", "require_finetime", w.require_finetime);
         }
 

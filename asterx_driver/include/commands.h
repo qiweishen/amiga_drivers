@@ -111,7 +111,7 @@ namespace asterx {
 
     // receiver.warmup
     struct WarmupSettings {
-        int min_uptime_s{1200}; // ReceiverStatus.UpTime; 0 = no uptime gate
+        int min_recording_s{1200}; // Host monotonic time since the first queued SBF block; 0 = no duration gate
         bool require_finetime{true}; // ReceiverStatus.RxState bit 6
     };
 

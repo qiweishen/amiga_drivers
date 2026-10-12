@@ -913,8 +913,8 @@ namespace asterx {
         }
 
         // warmup
-        if (settings.warmup.min_uptime_s < 0) {
-            throw ConfigError("receiver.warmup.min_uptime_s must be >= 0");
+        if (settings.warmup.min_recording_s < 0) {
+            throw ConfigError("receiver.warmup.min_recording_s must be >= 0");
         }
 
         // streams
@@ -936,8 +936,8 @@ namespace asterx {
             (void) BuildSbfOutputCommand(s, "IP10");
         }
         if (!has_receiver_status) {
-            throw ConfigError("receiver.sbf_streams must include ReceiverStatus (or the Status group): the warm-up "
-                "gate reads its UpTime and FINETIME bits");
+            throw ConfigError("receiver.sbf_streams must include ReceiverStatus (or the Status group): FINETIME "
+                "supports warm-up readiness and UpTime detects receiver resets");
         }
         std::unordered_set<int> nmea_ids;
         for (const auto &s: settings.nmea_streams) {
