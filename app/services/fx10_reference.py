@@ -1,4 +1,4 @@
-"""Collect a persistent FX10 white/dark pair with the saved driver configuration."""
+"""Collect a persistent FX10 white/dark pair with the shared snapshot configuration."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def _duration(value: object) -> float:
 
 def configured_duration() -> tuple[Path, float | None]:
     """For page display only; the collector announces its actual loaded value."""
-    loaded = config_store.read("fx10")
+    loaded = config_store.read("fx10_snapshot")
     doc = yaml.safe_load(loaded.text)
     if doc is None:
         doc = {}
@@ -67,8 +67,7 @@ def status() -> str:
 
 
 def guard_reason() -> str | None:
-    # Reference collection can use the shared trigger controller, even when the
-    # main recording has FX10 disabled. It needs the whole rig to be idle.
+    # Keep the existing whole-rig idle requirement for persistent reference capture.
     return camera_operations.guard_reason(None)
 
 
@@ -117,7 +116,7 @@ async def collect_reference() -> ReferenceResult:
 async def _collect() -> ReferenceResult:
     global _status, _last_result
     started = time.monotonic()
-    _status = "Preparing reference capture using the saved FX10 configuration…"
+    _status = "Preparing reference capture using the saved FX10 snapshot configuration…"
     _last_result = None
     proc = None
     completed = None
@@ -137,19 +136,16 @@ async def _collect() -> ReferenceResult:
             raise RuntimeError("A reference collector is already running")
         if await runtime.pgrep("AmigaDrivers"):
             raise RuntimeError("Stop the main recording before collecting references")
-        config = config_store.get("fx10")
+        config = config_store.get("fx10_snapshot")
         settings = config_store.main_settings()
         output_root = settings["output_dir"]
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
-        # The SensorSync board's port is the rig's (config-main.yaml), so the tool
-        # receives it explicitly; it only needs it when sensor_trigger is enabled.
+        # The shared snapshot config selects freerun with SensorSync disabled.
         argv = [
             runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config.path),
             "--out", runtime.exec_path(output_root),
         ]
-        if settings["sensor_trigger_port"]:
-            argv += ["--sensor-port", settings["sensor_trigger_port"]]
         proc = await tool_jobs.spawn(argv)
 
         async def read_stdout() -> None:

@@ -3,6 +3,7 @@ so every comment survives; the C++ loaders remain the final validators)."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from yaml.nodes import MappingNode, ScalarNode
+from yaml.tokens import AliasToken, AnchorToken
 
 from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile
 from ..state import STATE
@@ -50,7 +53,7 @@ def _checked_config(file: ConfigFile) -> ConfigFile:
 
 def get(config_id: str) -> ConfigFile:
     template = CONFIG_FILES[config_id]
-    if config_id == "main":
+    if config_id in ("main", "fx10_snapshot"):
         return _checked_config(ConfigFile(template.id, template.label, template.path.resolve()))
     general = _main_document().get("General") or {}
     default = template.path.relative_to(REPO_ROOT).as_posix()
@@ -61,8 +64,10 @@ def get(config_id: str) -> ConfigFile:
     return _checked_config(ConfigFile(template.id, template.label, path.resolve()))
 
 
-def _main_document() -> dict:
-    doc = yaml.safe_load(get("main").path.read_text(encoding="utf-8"))
+def _main_document(text: str | None = None) -> dict:
+    if text is None:
+        text = get("main").path.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
     if doc is None:
         doc = {}
     if not isinstance(doc, dict) or ("General" in doc and not isinstance(doc["General"], dict)):
@@ -137,7 +142,8 @@ def save(config_id: str, text: str, expected_mtime: int | None, *,
 
 def main_settings() -> dict:
     """Parsed view of config-main.yaml (read-only; editing stays text-level)."""
-    doc = _main_document()
+    text = read("main").text
+    doc = _main_document(text)
     general = doc.get("General") or {}
     enables = {}
     for driver, key in ENABLE_KEYS.items():
@@ -153,15 +159,29 @@ def main_settings() -> dict:
         raise ValueError("Sensor Trigger.Port must be a string")
     if sensor_trigger_port and not Path(sensor_trigger_port).is_absolute():
         raise ValueError("Sensor Trigger.Port must be an absolute device path or empty")
-    output_dir = str(general.get("Output Directory", "./data"))
+    # yaml-cpp reads scalar text as-is, including unquoted numbers or words
+    # such as yes. PyYAML's constructed booleans would lose that spelling.
+    nodes = _main_field_nodes(text, allow_missing=True)
+    metadata = {}
+    for key, default in (("Operator", "Anonymous"), ("Field", "Unknown"), ("Output Directory", "./data")):
+        node = nodes.get(key)
+        if node is None:
+            metadata[key] = default
+        elif not isinstance(node, ScalarNode) or node.tag == "tag:yaml.org,2002:null":
+            raise ValueError(f"General.{key} must be a non-null text scalar")
+        else:
+            metadata[key] = node.value
+    output_dir = metadata["Output Directory"]
     return {
+        "operator": metadata["Operator"],
+        "field": metadata["Field"],
         "output_dir": resolve_output_dir(output_dir),
         "output_dir_raw": output_dir,
         "enables": enables,
         "enable_logging": True,  # The main executable always initializes session logging.
         "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
-        # The rig's one SensorSync board; "" = none. Standalone tools that own the
-        # board (fx10_reference) get it from here, the drivers through main.
+        # The rig's one SensorSync board; "" = none. Recording drivers receive
+        # it through main; snapshot/reference capture uses its own freerun config.
         "sensor_trigger_port": sensor_trigger_port,
     }
 
@@ -510,3 +530,112 @@ def set_enable(driver: str, value: bool) -> None:
     if n == 0:  # key missing: append under General is risky — refuse loudly
         raise KeyError(f"no '{key}:' line found in config-main.yaml")
     save("main", new_text, expected_mtime=loaded.mtime, expected_path=loaded.file.path)
+
+
+def _main_field_nodes(text: str, *, allow_missing: bool = False) -> dict:
+    """Return unique General entries from this exact file snapshot."""
+    document = yaml.compose(text, Loader=yaml.SafeLoader)
+
+    def entries(node, label: str) -> dict:
+        if not isinstance(node, MappingNode):
+            raise ApplyError(f"{label} must be a YAML mapping")
+        result = {}
+        for name, value in node.value:
+            if not isinstance(name, ScalarNode) or name.tag != "tag:yaml.org,2002:str":
+                raise ApplyError(f"{label} must have string keys without YAML merges")
+            if name.value in result:
+                raise ApplyError(f"Duplicate key {label}.{name.value}; resolve it in the config editor")
+            result[name.value] = value
+        return result
+
+    if document is None and allow_missing:
+        return {}
+    root = entries(document, "Main config")
+    if "General" not in root and allow_missing:
+        return {}
+    return entries(root.get("General"), "General")
+
+
+def _main_field_node(text: str, key: str) -> ScalarNode:
+    """Locate one unambiguous scalar without consuming inline comments.
+
+    Anchors/aliases and multiline scalars need more than a local replacement;
+    leave those layouts to the full config editor instead of changing meaning.
+    """
+    if any(isinstance(token, (AliasToken, AnchorToken)) for token in yaml.scan(text, Loader=yaml.SafeLoader)):
+        raise ApplyError("Overview editing does not support YAML anchors or aliases; use the config editor")
+    general = _main_field_nodes(text)
+    node = general.get(key)
+    if node is None:
+        raise ApplyError(f"General.{key} is missing; add it in the config editor before editing here")
+    if not isinstance(node, ScalarNode) or node.tag == "tag:yaml.org,2002:null":
+        raise ApplyError(f"General.{key} must be a non-null text scalar")
+    if node.start_mark.line != node.end_mark.line or node.style in ("|", ">"):
+        raise ApplyError(f"General.{key} must occupy one line for Overview editing")
+    return node
+
+
+def set_main_field(key: str, value: str, *, expected_value: str) -> None:
+    """Compatibility wrapper for saving one Overview field."""
+    set_main_fields({key: value}, expected_values={key: expected_value})
+
+
+def set_main_fields(values: dict[str, str], *, expected_values: dict[str, str]) -> None:
+    """Save changed Overview fields together, preserving unrelated edits.
+
+    Each displayed value is its field's conflict baseline. Validate and check
+    every submitted field before replacing any text, then commit once through
+    save() so a failed Save cannot leave only some fields written.
+    """
+    if not isinstance(values, dict) or not isinstance(expected_values, dict):
+        raise ValueError("Overview values and their expected values must be mappings")
+    if values.keys() != expected_values.keys():
+        raise ValueError("Each Overview field must have exactly one expected value")
+    for key, value in values.items():
+        if key not in ("Operator", "Field", "Output Directory"):
+            raise ValueError(f"Unsupported Overview field: {key}")
+        if not isinstance(value, str) or not isinstance(expected_values[key], str):
+            raise ValueError(f"General.{key} and its expected value must be strings")
+        if not value.strip():
+            raise ValueError(f"{key} must not be empty or whitespace")
+        if key == "Output Directory":
+            if any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
+                raise ValueError("Output Directory must not contain control characters")
+            problems = output_dir_problems(value)
+            if problems:
+                raise ValueError("; ".join(problems))
+    if not values:
+        return
+
+    loaded = read("main")
+    replacements = []
+    changed_keys = set()
+    for key, value in values.items():
+        node = _main_field_node(loaded.text, key)
+        if node.value == value:
+            continue
+        if node.value != expected_values[key]:
+            raise ConflictError(f"General.{key} was changed on disk; reload before saving")
+
+        # Keep Unicode characters intact (JSON surrogate pairs are not YAML's
+        # representation of astral code points), escaping YAML-sensitive breaks.
+        replacement = json.dumps(value, ensure_ascii=False)
+        replacement = "".join(
+            f"\\u{ord(char):04x}" if 127 <= ord(char) < 160 or char in "\u2028\u2029\ufffe\uffff" else char
+            for char in replacement
+        )
+        replacements.append((node.start_mark.index, node.end_mark.index, replacement))
+        changed_keys.add(key)
+    if not replacements:
+        return
+
+    text = loaded.text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    for key, value in values.items():
+        edited = _main_field_node(text, key)
+        # Already-matching legacy scalars may remain unquoted. Replaced values
+        # must be string scalars and every submitted field must keep its text.
+        if edited.value != value or (key in changed_keys and edited.tag != "tag:yaml.org,2002:str"):
+            raise ApplyError(f"General.{key} did not round-trip as the requested string")
+    save("main", text, expected_mtime=loaded.mtime, expected_path=loaded.file.path)

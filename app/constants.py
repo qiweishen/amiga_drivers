@@ -27,9 +27,9 @@ GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 
 # --- theme -------------------------------------------------------------------
 # Quasar brand colors, applied application-wide in main() via app.colors().
-# THE place to retheme the console: every element asks for a brand NAME
-# ("primary", "positive", "negative", "warning") rather than a literal hue, so
-# editing a value here moves everything that means it.
+# Semantic controls use brand names ("primary", "positive", "negative",
+# "warning"). Surface colors, typography and spacing live in
+# app/resource/console.css; its accent uses the Quasar primary variable.
 #
 # Two things are deliberately NOT reachable from here:
 #   - the neutral "grey" / "blue-grey" badges (idle, disabled, stopped) —
@@ -37,13 +37,13 @@ GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 #   - Tailwind utility classes (text-gray-600, bg-red-50, text-amber-700, ...)
 #     used for subtle text and panel backgrounds; those are per-class edits.
 PALETTE = {
-    "primary": "#01a7d7",    # header bar, default buttons, progress bars
-    "secondary": "#26a69a",
-    "accent": "#9c27b0",
-    "positive": "#21ba45",   # sensor RUNNING / recording healthy
-    "negative": "#c10015",   # FAILED, Stop recording, disk below the hard floor
-    "warning": "#f2c037",    # INITIALIZING / STOPPING, disk warning floor
-    "info": "#31ccec",
+    "primary": "#3d596b",    # primary actions and storage indicators
+    "secondary": "#66747d",
+    "accent": "#526b7a",
+    "positive": "#35754a",   # driver-reported RUNNING state
+    "negative": "#ad3e36",   # FAILED, Stop recording, disk below the hard floor
+    "warning": "#aa721d",    # INITIALIZING / STOPPING, disk warning floor
+    "info": "#526b7a",
 }
 
 # --- refresh cadence ---------------------------------------------------------
@@ -80,6 +80,7 @@ CONFIG_FILES: dict[str, ConfigFile] = {
         ConfigFile("main", "Main (config-main.yaml)", MAIN_CONFIG),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
+        ConfigFile("fx10_snapshot", "FX10 snapshot / reference", REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml")
     ]

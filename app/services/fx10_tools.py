@@ -1,6 +1,6 @@
 """FX10 helpers: the snapshot pipeline (fx10_snapshot in the container ->
 shared ENVI BIL reader -> per-band spectral statistics over ~1 s of
-frames, normalized to 100%). Device discovery is driver-neutral:
+frames in raw digital numbers). Device discovery is driver-neutral:
 services/ebus_tools.py."""
 
 from __future__ import annotations
@@ -46,10 +46,12 @@ class SnapshotResult:
     ok: bool
     reason: str = ""  # FAIL reason / pipeline error
     wavelengths_nm: list[float] = field(default_factory=list)  # x axis, one per band
-    # Per-band statistics over ALL captured frames and samples, as % of full scale
-    spectrum_pct: dict[str, list[float]] = field(default_factory=dict)
+    # Per-band statistics over ALL captured frames and samples, in raw DN.
+    spectrum_dn: dict[str, list[float]] = field(default_factory=dict)
+    full_scale: int = 0  # effective PixelFormat range, not storage-container width
+    pixel_format: str = ""
     clipped_pct: float = 0.0  # saturated pixels over the FULL cube
-    mean_pct: float = 0.0  # cube mean as % of full scale
+    mean_dn: float = 0.0  # cube mean in raw DN
     lines: int = 0
     bands: int = 0
     samples: int = 0
@@ -105,7 +107,7 @@ async def _snapshot(ip: str, exposure_ms: float,
         out_host = FX10_SNAPSHOT_DIR / sid
     argv = [
         runtime.exec_path(BIN_FX10_SNAPSHOT),
-        "--config", runtime.exec_path(config_store.get("fx10").path),
+        "--config", runtime.exec_path(config_store.get("fx10_snapshot").path),
         "--out", runtime.exec_path(out_host),
         "--ip", ip,
         "--frames", str(frames),
@@ -164,11 +166,12 @@ def _decode_envi(session_dir: Path) -> SnapshotResult:
     """Bounded full snapshot; layout/index validation is shared with live/reference."""
     try:
         capture, cube = fx10.snapshot_cube(session_dir)
-        values, mean, clipped = fx10.spectrum(cube, capture.full_scale)
+        values, mean, clipped = fx10.spectrum(cube, capture.full_scale, normalized=False)
         return SnapshotResult(
             ok=False,  # caller fills elapsed/source metadata before declaring success
-            wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
-            clipped_pct=clipped, mean_pct=mean, lines=cube.shape[0],
+            wavelengths_nm=list(capture.wavelengths_nm), spectrum_dn=values,
+            full_scale=capture.full_scale, pixel_format=capture.pixel_format,
+            clipped_pct=clipped, mean_dn=mean, lines=cube.shape[0],
             bands=capture.bands, samples=capture.samples,
         )
     except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, csv.Error) as error:

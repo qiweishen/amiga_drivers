@@ -56,12 +56,17 @@ services:
             # Software rendering (set 0 for GPU acceleration)
             LIBGL_ALWAYS_SOFTWARE: 1
 
-        devices:
-            # Teensy trigger board
-            - /dev/ttyACM0:/dev/ttyACM0
+#        devices:
+#            # Teensy trigger board
+#            - /dev/ttyACM0:/dev/ttyACM0
+
+        device_cgroup_rules:
+            # KEYLOK hiddev minor numbers can change after replug or reboot.
+            - "c 180:* rw"
 
         group_add:
             - "20" # dialout
+            - "1000" # GROUP in resource/99-pleora-keylok.rules
 
         volumes:
             - ..:/workspace
@@ -85,6 +90,8 @@ services:
             - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
             # Teensy trigger board
             - /dev/serial/by-id:/dev/serial/by-id:ro
+            # Share new device nodes and the host udev alias /dev/usb/hid/hiddev0.
+            # Do not bind an individual KEYLOK node: it becomes stale after replug.
             - /dev:/dev
 
         working_dir: /workspace

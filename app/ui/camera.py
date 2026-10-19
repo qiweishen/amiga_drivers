@@ -28,7 +28,7 @@ from nicegui import app, ui
 from ..constants import TOOL_TICK_S
 from ..services import config_store, config_actions, ebus_tools, fx10_tools, gox_tools
 from ..state import STATE, ProcState
-from . import layout
+from . import fx10_plot, layout
 
 _COLUMNS = [
     {"name": "kind", "label": "Driver", "field": "kind", "align": "left"},
@@ -92,100 +92,120 @@ def _check_ip_inputs(ip: str, mask: str, gateway: str, host_subnets: list[str], 
 def camera_page() -> None:
     with layout.frame("Camera Tools"):
         # =================================================== device discovery
-        ui.label("Device discovery (GoX and FX10)").classes("text-lg font-bold")
-        ui.label("One scan lists every GigE Vision camera on the host's adapters. A camera owned by "
-                 "the running recording is marked \"in use\"; its snapshot and Set IP stay disabled."
-                 ).classes("text-sm text-gray-700 whitespace-pre-line")
-        with ui.row().classes("items-center gap-4"):
-            scan_btn = ui.button("Scan cameras", icon="search", on_click=lambda: _scan())
-            set_ip_btn = ui.button("Set IP…", icon="lan", on_click=lambda: _set_ip_dialog()).props("outline")
-            set_ip_busy = ui.spinner(size="sm").classes("hidden")
-            scan_status = ui.label("").classes("text-sm text-gray-600")
-        table = ui.table(columns=_COLUMNS, rows=[], row_key="key", selection="single").classes("w-full")
+        with ui.column().classes("console-panel w-full"):
+            with ui.row().classes("section-heading w-full"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("lan").classes("muted")
+                    ui.label("Device discovery").classes("section-title")
+                ui.label("GoX + FX10 · GigE Vision").classes("text-xs mono muted")
+            ui.label("Scan the host's adapters, then select a camera to target its workbench. A camera owned by "
+                     "the running recording is marked \"in use\"; its snapshot and Set IP stay disabled."
+                     ).classes("section-copy")
+            with ui.row().classes("console-toolbar"):
+                scan_btn = ui.button("Scan cameras", icon="search", on_click=lambda: _scan())
+                set_ip_btn = ui.button("Set IP…", icon="lan", on_click=lambda: _set_ip_dialog()).props("outline")
+                set_ip_busy = ui.spinner(size="sm").classes("hidden")
+                scan_status = ui.label("").classes("text-sm muted")
+            table = ui.table(columns=_COLUMNS, rows=[], row_key="key", selection="single").classes("w-full")
+            table.add_slot("no-data", '<div class="section-copy">No cameras listed. Use Scan cameras to refresh the list.</div>')
 
-        # ======================================================== GoX section
-        ui.separator()
-        ui.label("GoX camera preview").classes("text-lg font-bold")
-        gox_guard = ui.label("").classes("text-sm text-red-700")
-        gox_target_label = ui.label().classes("text-sm text-gray-700")
-        with ui.row().classes("items-center gap-8 w-full"):
-            with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Exposure (ms)")
-                ui.label("Camera limit: 0.001 - 332.738 ms on the GOX-12405C-PGE").classes("text-xs text-gray-500")
-                # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
-                gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
-                                         value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
-                ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
-            with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Gain (magnification)")
-                # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
-                # (about 0..42 dB) - manual p.148, dB conversion table p.181.
-                ui.label("Camera limit: x1.0 ... x126.0 (about 0 ... 42 dB)").classes("text-xs text-gray-500")
-                gox_gain = ui.slider(min=1.0, max=126.0, step=0.1,
-                                     value=min(126.0, app.storage.general.get("gox_gain", 1.0)))
-                ui.number(min=1.0, max=126.0, step=0.1, prefix="x").bind_value(gox_gain).classes("w-full")
-        with ui.row().classes("items-center gap-4"):
-            gox_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _gox_snap())
-            gox_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _gox_apply()).props("outline")
-            gox_busy = ui.spinner(size="sm").classes("hidden")
-            gox_meta = ui.label("").classes("text-sm text-gray-600")
-        gox_warn = ui.label("").classes("text-sm text-amber-700")
-        with ui.row().classes("w-full gap-4 items-start"):
-            gox_image = ui.interactive_image().classes("max-w-[60%] border rounded")
-            gox_chart = ui.echart({
-                "xAxis": {"type": "category", "show": False},
-                "yAxis": {"type": "value", "show": False},
-                "grid": {"left": 4, "right": 4, "top": 4, "bottom": 4},
-                "series": [
-                    {"type": "bar", "data": [], "barCategoryGap": "0%"}
-                ],
-                "tooltip": {},
-            }).classes("w-80 h-40")
+        with ui.element("div").classes("workspace-grid"):
+            # ==================================================== GoX section
+            with ui.column().classes("console-panel w-full min-w-0"):
+                with ui.row().classes("section-heading w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("photo_camera").classes("muted")
+                        ui.label("GoX · Exposure workbench").classes("section-title")
+                ui.label("Preview with temporary settings; Apply to config saves them for recording.").classes("section-copy")
+                gox_target_label = ui.label().classes("text-sm mono break-all")
+                gox_guard = ui.label("").classes("text-sm text-red-700")
+                with ui.element("div").classes("control-grid w-full"):
+                    with ui.column().classes("w-full min-w-0 gap-2"):
+                        ui.label("Exposure (ms)").classes("font-medium")
+                        ui.label("GOX-12405C-PGE · 0.001–332.738 ms").classes("text-xs muted")
+                        # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
+                        gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
+                                                 value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
+                        ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
+                    with ui.column().classes("w-full min-w-0 gap-2"):
+                        ui.label("Gain (magnification)").classes("font-medium")
+                        # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
+                        # (about 0..42 dB) - manual p.148, dB conversion table p.181.
+                        ui.label("x1.0–x126.0 · about 0–42 dB").classes("text-xs muted")
+                        gox_gain = ui.slider(min=1.0, max=126.0, step=0.1,
+                                             value=min(126.0, app.storage.general.get("gox_gain", 1.0)))
+                        ui.number(min=1.0, max=126.0, step=0.1, prefix="x").bind_value(gox_gain).classes("w-full")
+                with ui.row().classes("console-toolbar"):
+                    gox_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _gox_snap())
+                    gox_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _gox_apply()).props("outline")
+                    gox_busy = ui.spinner(size="sm").classes("hidden")
+                gox_warn = ui.label("").classes("text-sm text-amber-700")
+                with ui.column().classes("preview-surface w-full justify-center"):
+                    gox_image = ui.interactive_image().classes("w-full")
+                    gox_image.bind_visibility_from(gox_image, "source", backward=bool)
+                    with ui.column().classes("empty-state w-full").bind_visibility_from(
+                            gox_image, "source", backward=lambda source: not source):
+                        ui.icon("photo_camera", size="36px")
+                        ui.label("No snapshot displayed")
+                        ui.label("Select a GoX camera and take a snapshot to inspect exposure.").classes("text-xs")
+                gox_meta = ui.label("").classes("text-sm muted mono break-all")
+                with ui.column().classes("plot-surface w-full"):
+                    ui.label("Pixel intensity distribution").classes("text-xs muted")
+                    gox_chart = ui.echart({
+                        "xAxis": {"type": "category", "show": False},
+                        "yAxis": {"type": "value", "show": False},
+                        "grid": {"left": 4, "right": 4, "top": 4, "bottom": 4},
+                        "series": [
+                            {"type": "bar", "data": [], "barCategoryGap": "0%"}
+                        ],
+                        "tooltip": {},
+                    }).classes("w-full h-40")
 
-        # ======================================================= FX10 section
-        ui.separator()
-        ui.label("FX10 camera preview").classes("text-lg font-bold")
-        fx10_guard = ui.label("").classes("text-sm text-red-700")
-        fx10_target_label = ui.label().classes("text-sm text-gray-700")
-        with ui.row().classes("items-center gap-8 w-full"):
-            with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Exposure (ms)")
-                ui.label("Camera limit: 0.010 ... 419.000 ms on the FX10e").classes("text-xs text-gray-500")
-                # Camera limit: ExposureTime is 10..419000 µs (0.01..419 ms) on the FX10e
-                fx10_exposure = ui.slider(min=0.010, max=419.000, step=0.001,
-                                          value=min(419.000, app.storage.general.get("fx10_exposure_ms", 50.000)))
-                ui.number(min=0.010, max=419.000, step=0.001, suffix="ms").bind_value(fx10_exposure).classes("w-full")
-            with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Spatial binning")
-                ui.label("1024 / 512 / 256 / 128 px wide").classes("text-xs text-gray-500")
-                fx10_spatial = ui.select(_BINNING, value=app.storage.general.get("fx10_spatial_binning", 1)).props(
-                    "outlined dense")
-            with ui.column().classes("flex-1 min-w-0"):
-                ui.label("Spectral binning")
-                ui.label("448 / 224 / 112 / 56 bands · 2 = factory").classes("text-xs text-gray-500")
-                # Default 2, like the driver: the factory offset / black-level /
-                # bad-pixel calibration was performed at 2x spectral binning.
-                fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 2)).props(
-                    "outlined dense")
-        with ui.row().classes("items-center gap-4"):
-            fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
-            fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props("outline")
-            fx10_busy = ui.spinner(size="sm").classes("hidden")
-            fx10_meta = ui.label("").classes("text-sm text-gray-600")
-        ui.link("Collect white and dark references on the Collect Reference page", "/reference").classes("text-sm")
-        # Per-band statistics over ~1 s of frames: x = wavelength, y = % of full scale
-        fx10_chart = ui.echart({
-            "xAxis": {"type": "value", "name": "Wavelength (nm)", "nameLocation": "middle",
-                      "nameGap": 28, "min": "dataMin", "max": "dataMax"},
-            "yAxis": {"type": "value", "name": "Normalized (%)", "min": 0, "max": 100},
-            "grid": {"left": 56, "right": 24, "top": 32, "bottom": 44},
-            "legend": {"top": 0},
-            "tooltip": {"trigger": "axis"},
-            "series": [],
-        }).classes("w-full h-96")
+            # =================================================== FX10 section
+            with ui.column().classes("console-panel w-full min-w-0"):
+                with ui.row().classes("section-heading w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("ssid_chart").classes("muted")
+                        ui.label("FX10 · Spectral workbench").classes("section-title")
+                ui.label("Inspect spectral response with temporary settings before applying to config.").classes("section-copy")
+                fx10_target_label = ui.label().classes("text-sm mono break-all")
+                fx10_guard = ui.label("").classes("text-sm text-red-700")
+                with ui.element("div").classes("control-grid w-full"):
+                    with ui.column().classes("w-full min-w-0 gap-2"):
+                        ui.label("Exposure (ms)").classes("font-medium")
+                        ui.label("FX10e · 0.010–419.000 ms").classes("text-xs muted")
+                        # Camera limit: ExposureTime is 10..419000 µs (0.01..419 ms) on the FX10e
+                        fx10_exposure = ui.slider(min=0.010, max=419.000, step=0.001,
+                                                  value=min(419.000, app.storage.general.get("fx10_exposure_ms", 50.000)))
+                        ui.number(min=0.010, max=419.000, step=0.001, suffix="ms").bind_value(fx10_exposure).classes("w-full")
+                    with ui.column().classes("w-full min-w-0 gap-2"):
+                        ui.label("Spatial binning").classes("font-medium")
+                        ui.label("1024 / 512 / 256 / 128 px wide").classes("text-xs muted")
+                        fx10_spatial = ui.select(_BINNING, value=app.storage.general.get("fx10_spatial_binning", 1)).props(
+                            "outlined dense").classes("w-full")
+                    with ui.column().classes("w-full min-w-0 gap-2"):
+                        ui.label("Spectral binning").classes("font-medium")
+                        ui.label("448 / 224 / 112 / 56 bands · 2 = factory").classes("text-xs muted")
+                        # Default 2, like the driver: the factory offset / black-level /
+                        # bad-pixel calibration was performed at 2x spectral binning.
+                        fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 2)).props(
+                            "outlined dense").classes("w-full")
+                with ui.row().classes("console-toolbar"):
+                    fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
+                    fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props("outline")
+                    fx10_busy = ui.spinner(size="sm").classes("hidden")
+                # Per-band raw DN over ~1 s; thresholds use the capture's PixelFormat.
+                with ui.column().classes("plot-surface w-full"):
+                    fx10_chart = ui.echart(fx10_plot.workbench_options()).classes("w-full h-96")
+                    ui.label("No spectrum displayed · take an FX10 snapshot to inspect band statistics.").classes(
+                        "empty-state w-full text-xs").bind_visibility_from(
+                            fx10_chart.options, "series", backward=lambda series: not series)
+                fx10_axis_note = ui.label("400–1000 nm · 100 nm ticks. Saturation guides use the captured pixel format.").classes("section-copy")
+                fx10_meta = ui.label("").classes("text-sm muted mono break-all")
+                ui.link("Collect white and dark references →", "/reference").classes("text-sm")
 
         with ui.expansion("Raw output of the last command", icon="terminal").classes("w-full"):
-            raw_pre = ui.element("pre").classes("w-full text-xs font-mono whitespace-pre-wrap")
+            raw_pre = ui.element("pre").classes("terminal-surface w-full text-xs font-mono whitespace-pre-wrap")
 
         # ================================================================ glue
         def _show_raw(text: str) -> None:
@@ -478,14 +498,16 @@ def camera_page() -> None:
                 ui.notify(f"Snapshot failed: {result.reason}", type="negative", multi_line=True)
                 fx10_meta.set_text(f"Failed ({result.elapsed_s:.1f}s): {result.reason}")
                 return
-            axis = result.wavelengths_nm or list(range(result.bands))
-            fx10_chart.options["xAxis"]["name"] = "Wavelength (nm)" if result.wavelengths_nm else "Image row (uncalibrated)"
-            fx10_chart.options["series"] = [
-                {"name": name, "type": "line", "showSymbol": False, "animation": False,
-                 "data": [[x, v] for x, v in zip(axis, values)]}
-                for name, values in result.spectrum_pct.items()
-            ]
+            fx10_chart.options.update(fx10_plot.workbench_options(
+                result.spectrum_dn, full_scale=result.full_scale, bands=result.bands,
+                wavelengths_nm=result.wavelengths_nm,
+            ))
             fx10_chart.update()
+            fx10_axis_note.set_text(
+                "400–1000 nm · 100 nm ticks · recorded wavelength coordinates."
+                if result.wavelengths_nm else
+                "400–1000 nm · 100 nm ticks · linear channel mapping for display; wavelength calibration unavailable."
+            )
             request = result.request
             requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
                          f"binning {request.spatial_binning}×{request.spectral_binning} · "
@@ -493,7 +515,8 @@ def camera_page() -> None:
             fx10_meta.set_text(
                 f"{result.lines} frames (~1s) · {result.bands} bands · {result.samples} px/line · "
                 f"{requested}"
-                f"mean {result.mean_pct:.1f}% · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
+                f"{result.pixel_format} · full scale {result.full_scale} DN · "
+                f"mean {result.mean_dn:.1f} DN · clipped {result.clipped_pct:.2f}% · {result.elapsed_s:.1f}s"
             )
 
         async def _fx10_apply() -> None:

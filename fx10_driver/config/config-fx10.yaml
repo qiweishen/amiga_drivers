@@ -34,16 +34,6 @@ acquisition:
         multiband_string: ""            # "start_row height;..." e.g. "10 20;100 20"; rows 0..1081, height 1..448, total <= 448
 
 
-# Mechanical shutter is a mandatory driver step, with no YAML override:
-# after applying config, write MotorShutter_PulseRev = 255 before AcquisitionStart.
-# Each write opens the shutter; the stored value does not report shutter state.
-# MotorShutter_PulseFwd = 255 closes it and is not issued during normal startup.
-
-# --- Reference collection (Collect Reference page only) ---
-reference:
-    duration_s: 5.0                     # 0.1..3600; seconds per phase: white, then dark
-
-
 # --- Sensor Trigger (Teensy SensorSync, 3rd_party/External/sensor_trigger) ---
 # The rig's one board, shared with the Go-X driver: its serial port is named once in
 # config/config-main.yaml ("Sensor Trigger: Port"); this block only declares participation

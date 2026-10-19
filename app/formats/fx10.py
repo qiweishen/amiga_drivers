@@ -330,12 +330,19 @@ def tail_cube(segment: Segment, limit: int, *, tail_bytes: int = INDEX_TAIL_BYTE
     return np.frombuffer(b"".join(frames), dtype=capture.dtype).reshape(-1, capture.bands, capture.samples)
 
 
-def spectrum(cube: np.ndarray, full_scale: int) -> tuple[dict[str, list[float]], float, float]:
+def spectrum(cube: np.ndarray, full_scale: int, *, normalized: bool = True
+             ) -> tuple[dict[str, list[float]], float, float]:
+    """Per-band values and cube mean in percent or raw DN; clipped pixels in percent.
+
+    Raw statistics are taken directly from the decoded samples, without the
+    percentage conversion or its display rounding. Out-of-range DN are retained.
+    """
     axes = (0, 2)
-    scale = 100.0 / full_scale
+    scale = 100.0 / full_scale if normalized else 1.0
     values = {"mean": cube.mean(axis=axes), "median": np.median(cube, axis=axes),
               "max": cube.max(axis=axes), "min": cube.min(axis=axes), "p90": np.percentile(cube, 90, axis=axes)}
-    return ({key: [round(float(v) * scale, 3) for v in row] for key, row in values.items()},
+    return ({key: [round(float(v) * scale, 3) if normalized else float(v) for v in row]
+             for key, row in values.items()},
             float(cube.mean() * scale), float((cube >= full_scale).mean() * 100.0))
 
 
@@ -369,13 +376,13 @@ class BandHistograms:
             histogram += counts
         self.count += added
 
-    def finish(self) -> tuple[dict[str, list[float]], float, float]:
+    def finish(self, *, normalized: bool = True) -> tuple[dict[str, list[float]], float, float]:
         if self.count == 0:
             raise ValueError("No non-anomalous reference frames in the line index")
         values = {name: [] for name in ("mean", "median", "max", "min", "p90")}
         total_dn = 0.0
         clipped = 0
-        scale = 100.0 / self.full_scale
+        scale = 100.0 / self.full_scale if normalized else 1.0
         for histogram in self.histograms:
             cumulative = np.cumsum(histogram, dtype=np.uint64)
 
@@ -390,14 +397,18 @@ class BandHistograms:
             band_values = {"mean": dn_sum / self.count, "median": percentile(0.5),
                            "max": percentile(1.0), "min": percentile(0.0), "p90": percentile(0.9)}
             for name, value in band_values.items():
-                values[name].append(round(value * scale, 3))
+                values[name].append(round(value * scale, 3) if normalized else float(value))
             total_dn += dn_sum
             clipped += int(histogram[self.full_scale:].sum())
         total_pixels = self.count * len(self.histograms)
         return values, total_dn / total_pixels * scale, clipped / total_pixels * 100.0
 
-def reference_spectrum(directory: Path, expected_frames: int):
-    """All finalized segments, exact integer histograms, bounded working memory."""
+def reference_spectrum(directory: Path, expected_frames: int, *, normalized: bool = True):
+    """Whole-phase statistics in percent or raw DN, with bounded integer histograms.
+
+    Raw DN bypass percentage scaling and display rounding; clipping remains the
+    percentage of samples at or above the recorded PixelFormat's full scale.
+    """
     capture = load_capture(directory)
     histograms = BandHistograms(capture.bands, capture.full_scale)
     count = 0
@@ -407,5 +418,5 @@ def reference_spectrum(directory: Path, expected_frames: int):
             count += cube.shape[0]
     if count != expected_frames:
         raise ValueError("Reference frame index disagrees with the completed phase frame count")
-    values, mean, clipped = histograms.finish()
+    values, mean, clipped = histograms.finish(normalized=normalized)
     return capture, count, values, mean, clipped

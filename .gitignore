@@ -7,8 +7,6 @@
 *.vscode/
 *.DS_Store
 
-/diagnostics/
-
 /3rd_party/External/
 
 /data/

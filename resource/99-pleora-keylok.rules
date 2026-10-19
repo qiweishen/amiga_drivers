@@ -1,0 +1,1 @@
+ACTION=="add|change", KERNEL=="hiddev*", ATTRS{idVendor}=="0471", ATTRS{idProduct}=="485e", GROUP:="1000", MODE:="0660", SYMLINK+="usb/hid/hiddev0"

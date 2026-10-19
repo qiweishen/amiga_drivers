@@ -11,25 +11,25 @@ from ..state import STATE, ProcState
 from . import layout
 
 
-_EDIT_ORDER = ("main", "asterx", "fx10", "gox", "lms4xxx")
+_EDIT_ORDER = ("main", "asterx", "fx10", "fx10_snapshot", "gox", "lms4xxx")
 
 
 @ui.page("/config")
 def config_page() -> None:
     with layout.frame("Config"):
-        ui.label(
-            "Edited as raw text (comments are preserved). Validation here is syntax-only; "
-            "the C++ loader is the final authority. "
-            "Saving is locked during initialization and while acquisition ownership is unknown. "
-            "Changes saved while recording take effect on the next start."
-        ).classes("text-sm text-gray-600")
+        with ui.column().classes("console-panel w-full gap-4"):
+            ui.label(
+                "YAML text editor; comments are preserved. Validation checks syntax only; "
+                "the C++ loader is the final authority. "
+                "Saving is locked during initialization and while acquisition ownership is unknown."
+            ).classes("section-copy")
 
-        with ui.tabs() as tabs:
-            tab_handles = {cid: ui.tab(CONFIG_FILES[cid].label) for cid in _EDIT_ORDER}
-        with ui.tab_panels(tabs, value=tab_handles["main"]).classes("w-full"):
-            for cid in _EDIT_ORDER:
-                with ui.tab_panel(tab_handles[cid]):
-                    _editor_panel(cid)
+            with ui.tabs().classes("w-full").props("align=left outside-arrows mobile-arrows") as tabs:
+                tab_handles = {cid: ui.tab(CONFIG_FILES[cid].label) for cid in _EDIT_ORDER}
+            with ui.tab_panels(tabs, value=tab_handles["main"]).classes("w-full bg-transparent"):
+                for cid in _EDIT_ORDER:
+                    with ui.tab_panel(tab_handles[cid]).classes("p-0"):
+                        _editor_panel(cid)
 
 
 def _editor_panel(config_id: str) -> None:
@@ -42,13 +42,15 @@ def _editor_panel(config_id: str) -> None:
         return
     state = {"mtime": loaded.mtime, "saved_text": loaded.text, "path": loaded.file.path, "saving": False}
 
-    path_label = ui.label(str(loaded.file.path)).classes("text-xs text-gray-800 font-mono")
+    with ui.row().classes("console-toolbar w-full"):
+        ui.icon("description").classes("muted")
+        path_label = ui.label(str(loaded.file.path)).classes("text-xs mono muted break-all")
     path_warning = ui.label("").classes("text-sm text-amber-700")
     editor = ui.codemirror(
         value=loaded.text,
         language="YAML",
         theme="basicDark",
-    ).classes("w-full h-[60vh] text-s")
+    ).classes("terminal-surface w-full h-[56vh] text-sm")
     dirty_label = ui.label("").classes("text-xs text-amber-700")
 
     def _mark_dirty() -> None:
@@ -127,7 +129,7 @@ def _editor_panel(config_id: str) -> None:
         editor.set_value(fresh.text)
         _mark_dirty()
 
-    with ui.row().classes("gap-2"):
+    with ui.row().classes("console-toolbar editor-actions w-full"):
         ui.button("Validate", icon="rule", on_click=_validate).props("outline")
         ui.button("Save", icon="save", on_click=lambda: _save())
         ui.button("Revert", icon="undo", on_click=_revert).props("flat")

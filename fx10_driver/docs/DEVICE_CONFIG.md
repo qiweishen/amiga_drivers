@@ -195,14 +195,18 @@ hardware verification were not run for this change.
 The navigation's **Collect Reference** page (`/reference`) is dedicated to FX10;
 Camera Tools links to it. Place an illuminated white
 reference target in the field of view before clicking. The tool loads the camera
-address and acquisition settings from the **saved FX10 config** referenced by
-the main config. Use **Apply to config** first when preview slider changes should
-be used; table selection and unsaved sliders do not override reference settings.
-Exposure, binning, pixel format, geometry/calibration, network settings and trigger
-mode/rate follow that config. The collection takes its output root from the main
+address and acquisition settings from **`config/config-fx10-snapshot.yaml`**, shared
+with the **FX10 · Spectral workbench**. This config explicitly selects freerun and
+disables SensorSync, so reference capture does not require a trigger board or its
+serial port. Edit the **FX10 snapshot / reference** tab on the Config page to save
+reference settings; table selection and preview sliders do not override them.
+The workbench's **Apply to config** button still updates the main recording's FX10
+config, which is separate from the snapshot/reference config.
+Reference exposure, binning, pixel format, geometry/calibration, network settings
+and trigger mode/rate follow the snapshot/reference config. The collection takes its output root from the main
 config's **Output Directory**, as normal rig recordings do.
 
-Set the duration in the saved FX10 YAML:
+Set the duration in `config/config-fx10-snapshot.yaml`:
 
 ```yaml
 reference:
@@ -220,7 +224,7 @@ Use **Reload config** after editing; collection always loads the saved file agai
 then uses the same connection for both phases:
 
 1. Write `MotorShutter_PulseRev = 255`, check the SDK result, start the receiver,
-   start configured SensorSync logging/pulses, and collect white reference for `reference.duration_s`.
+   and collect white reference in freerun for `reference.duration_s`.
 2. Require acknowledgement of `AcquisitionStop`, then drain/finalize all white
    data before moving the shutter. Teardown shares the once-per-run stop flag
    and does not replay this command.
@@ -236,7 +240,9 @@ with their original per-line timing observations, so the saved data do not asser
 an exact physical exposure span equal to the requested duration. Shutter write acknowledgement still
 does not verify position or settling; no undocumented wait is assumed.
 
-When SensorSync is enabled, each finalized phase also writes `timing_quality.json`.
+The standalone C++ tool also supports other configs supplied through `--config`.
+For a CLI capture with SensorSync enabled, supply `--sensor-port`; each finalized
+phase also writes `timing_quality.json`.
 It checks the selected channel's edge sequence/order, declared active-high
 exposure polarity, complete exposure pairs, and trigger/exposure/real-frame
 counts. RX gaps can explain a count difference but still fail a clean reference.
@@ -277,8 +283,11 @@ temporary-file cleanup. Existing timestamp collisions receive the usual suffix.
 
 The page has separate **White reference** and **Dark reference** line charts.
 Both use the same reductions as Snapshot and Data Live: per band, calculate mean,
-median, min, max and p90 over all genuine, non-anomalous frames and spatial samples,
-then multiply by `100 / full_scale` from that phase's immutable `capture.json`.
+median, min, max and p90 over all genuine, non-anomalous frames and spatial samples.
+Reference curves and their means are displayed in raw digital numbers (DN),
+matching the Spectral workbench, without percentage scaling or display rounding
+of curve values. Horizontal translucent dashed guides mark 20%, 50% and 80% of
+the captured PixelFormat's `full_scale` from that phase's immutable `capture.json`.
 Synthetic padding is excluded using the versioned line index. The reference
 charts cover all finalized segments in the whole phase, not the last-second
 window used by Data Live. Integer histograms accumulate bounded batches; median
@@ -286,9 +295,12 @@ and p90 use linear interpolation at rank `(N - 1) * q`, matching the existing
 NumPy reductions without concatenating the full recording in memory. The reader
 checks geometry, header layout, file sizes and the phase's written-frame count.
 
-Calibrated captures use their saved wavelength axis; otherwise the horizontal
-axis is explicitly **Image row (uncalibrated)**. Each plot shows the requested
-duration, actual frame count, geometry, mean and clipping percentage. Plot errors
+Both plots use the Spectral workbench's fixed 400–1000 nm horizontal axis with
+100 nm ticks. Calibrated captures use their saved wavelength coordinates;
+otherwise band positions are mapped evenly onto 400–1000 nm for display and
+identified as uncalibrated. This mapping does not resample the signal or alter
+capture metadata. Each plot shows the requested duration, actual frame count,
+geometry, PixelFormat, full scale, raw mean and clipping percentage. Plot errors
 leave the successful raw recording intact and are shown separately. Completed
 results remain available when navigating away and back within the same GUI process;
 the next collection clears both previous plots before displaying its new pair.

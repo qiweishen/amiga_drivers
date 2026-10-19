@@ -7,7 +7,7 @@ from nicegui import ui
 from ..constants import TOOL_TICK_S
 from ..services import fx10_reference
 from ..state import STATE
-from . import layout
+from . import fx10_plot, layout
 
 
 @ui.page("/reference")
@@ -19,41 +19,43 @@ def reference_page() -> None:
             page["alive"] = False
 
         ui.context.client.on_delete(dispose)
-        ui.label("Position an illuminated white reference target before collecting. The camera captures white "
-                 "with the shutter open, then dark with the shutter closed, using the saved FX10 configuration.").classes(
-                     "text-sm text-gray-700")
+        with ui.column().classes("console-panel w-full gap-3"):
+            ui.label("FX10 white / dark reference").classes("section-title")
+            ui.label("Position a white reference target before collecting. The camera captures white "
+                     "with the shutter open, then dark with the shutter closed, using the saved FX10 snapshot "
+                     "configuration in freerun. No trigger board is required.").classes(
+                         "section-copy")
+            config_label = ui.label("").classes("text-xs mono muted break-all")
+            with ui.row().classes("console-toolbar w-full"):
+                collect_btn = ui.button("Collect Reference", icon="contrast", on_click=lambda: collect())
+                ui.button("Reload config", icon="refresh", on_click=lambda: show_config()).props("outline")
+                ui.link("Edit FX10 snapshot / reference config", "/config")
+                spinner = ui.spinner(size="sm").classes("hidden")
+            guard_label = ui.label("").classes("text-sm text-red-700")
+            status_label = ui.label("").classes("text-sm break-all")
+            session_label = ui.label("").classes("text-xs mono muted break-all")
+
         ui.label("Both plots summarize every valid frame and spatial sample in their reference phase, using the "
-                 "same mean, median, min, max and p90 statistics as Snapshot and Data Live. Values are normalized "
-                 "to the recorded bit depth. Setup and finalization add to the capture time.").classes("text-sm text-gray-600")
-        config_label = ui.label("").classes("text-sm text-gray-700 break-all")
-        with ui.row().classes("items-center gap-4"):
-            collect_btn = ui.button("Collect Reference", icon="contrast", on_click=lambda: collect())
-            ui.button("Reload config", icon="refresh", on_click=lambda: show_config()).props("outline")
-            ui.link("Edit FX10 config", "/config")
-            spinner = ui.spinner(size="sm").classes("hidden")
-        guard_label = ui.label("").classes("text-sm text-red-700")
-        status_label = ui.label("").classes("text-sm text-gray-700 break-all")
-        session_label = ui.label("").classes("text-sm font-mono break-all")
+                 "same mean, median, min, max and p90 statistics as the Spectral workbench, in raw digital numbers (DN). "
+                 "Dashed guides mark 20%, 50% and 80% of the captured pixel format's full scale. "
+                 "The wavelength axis spans 400–1000 nm with 100 nm ticks. "
+                 "Setup and finalization add to the capture time.").classes("section-copy")
 
         charts = {}
         labels = {}
-        with ui.element("div").classes("grid grid-cols-1 lg:grid-cols-2 gap-4 w-full"):
+        axis_notes = {}
+        with ui.element("div").classes("workspace-grid w-full"):
             for phase in ("white", "dark"):
-                with ui.card().classes("w-full min-w-0"):
-                    ui.label(f"{phase.capitalize()} reference").classes("text-lg font-bold")
-                    labels[phase] = ui.label("Waiting for collection").classes("text-sm text-gray-600")
-                    charts[phase] = ui.echart({
-                        "xAxis": {"type": "value", "name": "Image row (uncalibrated)",
-                                  "nameLocation": "middle", "nameGap": 28, "min": "dataMin", "max": "dataMax"},
-                        "yAxis": {"type": "value", "name": "Normalized (%)", "min": 0, "max": 100},
-                        "grid": {"left": 52, "right": 20, "top": 48, "bottom": 48},
-                        "legend": {"top": 0},
-                        "tooltip": {"trigger": "axis"},
-                        "series": [],
-                    }).classes("w-full h-96")
+                with ui.card().classes("console-panel w-full min-w-0").props("flat"):
+                    with ui.row().classes("section-heading w-full items-center justify-between"):
+                        ui.label(f"{phase.capitalize()} reference").classes("section-title")
+                        ui.icon("light_mode" if phase == "white" else "dark_mode").classes("muted")
+                    labels[phase] = ui.label("Waiting for collection").classes("section-copy")
+                    charts[phase] = ui.echart(fx10_plot.workbench_options()).classes("plot-surface w-full h-96")
+                    axis_notes[phase] = ui.label("").classes("section-copy")
 
         with ui.expansion("Raw output of the last collection", icon="terminal").classes("w-full"):
-            raw_output = ui.label("").classes("w-full text-xs font-mono whitespace-pre-wrap break-all")
+            raw_output = ui.label("").classes("terminal-surface w-full text-xs mono whitespace-pre-wrap break-all p-4")
 
         def show_config() -> None:
             try:
@@ -79,18 +81,18 @@ def reference_page() -> None:
             for phase, chart in charts.items():
                 spectrum = result.spectra.get(phase) if result else None
                 if spectrum and spectrum.ok:
-                    axis = spectrum.wavelengths_nm or list(range(spectrum.bands))
-                    chart.options["xAxis"]["name"] = "Wavelength (nm)" if spectrum.wavelengths_nm else "Image row (uncalibrated)"
-                    chart.options["series"] = [
-                        {"name": name, "type": "line", "showSymbol": False, "animation": False,
-                         "data": [[x, value] for x, value in zip(axis, values)]}
-                        for name, values in spectrum.spectrum_pct.items()
-                    ]
+                    chart.options.update(fx10_plot.workbench_options(
+                        spectrum.spectrum_dn, full_scale=spectrum.full_scale, bands=spectrum.bands,
+                        wavelengths_nm=spectrum.wavelengths_nm,
+                    ))
+                    axis_notes[phase].set_text(fx10_plot.axis_note(spectrum.wavelengths_nm))
                     labels[phase].set_text(
                         f"{result.duration_s:g} s requested · {spectrum.frames} frames · {spectrum.bands} bands · "
-                        f"{spectrum.samples} px/line · mean {spectrum.mean_pct:.1f}% · clipped {spectrum.clipped_pct:.2f}%")
+                        f"{spectrum.samples} px/line · {spectrum.pixel_format} · full scale {spectrum.full_scale} DN · "
+                        f"mean {spectrum.mean_dn:.1f} DN · clipped {spectrum.clipped_pct:.2f}%")
                 else:
-                    chart.options["series"] = []
+                    chart.options.update(fx10_plot.workbench_options())
+                    axis_notes[phase].set_text("")
                     labels[phase].set_text(spectrum.reason if spectrum else (
                         result.reason if result and not result.ok else "Waiting for collection or statistics"))
                 chart.update()

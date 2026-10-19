@@ -6,17 +6,17 @@
 # --- General Settings ---
 General:
     # Metadata
-    Operator: <Dev>
+    Operator: "Yanchun"
     # Field info
-    Field: <Test>
+    Field: "Bird_Cage"
 
     # Root output data directory for all output
     Output Directory: ./data
 
     # Per-driver enable switches
     # It will be overrided by GUI
-    Enable ASTERX: false
-    Enable FX10: true
+    Enable ASTERX: true
+    Enable FX10: false
     Enable GOX: false
     Enable LMS4XXX: false
 
@@ -30,12 +30,15 @@ General:
     LMS4XXX Driver Config Path: ./lms4xxx_driver/config/config-lms4xxx.yaml
 
 
-# --- Sensor Trigger (Teensy SensorSync-Logger board) ---
-# The rig's one hardware trigger / timing board. The timing log is raw/sensor_trigger.log.
+# --- Sensor Trigger (Teensy SensorSync-Logger board, needed by FX10e) ---
+# The rig's one hardware trigger / timing board. The timing log is raw/sensor_trigger.log
 Sensor Trigger:
     Port: "/dev/serial/by-id/usb-Teensyduino_USB_Serial_16838390-if00"   # by-id survives re-enumeration; "" = no board
 
 
+# =============================================================
+# ADVANCED: do not change without a reason
+# =============================================================
 # --- Rig-wide guards ---
 # One policy for every enabled driver, enforced by the unified main.
 Guards:

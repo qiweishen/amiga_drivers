@@ -26,32 +26,47 @@ def live_page() -> None:
             versions["fx10"] += 1
 
         ui.context.client.on_delete(dispose)
-        guard_label = ui.label("").classes("text-sm text-red-700")
+        guard_label = ui.label("").classes("text-sm muted")
 
-        # ------------------------------------------------------------ GoX
-        ui.label("GoX — newest frame (last ~1 s)").classes("text-lg font-bold")
-        with ui.row().classes("items-center gap-4"):
-            gox_btn = ui.button("Fetch frame", icon="photo_camera", on_click=lambda: _fetch_gox())
-            gox_busy = ui.spinner(size="sm").classes("hidden")
-            gox_meta = ui.label("").classes("text-sm text-gray-600")
-        gox_image = ui.interactive_image().classes("max-w-[70%]")
+        with ui.element("div").classes("workspace-grid"):
+            # -------------------------------------------------------- GoX
+            with ui.column().classes("console-panel w-full min-w-0"):
+                ui.label("GoX image preview").classes("section-title")
+                ui.label("Newest frame found in the last ~1 s of recorded data.").classes("section-copy")
+                with ui.row().classes("console-toolbar"):
+                    gox_btn = ui.button("Fetch frame", icon="photo_camera", on_click=lambda: _fetch_gox())
+                    gox_busy = ui.spinner(size="sm").classes("hidden")
+                with ui.column().classes("preview-surface w-full justify-center"):
+                    gox_image = ui.interactive_image().classes("w-full")
+                    gox_image.bind_visibility_from(gox_image, "source", backward=bool)
+                    with ui.column().classes("empty-state w-full").bind_visibility_from(
+                            gox_image, "source", backward=lambda source: not source):
+                        ui.icon("image_search", size="36px")
+                        ui.label("No recorded frame displayed")
+                        ui.label("Use Fetch frame during an active GoX recording.").classes("text-xs")
+                gox_meta = ui.label("").classes("text-sm muted mono break-all")
 
-        # ------------------------------------------------------------ FX10
-        ui.separator()
-        ui.label("FX10 — spectral statistics (last 1 s of frames)").classes("text-lg font-bold")
-        with ui.row().classes("items-center gap-4"):
-            fx10_btn = ui.button("Fetch spectrum", icon="ssid_chart", on_click=lambda: _fetch_fx10())
-            fx10_busy = ui.spinner(size="sm").classes("hidden")
-            fx10_meta = ui.label("").classes("text-sm text-gray-600")
-        chart = ui.echart({
-            "xAxis": {"type": "value", "name": "Wavelength (nm)", "nameLocation": "middle",
-                      "nameGap": 28, "min": "dataMin", "max": "dataMax"},
-            "yAxis": {"type": "value", "name": "Normalized (%)", "min": 0, "max": 100},
-            "grid": {"left": 56, "right": 24, "top": 32, "bottom": 44},
-            "legend": {"top": 0},
-            "tooltip": {"trigger": "axis"},
-            "series": [],
-        }).classes("w-full h-96")
+            # -------------------------------------------------------- FX10
+            with ui.column().classes("console-panel w-full min-w-0"):
+                ui.label("FX10 spectral statistics").classes("section-title")
+                ui.label("Band statistics across the last 1 s of recorded frames.").classes("section-copy")
+                with ui.row().classes("console-toolbar"):
+                    fx10_btn = ui.button("Fetch spectrum", icon="ssid_chart", on_click=lambda: _fetch_fx10())
+                    fx10_busy = ui.spinner(size="sm").classes("hidden")
+                with ui.column().classes("plot-surface w-full"):
+                    chart = ui.echart({
+                        "xAxis": {"type": "value", "name": "Wavelength (nm)", "nameLocation": "middle",
+                                  "nameGap": 28, "min": "dataMin", "max": "dataMax"},
+                        "yAxis": {"type": "value", "name": "Normalized (%)", "min": 0, "max": 100},
+                        "grid": {"left": 56, "right": 24, "top": 32, "bottom": 44},
+                        "legend": {"top": 0},
+                        "tooltip": {"trigger": "axis"},
+                        "series": [],
+                    }).classes("w-full h-80")
+                    ui.label("No spectrum displayed · use Fetch spectrum during an active FX10 recording.").classes(
+                        "empty-state w-full text-xs").bind_visibility_from(
+                            chart.options, "series", backward=lambda series: not series)
+                fx10_meta = ui.label("").classes("text-sm muted mono break-all")
 
         # ---------------------------------------------------------------- glue
         def refresh_guard() -> None:
@@ -70,8 +85,23 @@ def live_page() -> None:
             # nothing — an idle tick sends nothing however often it runs.
             running = (STATE.process_state == ProcState.RUNNING and STATE.ownership_verified
                        and not STATE.control_uncertain)
-            guard_label.set_text(
-                "" if running else "Recording is not running — start it on the Overview page first")
+            tone = "text-warning"
+            if STATE.control_uncertain or (STATE.process_state is ProcState.RUNNING
+                                           and not STATE.ownership_verified):
+                reason = "Acquisition state is unverified — previews are unavailable until the controller confirms it."
+            elif STATE.process_state is ProcState.STARTING:
+                reason = "Recording is starting — previews become available after sensor initialization."
+            elif STATE.process_state is ProcState.STOPPING:
+                reason = "Recording is stopping — previews are unavailable."
+            elif STATE.process_state is ProcState.FAILED:
+                reason = "Recording failed — review Overview and System logs before restarting."
+                tone = "text-negative"
+            else:
+                reason = "" if running else "Recording is not running — start it on the Overview page first"
+                tone = "muted"
+            guard_label.set_text(reason)
+            guard_label.classes(add=tone, remove=" ".join(
+                name for name in ("muted", "text-warning", "text-negative") if name != tone))
             gox_btn.set_enabled(running and STATE.enables_at_start.get("gox", False)
                                 and not pending["gox"] and not live_view.busy())
             fx10_btn.set_enabled(running and STATE.enables_at_start.get("fx10", False)

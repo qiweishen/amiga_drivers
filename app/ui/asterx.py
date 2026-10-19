@@ -120,13 +120,13 @@ def _alert(label: ui.label, on: bool, color: str = "text-red-700") -> None:
 
 def _kv_card(title: str, keys: list[str]) -> tuple[ui.card, ui.label, dict[str, ui.label]]:
     """Pre-built labels; the timer only calls set_text (never rebuilds)."""
-    with ui.card().classes("w-72") as card:
-        title_label = ui.label(title).classes("font-bold")
+    with ui.card().classes("console-panel w-full min-w-0").props("flat") as card:
+        title_label = ui.label(title).classes("section-title")
         labels: dict[str, ui.label] = {}
         for k in keys:
             with ui.row().classes("items-center justify-between w-full gap-2"):
-                ui.label(k).classes("text-xs text-gray-500")
-                labels[k] = ui.label("—").classes("text-sm font-mono")
+                ui.label(k).classes("text-xs muted")
+                labels[k] = ui.label("—").classes("text-sm mono break-all text-right")
     return card, title_label, labels
 
 
@@ -141,61 +141,64 @@ def asterx_page(session: str = "") -> None:
 
     ui.context.client.on_delete(close)
     with layout.frame("AsteRx · Live & History"):
-        with ui.row().classes("items-center gap-4"):
-            source_mode = ui.toggle({"live": "Live", "history": "History replay"}, value="history" if session else "live",
-                                    on_change=lambda _: _mode_changed())
-            source_badge = ui.badge("LIVE").props('color="blue-grey"')
-        guard_label = ui.label("").classes("text-sm text-amber-700")
+        with ui.column().classes("console-panel w-full gap-3"):
+            with ui.row().classes("console-toolbar w-full justify-between"):
+                ui.label("AsteRx GNSS / INS").classes("section-title")
+                with ui.row().classes("items-center gap-3"):
+                    source_mode = ui.toggle({"live": "Live", "history": "History replay"}, value="history" if session else "live",
+                                            on_change=lambda _: _mode_changed())
+                    source_badge = ui.badge("LIVE").props('color="blue-grey"')
+            guard_label = ui.label("").classes("text-sm text-amber-700")
 
-        with ui.column().classes("w-full gap-2 border rounded p-3") as history_controls:
-            ui.label("Replay a finalized recording").classes("font-bold")
+        with ui.column().classes("console-panel w-full gap-3") as history_controls:
+            ui.label("Replay a finalized recording").classes("section-title")
             ui.label("Enter a path on the GUI server: a session directory, raw/asterx directory, or a single CSV. "
                      "A directory loads both live_insnavgeod.csv and live_receiverstatus.csv when available."
-                     ).classes("text-sm text-gray-600")
-            with ui.row().classes("w-full items-center gap-2"):
+                     ).classes("section-copy")
+            with ui.row().classes("console-toolbar w-full"):
                 history_path = ui.input("Session directory or CSV path",
                                         value=session,
-                                        placeholder="recordings/<session>/raw/asterx").classes("flex-1")
+                                        placeholder="recordings/<session>/raw/asterx").classes("flex-1 min-w-0").props("outlined dense")
                 load_btn = ui.button("Load history", icon="folder_open", on_click=lambda: _load())
                 cancel_btn = ui.button("Cancel read", icon="close", on_click=player.cancel_read).props("flat")
                 loading = ui.spinner(size="sm")
-            with ui.row().classes("items-center gap-3"):
+            with ui.row().classes("console-toolbar filter-bar w-full"):
                 play_btn = ui.button("Play", icon="play_arrow", on_click=lambda: _play())
                 pause_btn = ui.button("Pause", icon="pause", on_click=player.pause).props("outline")
                 restart_btn = ui.button("Restart", icon="replay", on_click=lambda: _seek(0.0)).props("outline")
                 speed = ui.select({0.25: "0.25×", 0.5: "0.5×", 1.0: "1×", 2.0: "2×", 4.0: "4×", 8.0: "8×"},
                                   value=1.0, label="Speed",
-                                  on_change=lambda e: player.set_speed(float(e.value))).classes("w-24")
-                seek_position = ui.number("Jump to", value=0.0, min=0.0, step=0.1, suffix="s").classes("w-32")
+                                  on_change=lambda e: player.set_speed(float(e.value))).classes("w-24").props("outlined dense")
+                seek_position = ui.number("Jump to", value=0.0, min=0.0, step=0.1, suffix="s").classes("w-32").props("outlined dense")
                 seek_btn = ui.button("Jump", icon="skip_next",
                                      on_click=lambda: _seek(seek_position.value)).props("outline")
             progress = ui.linear_progress(value=0.0, show_value=False).classes("w-full")
             timeline = ui.slider(min=0, max=1, step=0.01, value=0).props("label").classes("w-full")
             timeline.on("pan", lambda e: page.__setitem__("scrubbing", e.args["phase"] == "start"), ["phase"])
             timeline.on("change", lambda e: _seek(e.args), [None])
-            index_progress = ui.label().classes("text-xs text-gray-600")
+            index_progress = ui.label().classes("section-copy")
             gap_label = ui.label().classes("text-xs text-amber-700 whitespace-pre-line")
-            playback_label = ui.label("").classes("text-sm font-mono")
-            history_info = ui.label("").classes("text-xs text-gray-600 whitespace-pre-line break-all")
+            playback_label = ui.label("").classes("text-sm mono")
+            history_info = ui.label("").classes("text-xs muted whitespace-pre-line break-all")
             history_error = ui.label("").classes("text-sm text-red-700 whitespace-pre-line")
             ui.label("Timeline: recorded host time. Playback only changes this page; it does not control the receiver. "
-                     "The route is simplified for display.").classes("text-xs text-gray-500")
+                     "The route is simplified for display.").classes("section-copy")
 
-        with ui.column().classes("w-full"):
-            with ui.row().classes("items-center gap-4"):
+        with ui.column().classes("console-panel w-full gap-3"):
+            with ui.row().classes("console-toolbar w-full"):
+                ui.label("Position & route").classes("section-title mr-auto")
                 fix_badge = ui.badge("No fix").props('color="grey"')
                 follow = ui.switch("Follow vehicle", value=True)
-            m = ui.leaflet(center=(0.0, 0.0), zoom=2).classes("w-full h-96")
-            track_layer = m.generic_layer(name="polyline", args=[[], {"color": "#1976d2", "weight": 3}])
+            m = ui.leaflet(center=(0.0, 0.0), zoom=2).classes("plot-surface w-full h-96")
+            track_layer = m.generic_layer(name="polyline", args=[[], {"color": "#087f8c", "weight": 3}])
             marker_holder: list = [None]
 
-        ui.separator()
-        ui.label("Attitude and receiver health").classes("text-lg font-bold")
-        with ui.row().classes("w-full gap-4 flex-wrap items-start"):
-            with ui.card().classes("w-72") as frd_card:
-                frd_title = ui.label("Attitude (INSNavGeod)").classes("font-bold")
+        ui.label("Attitude and receiver health").classes("section-title")
+        with ui.element("div").classes("grid grid-cols-1 xl:grid-cols-3 gap-4 w-full items-start"):
+            with ui.card().classes("console-panel w-full min-w-0").props("flat") as frd_card:
+                frd_title = ui.label("Attitude (INSNavGeod)").classes("section-title")
                 frd_html = ui.html(_frd_svg(float("nan"), float("nan"), float("nan")))
-                frd_hpr = ui.label("—").classes("text-sm font-mono")
+                frd_hpr = ui.label("—").classes("text-sm mono")
             ins_card, ins_title, ins_f = _kv_card("INS (4226)", [
                 "Fix (GNSS)", "Error", "GNSS age", "Lat / Lon", "Height", "Accuracy", "Host CSV time"])
             rx_card, rx_title, rx_f = _kv_card("Receiver (4014)", [
@@ -230,7 +233,8 @@ def asterx_page(session: str = "") -> None:
                 suffix, dim = f"stale {age:.1f}s", True
             else:
                 suffix, dim = "live", False
-            card.classes(**({"add": "opacity-40"} if dim else {"remove": "opacity-40"}))
+            # Freshness must not reduce the contrast of errors or the stale label.
+            card.classes(**({"add": "telemetry-stale"} if dim else {"remove": "telemetry-stale"}))
             title_label.set_text(f"{name} — {suffix}")
 
         def _refresh_badge(data) -> None:

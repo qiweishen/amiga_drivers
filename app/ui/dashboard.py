@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import time
 import json
+from collections.abc import Callable
 
 from nicegui import ui
 
 from ..constants import DRIVERS, UI_TICK_S
 from ..services import config_store, config_actions, process
-from ..state import STATE, ProcState
-from . import components, layout
+from ..services.storage import human_bytes
+from ..state import STATE, ProcState, SensorState
+from . import components, layout, recording_settings
 
 
 def _driver_of(sensor_key: str) -> str:
@@ -19,76 +21,164 @@ def _driver_of(sensor_key: str) -> str:
 
 @ui.page("/")
 def dashboard_page() -> None:
+    enabled_drivers: dict[str, bool] = {}
+    syncing_switches = False
+
+    async def start_recording() -> None:
+        if not details.ready:
+            ui.notify("Save or reload the recording details before starting.", type="warning")
+            return
+        details.set_enabled(False)
+        try:
+            await _on_start(lambda: details.ready)
+        finally:
+            refresh()
+
+    def toggle_driver(driver: str, value: bool):
+        # Inspect the guard synchronously: a coroutine would run only after
+        # set_value has returned and the programmatic-sync guard is cleared.
+        if syncing_switches:
+            return
+        return save_driver(driver, value)
+
+    async def save_driver(driver: str, value: bool) -> None:
+        await _on_toggle(driver, value)
+        # Read after the explicit action, including failures, to restore the
+        # saved switch values. Metadata drafts are independent of the switches.
+        refresh_settings(load_details=False)
+        refresh()
+
     with layout.frame("Overview"):
-        # --- control row -----------------------------------------------------
-        with ui.row().classes("items-center gap-4"):
-            start_btn = ui.button("Start recording", icon="play_arrow", on_click=_on_start)
-            stop_btn = ui.button("Stop recording", icon="stop", color="negative", on_click=_confirm_stop)
-            session_label = ui.label().classes("text-sm text-gray-600")
-        ui.label("Note: closing the GUI does not stop recording; reopening it reattaches automatically.").classes("text-xs text-gray-500")
-        with ui.expansion("Recent control commands", icon="history").classes("w-full"):
-            ui.label("A disconnected request can still have executed. Use its ID and current device state before retrying.").classes("text-xs text-gray-600")
-            commands = ui.table(columns=[{"name": name, "label": name.replace("_", " ").title(),
-                                           "field": name, "align": "left"}
-                                          for name in ("id", "action", "state", "error")],
-                                rows=[], row_key="id", pagination=8).classes("w-full")
-        shown_commands = [None]
-        with ui.expansion("Recorded run result and final driver counters", icon="description").classes("w-full"):
-            ui.label("These are the acquisition's recorded values; they do not constitute an independent integrity audit.").classes("text-xs text-gray-600")
-            run_result = ui.label().classes("text-xs font-mono whitespace-pre-wrap max-h-80 overflow-auto w-full")
-        shown_result = [None]
-
-        # --- enable switches -------------------------------------------------
-        ui.separator()
-        ui.label("Sensor enables (written to config-main.yaml)").classes("font-bold")
-        with ui.row().classes("gap-6"):
-            switches: dict[str, ui.switch] = {}
-            for driver in DRIVERS:
-                switches[driver] = ui.switch(
-                    {"lms4xxx": "LMS4xxx", "gox": "GoX", "asterx": "AsteRx", "fx10": "FX10"}[driver],
-                    on_change=lambda e, d=driver: _on_toggle(d, e.value),
-                )
-
-        # --- sensor cards + disk --------------------------------------------
-        ui.separator()
-
-        # Built once, updated in place on every tick. Only the card ROW is
-        # rebuilt, and only when the sensor set itself changes (a new session
-        # can bring different LMS instances) — a clear() per tick would destroy
-        # and recreate the "View logs" link below and drop clicks landing in
-        # the swap window (same rule as layout.py's banner).
-        cards_row = ui.row().classes("gap-4 flex-wrap")
-        update_disk = components.disk_gauge()
-        with ui.row().classes("items-center gap-2 bg-red-50 text-red-900 px-3 py-2 rounded w-full") as error_row:
-            ui.icon("error")
-            error_label = ui.label().classes("text-sm break-all")
-            ui.link("View logs", "/logs").classes("text-sm")
+        with ui.row().classes("console-notice notice-danger").props('role="status"') as error_row:
+            ui.icon("error_outline")
+            error_label = ui.label().classes("notice-copy")
+            ui.link("View logs", "/logs")
         error_row.set_visibility(False)
 
+        with ui.column().classes("recording-console"):
+            with ui.row().classes("recording-command-bar"):
+                with ui.column().classes("recording-session"):
+                    session_caption = ui.label("Session").classes("eyebrow")
+                    session_label = ui.label("No active session").classes("session-id mono")
+                with ui.row().classes("recording-buttons"):
+                    start_btn = ui.button("Start recording", icon="play_arrow", on_click=start_recording)
+                    stop_btn = ui.button("Stop recording", icon="stop", color="negative", on_click=_confirm_stop).props("outline")
+                    start_btn.disable()
+                    stop_btn.disable()
+            control_reason = ui.label().classes("control-reason w-full")
+            ui.label("Recording continues when this page is closed.").classes("control-note")
+
+        # Session totals and driver telemetry; not an integrity certification.
+        with ui.element("div").classes("overview-metrics"):
+            with ui.column().classes("metric-cell"):
+                ui.label("Running / listed").classes("eyebrow")
+                running_value = ui.label("—").classes("metric-value")
+                running_value.tooltip("Running status entries / entries selected in Enabled drivers")
+            with ui.column().classes("metric-cell"):
+                ui.label("Session data").classes("eyebrow")
+                bytes_value = ui.label("—").classes("metric-value")
+                bytes_value.tooltip("Total files across all sensors in the current or last session")
+            with ui.column().classes("metric-cell"):
+                ui.label("File growth").classes("eyebrow")
+                rate_value = ui.label("—").classes("metric-value")
+                rate_value.tooltip("Aggregate file growth across all sensor directories")
+            with ui.column().classes("metric-cell"):
+                ui.label("Elapsed").classes("eyebrow")
+                elapsed_value = ui.label("—").classes("metric-value")
+                elapsed_value.tooltip("Host elapsed time of the active recording")
+
+        with ui.element("div").classes("overview-workspace"):
+            with ui.column().classes("overview-primary"):
+                with ui.column().classes("console-panel sensor-panel"):
+                    with ui.row().classes("section-heading items-center"):
+                        ui.label("Sensor overview").classes("section-title")
+                        channel_label = ui.label().classes("channel-count")
+                    # Only membership changes rebuild the rows; telemetry
+                    # updates stable elements without dropping focus or clicks.
+                    cards_row = ui.element("div").classes("sensor-grid")
+                    with ui.column().classes("empty-state") as empty_sensors:
+                        ui.icon("sensors")
+                        empty_title = ui.label().classes("section-title")
+                        empty_copy = ui.label()
+                with ui.column().classes("console-panel storage-panel"):
+                    update_disk = components.disk_gauge()
+                    ui.link("Recording history", "/sessions").classes("storage-history")
+
+            with ui.column().classes("overview-rail"):
+                with ui.column().classes("console-panel setup-panel"):
+                    with ui.row().classes("section-heading items-center"):
+                        ui.label("Next recording").classes("section-title")
+                        ui.link("All settings", "/config").classes("text-xs")
+                    enable_notice = ui.label().classes("text-xs text-amber-700 break-all")
+                    enable_notice.set_visibility(False)
+                    details = recording_settings.RecordingSettings(on_pending=start_btn.disable)
+                    ui.separator()
+                    ui.label("Enabled drivers").classes("eyebrow")
+                    ui.label("Switches save immediately for the next start.").classes("section-copy")
+                    with ui.element("div").classes("enable-grid"):
+                        switches: dict[str, ui.switch] = {}
+                        labels = {
+                            "asterx": ("AsteRx", "GNSS / IMU"),
+                            "fx10": ("FX10", "Hyperspectral camera"),
+                            "gox": ("GoX", "RGB camera"),
+                            "lms4xxx": ("LMS4xxx", "2D LiDAR"),
+                        }
+                        for driver in DRIVERS:
+                            name, description = labels[driver]
+                            with ui.row().classes("enable-option"):
+                                switches[driver] = ui.switch(
+                                    name, on_change=lambda e, d=driver: toggle_driver(d, e.value),
+                                ).props("dense")
+                                switches[driver].disable()
+                                ui.label(description).classes("enable-detail")
+
+        with ui.column().classes("overview-diagnostics"):
+            with ui.expansion("Control command history", icon="history").classes("w-full"):
+                ui.label("Check the command ID and device state before retrying a disconnected request.").classes("section-copy")
+                commands = ui.table(
+                    columns=[{"name": name, "label": name.replace("_", " ").title(),
+                              "field": name, "align": "left"}
+                             for name in ("id", "action", "state", "error")],
+                    rows=[], row_key="id", pagination=8,
+                ).classes("w-full").props("dense flat")
+            with ui.expansion("Session result and driver counters", icon="description").classes("w-full"):
+                ui.label("Recorded driver results; these do not independently verify data integrity.").classes("section-copy")
+                run_result = ui.label().classes("terminal-surface whitespace-pre-wrap max-h-80 overflow-auto w-full")
+
+        shown_commands = [None]
+        shown_result = [None]
         card_updates: dict[str, object] = {}
         sensor_keys: list[tuple] = [()]
 
-        def rebuild_cards() -> None:
+        def visible_sensor_keys() -> tuple[str, ...]:
+            return tuple(key for key in STATE.sensors if enabled_drivers.get(_driver_of(key), False))
+
+        def rebuild_cards(keys: tuple[str, ...]) -> None:
             cards_row.clear()
             card_updates.clear()
             with cards_row:
-                for st in STATE.sensors.values():
+                for key in keys:
+                    st = STATE.sensors[key]
                     card_updates[st.key] = components.sensor_card(st)
 
         def refresh_cards() -> None:
-            keys = tuple(STATE.sensors)
+            keys = visible_sensor_keys()
             if keys != sensor_keys[0]:
                 sensor_keys[0] = keys
-                rebuild_cards()
+                rebuild_cards(keys)
             for key, update in card_updates.items():
                 st = STATE.sensors.get(key)
                 if st is not None:
                     update(st)
+            empty_sensors.set_visibility(not keys)
+            has_enabled = any(enabled_drivers.values())
+            empty_title.set_text("Waiting for enabled sensors" if has_enabled else "No drivers enabled")
+            empty_copy.set_text("Status entries will appear when an enabled sensor reports its state."
+                                if has_enabled else "Enable a driver in Next recording to show its sensors here.")
+            channel_label.set_text(f"Status entries: {len(keys)}")
             update_disk()
             error_label.set_text(STATE.last_error)
             error_row.set_visibility(bool(STATE.last_error))
-
-        refresh_cards()
 
         def refresh() -> None:
             if shown_result[0] != STATE.run_result:
@@ -104,44 +194,81 @@ def dashboard_page() -> None:
                 shown_commands[0] = recent
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
             start_btn.set_enabled(STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy and not STATE.tool_uncertain
-                                  and not running and STATE.process_state is not ProcState.STOPPING)
+                                  and not running and STATE.process_state is not ProcState.STOPPING
+                                  and not _start_in_flight and details.ready)
             stop_btn.set_enabled(STATE.env_ok and running)
+            details.set_enabled(STATE.env_ok and not STATE.config_locked and not STATE.control_uncertain
+                                and not STATE.snapshot_busy and not STATE.tool_uncertain and not _start_in_flight)
             for sw in switches.values():
                 sw.set_enabled(STATE.env_ok and not STATE.config_locked and not STATE.control_uncertain
                                and not STATE.snapshot_busy and not STATE.tool_uncertain)
-            if STATE.active_session is not None:
-                started = STATE.session_started_at or 0
-                elapsed = max(0, int(time.time() - started))
-                session_label.set_text(
-                    f"Session {STATE.active_session.name} · elapsed {elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}"
-                    if running
-                    else f"Last session {STATE.active_session.name}"
-                )
+
+            if not STATE.env_ok:
+                reason = "Device controls are unavailable. Review the runtime notice above."
+            elif STATE.control_uncertain:
+                reason = "Acquisition state is unverified. Waiting for the controller."
+            elif STATE.snapshot_busy or STATE.tool_uncertain:
+                reason = "A camera tool is active or its state is unverified."
             elif STATE.process_state is ProcState.STARTING:
-                session_label.set_text("Waiting for verified session metadata and sensor initialization ...")
+                reason = "Starting — waiting for verified sensor initialization."
             elif STATE.process_state is ProcState.STOPPING:
-                session_label.set_text("Stop requested — waiting for shutdown ...")
+                reason = "Stopping — waiting for the acquisition to shut down."
+            elif not running and not details.ready:
+                reason = "Recording details are not ready. Save or reload changes in Next recording."
             else:
-                session_label.set_text("")
+                reason = ""
+            control_reason.set_text(reason)
+            control_reason.set_visibility(bool(reason))
+            session_caption.set_text("Current session" if running or STATE.process_state is ProcState.STOPPING else "Last session")
+            session_label.set_text(STATE.active_session.name if STATE.active_session else "No session available")
+            started = STATE.session_started_at
+            if running and started is not None and started > 0:
+                elapsed = max(0, int(time.time() - started))
+                elapsed_value.set_text(f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}")
+            else:
+                elapsed_value.set_text("—")
+
+            sensors = tuple(STATE.sensors.values())
+            visible_sensors = tuple(STATE.sensors[key] for key in visible_sensor_keys())
+            running_count = sum(s.state is SensorState.RUNNING for s in visible_sensors)
+            running_value.set_text(f"{running_count:02d} / {len(visible_sensors):02d}")
+            has_sample = (STATE.storage.generation == STATE.session_generation
+                          and STATE.storage.sampled_at > 0 and not STATE.storage.error)
+            bytes_value.set_text(human_bytes(sum(s.bytes_total for s in sensors))
+                                 if has_sample and sensors and STATE.active_session else "—")
+            rate = sum(s.bytes_per_s for s in sensors)
+            rate_value.set_text(f"{human_bytes(rate)}/s" if has_sample and sensors and running and rate > 0 else "—")
             refresh_cards()
 
-        def refresh_switches() -> None:
+        def sync_switches() -> None:
+            nonlocal syncing_switches
+            syncing_switches = True
             try:
-                enables = config_store.main_settings()["enables"]
-            except Exception:
-                return
-            for driver, sw in switches.items():
-                if sw.value != enables.get(driver, False):
-                    sw.set_value(enables.get(driver, False))
+                for driver, sw in switches.items():
+                    if sw.value != enabled_drivers.get(driver, False):
+                        sw.set_value(enabled_drivers.get(driver, False))
+            finally:
+                syncing_switches = False
 
-        refresh_switches()
-        # See constants.UI_TICK_S for how this composes with the log flush and
-        # tail stages. The tick is cheap because nothing is rebuilt and NiceGUI
-        # drops setter calls that would not change anything.
+        def refresh_settings(*, load_details: bool = True) -> None:
+            try:
+                settings = config_store.main_settings()
+            except Exception as exc:
+                enable_notice.set_text(f"Cannot read main configuration: {exc}")
+                enable_notice.set_visibility(True)
+                if load_details:
+                    details.read_failed(exc)
+                sync_switches()
+                return
+            enable_notice.set_visibility(False)
+            if load_details:
+                details.sync(settings)
+            enabled_drivers.update(settings["enables"])
+            sync_switches()
+
+        refresh_settings()
+        refresh()
         ui.timer(UI_TICK_S, refresh)
-        # Config file re-read + YAML parse: only needs to catch edits made
-        # outside this tab.
-        ui.timer(5.0, refresh_switches)
 
 
 async def _on_toggle(driver: str, value: bool) -> None:
@@ -165,7 +292,7 @@ async def _on_toggle(driver: str, value: bool) -> None:
 _start_in_flight = False  # single-flight guard: preflight awaits several execs
 
 
-async def _on_start() -> None:
+async def _on_start(settings_ready: Callable[[], bool] | None = None) -> None:
     global _start_in_flight
     if _start_in_flight or STATE.process_state in (
         ProcState.STARTING, ProcState.RUNNING, ProcState.STOPPING
@@ -188,6 +315,12 @@ async def _on_start() -> None:
                     ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
             if not await dialog:
                 return
+        # Preflight and its warning dialog yield. Do not start with stale
+        # metadata if an input event arrived while either was in progress.
+        if settings_ready is not None and not settings_ready():
+            ui.notify("Recording details changed during preflight; save or reload them before starting.",
+                      type="warning")
+            return
         if await process.start():
             ui.notify("Start accepted — waiting for sensor initialization", type="info")
         elif STATE.stop_requested or STATE.process_state is ProcState.EXITED:

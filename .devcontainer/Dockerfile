@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     sudo \
     locales \
+    usbutils \
+    zenity \
     # ----- Python and image runtime libraries ----- \
     python3 \
     python3-pip \
