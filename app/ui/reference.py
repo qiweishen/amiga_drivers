@@ -22,14 +22,15 @@ def reference_page() -> None:
         with ui.column().classes("console-panel w-full gap-3"):
             ui.label("FX10 white / dark reference").classes("section-title")
             ui.label("Position a white reference target before collecting. The camera captures white "
-                     "with the shutter open, then dark with the shutter closed, using the saved FX10 snapshot "
-                     "configuration in freerun. No trigger board is required.").classes(
+                     "with the shutter open, then dark with the shutter closed, using the saved FX10 recording "
+                     "configuration, including its freerun or external trigger mode. "
+                     "When SensorSync is enabled, the trigger board uses the port in the main configuration.").classes(
                          "section-copy")
             config_label = ui.label("").classes("text-xs mono muted break-all")
             with ui.row().classes("console-toolbar w-full"):
                 collect_btn = ui.button("Collect Reference", icon="contrast", on_click=lambda: collect())
                 ui.button("Reload config", icon="refresh", on_click=lambda: show_config()).props("outline")
-                ui.link("Edit FX10 snapshot / reference config", "/config")
+                ui.link("Edit FX10 recording / reference config", "/config")
                 spinner = ui.spinner(size="sm").classes("hidden")
             guard_label = ui.label("").classes("text-sm text-red-700")
             status_label = ui.label("").classes("text-sm break-all")

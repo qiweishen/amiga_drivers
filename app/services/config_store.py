@@ -181,7 +181,7 @@ def main_settings() -> dict:
         "enable_logging": True,  # The main executable always initializes session logging.
         "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
         # The rig's one SensorSync board; "" = none. Recording drivers receive
-        # it through main; snapshot/reference capture uses its own freerun config.
+        # it through main; reference capture forwards it to the standalone collector.
         "sensor_trigger_port": sensor_trigger_port,
     }
 

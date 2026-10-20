@@ -22,7 +22,7 @@ cameras:
             frame_rate_hz: 5.0              # >= 0.125 freerun; external + sensor_trigger: the SensorSync pulse rate, 1..10 Hz (12-bit packed full frame: <= ~5.8 fps, p.48-53)
             blemish_correction: false       # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
-                mode: external          # freerun | external
+                mode: freerun           # freerun | external
                 activation: rising      # rising | falling (TriggerActivation 1 | 2, p.142)
                 selector_entry: FrameStart
                 source_entry: 24        # 7..19 | 24 | 36 | 37 or an entry name; 24 = Line5 Opt In, pins 2/3 of the 6-pin connector (p.17, p.141)
@@ -59,7 +59,7 @@ cameras:
 # and their Line2 ExposureActive strobes are logged into raw/sensor_trigger.log. Pulses
 # start once every registered camera is armed and stop before the first camera stops.
 sensor_trigger:
-    enabled: true
+    enabled: false
 
 
 # =============================================================

@@ -80,7 +80,7 @@ CONFIG_FILES: dict[str, ConfigFile] = {
         ConfigFile("main", "Main (config-main.yaml)", MAIN_CONFIG),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
-        ConfigFile("fx10_snapshot", "FX10 snapshot / reference", REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml"),
+        ConfigFile("fx10_snapshot", "FX10 snapshot", REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml")
     ]

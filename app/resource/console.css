@@ -147,6 +147,20 @@ body { background: var(--console-bg); color: var(--console-ink); font: 13px/1.45
 .metadata-hint { color: #80601b; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .metadata-actions { display: flex; width: 100%; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 2px; }
 .metadata-status { flex: 1 1 100%; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.q-dialog .folder-browser { width: 680px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 48px); padding: 16px; gap: 10px; background: var(--console-surface); border: 1px solid var(--console-line); border-radius: 2px; box-shadow: none; flex-wrap: nowrap; }
+.folder-navigation { width: 100%; gap: 8px; flex-wrap: wrap; }
+.folder-path-row { width: 100%; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.folder-path { flex: 1; min-width: 0; }
+.folder-path .q-field__native { font: 12px/1.5 var(--console-mono); }
+.folder-path .q-field__control { border-radius: 2px; background: white; }
+.folder-list { width: 100%; min-height: 120px; height: 300px; flex: 1 1 300px; flex-wrap: nowrap; overflow-y: auto; gap: 0; border: 1px solid var(--console-line); background: white; }
+.q-dialog .folder-entry { width: 100%; min-height: 40px; flex-shrink: 0; padding: 8px 12px; border-radius: 0; border-bottom: 1px solid var(--console-soft-line); color: var(--console-ink) !important; font-weight: 400; }
+.folder-entry .q-btn__content { flex-wrap: nowrap; text-align: left; }
+.folder-entry .block { min-width: 0; overflow-wrap: anywhere; }
+.folder-entry .q-icon { color: #647580; font-size: 20px; flex-shrink: 0; }
+.folder-empty { padding: 18px 12px; color: var(--console-muted); font-size: 12px; }
+.folder-error { width: 100%; color: #8c302a; font-size: 12px; overflow-wrap: anywhere; }
+.folder-actions { width: 100%; justify-content: flex-end; gap: 8px; padding-top: 10px; border-top: 1px solid var(--console-line); }
 .enable-grid { display: flex; flex-direction: column; width: 100%; gap: 0; }
 .enable-option { display: flex; width: 100%; min-height: 40px; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--console-soft-line); }
 .enable-option:last-child { border-bottom: 0; }

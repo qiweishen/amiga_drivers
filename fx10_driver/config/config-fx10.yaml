@@ -4,6 +4,7 @@
 
 # Specim FX10e hyperspectral line-scan camera.
 # Referenced by config/config-main.yaml ("FX10 Driver Config Path").
+# Also used by Collect Reference, preserving acquisition and trigger settings.
 
 
 
@@ -43,6 +44,11 @@ acquisition:
 sensor_trigger:
     enabled: true
     trigger_channel: 0                  # 0..3 physical ID; v2 drives 0/1 together (FX, >=20 Hz), 2/3 together (JAI, 1..10 Hz)
+
+
+# --- Reference collection (Collect Reference page only) ---
+reference:
+    duration_s: 5.0                     # 0.1..3600; seconds per phase: white, then dark
 
 
 # =============================================================

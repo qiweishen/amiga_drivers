@@ -1,8 +1,7 @@
 # =============================================================
-# FX10e Driver Configuration - Snapshot / Reference
+# FX10e Driver Configuration - Snapshot
 # =============================================================
-# Shared by the Spectral workbench and white/dark reference collection.
-# fx10_reference uses the saved device/acquisition settings and reference.duration_s.
+# Used by the Spectral workbench; Collect Reference uses config-fx10.yaml.
 # fx10_snapshot forces: trigger freerun, frame_rate_hz from --fps, one segment under --out,
 # on_gap record, no frame/duration limit, statistics off; the sensor trigger is never used.
 # Workbench-only overrides: device.ip (--ip), exposure_ms (--exposure-ms),
@@ -22,11 +21,11 @@ acquisition:
     spectral_binning: 2                 # 1 | 2 | 4 | 8; mroi needs 1
     pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
     exposure_ms: 5.0                    # > 0
-    frame_rate_hz: 50.0                 # freerun line rate for reference; snapshot uses --fps
+    frame_rate_hz: 50.0                 # snapshot uses --fps
     status_line: false
     image_enhancement: true
     trigger:
-        mode: freerun                  # reference must not wait for external trigger pulses
+        mode: freerun                  # snapshot uses freerun
     mroi:
         enabled: false
         multiband_string: ""
@@ -34,7 +33,7 @@ acquisition:
 
 # --- Sensor Trigger ---
 sensor_trigger:
-    enabled: false                     # snapshot/reference do not require a trigger board
+    enabled: false                     # snapshot does not require a trigger board
 
 
 # Mechanical shutter is a mandatory driver step, with no YAML override:
@@ -42,17 +41,12 @@ sensor_trigger:
 # Each write opens the shutter; the stored value does not report shutter state.
 # MotorShutter_PulseFwd = 255 closes it and is not issued during normal startup.
 
-# --- Reference collection (Collect Reference page only) ---
-reference:
-    duration_s: 5.0                     # 0.1..3600; seconds per phase: white, then dark
-
-
 # =============================================================
 # ADVANCED: do not change without a reason
 # =============================================================
 # --- Features ---
 features:
-    raw: []                             # no strobe wiring for snapshot/reference
+    raw: []                             # no strobe wiring for snapshot
 
 
 # --- Output (ENVI BIL) ---

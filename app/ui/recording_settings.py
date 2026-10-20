@@ -8,7 +8,8 @@ from dataclasses import dataclass
 
 from nicegui import ui
 
-from ..services import config_actions, config_store, folder_picker
+from ..services import config_actions, config_store
+from . import folder_browser
 
 
 _FIELDS = (("Operator", "operator"), ("Field", "field"),
@@ -54,7 +55,7 @@ class RecordingSettings:
                                 self._choose_folder = ui.button(
                                     "Select Folder", icon="folder_open", on_click=self.choose_folder,
                                 ).props("outline dense no-wrap").classes("metadata-folder")
-                                self._choose_folder.tooltip("Open a folder dialog on the recording computer")
+                                self._choose_folder.tooltip("Browse the recording computer's directories in this page")
                         field.disable()
                         field.on_value_change(lambda e, k=key: self._edit(k, e.value))
                         self._inputs[key] = field
@@ -152,7 +153,7 @@ class RecordingSettings:
         self._on_pending()
         self._render()
         try:
-            selected = await folder_picker.select_directory(initial)
+            selected = await folder_browser.select_directory(initial)
             if selected is not None and self._alive:
                 if not self._enabled or self._drafts["Output Directory"].value != initial:
                     self._folder_error = "The recording settings changed while the dialog was open. Select the folder again."
@@ -229,7 +230,7 @@ class RecordingSettings:
         pending = any(d.dirty or d.conflict for d in drafts)
         failed = bool(self._read_error) or any(d.error for d in drafts)
         if self._selecting_folder:
-            text = "Select a folder in the desktop dialog…"
+            text = "Select a folder in the directory browser…"
         elif saving:
             text = "Saving recording details…"
         elif pending:

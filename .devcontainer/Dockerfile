@@ -32,7 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     locales \
     usbutils \
-    zenity \
     # ----- Python and image runtime libraries ----- \
     python3 \
     python3-pip \
@@ -53,12 +52,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # =============================================================
 RUN apt-get install -y --no-install-recommends \
     libqt5opengl5 libavcodec58
-
-# =============================================================
-# Wayland client libraries (GUI forwarding defaults to X11/XWayland)
-# =============================================================
-RUN apt-get install -y --no-install-recommends \
-    libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0
 
 # =============================================================
 # eBUS SDK (single Pleora 6.5.1 edition for BOTH the JAI Go-X and the Specim FX10)

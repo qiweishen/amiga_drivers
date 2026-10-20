@@ -1,4 +1,4 @@
-"""Collect a persistent FX10 white/dark pair with the shared snapshot configuration."""
+"""Collect a persistent FX10 white/dark pair with the recording configuration."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def _duration(value: object) -> float:
 
 def configured_duration() -> tuple[Path, float | None]:
     """For page display only; the collector announces its actual loaded value."""
-    loaded = config_store.read("fx10_snapshot")
+    loaded = config_store.read("fx10")
     doc = yaml.safe_load(loaded.text)
     if doc is None:
         doc = {}
@@ -116,7 +116,7 @@ async def collect_reference() -> ReferenceResult:
 async def _collect() -> ReferenceResult:
     global _status, _last_result
     started = time.monotonic()
-    _status = "Preparing reference capture using the saved FX10 snapshot configuration…"
+    _status = "Preparing reference capture using the saved FX10 recording configuration…"
     _last_result = None
     proc = None
     completed = None
@@ -136,16 +136,19 @@ async def _collect() -> ReferenceResult:
             raise RuntimeError("A reference collector is already running")
         if await runtime.pgrep("AmigaDrivers"):
             raise RuntimeError("Stop the main recording before collecting references")
-        config = config_store.get("fx10_snapshot")
+        config = config_store.get("fx10")
         settings = config_store.main_settings()
         output_root = settings["output_dir"]
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
-        # The shared snapshot config selects freerun with SensorSync disabled.
+        # Acquisition/trigger settings come from the same config as recording.
+        # The collector uses the rig's port only when sensor_trigger.enabled.
         argv = [
             runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config.path),
             "--out", runtime.exec_path(output_root),
         ]
+        if settings["sensor_trigger_port"]:
+            argv += ["--sensor-port", settings["sensor_trigger_port"]]
         proc = await tool_jobs.spawn(argv)
 
         async def read_stdout() -> None:

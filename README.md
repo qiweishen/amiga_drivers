@@ -522,7 +522,7 @@ See [Docker deployment](#docker-deployment) for the single-container configurati
 
 | Page | What it does |
 | --- | --- |
-| `/` **Overview** | Start/stop a recording; per-driver Enable switches for the next start; sensor health, storage and written-frame rates; final run results and recent command outcomes. |
+| `/` **Overview** | Start/stop a recording; Operator, Field and Output Directory settings with explicit Save; per-driver Enable switches for the next start; sensor health, storage and written-frame rates; final run results and recent command outcomes. |
 | `/config` **Config** | Raw-text editor for the selected main and driver configs; YAML validation, path/version conflict detection, atomic save and a `.bak`. |
 | `/logs` **Logs** | The unified session log with level/module filters and follow mode. |
 | `/live` **Data Live** | On-demand Go-X/FX10 previews from files in the RUNNING session, using bounded background work and the session/settings captured at request time. |
@@ -530,6 +530,26 @@ See [Docker deployment](#docker-deployment) for the single-container configurati
 | `/sessions` **History** | Bounded session metadata listing, date/device/state filters, pagination and links to finalized AsteRx recordings. |
 | `/reference` **Collect Reference** | FX10 white/dark reference collection with saved configuration and retained results. |
 | `/camera` **Camera Tools** | One shared device discovery for both camera drivers, then a Go-X and an FX10 exposure workbench. |
+
+### Recording output directory
+
+In **Overview → Next recording**, **Select Folder** opens a directory browser
+inside the web page. It lists directories visible to the acquisition service
+inside its container; a remote operator selects a server path, not a folder on
+the browser's computer. The acquisition host needs no desktop session or native
+file dialog.
+
+Compose sets `AMIGA_DATA_ROOT=/workspace`, so browsing and the resolved output
+path stay within that boundary. The repository is mounted at `/workspace`, and
+the host's `/mnt/SharedData/Post_Processing_Data` is mounted at
+`/workspace/dataset`. Select `/workspace/dataset` or one of its directories to
+write to that shared disk. Host directories that are not mounted into the
+container cannot be selected.
+
+Selecting a directory fills the **Output Directory** draft and shows **Unsaved
+changes**. Click **Save** to write the settings to `config-main.yaml`; selection
+alone does not save. The saved directory applies to the next recording and does
+not relocate an active session.
 
 ### AsteRx history playback
 
@@ -664,7 +684,7 @@ feed until that file is available.
 
 ## Docker deployment
 
-### Standard workstation setup
+### Headless acquisition host
 
 Use [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml) for
 the single `amiga-drivers-dev` service. It includes the C++/SDK development
@@ -707,11 +727,12 @@ docker compose -f .devcontainer/docker-compose.yml stop amiga-drivers-dev
 ```
 
 `--remove-orphans` removes the old `gui` service container when migrating from the
-previous configuration. The workstation setup retains the existing shared disk
-at `/mnt/SharedData/Post_Processing_Data`, X11 socket and authorization file,
-user runtime and device mounts. These host paths must exist; the X11 bind mounts
-are configured to fail instead of creating missing source paths. The active
-desktop session's `DISPLAY` and `XAUTHORITY` values select GUI forwarding.
+previous configuration. The headless setup retains the repository, shared disk
+and device mounts. The host directory `/mnt/SharedData/Post_Processing_Data`
+appears as `/workspace/dataset` in the container and in **Select Folder**. Ensure
+the shared disk is mounted and writable before recording. The control terminal
+is accessed through a web browser; no X11/Wayland forwarding, desktop session or
+host user runtime mount is required.
 
 `build/bin/` acquisition/tool binaries must be prepared separately. Startup does
 not start recording, and the GUI can report missing binaries before acquisition

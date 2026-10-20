@@ -195,18 +195,22 @@ hardware verification were not run for this change.
 The navigation's **Collect Reference** page (`/reference`) is dedicated to FX10;
 Camera Tools links to it. Place an illuminated white
 reference target in the field of view before clicking. The tool loads the camera
-address and acquisition settings from **`config/config-fx10-snapshot.yaml`**, shared
-with the **FX10 · Spectral workbench**. This config explicitly selects freerun and
-disables SensorSync, so reference capture does not require a trigger board or its
-serial port. Edit the **FX10 snapshot / reference** tab on the Config page to save
-reference settings; table selection and preview sliders do not override them.
-The workbench's **Apply to config** button still updates the main recording's FX10
-config, which is separate from the snapshot/reference config.
+address and acquisition settings from the **same FX10 config as normal recording**:
+`General.FX10 Driver Config Path` in the main config, normally
+**`fx10_driver/config/config-fx10.yaml`**. Edit the **FX10** tab on the Config page
+to save recording and reference settings; table selection and preview sliders
+do not override them. The workbench's **Apply to config** button updates this same
+recording/reference config. The **FX10 snapshot** config is only used by the
+**FX10 · Spectral workbench** preview.
 Reference exposure, binning, pixel format, geometry/calibration, network settings
-and trigger mode/rate follow the snapshot/reference config. The collection takes its output root from the main
-config's **Output Directory**, as normal rig recordings do.
+and trigger mode/rate follow the recording config, including **freerun or external**
+trigger mode. When `sensor_trigger.enabled` is true, the app passes the main
+config's **Sensor Trigger: Port** as `--sensor-port`; a missing port fails collection
+instead of falling back to freerun. With SensorSync disabled, external mode
+requires an independently supplied trigger. The collection takes its output root
+from the main config's **Output Directory**, as normal rig recordings do.
 
-Set the duration in `config/config-fx10-snapshot.yaml`:
+Set the duration in `fx10_driver/config/config-fx10.yaml` (or the selected recording config):
 
 ```yaml
 reference:
@@ -224,7 +228,7 @@ Use **Reload config** after editing; collection always loads the saved file agai
 then uses the same connection for both phases:
 
 1. Write `MotorShutter_PulseRev = 255`, check the SDK result, start the receiver,
-   and collect white reference in freerun for `reference.duration_s`.
+   and collect white reference in the configured trigger mode for `reference.duration_s`.
 2. Require acknowledgement of `AcquisitionStop`, then drain/finalize all white
    data before moving the shutter. Teardown shares the once-per-run stop flag
    and does not replay this command.

@@ -6,9 +6,9 @@
 # --- General Settings ---
 General:
     # Metadata
-    Operator: "Yanchun"
+    Operator: "Tester"
     # Field info
-    Field: "Bird_Cage"
+    Field: "TPA_Workspace"
 
     # Root output data directory for all output
     Output Directory: ./data
