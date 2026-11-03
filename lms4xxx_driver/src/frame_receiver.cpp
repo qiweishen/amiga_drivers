@@ -1,14 +1,13 @@
 #include "frame_receiver.h"
 
-#include "byte_util.h"
-#include "cola_b.h"
-#include "time_util.h"
-
 #include <chrono>
 #include <algorithm>
 #include <cstring>
 #include <string>
 
+#include "byte_util.h"
+#include "cola_b.h"
+#include "time_util.h"
 #include "logger.h"
 #include "utility.h"
 
@@ -140,21 +139,23 @@ namespace lms4xxx {
 
             std::uint8_t computed_cs = ColaBCodec::ComputeChecksum(data_start, data_len);
 
-            if (computed_cs != received_cs) {
-                error_covered_until = std::max(error_covered_until, pos + total_frame_size);
+            const bool checksum_valid = computed_cs == received_cs;
+            if (!checksum_valid) {
                 // The manual calls this "CRC8" (p.66) but specifies XOR; the
                 // name is kept because the GUI statistics field is crc=.
                 ReportFramingError(FrameReceiver::FrameError::kChecksumMismatch, "checksum mismatch",
                                      fmt::format("computed 0x{:02X}, received 0x{:02X}", computed_cs, received_cs));
-                return 1; // search every possible STX without charging its tail again
+                // Its length gives a bounded record. Archive exactly these bytes
+                // once; searching inside them would duplicate bytes in the raw file.
+            } else {
+                consecutive_framing_errors = 0; // a good frame ends the burst
             }
-
-            consecutive_framing_errors = 0; // a good frame ends the burst
             error_covered_until = 0;
 
             RawFrame frame;
-            frame.data.assign(data_start, data_start + data_len);
+            frame.data.assign(buffer.data() + pos, buffer.data() + pos + total_frame_size);
             frame.receive_timestamp_us = common::TimeUtil::SteadyNowUs();
+            frame.checksum_valid = checksum_valid;
 
             if (on_frame) {
                 on_frame(std::move(frame));
@@ -224,6 +225,18 @@ namespace lms4xxx {
         }
 
         impl_->Compact(scan_pos);
+    }
+
+
+    std::size_t FrameReceiver::Finish() {
+        const auto pending = impl_->write_pos;
+        if (pending != 0) {
+            impl_->ReportFramingError(FrameError::kIncomplete, "incomplete stream tail",
+                                     fmt::format("{} byte(s) have no complete telegram", pending));
+            impl_->write_pos = 0;
+            impl_->error_covered_until = 0;
+        }
+        return pending;
     }
 
 

@@ -1,5 +1,5 @@
 """FX10 helpers: the snapshot pipeline (fx10_snapshot in the container ->
-shared ENVI BIL reader -> per-band spectral statistics over ~1 s of
+shared raw/legacy ENVI reader -> per-band spectral statistics over ~1 s of
 frames in raw digital numbers). Device discovery is driver-neutral:
 services/ebus_tools.py."""
 

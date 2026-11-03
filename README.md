@@ -39,7 +39,7 @@ are named at second resolution and an existing one is refused, never reused.
   <img alt="CMake"    src="https://img.shields.io/badge/CMake-%E2%89%A5%203.14-064F8C?logo=cmake&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Ubuntu%2022.04%20(devcontainer)-E95420?logo=ubuntu&logoColor=white">
   <img alt="GUI"      src="https://img.shields.io/badge/GUI-NiceGUI%20%C2%B7%20pip-3776AB?logo=python&logoColor=white">
-  <img alt="Storage"  src="https://img.shields.io/badge/storage-SBF%20%C2%B7%20ENVI%20%C2%B7%20HDF5-4B8BBE">
+  <img alt="Storage"  src="https://img.shields.io/badge/storage-SBF%20%C2%B7%20RAW%20%C2%B7%20CoLa%20B-4B8BBE">
 </p>
 
 > A former fifth driver (Aceinna INS401) is retired and archived outside this
@@ -57,9 +57,9 @@ are named at second resolution and an existing one is refused, never reused.
 | Sensor | Driver | Transport | Records |
 |---|---|---|---|
 | Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (including warm-up) + `live_*.csv` telemetry sidecar |
-| JAI **Go-X** GigE cameras (×N) | `gox_driver` | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `jai-raw-seg` segments + `idx.jsonl` + `device.json` + `telemetry.jsonl` per camera; its channel in `raw/sensor_trigger.log` |
-| Specim **FX10e** hyperspectral pushbroom | `fx10_driver` | Pleora eBUS SDK (GVSP), SensorSync-triggered | ENVI BIL `.bil`/`.hdr` + `.lines.csv`; its channel in `raw/sensor_trigger.log` |
-| SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | `scan_<id>_<ts>_NNN.h5` (`lms4xxx-h5` v3) |
+| JAI **Go-X** GigE cameras (×N) | `ebus_driver` + GOX config | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `ebus-raw-v1` SDK buffers + `device.json` + `events.jsonl`; its channel in `raw/sensor_trigger.log` |
+| Specim **FX10e** hyperspectral pushbroom | `ebus_driver` + FX10 config | Pleora eBUS SDK (GVSP), SensorSync-triggered | The same `ebus-raw-v1` SDK buffers + metadata/events; ENVI is an offline derivative |
+| SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | Complete telegrams in `scan_<id>_<ts>_NNN.bin` + CSV index + JSON metadata |
 
 Every driver **resets the device to a known baseline on each start** and then
 writes only the parameters the recording depends on, reading each one back.
@@ -71,25 +71,13 @@ server are listed in `resource/devices_ip.yaml`.
 
 ## Architecture
 
-```
-                      +---------------------------------------------------+
-                      |     AmigaDrivers: composition + coordinator       |
-                      |  SignalHandler · spdlog (single instance) ·       |
-                      |  session folder · config snapshot · drivers.json  |
-                      |  · rig-wide guards · terminate propagation ·      |
-                      |  exit status                                      |
-                      +--+----------+----------+----------+---------------+
-                         |          |          |          |
-                 AsterxDriverApp  GoxApp    Fx10App    Lms4xxxApp (xN)
-                         |          |          |          |
-                  Qt thread +   eBUS SDK   eBUS SDK   TCP CoLa-B client
-                  SsnRx (TCP)   (GVSP)     (GVSP)     + SPSC rings
-                  + SBF write   + chunk    + flush    + parse thread
-                    thread        queue +    thread   + writer thread
-                                  writer
-                         |          |          |          |
-                     SBF files  jai-raw-seg ENVI BIL  scan_*.h5
-                                 segments   + trig log
+```text
+AmigaDrivers / RunSession
+  ├─ AsterxDriverApp → SsnRx → SBF writer
+  ├─ EbusCameraDriver (one per GOX or FX10)
+  │    ├─ GOX / FX10 configuration hooks
+  │    └─ PvBuffer → owned byte copy → bounded queue → common RAW writer
+  └─ Lms4xxxDriverApp (one per LiDAR) → CoLa B + timestamp monitor → RAW recorder
 ```
 
 Every driver app derives from `common::IDriverApp` (`common/include/driver_app.h`):
@@ -123,18 +111,19 @@ Lifecycle ownership is explicit:
   shutdown and final manifest. `Init` may start resources; even failed/partial
   initialization must be followed by `Shutdown`. Every Run thread joins before
   Shutdown drains internal workers/writers. An instance represents one epoch.
-- `fx10::Session`: device/receiver/recorder lifetime and counters;
-  `Fx10DriverApp` only adapts the common interface.
+- `ebus_driver::EbusCameraDriver`: one lifecycle per GOX/FX10 camera, a bounded
+  buffer pool/queue, receive and writer workers; device-specific hooks only configure,
+  apply start actions, read back and monitor the device.
 - LMS `CommandChannel`: serialized CoLa transactions and uncertainty;
   configuration, streaming and lifecycle have separate source files.
 - `AcquisitionController` in `app/services/process.py`: process identity,
   tasks, stop latch and immutable recording snapshots; UI code observes state.
 
-The preview readers also have explicit boundaries: `app/formats/fx10.py`
-defines FX10 ENVI/capture/index rules, while `gox_driver/scripts/jai_raw/`
-defines Go-X record layouts and pixel decoding for both CLI and GUI.
-Services choose full, tail or streamed reads and render previews. The on-disk
-recording formats and existing CLI names remain unchanged.
+The shared `ebus_driver/scripts/ebus_raw/` package reads the new camera RAW
+format and decodes supported pixels offline. `app/formats/fx10.py` and
+`gox_driver/scripts/jai_raw/` retain historical ENVI / jai-raw-seg compatibility.
+CLI names and YAML inputs remain supported; new recordings use a different format.
+See [the unified driver and binary format](ebus_driver/README.md).
 
 The existing Go-X RGB8 preview path still passes RGB arrays to OpenCV image
 writers that interpret channels as BGR. That display limitation is unchanged by
@@ -166,8 +155,9 @@ deployment is the single container shown above. See [Web GUI](#web-gui) for reco
 | `AmigaDrivers` | The unified executable for multi-sensor recording |
 | `ebus_discover` / `ebus_set_ip` | GigE Vision enumeration for both camera drivers / camera re-addressing (FORCEIP + persistent IP); both live in `common/` and are used by the web GUI |
 | `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
-| `fx10_reference` | Collect Reference page: white then dark, each for `reference.duration_s` (default 5 s), with separate spectral plots and a persistent `reference_<UTC>` session using the FX10 ENVI recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
-| `asterx_lib`, `fx10_lib`, `gox_lib`, `lms4xxx_lib` | Per-driver static libraries |
+| `fx10_reference` | Collect Reference page: white then dark, each for `reference.duration_s` (default 5 s), with separate spectral plots and a persistent `reference_<UTC>` session using the unified RAW recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
+| `asterx_lib`, `lms4xxx_lib`, `ebus_camera` | Sensor adapters; both cameras share `ebus_camera` |
+| `ebus_raw`, `gox_device_config`, `fx10_device_config` | Shared SDK-free recorder and isolated device configuration profiles |
 | `amiga_common` | SDK-independent infrastructure: session coordinator, logging, strict config loading, queues, rig guards, SensorSync host wrapper and `drivers.json` |
 | `amiga_ebus` | The eBUS-SDK-dependent layer shared by gox and fx10 (`common/include/ebus`): GenICam env bootstrap, PvResult errors, discovery, device IP configuration |
 
@@ -175,11 +165,9 @@ deployment is the single container shown above. See [Web GUI](#web-gui) for reco
 
 | Dependency | Provided by | Used by |
 |-----------|-------------|---------|
-| HDF5 1.14.6 (C library, static `hdf5-static`) | FetchContent, pinned in `3rd_party/FetchContent/` (`cmake/Dependencies.cmake`) | lms4xxx scan recorder (`lms4xxx-h5`, see `docs/FORMAT_H5.md`) |
-| zlib (`zlib1g-dev`) | system (devcontainer apt) | HDF5 gzip filter — a hard requirement of the pinned HDF5 CMake |
 | spdlog v1.17.0 (+fmt) | FetchContent, pinned in `3rd_party/FetchContent/` | all (single process-wide logger) |
 | yaml-cpp 0.9.0 | FetchContent, pinned in `3rd_party/FetchContent/` | main + all four driver configs |
-| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | gox (`jai-raw-seg` `idx.jsonl`, device sidecars, snapshot tools), asterx/fx10 sidecars, `drivers.json` |
+| nlohmann/json v3.12.0 | FetchContent, pinned in `3rd_party/FetchContent/` | camera RAW record metadata and events, device sidecars, snapshot tools, `drivers.json` |
 | doctest 2.4.11 | vendored `3rd_party/doctest/` | every unit-test suite (common + the four drivers) |
 | Boost (header-only) | system | lms4xxx (Asio TCP) |
 | Qt5 Core/Network/SerialPort | system | asterx (vendored Septentrio SsnRx SDK) |
@@ -192,7 +180,7 @@ The C++ acquisition program does not need Python to record data. These are direc
 version pins, not a transitive Python lock or a fully hermetic OS image.
 
 The unified build always includes all four drivers, their device tools and unit
-tests. The eBUS SDK, Qt/ssnrx and HDF5/zlib are required for the complete driver
+tests. The eBUS SDK and Qt/ssnrx are required for the complete driver
 set. The main YAML configuration selects which drivers run in a session.
 The contract checker is registered when a Python interpreter is available.
 `AMIGA_BUILD_REVISION` supplies the recorded source identity (default `unknown`);
@@ -213,7 +201,8 @@ The C++ side builds inside the `amiga-drivers-dev` devcontainer
 Qt5, Boost and zlib. The Dockerfile installs the pinned SDK package from `resource/`.
 
 For eBUS user-mode camera reception, the host's `net.core.rmem_max` must allow
-the configured `network.socket_rx_buffer_mb` request. The shipped FX10 config
+the configured `network.socket_rx_buffer_mb` request to obtain that size without
+SDK clamping. The shipped FX10 config
 requests 32 MiB (33554432 bytes); Go-X requests 16 MiB per camera. These are
 per-socket limits, so use the largest configured request, not their sum.
 The container uses `network_mode: host`, so check and provision this on the
@@ -229,9 +218,14 @@ The write above lasts until reboot; persistent host provisioning can set
 `net.core.rmem_max = 33554432` in `/etc/sysctl.d/`. Adjust this value when requesting
 larger buffers. The SDK sets each socket's buffer explicitly, so raising
 `rmem_default` is not required for this error. The application and container
-startup do not change these host settings. FX10 rejects a capped request before
-acquisition; changing the limit resolves that admission failure but does not
-establish loss-free throughput.
+startup do not change these host settings. In eBUS 6.5.1, a request above
+`rmem_max` is automatically capped by the SDK and returns `INVALID_PARAMETER`.
+The unified camera driver warns and continues with that SDK fallback, retaining
+the request, a read-only sysctl snapshot when available, and the actual socket
+readback after Open. The capped result is not compared against the original
+larger request. The SDK readback may include kernel bookkeeping; it is not pure
+payload capacity. A smaller receive buffer provides less buffering against
+receive stalls; neither setting proves loss-free throughput.
 
 ### Build
 
@@ -369,11 +363,9 @@ configuration snapshot and run metadata under `raw/`:
     │                                 #   exposure (S) edges of every channel, PPS (P) and NMEA (Z)
     ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; warm-up and ready
     │                                 #   phases share the same SBF file sequence
-    ├── gox/<cam>/                    # seg_NNNNN.raw (jai-raw-seg) + seg_NNNNN.idx.jsonl + segments.jsonl
-    │                                 #   + device.json (one-shot audit, timing block) + telemetry.jsonl + stream_stats.txt
-    ├── fx10/fx10_<UTC>Z/             # capture.json + segment_NNNN.bil/.hdr/.lines.csv
-    │                                #   + device.json + telemetry.jsonl + stream_stats.txt + segments.jsonl
-    └── lms4xxx/                      # scan_<instance>_<ts>_NNN.h5
+    ├── gox/<cam>/                    # seg_NNNNN.raw (ebus-raw-v1) + device.json + events.jsonl
+    ├── fx10/fx10_<UTC>Z/             # the same RAW format and sidecars
+    └── lms4xxx/                      # scan_<instance>_<ts>_NNN.bin + .csv + .json
 ```
 
 Controller journals and temporary previews are separate from acquisition data:
@@ -400,28 +392,26 @@ The recording formats are self-describing enough to read without this repository
   the ready phase use the same writer. Opening the warm-up gate does not split
   the file; the configured size/time rotation still applies. Warm-up blocks
   retain their original device time and validity fields.
-- **`jai-raw-seg`** (gox) — 12-bit packed Bayer payloads verbatim from the SDK
-  buffer behind a 96-byte CRC-protected frame header; `gox_driver/scripts/`
-  `inspect_raw.py` / `unpack_raw.py` are the reference readers, and the index
-  can be rebuilt from the headers alone.
-- **ENVI BIL** (fx10) — a segment is valid **iff its `.hdr` exists**; the header
-  is written last, and it carries the read-back exposure and frame rate, the AIE
-  state and which calibration pack applies. `.lines.csv` gives every line its
-  BlockID, raw camera tick and any gap/rejection event.
-- **`lms4xxx-h5`** (lms4xxx) — `/frames/*` per-scan metadata, `/channels/*` raw
-  `[scan, point]` values with their scale factors, and `/telemetry/*` device
-  health. HDF5 has no atomic rename, so a finished file is marked instead: **a
-  file without the `closed_cleanly` root attribute is incomplete.** Flushes are
-  `H5Fflush` + `fdatasync`, so the loss window really is `flush_interval_ms`.
-  Scans are only written once the device clock is NTP-locked
-  (`docs/DEVICE_CONFIG.md`, "Time"). `lms4xxx_driver/scripts/inspect_h5.py` is
-  the reference reader (`info` / `verify` / `csv`).
+- **`ebus-raw-v1`** (GOX and FX10) — unchanged SDK acquired bytes, with
+  per-record JSON layout/status/timestamps and CRC32C for prefix, metadata and payload.
+  `device.json` stores configuration and `events.jsonl` records health and completion.
+  The native SDK timestamp's unit/epoch are not assumed. Historical jai-raw-seg
+  and FX10 ENVI recordings remain readable. New FX10 ENVI files are created only
+  by the separate offline exporter; the authoritative bytes remain in RAW.
+- **`lms4xxx-cola-b` v1** (lms4xxx) — complete received telegrams, including
+  STX, length, command bytes and checksum, concatenated in BIN files. CSV indexes
+  preserve byte offsets, host reception and clock observations; JSON carries
+  device/configuration metadata and per-split completion. The first scan is fully
+  checked; later scans only expose time fields to the live NTP monitor. Point
+  decoding and HDF5 generation live in `amiga_decoders/lms4xxx_decoder`.
+  Check the split metadata, file lengths and final session verdict together;
+  `fdatasync` does not make BIN/CSV/JSON an atomic transaction. See
+  [the raw format](lms4xxx_driver/docs/FORMAT_RAW.md).
 
-Every driver writes from a thread that is not the one talking to the device
-(AsteRx and LMS writer threads, the Go-X chunk queue + writer, the FX10 flush
-thread), so a stalling disk shows up as queue depth in the statistics — and as a
-fail-fast stop once a bounded budget is exhausted — never as a sensor that
-silently lost data because its socket was not being read.
+Each camera has a receive worker and a separate RAW writer. The receive worker
+copies SDK bytes to owned memory before requeueing. Queue exhaustion requests a
+failed stop and records the rejected buffer identity. This policy makes observed
+loss explicit; it does not prove that hardware, SDK or storage cannot lose data.
 
 ## Health guards
 
@@ -454,7 +444,7 @@ On top of the two, each driver keeps the guards that are specific to its device:
 | asterx | Warm-up gate on host monotonic time since the first queued SBF block, plus optional `ReceiverStatus` FINETIME, controls rig readiness; SBF is recorded throughout. The duration clock continues across warm-up reconnects and file rotation. A 3 s SBF silence timer reconnects during warm-up and is fatal after the gate opens. Damage, link gaps and receiver resets always mark the recording incomplete and are fatal after readiness; write failures and queue overflow are fatal in every phase. |
 | gox | PTP slave-status admission / runtime guard, thermal warning, `Counter0` missed-trigger accounting, SensorSync log integrity / stall / session-start guards (silence under SensorSync pulses is watched like freerun); the first dropped / lost / incomplete frame is fatal (fail-fast) |
 | fx10 | *Stream-unusable* abort — buffers keep arriving but none is usable, which total silence cannot detect and main therefore cannot see — thermal limits (processing board 80 °C / FPGA 90 °C), recorder-failure classification, SensorSync log integrity and stall; the first lost / unrecorded frame or missed trigger is fatal (fail-fast) |
-| lms4xxx | First-telegram content verification, NTP server probe, NTP time lock and device-time step check (no host clock involved), consecutive framing-error threshold, writer failure; the first lost / damaged scan is fatal (fail-fast) |
+| lms4xxx | Full first-scan structure/scale verification; timestamp-only monitoring thereafter, NTP server/device health and clock-step checks. Framing, transport and writer failures stop the run. Complete offending telegrams are retained; subsequent point decoding is offline. Counter gaps remain diagnostic during capture and affect the final integrity verdict. |
 
 Fatal guard failures end the whole rig's run — and say so in the exit status
 (`drivers.json` records `failed (<driver>)`, or `failed (disk)`).
@@ -847,15 +837,16 @@ amiga_drivers/
 ├── CMakeLists.txt            # unified driver build, tests and caller-supplied revision
 ├── Start.bash               # convenience wrapper for setcap + command-line recording
 ├── .devcontainer/            # one Ubuntu image, GUI/acquisition Compose service and IDE settings
-├── cmake/                    # Dependencies.cmake (hdf5/spdlog/yaml-cpp/nlohmann) + FindeBUS.cmake
+├── cmake/                    # Dependencies.cmake (spdlog/yaml-cpp/nlohmann) + FindeBUS.cmake
 ├── 3rd_party/                # FetchContent sources, External/sensor_trigger + vendored doctest
 ├── config/config-main.yaml   # driver selection, guards, output root
 ├── resource/                 # eBUS SDK .deb + devices_ip.yaml (rig addresses, time server)
 ├── common/                   # amiga_common + amiga_ebus + tests/
 ├── asterx_driver/            # Qt/SsnRx session, SBF write queue, live CSV sidecar, tests/
-├── fx10_driver/              # fx10_core (SDK-free) + fx10_ebus (eBUS glue) + tools/ + tests/
-├── gox_driver/               # jai_core (SDK-free) + jai_ebus (eBUS glue) + scripts/ + tools/ + tests/
-├── lms4xxx_driver/           # CoLa B driver, scan parser, HDF5 recorder, scripts/, tests/
+├── ebus_driver/             # one camera runtime + RAW recorder + offline readers/export + tests/
+├── fx10_driver/              # FX10 configuration, GenICam control, tools and config tests
+├── gox_driver/               # GOX configuration, PTP/control, legacy reader and config tests
+├── lms4xxx_driver/           # CoLa B communication, first-scan/time monitor, RAW recorder, tests/
 ├── app/                      # Python GUI/control services (pip-managed dependencies)
 │   ├── main.py               # NiceGUI single-container entry point
 │   ├── formats/              # shared FX10 recording-format readers
@@ -877,7 +868,7 @@ amiga_drivers/
 | [`gox_driver/docs/DEVICE_CONFIG.md`](gox_driver/docs/DEVICE_CONFIG.md) | `UserSetLoad Default` on every bring-up, the ordered apply plan, the raw-feature audit, PTP slave-status guards (user-confirmed sole grandmaster = AsteRx, identity not verified by the driver, L2-domain prerequisite), fail-fast and the on-disk residue after a crash |
 | [`fx10_driver/docs/DEVICE_CONFIG.md`](fx10_driver/docs/DEVICE_CONFIG.md) | Factory user set + calibration-ROI guard, the write-order plan, which parameters are exposed and why the rest stay at their factory values, the recording policy (time source, fail-fast, off-thread durability) |
 | [`lms4xxx_driver/docs/DEVICE_CONFIG.md`](lms4xxx_driver/docs/DEVICE_CONFIG.md) | `mSCloadappdef` baseline, every telegram with its page number, `sAN` status-byte polarity, the shutdown handshake, the device self-report, "Time": NTP routing prerequisite, time lock and step check |
-| [`lms4xxx_driver/docs/FORMAT_H5.md`](lms4xxx_driver/docs/FORMAT_H5.md) | The `lms4xxx-h5` layout, durability and completeness semantics, what the timestamps mean |
+| [`lms4xxx_driver/docs/FORMAT_RAW.md`](lms4xxx_driver/docs/FORMAT_RAW.md) | Complete CoLa B archive, byte/index contract, online/offline boundary and completion semantics |
 | [`lms4xxx_driver/docs/sopas_filter_polarity.md`](lms4xxx_driver/docs/sopas_filter_polarity.md) | Why two filter status bytes contradict the manual's tables |
 | [`resource/devices_ip.yaml`](resource/devices_ip.yaml) | Rig addresses, host NIC per device, the AsteRx as NTP/PTP server |
 | [`3rd_party/External/sensor_trigger/README.md`](3rd_party/External/sensor_trigger/README.md) | SensorSync-Logger protocol, session log format and offline post-processing |

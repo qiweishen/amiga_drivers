@@ -9,8 +9,9 @@ TEST_CASE("A stopped LiDAR can retain every parsed scan and fail only time quali
     drv.device_no_ntp_events = 1;
     drv.ntp_status = lms4xxx::DriverStatistics::NtpStatus::kNotLocked;
     drv.ntp_server_reachable = true;
-    lms4xxx::ScanRecordWriter::Statistics wr{};
-    wr.frames_queued = wr.frames_written = 19328;
+    lms4xxx::RawRecorder::Statistics wr{};
+    wr.frames_queued = wr.frames_written = 19343;
+    wr.scans_queued = wr.scans_written = 19328;
 
     CHECK(lms4xxx::FirstDataLoss(drv, wr) == nullptr);
     const auto result = lms4xxx::AssessRecording(drv, wr, false, false, false);
@@ -29,8 +30,9 @@ TEST_CASE("Control replies do not make a fully recorded scan pipeline incomplete
     lms4xxx::DriverStatistics::Snapshot drv{};
     drv.frames_received = 115;
     drv.frames_parsed = 100;
-    lms4xxx::ScanRecordWriter::Statistics wr{};
-    wr.frames_queued = wr.frames_written = 100;
+    lms4xxx::RawRecorder::Statistics wr{};
+    wr.frames_queued = wr.frames_written = 115;
+    wr.scans_queued = wr.scans_written = 100;
     const auto result = lms4xxx::AssessRecording(drv, wr, false, false, false);
     CHECK_FALSE(result.Failed());
     CHECK_FALSE(result.data_integrity_failed);
@@ -40,17 +42,31 @@ TEST_CASE("Control replies do not make a fully recorded scan pipeline incomplete
 TEST_CASE("Final drain and file close failures remain failures on an operator stop") {
     lms4xxx::DriverStatistics::Snapshot drv{};
     drv.frames_parsed = 100;
-    lms4xxx::ScanRecordWriter::Statistics wr{};
+    drv.frames_received = 100;
+    lms4xxx::RawRecorder::Statistics wr{};
     wr.frames_queued = 100;
     wr.frames_written = 99;
     auto result = lms4xxx::AssessRecording(drv, wr, false, false, false);
     CHECK(result.Failed());
     CHECK(result.data_integrity_failed);
-    CHECK(result.Summary().find("parsed=100 queued=100 written=99") != std::string::npos);
+    CHECK(result.Summary().find("received=100 queued=100 written=99") != std::string::npos);
     wr.frames_written = 100;
     result = lms4xxx::AssessRecording(drv, wr, false, true, false);
     CHECK(result.Failed());
     CHECK(result.data_integrity_failed);
+}
+
+TEST_CASE("Counter gaps are diagnosed at final assessment without an online quality stop") {
+    lms4xxx::DriverStatistics::Snapshot drv{};
+    drv.frames_received = drv.frames_parsed = 2;
+    drv.counter_gaps = 1;
+    lms4xxx::RawRecorder::Statistics wr{};
+    wr.frames_queued = wr.frames_written = 2;
+    wr.scans_queued = wr.scans_written = 2;
+    CHECK(lms4xxx::FirstDataLoss(drv, wr) == nullptr);
+    const auto result = lms4xxx::AssessRecording(drv, wr, false, false, false);
+    CHECK(result.data_integrity_failed);
+    CHECK(result.Summary().find("counter_gaps=1") != std::string::npos);
 }
 
 TEST_CASE("Transport loss and clock anomalies retain independent failure reasons") {

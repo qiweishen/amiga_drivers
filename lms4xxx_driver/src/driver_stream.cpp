@@ -1,20 +1,20 @@
-#include "driver_internal.h"
-
 #include <cstring>
+
+#include "driver_internal.h"
 #include "command_builder.h"
 #include "error.h"
 #include "scan_data_parser.h"
 #include "ntp_probe.h"
-#include "scan_record.h"
+#include "scan_time.h"
 #include "scan_verify.h"
 #include "logger.h"
 #include "thread_util.h"
 #include "time_util.h"
 
+
 namespace {
     common::DriverLog g_log{"LMS4xxx"};
     constexpr std::size_t kReadBufferSize = 16 * 1024;
-    constexpr auto kParseBackoffSleep = std::chrono::microseconds(100);
     constexpr int kNtpProbeTimeoutMs = 2000;
     constexpr int kNtpProbeMaxFailures = 3;
 
@@ -179,29 +179,35 @@ namespace lms4xxx {
 
     void Lms4xxxDriver::Impl::ReceiveLoop() {
         g_log.Trace("[{}] Receive thread started", Tag());
-
-        std::vector<std::uint8_t> buf(kReadBufferSize);
-
-        while (receive_running.load(std::memory_order_acquire)) {
-            std::error_code ec;
-            const auto n = tcp_client->ReadSome(buf.data(), buf.size(), ec);
-
-            if (ec) {
-                if (receive_running.load(std::memory_order_relaxed)) {
-                    g_log.Error("[{}] Receive thread: read error: {}", Tag(), ec.message());
-                    fault.store(true, std::memory_order_release);
-                    ReportError(ec, "receive thread read error");
-                    SetState(ConnectionState::kError);
+        try {
+            std::vector<std::uint8_t> buf(kReadBufferSize);
+            while (receive_running.load(std::memory_order_acquire)) {
+                std::error_code ec;
+                const auto n = tcp_client->ReadSome(buf.data(), buf.size(), ec);
+                if (n > 0) {
+                    stats.bytes_received.fetch_add(n, std::memory_order_relaxed);
+                    frame_receiver->Feed(buf.data(), n);
                 }
-                break;
+                if (ec) {
+                    if (receive_running.load(std::memory_order_relaxed)) {
+                        g_log.Error("[{}] Receive thread: read error: {}", Tag(), ec.message());
+                        fault.store(true, std::memory_order_release);
+                        ReportError(ec, "receive thread read error");
+                        SetState(ConnectionState::kError);
+                    }
+                    break;
+                }
             }
-
-            if (n > 0) {
-                stats.bytes_received.fetch_add(n, std::memory_order_relaxed);
-                frame_receiver->Feed(buf.data(), n);
-            }
+        } catch (const std::exception &e) {
+            fault.store(true, std::memory_order_release);
+            ReportError(make_error_code(ErrorCode::kProtocolError), std::string("receive worker failed: ") + e.what());
+            SetState(ConnectionState::kError);
+        } catch (...) {
+            fault.store(true, std::memory_order_release);
+            ReportError(make_error_code(ErrorCode::kProtocolError), "receive worker failed with an unknown exception");
+            SetState(ConnectionState::kError);
         }
-
+        receive_running.store(false, std::memory_order_release);
         g_log.Trace("[{}] Receive thread stopped", Tag());
     }
 
@@ -367,117 +373,113 @@ namespace lms4xxx {
     }
 
 
-    void Lms4xxxDriver::Impl::ParseLoop() {
-        g_log.Trace("[{}] Parse thread started", Tag());
-
-        bool first_frame = true;
-        TimeGate time_gate;
-        time_gate.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.ntp.lock_timeout_s);
-        if (config.ntp.enabled) {
-            stats.ntp_status.store(DriverStatistics::NtpStatus::kNotLocked, std::memory_order_relaxed);
+    void Lms4xxxDriver::Impl::MonitorFrame(RawRecord &record) {
+        // Corrupted bytes are still archived, but cannot drive command state or clocks.
+        if (!record.frame.checksum_valid) return;
+        const auto &bytes = record.frame.data;
+        if (bytes.size() < 9) {
+            stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const auto *data = bytes.data() + 8;
+        const auto data_size = bytes.size() - 9;
+        const std::string_view command(reinterpret_cast<const char *>(data), data_size);
+        constexpr std::string_view scan_event = "sSN LMDscandata ";
+        constexpr std::string_view scan_reply = "sRA LMDscandata ";
+        const std::uint8_t *payload = nullptr;
+        std::size_t payload_size = 0;
+        ColaBMessage msg;
+        if (command.starts_with(scan_event) || command.starts_with(scan_reply)) {
+            // The common path borrows bytes from its owning RawFrame, without
+            // a second payload copy or any per-point allocation.
+            record.is_scan = true;
+            payload = data + scan_event.size();
+            payload_size = data_size - scan_event.size();
+        } else {
+            if (const auto ec = ColaBCodec::Decode(data, data_size, msg, Tag())) {
+                stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
+                g_log.Warn("[{}] Frame decode error: {}; raw telegram retained", Tag(), ec.message());
+                return;
+            }
+            record.is_scan = IsScanMessage(msg);
+            payload = msg.payload.data();
+            payload_size = msg.payload.size();
+        }
+        if (!record.is_scan) {
+            stats.non_scan_frames.fetch_add(1, std::memory_order_relaxed);
+            HandleNonScanFrame(msg);
+            return;
         }
 
-        while (true) {
-            // A time fault does not invalidate native range/intensity data.
-            // Keep draining its scans and command replies during orderly stop.
-            if (fault.load(std::memory_order_acquire) && !time_fault.load(std::memory_order_acquire)) {
-                g_log.Trace("[{}] Parse thread stopping: fault latched", Tag());
-                break;
-            }
-
-            RawFrame frame;
-            if (!ring_buffer->try_pop(frame)) {
-                if (!parse_running.load(std::memory_order_acquire)) {
-                    break; // producer has joined; the queue is now drained
-                }
-                std::this_thread::sleep_for(kParseBackoffSleep);
-                continue;
-            }
-
-            ColaBMessage msg;
-            auto ec = ColaBCodec::Decode(frame.data.data(), frame.data.size(), msg, Tag());
-            if (ec) {
-                stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                g_log.Warn("[{}] Frame decode error: {}", Tag(), ec.message());
-                continue;
-            }
-
-            if (!IsScanMessage(msg)) {
-                // Telemetry answers (sRA) and anything else the device sends
-                // mid-stream. Never silently discarded: an unexpected reply
-                // here is the only visible symptom of a desynchronised link.
-                stats.non_scan_frames.fetch_add(1, std::memory_order_relaxed);
-                HandleNonScanFrame(msg);
-                continue;
-            }
-
-            ScanData scan;
-            ec = ScanDataParser::Parse(msg.payload.data(), msg.payload.size(), scan, Tag());
-            if (ec) {
-                stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                g_log.Warn("[{}] Scan data parse error: {}", Tag(), ec.message());
-                continue;
-            }
-
-            if (!first_frame) {
-                const auto problems = lms4xxx::VerifyScanContent(scan, config.scan, config.ntp.enabled);
-                if (!problems.empty()) {
-                    stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
-                    fault.store(true, std::memory_order_release);
-                    ReportError(make_error_code(ErrorCode::kInvalidConfig), "scan content changed: " + problems);
-                    break;
-                }
-            }
-            if (first_frame) {
-                VerifyFirstScan(scan);
-                if (config.ntp.enabled && !scan.has_timestamp) {
-                    // Already faulted; record the reason for ntp=
-                    stats.ntp_status.store(DriverStatistics::NtpStatus::kNoTimestamp, std::memory_order_relaxed);
-                }
-                // The mismatching telegram is itself invalid: do not hand it
-                // to the recorder on the way out.
-                if (fault.load(std::memory_order_acquire)) {
-                    break;
-                }
-            }
-
-            if (!first_frame) {
-                const auto prev_counter = stats.last_telegram_counter.load(std::memory_order_relaxed);
-                const auto expected = static_cast<std::uint32_t>((prev_counter + 1) & 0xFFFF);
-                if (scan.telegram_counter != expected) {
-                    const auto gap = (scan.telegram_counter >= expected)
-                                         ? scan.telegram_counter - expected
-                                         : (0x10000 + scan.telegram_counter - expected);
-                    stats.counter_gaps.fetch_add(1, std::memory_order_relaxed);
-                    g_log.Warn("[{}] Telegram counter gap: expected {}, got {} (missed ~{} frames)", Tag(),
-                               expected, scan.telegram_counter, gap);
-                }
-            }
-            first_frame = false;
-            stats.frames_parsed.fetch_add(1, std::memory_order_relaxed);
-
-            stats.last_telegram_counter.store(scan.telegram_counter, std::memory_order_relaxed);
-            stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);
-            stats.last_frame_time_us.store(frame.receive_timestamp_us, std::memory_order_relaxed);
-
-            scan.host_receive_monotonic_us = frame.receive_timestamp_us;
-            AssessScanTime(scan, time_gate);
-
-            ScanDataCallback cb;
-            {
-                std::lock_guard lock(callback_mutex);
-                cb = scan_callback;
-            }
-            if (cb) {
-                try {
-                    cb(scan);
-                } catch (const std::exception &e) {
-                    g_log.Warn("[{}] Scan callback threw: {}", Tag(), e.what());
-                }
+        stats.last_frame_time_us.store(record.frame.receive_timestamp_us, std::memory_order_relaxed);
+        ScanData scan;
+        const auto ec = first_scan ? ScanDataParser::Parse(payload, payload_size, scan, Tag())
+                                  : ScanDataParser::ParseTimestamp(payload, payload_size, scan, Tag());
+        if (ec) {
+            stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
+            g_log.Warn("[{}] Scan time/layout parse error: {}; raw telegram retained", Tag(), ec.message());
+            return;
+        }
+        if (first_scan) {
+            first_scan = false;
+            VerifyFirstScan(scan);
+        }
+        if (previous_scan_counter_valid) {
+            const auto previous = stats.last_telegram_counter.load(std::memory_order_relaxed);
+            const auto expected = static_cast<std::uint32_t>((previous + 1) & 0xFFFF);
+            if (scan.telegram_counter != expected) {
+                stats.counter_gaps.fetch_add(1, std::memory_order_relaxed);
+                g_log.Warn("[{}] Telegram counter discontinuity: expected {}, got {}; diagnostic only, raw order retained",
+                           Tag(), expected, scan.telegram_counter);
             }
         }
+        previous_scan_counter_valid = true;
+        stats.frames_parsed.fetch_add(1, std::memory_order_relaxed);
+        stats.last_telegram_counter.store(scan.telegram_counter, std::memory_order_relaxed);
+        stats.last_scan_counter.store(scan.scan_counter, std::memory_order_relaxed);
+        scan.host_receive_monotonic_us = record.frame.receive_timestamp_us;
+        AssessScanTime(scan, time_gate);
+        if (config.ntp.enabled && !scan.has_timestamp)
+            stats.ntp_status.store(DriverStatistics::NtpStatus::kNoTimestamp, std::memory_order_relaxed);
+        record.device_time_unix_us = scan.has_timestamp ? DeviceTimeUnixUs(scan.timestamp) : 0;
+        record.clock_step_us = scan.clock_observation.step_us;
+        record.clock_quality_flags = scan.clock_observation.flags;
+    }
 
-        g_log.Trace("[{}] Parse thread stopped", Tag());
+
+    void Lms4xxxDriver::Impl::HandleFrame(RawFrame &&frame) {
+        stats.frames_received.fetch_add(1, std::memory_order_relaxed);
+        RawRecord record;
+        record.frame = std::move(frame);
+        try {
+            MonitorFrame(record);
+        } catch (const std::exception &e) {
+            stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
+            fault.store(true, std::memory_order_release);
+            ReportError(make_error_code(ErrorCode::kProtocolError), std::string("telegram monitor failed: ") + e.what());
+        } catch (...) {
+            stats.parse_errors.fetch_add(1, std::memory_order_relaxed);
+            fault.store(true, std::memory_order_release);
+            ReportError(make_error_code(ErrorCode::kProtocolError), "telegram monitor failed with an unknown exception");
+        }
+        // A monitor failure never discards its triggering telegram or prevents
+        // later stop replies from being received. The owner decides when to stop.
+        TelegramCallback cb;
+        {
+            std::lock_guard lock(callback_mutex);
+            cb = telegram_callback;
+        }
+        if (cb) {
+            try {
+                cb(std::move(record));
+            } catch (const std::exception &e) {
+                fault.store(true, std::memory_order_release);
+                ReportError(make_error_code(ErrorCode::kProtocolError), std::string("telegram recorder callback failed: ") + e.what());
+            } catch (...) {
+                fault.store(true, std::memory_order_release);
+                ReportError(make_error_code(ErrorCode::kProtocolError), "telegram recorder callback failed with an unknown exception");
+            }
+        }
     }
 
 } // namespace lms4xxx

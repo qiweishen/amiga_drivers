@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 
-#include "command_channel.h"
+#include "../include/command_channel.h"
 #include "error.h"
 
 TEST_CASE("An unrelated command reply leaves the CoLa channel uncertain until reconnect") {

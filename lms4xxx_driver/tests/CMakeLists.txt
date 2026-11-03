@@ -12,9 +12,7 @@ set(LMS4XXX_TEST_SOURCES
         test_recording_status.cpp
         test_statistics.cpp
         test_scan_data_parser.cpp
-        test_scan_h5_file.cpp
-        test_scan_record.cpp
-        test_scan_record_writer.cpp
+        test_raw_recorder.cpp
         test_scan_verify.cpp
 )
 
@@ -23,8 +21,7 @@ add_executable(lms4xxx_tests
         ${LMS4XXX_TEST_SOURCES}
 )
 
-# The tests include hdf5.h themselves to read the files back
-target_link_libraries(lms4xxx_tests PRIVATE lms4xxx_lib hdf5-static)
+target_link_libraries(lms4xxx_tests PRIVATE lms4xxx_lib)
 
 # SYSTEM: no warnings from the vendored doctest header
 target_include_directories(lms4xxx_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rd_party)

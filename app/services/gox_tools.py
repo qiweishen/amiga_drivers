@@ -20,6 +20,7 @@ from ..constants import (
     SNAPSHOT_KEEP,
 )
 from gox_driver.scripts.jai_raw import pixels, recording
+from ebus_driver.scripts.ebus_raw import recording as raw_recording
 
 from . import camera_operations, runtime, tool_jobs
 
@@ -131,8 +132,12 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
 
 def _decode_snapshot(camera_dir, output_dir) -> SnapshotResult:
     try:
-        frame, payload, incomplete = recording.first_preview_frame(camera_dir)
-        image, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
+        if raw_recording.is_session(camera_dir):
+            frame, payload, incomplete = raw_recording.first_preview_frame(camera_dir)
+            image, name, _ = pixels.decode_record(frame, payload)
+        else:
+            frame, payload, incomplete = recording.first_preview_frame(camera_dir)
+            image, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
         # Retain the existing native PNG artifact and filename; statistics use
         # the native array directly instead of decoding that PNG a second time.
         png = output_dir / f"seq{frame.seq:08d}_{name}.png"

@@ -8,11 +8,13 @@
 #include "time_util.h"
 #include "utility.h"
 
+
 namespace {
     common::DriverLog g_log{"LMS4xxx"};
     // Resynchronisation failures are not a count of lost scans.
     constexpr std::uint64_t kMaxConsecutiveFramingErrors = 1000;
 }
+
 
 namespace lms4xxx {
     std::error_code StopMeasurement(const DeviceConfig &device, const NetworkConfig &network) {
@@ -51,6 +53,8 @@ namespace lms4xxx {
                 cb(ec, detail);
             } catch (const std::exception &e) {
                 g_log.Warn("[{}] Error callback threw: {}", Tag(), e.what());
+            } catch (...) {
+                g_log.Warn("[{}] Error callback threw an unknown exception", Tag());
             }
         }
     }
@@ -134,19 +138,17 @@ namespace lms4xxx {
         impl_->stop_stream_requested.store(false, std::memory_order_release);
         impl_->device_warnings_monotonic_us = 0;
         impl_->device_no_ntp = false;
-
-        impl_->ring_buffer = std::make_unique<FrameRingBuffer>(impl_->config.network.ring_buffer_frames);
+        impl_->first_scan = true;
+        impl_->previous_scan_counter_valid = false;
+        impl_->time_gate = Impl::TimeGate{};
+        if (impl_->config.ntp.enabled) {
+            impl_->stats.ntp_status.store(DriverStatistics::NtpStatus::kNotLocked, std::memory_order_relaxed);
+        }
 
         auto *stats_ptr = &impl_->stats;
-        auto *ring_ptr = impl_->ring_buffer.get();
 
         impl_->frame_receiver = std::make_unique<FrameReceiver>(
-            [stats_ptr, ring_ptr](RawFrame &&frame) {
-                stats_ptr->frames_received.fetch_add(1, std::memory_order_relaxed);
-                if (!ring_ptr->try_push(std::move(frame))) {
-                    stats_ptr->frames_dropped.fetch_add(1, std::memory_order_relaxed);
-                }
-            },
+            [impl = impl_.get()](RawFrame &&frame) { impl->HandleFrame(std::move(frame)); },
             [stats_ptr, impl = impl_.get()](FrameReceiver::FrameError error, std::uint64_t consecutive) {
                 if (error == FrameReceiver::FrameError::kChecksumMismatch) {
                     stats_ptr->crc_errors.fetch_add(1, std::memory_order_relaxed);
@@ -190,12 +192,12 @@ namespace lms4xxx {
             }
         }
 
+        impl_->time_gate.deadline = std::chrono::steady_clock::now() +
+                                   std::chrono::seconds(impl_->config.ntp.lock_timeout_s);
         impl_->scanning.store(true, std::memory_order_release);
         impl_->receive_running.store(true, std::memory_order_release);
-        impl_->parse_running.store(true, std::memory_order_release);
 
         try {
-            impl_->parse_thread = std::thread([this]() { impl_->ParseLoop(); });
             impl_->receive_thread = std::thread([this]() { impl_->ReceiveLoop(); });
             if (impl_->config.ntp.enabled) {
                 impl_->ntp_watch_running.store(true, std::memory_order_release);
@@ -212,15 +214,13 @@ namespace lms4xxx {
         impl_->ConfigureReceiveThread();
 
         impl_->SetState(ConnectionState::kScanning);
-        g_log.Trace("[{}] Scanning started (ring buffer capacity: {} frames)", impl_->Tag(),
-                    impl_->ring_buffer->capacity());
+        g_log.Trace("[{}] Scanning started (raw telegram recording)", impl_->Tag());
         return {};
     }
 
 
     std::error_code Lms4xxxDriver::StopScanning() {
-        const bool have_workers = impl_->receive_thread.joinable() || impl_->parse_thread.joinable() ||
-                                  impl_->ntp_watch_thread.joinable();
+        const bool have_workers = impl_->receive_thread.joinable() || impl_->ntp_watch_thread.joinable();
         if (!have_workers && !impl_->scanning.load(std::memory_order_relaxed)) {
             // Configure succeeded but the owner cancelled or its writer failed,
             // or StartStream's reply was lost before the workers were constructed.
@@ -232,15 +232,13 @@ namespace lms4xxx {
         g_log.Trace("[{}] Stopping scan...", impl_->Tag());
 
         // Preserve the normal drain path: responses are decoded by the existing
-        // workers until stop measurement has been acknowledged or its bounded wait ends.
+        // receive worker until stop measurement has been acknowledged or its bounded wait ends.
         impl_->stop_stream_requested.store(true, std::memory_order_release);
         if (impl_->tcp_client && impl_->tcp_client->IsConnected()) {
             if (const auto ec = impl_->tcp_client->Write(CommandBuilder::BuildStopStream())) {
                 g_log.Warn("[{}] Failed to send stop stream command (non-fatal): {}", impl_->Tag(), ec.message());
             }
-            if (impl_->receive_thread.joinable() && impl_->parse_thread.joinable() &&
-                impl_->parse_running.load(std::memory_order_acquire) &&
-                (!impl_->fault.load(std::memory_order_acquire) || impl_->time_fault.load(std::memory_order_acquire))) {
+            if (impl_->receive_thread.joinable() && impl_->receive_running.load(std::memory_order_acquire)) {
                 impl_->StopMeasurement(true, false);
             }
         }
@@ -260,21 +258,9 @@ namespace lms4xxx {
         if (impl_->receive_thread.joinable()) {
             impl_->receive_thread.join();
         }
-        impl_->parse_running.store(false, std::memory_order_release);
-        if (impl_->parse_thread.joinable()) {
-            impl_->parse_thread.join();
-        }
-        RawFrame remaining;
-        std::uint64_t discarded = 0;
-        while (impl_->ring_buffer && impl_->ring_buffer->try_pop(remaining)) {
-            ++discarded;
-        }
-        if (discarded > 0) {
-            impl_->stats.frames_dropped.fetch_add(discarded, std::memory_order_relaxed);
-            g_log.Warn("[{}] {} raw frames discarded after a parse fault", impl_->Tag(), discarded);
-        }
+        if (impl_->frame_receiver) impl_->frame_receiver->Finish();
 
-        // A failed parser or incomplete worker set cannot receive a command
+        // A failed receive worker or incomplete worker set cannot receive a command
         // answer. Only after joining every worker may cleanup replace the socket.
         const auto cleanup_ec = impl_->StopMeasurement(false, true);
         impl_->SetState(ConnectionState::kConnected);
@@ -291,7 +277,6 @@ namespace lms4xxx {
         }
 
         impl_->frame_receiver.reset();
-        impl_->ring_buffer.reset();
 
         impl_->SetState(ConnectionState::kDisconnected);
         g_log.Trace("[{}] Disconnected", impl_->Tag());
@@ -304,9 +289,9 @@ namespace lms4xxx {
     }
 
 
-    void Lms4xxxDriver::SetScanCallback(ScanDataCallback callback) {
+    void Lms4xxxDriver::SetTelegramCallback(TelegramCallback callback) {
         std::lock_guard lock(impl_->callback_mutex);
-        impl_->scan_callback = std::move(callback);
+        impl_->telegram_callback = std::move(callback);
     }
 
 

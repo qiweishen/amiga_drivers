@@ -1,5 +1,6 @@
 #include "ebus/sdk_error.h"
 
+
 namespace common::Ebus {
     std::string PvResultToString(const PvResult &result) {
         std::string code = ToStd(result.GetCodeString());

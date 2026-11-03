@@ -146,8 +146,8 @@ namespace fx10 {
     }
 
     Wavelengths ResolveForGeometry(const WavelengthConfig &config, const std::string &serial,
-                                  std::int64_t samples, std::int64_t bands,
-                                  std::int64_t offset_x, std::int64_t offset_y, bool status_line) {
+                                   std::int64_t samples, std::int64_t bands,
+                                   std::int64_t offset_x, std::int64_t offset_y, bool status_line) {
         if (samples <= 0 || samples > 65535 || bands <= 0 || bands > 65535) {
             throw ConfigError("invalid delivered image geometry");
         }
@@ -156,18 +156,18 @@ namespace fx10 {
         }
         if (config.source == WavelengthSource::kGrid) {
             throw ConfigError("generated wavelength grids are not calibration: use source=none for "
-                              "uncalibrated DN, or file/list with a matching calibration profile");
+                "uncalibrated DN, or file/list with a matching calibration profile");
         }
         const auto &cal = config.calibration;
         if (cal.reference.empty() || cal.device_serial.empty() || cal.samples <= 0 || cal.bands <= 0 ||
             cal.offset_x < 0 || cal.offset_y < 0) {
             throw ConfigError("wavelength file/list requires calibration reference, device_serial, "
-                              "samples, bands, offset_x and offset_y from the calibration pack");
+                "samples, bands, offset_x and offset_y from the calibration pack");
         }
         if (serial != cal.device_serial || samples != cal.samples || bands != cal.bands ||
             offset_x != cal.offset_x || offset_y != cal.offset_y || status_line) {
             throw ConfigError("delivered image does not match the spectral calibration profile "
-                              "(serial/geometry/offset/status-line); refusing to assign wavelengths");
+                "(serial/geometry/offset/status-line); refusing to assign wavelengths");
         }
         auto out = ResolveWavelengths(config, static_cast<int>(bands));
         out.source_tag += "; operator calibration reference: " + cal.reference;

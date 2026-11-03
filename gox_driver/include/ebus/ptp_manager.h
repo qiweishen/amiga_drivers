@@ -6,12 +6,12 @@
 
 #include <PvGenParameterArray.h>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "app_config.h"
 #include "device_json.h"
 #include "ptp_status.h"
-#include "signal_stop.h"
 
 namespace gox::ebus {
     class PtpManager {
@@ -25,11 +25,11 @@ namespace gox::ebus {
 
         // Polls GevIEEE1588Status until "slave" (sync_timeout_s); "master"/"faulty" fail immediately.
         // False when the requirement was not met under on_timeout=abort, or the process is stopping
-        bool WaitForSync(StopController *stop);
+        bool WaitForSync(const std::function<bool()> &stop = {});
 
         // Periodic: status must stay "slave"; a bad reading is re-checked a
         // few times first. False = synchronization lost (caller stops); true when PTP is off
-        bool CheckHealth(StopController *stop);
+        bool CheckHealth(const std::function<bool()> &stop = {});
 
         // PTP state for device.json / telemetry.jsonl (no device access)
         PtpSummary Summary() const;

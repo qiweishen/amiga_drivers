@@ -128,6 +128,66 @@ namespace lms4xxx {
         return {};
     }
 
+    std::error_code ScanDataParser::ParseTimestamp(const std::uint8_t *data, std::size_t len, ScanData &out,
+                                                   std::string_view tag) {
+        out = ScanData{};
+        Reader r{data, len, 0, tag};
+        const auto truncated = [&]() {
+            g_log.Warn("[{}] Truncated scan time layout at byte {} of {}", tag, r.pos, len);
+            return make_error_code(ErrorCode::kFrameTooShort);
+        };
+        // Device header is fixed. The monitor needs only counters and device clocks.
+        if (!r.HasBytes(36)) return truncated();
+        r.Skip(10);
+        out.telegram_counter = r.ReadUint16();
+        out.scan_counter = r.ReadUint16();
+        out.time_since_startup_us = r.ReadUint32();
+        out.transmission_time_us = r.ReadUint32();
+        r.Skip(14); // digital I/O, reserved and frequencies
+
+        if (!r.HasBytes(2)) return truncated();
+        const auto encoders = r.ReadUint16();
+        const auto encoder_bytes = static_cast<std::size_t>(encoders) * 6;
+        if (!r.HasBytes(encoder_bytes)) return truncated();
+        r.Skip(encoder_bytes);
+
+        // A timestamp follows variable-length channels. Re-read their lengths
+        // every time; caching the first telegram's offset could interpret sample
+        // bytes as a date after a layout change. No sample is dereferenced here.
+        for (const std::size_t sample_bytes : {std::size_t{2}, std::size_t{1}}) {
+            if (!r.HasBytes(2)) return truncated();
+            const auto channels = r.ReadUint16();
+            constexpr std::size_t header_bytes = 21;
+            if (channels > r.Remaining() / header_bytes) return truncated();
+            for (std::uint16_t channel = 0; channel < channels; ++channel) {
+                if (!r.HasBytes(header_bytes)) return truncated();
+                r.Skip(19); // content, scale, offset, start angle and angle step
+                const auto samples = r.ReadUint16();
+                const auto bytes = static_cast<std::size_t>(samples) * sample_bytes;
+                if (!r.HasBytes(bytes)) return truncated();
+                r.Skip(bytes);
+            }
+        }
+        if (!r.HasBytes(6)) return truncated();
+        r.Skip(4); // position
+        const auto name_flag = r.ReadUint16();
+        if (name_flag > 1) return make_error_code(ErrorCode::kProtocolError);
+        if (name_flag == 1) {
+            if (!r.HasBytes(2)) return truncated();
+            const auto bytes = r.ReadUint16();
+            if (!r.HasBytes(bytes)) return truncated();
+            r.Skip(bytes);
+        }
+        if (!r.HasBytes(2)) return truncated();
+        // Unknown flags have no documented block size: do not guess the date offset.
+        if (ColaBCodec::DecodeUint16(r.data + r.pos) > 1)
+            return make_error_code(ErrorCode::kProtocolError);
+        if (const auto ec = ParseTimestamp(r, out)) return ec;
+        if (r.HasBytes(2)) r.Skip(2); // optional reserved suffix
+        if (r.Remaining() != 0) return make_error_code(ErrorCode::kProtocolError);
+        return {};
+    }
+
     std::error_code ScanDataParser::ParseDeviceInfo(Reader &r, ScanData &out) {
         // Version(2) DeviceNo(2) Serial(4) Status(2x1) TelegramCtr(2) ScanCtr(2)
         // TimeSinceStartup(4) TransmissionTime(4) DigIn(2x1) DigOut(2x1) Reserved(2)
@@ -348,6 +408,10 @@ namespace lms4xxx {
         }
 
         const auto name_flag = r.ReadUint16();
+        if (name_flag > 1) {
+            g_log.Warn("[{}] Unknown device name flag: {}", r.tag, name_flag);
+            return make_error_code(ErrorCode::kProtocolError);
+        }
         out.has_device_name = (name_flag == 1);
 
         if (out.has_device_name) {
@@ -381,6 +445,10 @@ namespace lms4xxx {
         }
 
         const auto time_flag = r.ReadUint16();
+        if (time_flag > 1) {
+            g_log.Warn("[{}] Unknown timestamp flag: {}", r.tag, time_flag);
+            return make_error_code(ErrorCode::kProtocolError);
+        }
         out.has_timestamp = (time_flag == 1);
 
         if (out.has_timestamp) {

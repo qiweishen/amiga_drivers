@@ -30,22 +30,21 @@ STATS_CONTRACT = {
     # driver key in driver_stats._MODULE_TO_DRIVER -> where the line is built /
     # emitted, the expected fps literal, and a representative rendered line
     "gox": {
-        "format_file": "gox_driver/src/stats.cpp",
-        "literal": "fps=%.1f",
-        "emit_file": "gox_driver/src/capture_runner.cpp",
+        "format_file": "ebus_driver/src/camera_driver.cpp",
+        "literal": "fps={:.1f}",
+        "emit_file": "ebus_driver/src/camera_driver.cpp",
+        "profile_file": "ebus_driver/src/gox_config.cpp",
         "sample": "[Statistics] [cam0] up=00:01:05  rate=24.1 Hz  fps=24.0  disk=119.8 MB/s  ok=1560",
         "instance": "cam0",
         "fps": 24.0,
     },
     "fx10": {
-        # fx10 renders in stats_line.cpp and emits from the acquisition session
-        "format_file": "fx10_driver/src/stats_line.cpp",
+        "format_file": "ebus_driver/src/camera_driver.cpp",
         "literal": "fps={:.1f}",
-        "emit_file": "fx10_driver/src/session_monitor.cpp",
-        "logger_file": "fx10_driver/src/session.cpp",
-        "sample": "[Statistics] frames=1200  rate=50.0 Hz  fps=49.8  missed_triggers=0  "
-                  "temp_pcb=41.2  temp_fpga=52.7",
-        "instance": None,  # fx10 is single-instance: no [tag] prefix
+        "emit_file": "ebus_driver/src/camera_driver.cpp",
+        "profile_file": "ebus_driver/src/fx10_config.cpp",
+        "sample": "[Statistics] [fx10] up=60s rate=50.0 Hz  fps=49.8  frames=1200 buffers=1200 lost=0 queue=0/20",
+        "instance": "fx10",
         "fps": 49.8,
     },
     "lms": {
@@ -106,7 +105,13 @@ def check_stats_contract(cpp: dict[str, str]) -> list[str]:
             )
 
         # The module token routes the line to a sensor in the GUI.
-        m = GLOG_RE.search(logger_path.read_text(encoding="utf-8")) if logger_path.is_file() else None
+        if "profile_file" in spec:
+            logger_path = REPO_ROOT / spec["profile_file"]
+            m = re.search(r'options\.module\s*=\s*("[^"]*")', logger_path.read_text(encoding="utf-8")) if logger_path.is_file() else None
+            if 'log(options.module.empty() ? "eBUS" : options.module)' not in emit_path.read_text(encoding="utf-8"):
+                failures.append(f"{spec['emit_file']}: shared camera logger no longer uses the profile module")
+        else:
+            m = GLOG_RE.search(logger_path.read_text(encoding="utf-8")) if logger_path.is_file() else None
         if m is None:
             failures.append(f"{logger_path.relative_to(REPO_ROOT)}: no 'common::DriverLog g_log{{...}}' declaration found")
         else:

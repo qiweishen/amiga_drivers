@@ -49,7 +49,7 @@ features:
     raw: []                             # no strobe wiring for snapshot
 
 
-# --- Output (ENVI BIL) ---
+# --- Output (eBUS RAW; ENVI is an offline derivative) ---
 output:
     flush_interval_mb: 64               # 0..4096
     wavelengths:

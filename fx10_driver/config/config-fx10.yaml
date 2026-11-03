@@ -62,13 +62,13 @@ features:
         -   { name: LineSource, type: enum, value: ExposureActive }
 
 
-# --- Output (ENVI BIL) ---
+# --- Output (eBUS RAW; ENVI is an offline derivative) ---
 output:
     rotation:
-        max_lines: 0                    # 0 = no rotation by line count
+        max_lines: 0                    # RAW SDK records; 0 = no count-based rotation
         max_mb: 2048                    # 0 = no rotation by size
     flush_interval_mb: 64               # 0..4096; 0 = fdatasync only at segment boundaries (periodic fdatasync runs on a helper thread)
-    on_gap: pad_zero                    # record | pad_zero; use .lines.csv, never infer trigger identity from line index
+    on_gap: pad_zero                    # legacy input; RAW preserves gaps as metadata and never inserts zeros
     wavelengths:
         source: none                    # none = uncalibrated DN, NO wavelength axis; file/list requires calibration below
         file: ""                        # calibration-pack text file

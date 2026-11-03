@@ -124,7 +124,7 @@ namespace lms4xxx {
 
         // --- Timing ---
         std::uint32_t time_since_startup_us = 0; ///< Microseconds since device boot
-        std::uint32_t transmission_time_us = 0; ///< Microseconds transmission duration
+        std::uint32_t transmission_time_us = 0; ///< Raw device transmission-time field, microseconds
 
         // --- Digital I/O ---
         std::uint8_t digital_input_1 = 0;
@@ -134,7 +134,7 @@ namespace lms4xxx {
 
         // --- Frequency ---
         std::uint32_t scan_frequency = 0; ///< 1/100 Hz (600 Hz = 0x0000EA60)
-        std::uint32_t measurement_frequency = 0; ///< Hz (typically 100)
+        std::uint32_t measurement_frequency = 0; ///< Units of 100 Hz; raw telegram integer
 
         // --- Encoder (optional) ---
         bool has_encoder = false;

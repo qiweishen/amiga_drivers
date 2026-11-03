@@ -33,7 +33,6 @@ ntp:
     max_time_step_ms: 1000
 network:
     recv_buffer_bytes: 4194304
-    ring_buffer_frames: 1024
     receive_thread_priority: 99
     receive_thread_cpu: -1
     connect_timeout_ms: 1000
@@ -46,10 +45,7 @@ network:
 output:
     queue_max_frames: 512
     max_file_bytes: 1073741824
-    chunk_frames: 64
     flush_interval_ms: 1000
-    compression_level: 0
-    swmr: false
 telemetry:
     interval_s: 10
 logging:
@@ -87,7 +83,7 @@ TEST_CASE("The shipped-shape document loads and disabled entries are kept but no
     CHECK(cfg.lidars[1].device.port == 2111); // default
     CHECK(cfg.scan.remission == Remission::kRssi);
     CHECK(cfg.telemetry_interval_s == doctest::Approx(10.0));
-    CHECK(cfg.output.chunk_frames == 64);
+    CHECK(cfg.output.queue_max_frames == 512);
     CHECK(cfg.network.config_timeout_ms == 2000);
 
     const auto d = cfg.DriverConfigFor(cfg.lidars[0]);
@@ -122,8 +118,11 @@ TEST_CASE("The shipped config file itself loads") {
     CHECK(cfg.network.response_timeout_ms == 200);
 }
 
-TEST_CASE("The v3 layout rejects SWMR at config validation before device startup") {
-    CHECK(Mentions(LoadError(With("    swmr: false", "    swmr: true")), "output.swmr"));
+TEST_CASE("Offline HDF5 settings are rejected by the raw acquisition configuration") {
+    for (const auto *key : {"chunk_frames", "compression_level", "swmr"}) {
+        CHECK(Mentions(LoadError(With("output:", std::string("output:\n    ") + key + ": 1")),
+                       std::string("output.") + key));
+    }
 }
 
 TEST_CASE("Unknown keys are rejected, block by block, naming the accepted set") {
@@ -141,7 +140,7 @@ TEST_CASE("Unknown keys are rejected, block by block, naming the accepted set") 
         CHECK(Mentions(LoadError(With("    tcp_keepalive: true", "    tcp_keeplive: true")), "network.tcp_keeplive"));
     }
     SUBCASE("inside output: file_prefix is not a key (the file name is fixed)") {
-        CHECK(Mentions(LoadError(With("    swmr: false", "    swmr: false\n    file_prefix: lms")),
+        CHECK(Mentions(LoadError(With("output:", "output:\n    file_prefix: lms")),
                        "output.file_prefix"));
     }
     SUBCASE("ntp.role is not a key") {
@@ -183,19 +182,16 @@ TEST_CASE("Every numeric bound is enforced and named") {
         CHECK(Mentions(LoadError(With("    recv_buffer_bytes: 4194304", "    recv_buffer_bytes: -1")),
                        "network.recv_buffer_bytes: must not be negative"));
     }
-    SUBCASE("recv_buffer_bytes / ring_buffer_frames") {
+    SUBCASE("receive buffer") {
         CHECK(Mentions(LoadError(With("    recv_buffer_bytes: 4194304", "    recv_buffer_bytes: 1024")),
                        "network.recv_buffer_bytes"));
-        CHECK(Mentions(LoadError(With("    ring_buffer_frames: 1024", "    ring_buffer_frames: 8")),
+        CHECK(Mentions(LoadError(With("network:", "network:\n    ring_buffer_frames: 1024")),
                        "network.ring_buffer_frames"));
     }
     SUBCASE("keepalive values must be positive") {
         CHECK(Mentions(LoadError(With("    keepalive_count: 3", "    keepalive_count: 0")), "network.keepalive_count"));
     }
     SUBCASE("output ranges") {
-        CHECK(Mentions(LoadError(With("    chunk_frames: 64", "    chunk_frames: 0")), "output.chunk_frames"));
-        CHECK(Mentions(LoadError(With("    compression_level: 0", "    compression_level: 10")),
-                       "output.compression_level"));
         CHECK(Mentions(LoadError(With("    flush_interval_ms: 1000", "    flush_interval_ms: 0")),
                        "output.flush_interval_ms"));
         CHECK(Mentions(LoadError(With("    queue_max_frames: 512", "    queue_max_frames: 1")), "output.queue_max_frames"));
@@ -279,7 +275,7 @@ TEST_CASE("Structural errors are reported, not defaulted") {
                        "ntp.server"));
     }
     SUBCASE("a null value is not a default") {
-        CHECK(Mentions(LoadError(With("    chunk_frames: 64", "    chunk_frames:")), "output.chunk_frames"));
+        CHECK(Mentions(LoadError(With("    queue_max_frames: 512", "    queue_max_frames:")), "output.queue_max_frames"));
     }
     SUBCASE("a missing file") {
         CHECK_THROWS_AS(LoadAppConfig("/nonexistent/lms.yaml"), ConfigError);
@@ -297,7 +293,7 @@ lidar:
     CHECK(cfg.lidars[0].device.port == 2111);
     CHECK(cfg.scan.remission == Remission::kRssi);
     CHECK_FALSE(cfg.ntp.enabled);
-    CHECK(cfg.output.chunk_frames == 64);
+    CHECK(cfg.output.queue_max_frames == 512);
     CHECK(cfg.network.connect_timeout_ms == 500);
     CHECK(cfg.network.config_timeout_ms == 2000);
     CHECK(cfg.stats_interval_s == doctest::Approx(2.5));

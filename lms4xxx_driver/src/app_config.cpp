@@ -40,14 +40,13 @@ namespace lms4xxx {
 
         void ParseNetwork(const YAML::Node &root, NetworkConfig &net) {
             const YAML::Node n = OptionalMap(root, "", "network",
-                                             {"recv_buffer_bytes", "ring_buffer_frames", "receive_thread_priority",
+                                             {"recv_buffer_bytes", "receive_thread_priority",
                                               "receive_thread_cpu", "connect_timeout_ms", "response_timeout_ms",
                                               "config_timeout_ms", "tcp_keepalive", "keepalive_idle_s",
                                               "keepalive_interval_s", "keepalive_count"});
             const auto cpu_count = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
             ReadRange<std::size_t>(n, "network", "recv_buffer_bytes", 64 * 1024, 256ULL * 1024 * 1024,
                                    net.recv_buffer_bytes);
-            ReadRange<std::size_t>(n, "network", "ring_buffer_frames", 16, 1024 * 1024, net.ring_buffer_frames);
             ReadRange<int>(n, "network", "receive_thread_priority", 1, 99, net.receive_thread_priority);
             ReadRange<int>(n, "network", "receive_thread_cpu", -1, cpu_count - 1, net.receive_thread_cpu);
             ReadRange<int>(n, "network", "connect_timeout_ms", 100, 60000, net.connect_timeout_ms);
@@ -61,21 +60,13 @@ namespace lms4xxx {
 
         void ParseOutput(const YAML::Node &root, OutputConfig &out) {
             const YAML::Node n = OptionalMap(root, "", "output",
-                                             {"queue_max_frames", "max_file_bytes", "chunk_frames",
-                                              "flush_interval_ms", "compression_level", "swmr"});
+                                             {"queue_max_frames", "max_file_bytes", "flush_interval_ms"});
             ReadRange<std::size_t>(n, "output", "queue_max_frames", 2, 1024 * 1024, out.queue_max_frames);
             Read(n, "output", "max_file_bytes", out.max_file_bytes);
             if (out.max_file_bytes != 0 && out.max_file_bytes < 1024 * 1024) {
                 Fail("output.max_file_bytes", "must be 0 (no splitting) or >= 1048576");
             }
-            ReadRange<std::uint32_t>(n, "output", "chunk_frames", 1, 4096, out.chunk_frames);
             ReadRange<std::uint32_t>(n, "output", "flush_interval_ms", 1, 60000, out.flush_interval_ms);
-            ReadRange<int>(n, "output", "compression_level", 0, 9, out.compression_level);
-            Read(n, "output", "swmr", out.swmr);
-            if (out.swmr) {
-                Fail("output.swmr", "must be false: HDF5 v3 contains variable-length telemetry strings; "
-                     "appending them in SWMR mode is unsupported");
-            }
         }
 
         void ParseLidars(const YAML::Node &root, std::vector<LidarConfig> &lidars) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Inspect, verify and repair "jai-raw-seg" capture segment files.
+"""Inspect eBUS raw and legacy jai-raw-seg recordings.
 
-This tool mirrors the on-disk layout frozen in src/core/format.hpp (version 1.0):
+New eBUS files dispatch to the shared reader. The legacy layout below remains
+readable for existing recordings:
 
     FileHeader (512 B) | FrameRecord | FrameRecord | ...
 
@@ -9,10 +10,10 @@ where each FrameRecord is
 
     FrameHeader (96 B) | payload (payload_size B) | zero padding
 
-Every record starts at a multiple of record_align, exactly as written by src/core/recorder.cpp: the
+Every legacy record starts at a multiple of record_align: the
 first record at align_up(512, record_align), each next one align_up(96 + payload_size, record_align)
 bytes later. record_align == 1 packs records back to back right after the file header. All integers
-are little-endian. Any layout change requires a version bump in format.hpp and here.
+are little-endian; jai_raw/layout.py preserves this retired writer's format.
 
 Subcommands:
     list          print a per-frame table for one segment
@@ -21,7 +22,7 @@ Subcommands:
     extract       dump a single frame's raw payload
 
 Exit codes: 0 clean, 1 integrity errors (or frame not found), 2 usage errors.
-Python 3.8+, standard library only. Doubles as the seed for offline unpacking scripts.
+Python 3.10+, standard library only. Also used by offline unpacking scripts.
 """
 
 import argparse
@@ -29,6 +30,10 @@ import json
 import os
 import struct
 import sys
+from pathlib import Path
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # ----------------------------------------------------------------------------------------------------
 # CRC-32C (Castagnoli): polynomial 0x1EDC6F41, reflected, init/xorout 0xFFFFFFFF.
@@ -524,7 +529,7 @@ def cmd_extract(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="inspect_raw.py",
-        description="Inspect/verify/repair jai-raw-seg capture segments (format v1, src/core/format.hpp).")
+        description="Inspect/verify/extract eBUS raw and legacy jai-raw-seg recordings.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list", help="print a per-frame table for one segment")
@@ -554,6 +559,10 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
+        from ebus_driver.scripts.ebus_raw import inspection
+        target = getattr(args, "path", getattr(args, "segment", ""))
+        if inspection.contains_new_format(target):
+            return inspection.dispatch(args)
         return args.func(args)
     except (OSError, ValueError) as exc:
         print("error: %s" % exc, file=sys.stderr)

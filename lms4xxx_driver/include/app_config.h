@@ -75,7 +75,6 @@ namespace lms4xxx {
 
     struct NetworkConfig {
         std::size_t recv_buffer_bytes = 4 * 1024 * 1024; // SO_RCVBUF
-        std::size_t ring_buffer_frames = 1024;
         int receive_thread_priority = 99; // SCHED_FIFO 1..99
         int receive_thread_cpu = -1; // -1 = no pinning
         int connect_timeout_ms = 500;
@@ -96,14 +95,11 @@ namespace lms4xxx {
         NetworkConfig network;
     };
 
-    // HDF5 recorder (docs/FORMAT_H5.md)
+    // Complete CoLa B telegram recorder (docs/FORMAT_RAW.md)
     struct OutputConfig {
-        std::size_t queue_max_frames = 512; // parse thread -> write thread
-        std::size_t max_file_bytes = 1ULL * 1024 * 1024 * 1024; // payload bytes per split (0 = no split)
-        std::uint32_t chunk_frames = 64; // HDF5 chunk = write batch
+        std::size_t queue_max_frames = 512; // receive thread -> write thread
+        std::size_t max_file_bytes = 1ULL * 1024 * 1024 * 1024; // raw bytes per split (0 = no split)
         std::uint32_t flush_interval_ms = 1000;
-        int compression_level = 0; // 0 = off, 1..9 = gzip
-        bool swmr = false;
     };
 
     struct LidarConfig {

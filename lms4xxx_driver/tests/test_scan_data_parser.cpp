@@ -1,9 +1,7 @@
 /// @file test_scan_data_parser.cpp
 /// @brief ScanDataParser against synthesised sSN LMDscandata payloads.
 ///
-/// The parser is 400 lines of hand-written offset arithmetic on data a device
-/// controls, and it had no test and no fixture at all. The builder below lays
-/// the telegram out field by field from the manual's own table (Operating
+/// The builder lays the telegram out field by field from the manual's table (Operating
 /// Instructions 8023198, "Send data permanently [sEN LMDscandata]", p.91-95),
 /// so the expectations come from SICK rather than from the implementation.
 
@@ -432,4 +430,112 @@ TEST_CASE("ScanDataParser bounds the encoder count") {
     t.encoders = {1, 2, 3};
     ScanData scan;
     CHECK(ParseOf(t.Build(), scan) == make_error_code(ErrorCode::kProtocolError));
+}
+
+TEST_CASE("Timestamp monitoring matches full decoding without retaining point arrays") {
+    for (const std::uint16_t points : {std::uint16_t{4}, std::uint16_t{841}}) {
+        for (const bool optional : {false, true}) {
+            Telegram telegram = FullyConfiguredTelegram(points);
+            telegram.has_time = true;
+            telegram.has_name = optional;
+            telegram.name = "Front_Right";
+            if (optional) telegram.encoders = {111, 222};
+            const auto bytes = telegram.Build();
+            ScanData full, time;
+            REQUIRE(!ParseOf(bytes, full));
+            REQUIRE(!ScanDataParser::ParseTimestamp(bytes.data(), bytes.size(), time));
+            CHECK(time.telegram_counter == full.telegram_counter);
+            CHECK(time.scan_counter == full.scan_counter);
+            CHECK(time.time_since_startup_us == full.time_since_startup_us);
+            CHECK(time.transmission_time_us == full.transmission_time_us);
+            CHECK(time.has_timestamp == full.has_timestamp);
+            CHECK(time.timestamp.year == full.timestamp.year);
+            CHECK(time.timestamp.month == full.timestamp.month);
+            CHECK(time.timestamp.day == full.timestamp.day);
+            CHECK(time.timestamp.hour == full.timestamp.hour);
+            CHECK(time.timestamp.minute == full.timestamp.minute);
+            CHECK(time.timestamp.second == full.timestamp.second);
+            CHECK(time.timestamp.microsecond == full.timestamp.microsecond);
+            CHECK(time.channels_16bit.empty());
+            CHECK(time.channels_8bit.empty());
+            CHECK(time.device_name.empty());
+        }
+    }
+}
+
+TEST_CASE("Timestamp monitoring follows changed channel lengths without enforcing first-scan content") {
+    Telegram telegram = FullyConfiguredTelegram(1000);
+    telegram.has_time = true;
+    telegram.has_name = true;
+    telegram.name = "changed-layout";
+    telegram.encoders = {1, 2, 3};
+    telegram.ch16[0].content = "OTHER";
+    telegram.ch16[0].scale = 42.0f;
+    telegram.ch16[0].data.resize(7);
+    telegram.ch16[1].data.clear();
+    telegram.ch8[0].data.resize(11);
+    const auto bytes = telegram.Build();
+    ScanData time;
+    REQUIRE(!ScanDataParser::ParseTimestamp(bytes.data(), bytes.size(), time));
+    CHECK(time.timestamp.microsecond == telegram.microsecond);
+    CHECK(time.timestamp.year == telegram.year);
+    CHECK(time.channels_16bit.empty());
+    CHECK(time.channels_8bit.empty());
+}
+
+TEST_CASE("Timestamp monitoring rejects every truncated required section") {
+    Telegram telegram = FullyConfiguredTelegram();
+    telegram.has_time = true;
+    telegram.has_name = true;
+    telegram.name = "Front";
+    telegram.encoders = {123};
+    const auto bytes = telegram.Build();
+    for (std::size_t length = 0; length < bytes.size(); ++length) {
+        CAPTURE(length);
+        ScanData time;
+        const auto ec = ScanDataParser::ParseTimestamp(bytes.data(), length, time);
+        // The two reserved suffix bytes are optional, every earlier byte is required.
+        CHECK(static_cast<bool>(ec) == (length != bytes.size() - 2));
+    }
+}
+
+TEST_CASE("Timestamp monitoring bounds lengths before skipping device-controlled data") {
+    const auto original = FullyConfiguredTelegram().Build();
+    for (const std::size_t offset : {std::size_t{36}, std::size_t{38}, std::size_t{59}}) {
+        // Encoder count, 16-bit channel count, and the first channel's sample count.
+        auto bytes = original;
+        bytes[offset] = 0xff;
+        bytes[offset + 1] = 0xff;
+        ScanData time;
+        CHECK(ScanDataParser::ParseTimestamp(bytes.data(), bytes.size(), time));
+        CHECK(time.channels_16bit.empty());
+        CHECK(time.channels_8bit.empty());
+    }
+}
+
+TEST_CASE("Timestamp monitoring permits an absent timestamp and rejects unknown optional flags") {
+    Telegram telegram;
+    auto bytes = telegram.Build();
+    ScanData time;
+    REQUIRE(!ScanDataParser::ParseTimestamp(bytes.data(), bytes.size(), time));
+    CHECK_FALSE(time.has_timestamp);
+    for (const std::size_t offset : {std::size_t{46}, std::size_t{48}}) {
+        auto invalid = bytes;
+        invalid[offset + 1] = 2; // name/time flags whose block lengths are unknown
+        CHECK(ScanDataParser::ParseTimestamp(invalid.data(), invalid.size(), time));
+    }
+}
+
+TEST_CASE("Full scan decoding rejects unknown device-name and timestamp flags") {
+    const auto bytes = Telegram{}.Build();
+    for (const std::size_t offset : {std::size_t{46}, std::size_t{48}}) {
+        CAPTURE(offset);
+        for (const std::uint16_t flag : {std::uint16_t{2}, std::uint16_t{65535}}) {
+            auto invalid = bytes;
+            invalid[offset] = static_cast<std::uint8_t>(flag >> 8);
+            invalid[offset + 1] = static_cast<std::uint8_t>(flag);
+            ScanData scan;
+            CHECK(ParseOf(invalid, scan) == lms4xxx::make_error_code(ErrorCode::kProtocolError));
+        }
+    }
 }

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 
+
 namespace common::Ebus {
     // PvString -> std::string (PvString::GetAscii can return NULL).
     inline std::string ToStd(const PvString &s) {

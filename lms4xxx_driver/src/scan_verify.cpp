@@ -2,7 +2,7 @@
 
 #include <spdlog/fmt/fmt.h>
 
-#include "scan_record.h"
+#include "scan_time.h"
 
 
 namespace lms4xxx {
@@ -54,6 +54,20 @@ namespace lms4xxx {
         }
         bad(scan.has_encoder, "unexpected encoder block");
         bad(scan.has_device_name, "unexpected device name block");
+
+        // The configured units are checked once, with the first complete scan.
+        // Subsequent telegrams are archived unchanged without channel decoding.
+        const auto check_scale = [&bad](const auto *channel, const char *name, float factor, float offset) {
+            if (channel) {
+                bad(channel->scale_factor != factor || channel->scale_offset != offset,
+                    fmt::format("{}: scale ({}, {}) (expected {}, {})", name, channel->scale_factor,
+                                channel->scale_offset, factor, offset));
+            }
+        };
+        check_scale(scan.DistanceChannel(), "DIST1", 0.1f, 0.0f);
+        check_scale(remission, remission_name, refl ? 0.01f : 1.0f, 0.0f);
+        check_scale(scan.AngleCorrectionChannel(), "ANGL1", 1.0f, -32768.0f);
+        check_scale(scan.QualityChannel(), "QLTY1", 1.0f, 0.0f);
         return problems;
     }
 } // namespace lms4xxx

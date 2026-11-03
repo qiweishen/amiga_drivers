@@ -9,10 +9,12 @@
 
 
 namespace lms4xxx {
-    // Data section of one CRC-validated CoLa B frame (STX/Length/CS stripped)
+    // One length-delimited CoLa B frame, unchanged including STX/Length/CS.
+    // A checksum failure is retained for offline inspection, never decoded live.
     struct RawFrame {
-        std::vector<std::uint8_t> data; ///< Data payload (command + params)
-        std::uint64_t receive_timestamp_us = 0; ///< Host timestamp (microseconds)
+        std::vector<std::uint8_t> data;
+        std::uint64_t receive_timestamp_us = 0; ///< Host steady time after frame assembly, microseconds
+        bool checksum_valid = false;
 
         RawFrame() = default;
 
@@ -28,7 +30,7 @@ namespace lms4xxx {
     };
 
 
-    // Splits the TCP byte stream into CRC-validated CoLa B frames
+    // Splits the TCP byte stream into complete, bounded CoLa B frames.
     class FrameReceiver {
     public:
         using FrameCallback = std::function<void(RawFrame &&frame)>;
@@ -40,6 +42,7 @@ namespace lms4xxx {
             kLengthOutOfRange, ///< the length field is zero or exceeds max_frame_size
             kChecksumMismatch, ///< XOR over the data part disagrees ("CRC" in the GUI stats)
             kGarbage, ///< bytes between frames that belong to no telegram
+            kIncomplete, ///< bytes left without a complete frame when reception ends
         };
 
         // `consecutive` counts rejected candidates and garbage spans since the
@@ -63,6 +66,10 @@ namespace lms4xxx {
 
         // Complete frames are delivered through on_frame
         void Feed(const std::uint8_t *data, std::size_t len);
+
+        // Call after the producer stops. Reports an unfinished tail once, then clears it.
+        // Returns its byte count; these bytes have no complete telegram to archive.
+        std::size_t Finish();
 
     private:
         struct Impl;

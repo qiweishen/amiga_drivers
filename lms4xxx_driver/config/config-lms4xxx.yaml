@@ -39,9 +39,9 @@ scan:
 # =============================================================
 # --- NTP (device clock) ---
 # The only absolute time source of the LiDAR: with NTP off the scans carry
-# nothing but the device uptime (wraps every 71.6 min) and cannot be associated
-# with any other sensor offline — the driver warns loudly. Host time is never
-# used. The device must be able to reach the server (AsteRx RBi3 Pro+, GPS time)
+# nothing but the device uptime (wraps every 71.6 min). Absolute time association
+# then needs an independently established clock mapping. Host time is never
+# substituted for device time. The device must be able to reach the server
 # from its own subnet: see docs/DEVICE_CONFIG.md, "Time".
 ntp:
     enabled: true
@@ -54,23 +54,19 @@ ntp:
 
 # --- Telemetry ---
 telemetry:
-    interval_s: 10                      # 0..3600; 0 = off; stored in the .h5 /telemetry group
+    interval_s: 10                      # 0..3600; 0 = off; replies retained in the raw telegram stream
 
 
-# --- Output (HDF5) ---
+# --- Output (complete CoLa B telegrams + CSV index + JSON metadata) ---
 output:
     queue_max_frames: 512               # 2..1048576
     max_file_bytes: 1073741824          # 0 = no splitting | >= 1048576
-    chunk_frames: 64                    # 1..4096
     flush_interval_ms: 1000             # 1..60000
-    compression_level: 0                # 0..9; 0 = off
-    swmr: false                         # must remain false: v3 string datasets do not support SWMR append
 
 
 # --- Network ---
 network:
     recv_buffer_bytes: 4194304          # 65536..268435456 (SO_RCVBUF)
-    ring_buffer_frames: 1024            # 16..1048576
     receive_thread_priority: 99         # 1..99 (SCHED_FIFO)
     receive_thread_cpu: -1              # -1 = no pinning | 0..ncpu-1
     connect_timeout_ms: 500             # 100..60000

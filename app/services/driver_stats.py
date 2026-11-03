@@ -5,12 +5,12 @@ does): every frame-based driver prints its disk write rate as ``fps=<float>`` in
 the periodic ``[Statistics]`` line, meaning FRAMES ACTUALLY WRITTEN TO DISK per
 second over that driver's last stats window:
 
-    gox_driver/src/stats.cpp                    [Statistics] [cam0] up=… rate=… Hz  fps=24.0  …
-    fx10_driver/src/fx10_driver_app.cpp         [Statistics] frames=… rate=… Hz  fps=24.0  …
+    ebus_driver/src/camera_driver.cpp           [Statistics] [cam0] up=… rate=… Hz  fps=24.0  …
+    ebus_driver/src/camera_driver.cpp           [Statistics] [fx10] frames=… rate=… Hz  fps=24.0  …
     lms4xxx_driver/src/lms4xxx_driver_app.cpp   [Statistics] [Front_Right_Laser] up=… rate=… Hz  fps=600.0  …
 
-`rate=` is the sensor's own output rate; `fps=` is what survived to disk, so a
-gap between them is exactly the loss the card should surface.
+`rate=` is the observed valid-frame rate; `fps=` is the completed-write rate.
+A difference can include queued frames as well as loss; final counters distinguish them.
 
 AsteRx records a byte stream rather than frames and prints no fps field — its
 card simply has no frame rate.
@@ -28,13 +28,11 @@ import time
 
 from ..state import STATE
 
-# "[Statistics] [cam0] up=…" -> instance token; the plain fx10 line has none.
+# "[Statistics] [cam0] up=…" -> instance token; legacy FX10 lines may have none.
 _INSTANCE_RE = re.compile(r"^\[Statistics\] \[([^\]]+)\] ")
 _FPS_RE = re.compile(r"(?:^|\s)fps=(\d+(?:\.\d+)?)")
 
-# Module token -> driver. Statistics lines are emitted from the app layer for
-# fx10/lms (App token) but from capture_runner.cpp for gox (internal token), so
-# both spellings are accepted for each driver.
+# Module token -> driver. Keep legacy App tokens as well as profile module names.
 _MODULE_TO_DRIVER = {
     "GoX": "gox", "GoXApp": "gox",
     "FX10": "fx10", "FX10App": "fx10",
@@ -79,10 +77,8 @@ class DriverStats:
             cam = inst.group(1) if inst else "?"
             prev = self._gox_cams.get(cam)
             if prev is not None and now > prev[1]:
-                # capture_runner prints every camera back-to-back in one round,
-                # so the summed key only ever sees the microsecond gap BETWEEN
-                # cameras. A single camera's own lines are exactly one round
-                # apart — that is the period the staleness window needs.
+                # Each camera reports independently; measure its own interval,
+                # not the short gap between two different cameras' messages.
                 self._period["gox"] = now - prev[1]
             self._gox_cams[cam] = (fps, now)
             self._publish("gox", self._gox_total(now), now, track_period=False)

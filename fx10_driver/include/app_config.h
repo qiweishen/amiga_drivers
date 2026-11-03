@@ -92,7 +92,7 @@ namespace fx10 {
     };
 
     struct RotationConfig {
-        std::uint64_t max_lines = 0; // 0 = no rotation by line count
+        std::uint64_t max_lines = 0; // RAW SDK records; 0 = no count-based rotation
         std::uint64_t max_mb = 2048; // 0 = no rotation by size
     };
 

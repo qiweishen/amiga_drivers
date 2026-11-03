@@ -80,7 +80,7 @@ It is factory-enabled and the calibration pack that applies depends on it (the
 pack with `FX` in its name is for AIE on; the manual recommends it, p.44). The
 driver therefore writes it **only when the config asks for `false`**, which is
 also why a default configuration never needs a node name the manual does not
-print. The state and the matching pack are recorded in every `.hdr`.
+print. The state and the matching pack are recorded in device/profile metadata and offline-export provenance.
 
 Deliberately left at the factory value and **not** exposed:
 
@@ -112,36 +112,13 @@ Written but **not** exposed (hidden, driver-internal):
 
 ## Sequence
 
-`Fx10DriverApp::BringUpSession()` / `StartStreaming()` (`src/fx10_driver_app.cpp`) and
-`tools/snapshot_main.cpp`:
-
-| # | Step | Detail |
-|---|---|---|
-| 1 | connect | `PvDevice::CreateAndConnect` (id / MAC / IP) |
-| 2 | factory preparation | `PrepareFactoryDefaults()`: stop → reset Execute/check → cache refresh/readback → user-set load Execute/check → cache refresh/readback. Uses the existing connection throughout, without IsDone polling. |
-| 3 | stream open | `GevSCPSPacketSize` or `NegotiatePacketSize`, rx buffer, `SetStreamDestination` |
-| 4 | `ApplyAcquisitionConfig` | walks `BuildApplyPlan()` — see below. Every write is read back |
-| 5 | `readGeometry` | `Width`, `Height`, payload size, `PixelFormat` |
-| 6 | mechanical shutter | shared `CameraControl::OpenShutter`: write `MotorShutter_PulseRev = 255` once → check SDK write result; failure prevents streaming |
-| 7 | streaming | buffers → `StreamEnable` → `AcquisitionStart` |
-| 8 | external trigger | `SensorTriggerLog::Start` requests pulses only after the camera starts; the snapshot is freerun and does not request pulses |
-
-Stream initialization now fails if the user-mode socket buffer request is
-rejected or its supported readback is below the requested value. A documented
-`NOT_SUPPORTED` backend retains an explicit unknown capacity in runtime metadata;
-other readback errors fail startup. Linux SO_RCVBUF includes bookkeeping and is
-not directly the payload capacity. No sysctl, interface MTU, packet size, or
-resend-policy changes are applied to compensate automatically.
-
-With the shipped `network.socket_rx_buffer_mb: 32`, Linux
-`net.core.rmem_max` must be at least 33554432 bytes. eBUS 6.5.1 documents that
-a larger request is capped at this limit and returns `INVALID_PARAMETER`.
-The error reports the limit read by the acquisition process (or `unknown` if
-unreadable). The single container shares the host network namespace: provision
-the limit on the host as described in the root README's prerequisites, then
-retry. Reducing the configured buffer is not an equivalent fix for a given
-capture workload. An SDK `SO_RCVBUF` readback may include doubled bookkeeping;
-the host limit is compared with the original request, without doubling it.
+The shared [eBUS lifecycle](../../ebus_driver/README.md) owns connect, SDK
+buffers, workers and RAW storage. The FX10 profile loads factory defaults,
+applies the ordered write plan, reads actual image geometry and resolves the
+calibration axis. It opens the shutter (or requests closed for a dark reference)
+before AcquisitionStart, then establishes the missed-trigger counter baseline.
+Device-specific shutter commands remain in CameraControl; no tool implements
+a second acquisition loop.
 
 ### Mandatory mechanical-shutter action
 
@@ -172,10 +149,15 @@ permits startup to continue, but does not confirm mechanical motion completion.
 No motion-complete signal or settling time has been provided, so the driver
 does not invent a state check or a fixed wait.
 
-On successful preparation, production `device.json` records `shutter_preparation`
-with the open node/value, device-reported range, SDK acknowledgement, elapsed time,
-`status: open-pulse-acknowledged` and `state_verified: false`. Failures use the
-existing error/cleanup path before that snapshot is published.
+`device.json` records the requested action in `profile.shutter_request`; it does
+not contain an unexecuted `shutter_preparation` placeholder. After the startup
+hook succeeds, `events.jsonl` records a `profile_start` event whose
+`actions.shutter_preparation` contains the actual pulse node/value,
+device-reported range, SDK acknowledgement, elapsed time, acknowledged open/close
+status and `state_verified: false`. This result comes from the pulse operation's
+cached outcome, without another device-configuration readback. If the startup
+hook fails, the existing error/cleanup path runs without publishing
+`profile_start`; this event does not itself prove AcquisitionStart succeeded.
 `features.raw` rejects `AcquisitionStart`, `AcquisitionStop` and both motor-shutter
 pulse nodes to preserve the order and prevent duplicate/opposing motor writes.
 The normal startup does not write `MotorShutter_PulseFwd`; the separate
@@ -192,166 +174,44 @@ hardware verification were not run for this change.
 
 ### Collect Reference page
 
-The navigation's **Collect Reference** page (`/reference`) is dedicated to FX10;
-Camera Tools links to it. Place an illuminated white
-reference target in the field of view before clicking. The tool loads the camera
-address and acquisition settings from the **same FX10 config as normal recording**:
-`General.FX10 Driver Config Path` in the main config, normally
-**`fx10_driver/config/config-fx10.yaml`**. Edit the **FX10** tab on the Config page
-to save recording and reference settings; table selection and preview sliders
-do not override them. The workbench's **Apply to config** button updates this same
-recording/reference config. The **FX10 snapshot** config is only used by the
-**FX10 · Spectral workbench** preview.
-Reference exposure, binning, pixel format, geometry/calibration, network settings
-and trigger mode/rate follow the recording config, including **freerun or external**
-trigger mode. When `sensor_trigger.enabled` is true, the app passes the main
-config's **Sensor Trigger: Port** as `--sensor-port`; a missing port fails collection
-instead of falling back to freerun. With SensorSync disabled, external mode
-requires an independently supplied trigger. The collection takes its output root
-from the main config's **Output Directory**, as normal rig recordings do.
+The UI invokes `fx10_reference` using the saved FX10 YAML and output root.
+The operator places an illuminated white reference before starting. The tool
+captures white/open and dark/closed phases, each for reference.duration_s.
+The config text is read once and snapshotted.
 
-Set the duration in `fx10_driver/config/config-fx10.yaml` (or the selected recording config):
+Both phases now use independent EbusCameraDriver instances and connections.
+Before dark acquisition, serial/model, geometry, PixelFormat, exposure/trigger
+readbacks, ordered applied entries and calibration references must match.
+The manifest explicitly says `connection_scope="separate verified phases"`;
+undocumented factory state, AIE implementation and mechanical shutter position
+are not proven identical. The shutter remains closed after the dark phase until
+a subsequent normal/snapshot run requests opening it.
 
-```yaml
-reference:
-  duration_s: 5.0
-```
+Each phase records device.json, seg_*.raw and events.jsonl, plus
+reference_phase.json. A SensorSync participant has its own phase timing log.
+The root stores raw/config/config-fx10.yaml, reference.request.json,
+reference.json and reference.log. An interrupted or failed phase preserves its
+partial recording and publishes no successful pair.
 
-`reference.duration_s` is the duration **of each phase**, defaulting to 5 seconds
-when omitted. It accepts finite values from 0.1 to 3600 seconds, including
-fractions; zero, negatives, NaN, infinity and out-of-range values are rejected
-before device connection. Normal recording and snapshot durations are unaffected.
-The page shows the saved setting and provides a link to the config editor.
-Use **Reload config** after editing; collection always loads the saved file again.
-
-`fx10_reference` performs factory preparation and applies the configuration once,
-then uses the same connection for both phases:
-
-1. Write `MotorShutter_PulseRev = 255`, check the SDK result, start the receiver,
-   and collect white reference in the configured trigger mode for `reference.duration_s`.
-2. Require acknowledgement of `AcquisitionStop`, then drain/finalize all white
-   data before moving the shutter. Teardown shares the once-per-run stop flag
-   and does not replay this command.
-3. Write `MotorShutter_PulseFwd = 255`, check the SDK result, and collect dark
-   reference for `reference.duration_s` with the same acquisition settings.
-4. Stop/drain/finalize dark data and disconnect. The shutter remains closed;
-   the next normal acquisition explicitly issues its opening pulse.
-
-Each duration is a **host steady-clock window after stream/trigger startup**,
-not an inferred `frame_rate_hz * duration_s` frame count. Setup and durable finalization
-add to the total button-operation time. Startup and in-flight frames are retained
-with their original per-line timing observations, so the saved data do not assert
-an exact physical exposure span equal to the requested duration. Shutter write acknowledgement still
-does not verify position or settling; no undocumented wait is assumed.
-
-The standalone C++ tool also supports other configs supplied through `--config`.
-For a CLI capture with SensorSync enabled, supply `--sensor-port`; each finalized
-phase also writes `timing_quality.json`.
-It checks the selected channel's edge sequence/order, declared active-high
-exposure polarity, complete exposure pairs, and trigger/exposure/real-frame
-counts. RX gaps can explain a count difference but still fail a clean reference.
-For example, 602 triggers with 301 exposures/frames fails even when the camera's
-MissedTrigger counter is zero. Matching counts never set `association_verified`:
-the per-frame timing anchor and physical signal polarity still require evidence.
-Normal FX10 sessions apply the same final accounting check after stopping/draining.
-
-For external mode with SensorSync enabled, the configured channel's PWM pair
-is enabled: channels 0/1 share FX and channels 2/3 share JAI. Both outputs of that
-pair pulse together; the other pair is explicitly disabled for this operation.
-Pulses start after `AcquisitionStart`
-and stop before disarming the camera. In freerun all SensorSync trigger outputs
-are disabled while its timing log records observations. With SensorSync disabled,
-external mode needs the independently supplied trigger configured by the operator;
-no received frames makes the phase fail.
-
-Persistent output uses a `reference_` prefix on the pair's session directory:
-
-```text
-<Output Directory>/reference_<UTC>/
-  raw/config/config-fx10.yaml          # exact configuration text loaded once
-  raw/fx10/white/fx10_<UTC>/            # ordinary FX10 ENVI session
-  raw/fx10/dark/fx10_<UTC>/             # separate ordinary FX10 ENVI session
-  reference.log
-  reference.request.json
-  reference.json                      # completed only after BOTH phases finalize
-```
-
-Each phase reuses `EnviRecorder`: `segment_*.bil`, `.hdr`, `.lines.csv`,
-`capture.json`, `segments.jsonl`, configured rotation/gap/flush policies, plus
-`device.json`, start/stop `telemetry.jsonl`, `stream_stats.txt`, and
-`sensor_trigger.log` when enabled. `reference_phase.json` records the phase,
-timing, frame count and result. The per-phase stop policy overrides only the
-normal recording duration/frame limits with `reference.duration_s` and unlimited frames; it does not
-modify the saved source config. These directories are never included in preview
-temporary-file cleanup. Existing timestamp collisions receive the usual suffix.
-
-The page has separate **White reference** and **Dark reference** line charts.
-Both use the same reductions as Snapshot and Data Live: per band, calculate mean,
-median, min, max and p90 over all genuine, non-anomalous frames and spatial samples.
-Reference curves and their means are displayed in raw digital numbers (DN),
-matching the Spectral workbench, without percentage scaling or display rounding
-of curve values. Horizontal translucent dashed guides mark 20%, 50% and 80% of
-the captured PixelFormat's `full_scale` from that phase's immutable `capture.json`.
-Synthetic padding is excluded using the versioned line index. The reference
-charts cover all finalized segments in the whole phase, not the last-second
-window used by Data Live. Integer histograms accumulate bounded batches; median
-and p90 use linear interpolation at rank `(N - 1) * q`, matching the existing
-NumPy reductions without concatenating the full recording in memory. The reader
-checks geometry, header layout, file sizes and the phase's written-frame count.
-
-Both plots use the Spectral workbench's fixed 400–1000 nm horizontal axis with
-100 nm ticks. Calibrated captures use their saved wavelength coordinates;
-otherwise band positions are mapped evenly onto 400–1000 nm for display and
-identified as uncalibrated. This mapping does not resample the signal or alter
-capture metadata. Each plot shows the requested duration, actual frame count,
-geometry, PixelFormat, full scale, raw mean and clipping percentage. Plot errors
-leave the successful raw recording intact and are shown separately. Completed
-results remain available when navigating away and back within the same GUI process;
-the next collection clears both previous plots before displaying its new pair.
-
-The GUI reserves camera tools for the whole pair and prevents overlap with main
-recording, including a run with FX10 disabled because SensorSync may be shared.
-Leaving the page does not release the reservation early. Missing tools/config,
-shutter failures, transport/writer loss, verified missed triggers, trigger-log
-errors or empty phases do not yield a successful pair; partial data are retained.
-The GUI derives the actual duration from the collector's `REFERENCE: CONFIG`
-announcement, from the same configuration text saved with the pair. Its collection
-timeout is `2 * duration_s + 180` seconds, allowing initialization and finalization;
-the later plot calculation is separate. On timeout it requests shutdown. A process
-whose shutdown cannot be verified locks further
-control operations until its ownership is resolved. The main session `Guards`
-configuration does not apply to this standalone tool.
-
-Suggested verification (not executed here): check white/dark frame content and
-shutter writes on hardware; repeat with stored pulse values already equal to 255;
-compare actual exposure/binning/format with the saved config; exercise freerun
-and external triggering, zero-frame input, write failures, repeated clicks,
-page disconnect, cancellation/timeout and directory collisions. Confirm both
-segments finalize separately and failures never report a completed pair.
-Also check non-default/fractional durations, invalid duration rejection, timeout
-growth with duration, and post-navigation plot recovery. Compare histogram
-reductions against Snapshot/Data Live on the same integer cube (including odd/even
-pixel counts, ties, saturation and above-full-scale container values), split that
-cube across multiple segments, and verify that padding/anomalous index rows are
-excluded and corrupted metadata/indexes produce plot errors. These comparisons
-and runtime/UI/hardware checks were not executed here.
+CLI markers CONFIG/SESSION/PHASE/OK/FAIL and the GUI workflow remain supported.
+Plots decode supported RAW image buffers offline in DN, exclude invalid records,
+and retain the RAW data if rendering fails. Old ENVI reference sessions remain
+readable. See [format and lifecycle details](../../ebus_driver/README.md).
 
 ### Receive payload and image layout
 
-`PayloadSize` determines receive-buffer capacity; it need not equal the tightly
-packed pixel byte count. `StreamReceiver::CheckFrame()` validates every received
-image against its width, height and pixel type, then requires `GetImageSize()`,
-`GetEffectiveImageSize()`, `GetAcquiredSize()` and SDK-declared padding to agree.
-Chunk data, unexplained trailing bytes and missing-line/overrun flags fail the
-recording. Only declared horizontal/vertical padding is omitted from the ENVI
-pixels; packed formats are unpacked per row. The first image logs all these
-lengths, padding, chunk count and offsets for diagnosis. A larger allocation
-alone does not prove padding is present in the received image.
+The acquisition path copies the entire eBUS acquired buffer unchanged. It does
+not unpack Mono10/12, strip padding or Chunk bytes, delete a status line,
+convert to uint16, or assemble an ENVI cube. Every record carries the SDK's
+PixelFormat, geometry, image offset, padding, image/effective sizes and status.
+An SDK image represents one pushbroom scan line with spatial samples across
+width and spectral rows across height; a sequence forms a scan over time.
 
-The ordinary acquisition plan does not write Width/Height/OffsetX/OffsetY.
-The nominal band-count calculation is not an ROI-restoration command: a
-readback differing from that calculation still needs the camera's calibrated
-window to be checked. Do not infer calibrated ROI offsets from dimensions alone.
+Known image formats are decoded by the shared Python reader for preview and
+explicit offline ENVI export. Unsupported PFNC is not a reason to transform or
+discard safe payload bytes. A decoder rejects unknown layouts rather than guessing.
+Actual ROI, MROI, binning and device-side processing still determine what the
+camera has already output.
 
 ### The write plan
 
@@ -395,154 +255,48 @@ Check whether `LineSelector` exists before choosing an entry for it.
 
 ## Recording policy: time source, fail-fast, durability
 
-* **Time.** The FX10's only path to GPS time is SensorSync (`sensor_trigger`,
-  strobe edges against AsteRx PPS/ZDA). With `sensor_trigger.enabled: false`
-  the driver warns at bring-up: the lines then carry the camera's raw GVSP tick
-  and nothing that can be associated with another sensor offline. Host time is
-  never a time source on this platform (the `host_receive_*` columns of the
-  line index are diagnostics, kept for format stability).
-* **One SensorSync session per rig.** The board also triggers the Go-X (its
-  JAI pair), and its protocol allows one client and one `START` per session,
-  so the FX10 driver no longer owns the board: it is a participant of the
-  rig-wide `common::SensorSyncHub` that `main` creates
-  (`common::Config::sensor_sync`). The board's serial port is the rig's,
-  named once in `config/config-main.yaml` (`Sensor Trigger: Port`); this yaml
-  only declares `sensor_trigger.enabled` and `trigger_channel` (a `port` key
-  here is rejected as unknown). `BringUpSession` registers channel
-  `trigger_channel` with `frame_rate_hz` pulses (0 in freerun) — the first
-  registration opens the board, before any camera is armed; `StartStreaming`
-  arms after `AcquisitionStart` and the pulses start once every registered
-  camera has armed (the Go-X arms during its `Init`, so this arm is normally
-  the one that starts them); `TeardownSession` disarms before the stream
-  stops, which ends the session for everybody. The timing log is therefore one
-  file for the rig, `raw/sensor_trigger.log`, and `device.json`
-  `timing.observations_file` / the `.hdr` description name it relative to the
-  ENVI session directory (`../../sensor_trigger.log`); the FX10's own events
-  are the ones on its channel. The monitor loop keeps the same guards on the
-  shared session (integrity, 15 s stall) plus one more: a session that has not
-  started 30 s after this camera armed ends the run. `fx10_reference` still
-  owns the board alone through `fx10::SensorTriggerLog` (now an alias of
-  `common::SensorSyncLog`), takes the port as `--sensor-port` (the GUI passes
-  the main config's value) and writes its log next to its own phases.
-* **Fail-fast.** The first lost or unrecorded frame ends the whole rig at once:
-  the monitor thread polls `StreamReceiver::LossSeen()` (RetrieveBuffer error,
-  failed operation result, non-image payload, BlockID anomaly, requeue failure)
-  and `EnviRecorder::LossSeen()` (BlockID gap, rejected buffer, wrong geometry)
-  every 200 ms, and the camera's missed-trigger counter on the 60 s telemetry
-  tick. An incomplete recording is worthless to the platform; the operator
-  restarts immediately instead of finding a DEGRADED run at the end. For the
-  same reason there is no reconnect loop any more: a link loss (or an unusable
-  stream) ends the run — the frames across the gap are gone either way.
-* **Bounded recording pipeline.** The receive thread validates and copies SDK
-  image bytes, then requeues the `PvBuffer`. One recording worker unpacks,
-  removes declared padding and writes ENVI BIL, including index events and
-  rotation. A frame and its preceding gap share one queue entry. Rejected
-  buffer metadata uses the same ordered queue. Queue exhaustion stops the run;
-  accepted entries drain before `recorder.Stop()` and before sink destruction.
-  `network.buffer_count: auto` now selects 16 SDK receive buffers (subject to
-  the SDK limit). `stall_budget_s` sizes the application queue at the configured
-  line rate. `max_buffer_memory_mb` caps SDK payload buffers, application payload
-  buffers and one canonical scratch frame together; bookkeeping and other
-  application allocations are outside that cap. The actual allocations and
-  conservative queue-only stall estimate are stored in `device.json`.
-* **Durability.** Periodic `fdatasync` (`output.flush_interval_mb`) runs on a
-  helper using dup'd descriptors, with at most one active and one pending
-  request. Pending requests for the same segment are coalesced. A failed flush
-  immediately makes `Failed()` true and stops the session; finalization still
-  retries to preserve complete data/index records and accounts for the error.
-  The ENVI layout and finalize order (truncate → fdatasync → rename → `.hdr`)
-  are unchanged. The cadence is not a promise of loss limited to a fixed time.
+All capture paths now use the [shared RAW recorder](../../ebus_driver/README.md).
+It stores the raw SDK timestamp integer with unverified unit/epoch and the
+host reception realtime/monotonic observations separately. SensorSync
+association is evaluated from its observation log, not inferred from a common
+host timestamp. Shared-trigger participants register during Init and arm in Run.
+
+output.max_frames counts admitted valid image buffers. max_duration_s starts
+at the AcquisitionStart command. rotation.max_lines now limits SDK records per
+segment (including flagged/non-image buffers); max_mb limits total RAW bytes.
+on_gap remains accepted as legacy configuration, but RAW never inserts zeros:
+gaps are metadata and trigger a failed session. Existing config validation and
+device apply semantics remain in the FX10 profile.
+
+The shared engine records safe flagged buffers and fails on loss, queue
+exhaustion, SDK or file errors. It drains admitted buffers, synchronizes segments
+and records session_end only during finalization. A missing/failed final result
+is incomplete. Native RAW remains authoritative after an offline ENVI export;
+the exporter publishes a derivative header only after its data/index are complete.
 
 ## Dataset metadata
 
-The main `Fx10DriverApp` recording path writes the following files in each
-connection-epoch directory. The ENVI pixel layout is unchanged. Snapshot tools
-also use the recorder's v2 line index, capture contract and segment summaries;
-the device/telemetry/stream sidecars belong to the main capture session.
+device.json contains ebus-device-v1 identity, factory actions, applied writes,
+final configuration readbacks, calibration/profile, SDK header version and the
+actual buffer budget. Runtime SDK version is unknown unless queried.
+The profile records the actual geometry and expected frame rate separately;
+configuration is not evidence of an achieved rate.
 
-| File | Contents and publication point |
-|---|---|
-| `capture.json` | Existing dimensions, pixel format, wavelength axis and preview fields, plus a versioned `recording_contract`. Written before the first segment. |
-| `device.json` | One snapshot after receive buffers are allocated and before `StreamEnable`/`AcquisitionStart`: identity/firmware nodes, ordered configuration requests, attempted values after clamping, immediate readbacks, optional-write failures, final readable settings (including the selected line's source/mode/polarity/status), transport, receive endpoint, actual buffer allocation and socket readback, calibration reference and timing intent. Published atomically without overwriting an existing snapshot. |
-| `telemetry.jsonl` | `fx10-telemetry-v1` rows at start (before acquisition), each existing 60 s device-poll tick and stop (or `startup-failed` during partial startup). ProcPCB/FPGA temperatures, raw Counter1 value, baseline, delta, binding verification and regression flag. Each row includes host realtime/monotonic read-start and monotonic read-finish times and whether acquisition was started. |
-| `stream_stats.txt` | Full readable `PvStream` parameter dump after receive-thread shutdown and before stream disconnect. Unreadable/error values are explicit. This is an SDK snapshot, not the application's frame ledger. |
-| `segment_NNNN.lines.csv` | `fx10-line-index-v2`: original ten columns retain their order/meaning; twelve appended columns retain SDK layout and operation metadata for accepted and rejected buffers. |
-| `segments.jsonl` | `fx10-segment-v1`: one row after a segment's BIL/index and `.hdr` have been published. Counts actual frames separately from synthetic padding, records gap/rejection/anomaly counts, byte sizes, global line interval and first/last actual frame identities/timestamps. |
+The `profile_start` event contains only startup action results in `actions`:
+`shutter_preparation` and `missed_triggers` with `baseline` (null when unreadable)
+and `binding_verified`. It does not repeat the static `device.json` snapshot or
+reread its configuration nodes. Start/periodic/stop `device_health` events preserve
+temperatures, raw missed-trigger counter, baseline, delta, binding and regression
+evidence. `stream_final_statistics` records the
+available SDK counters. sensor_sync_quality and capture_final retain final
+accounting; session_end distinguishes SDK records from valid frames.
 
-The twelve new index columns are `sdk_acquired_size`, `sdk_payload_type`,
-`sdk_operation_result`, `sdk_chunk_count`, `sdk_image_present`, `sdk_pixel_type`,
-`sdk_width`, `sdk_height`, `sdk_padding_x`, `sdk_padding_y`, `sdk_image_size`, and
-`sdk_effective_image_size`. Empty means unavailable; padding/gap rows have no
-SDK fields. Non-image buffers retain generic SDK fields but leave image fields
-empty. Pixel type and operation result are opaque SDK numeric codes. The app's
-live and snapshot readers accept both v1 (10 columns) and v2 (22 columns).
-
-Packed pixels are unpacked to uint16, and SDK-declared padding is omitted.
-Recording layout metadata does **not** recover the omitted bytes or unused packed
-bits: ENVI preserves the canonical pixel values, not a byte-exact SDK payload.
-Rejected buffers retain diagnostic metadata, not their pixel bytes. `frame`
-means one spatial scan line with all delivered image rows, not an instantaneous
-full-scene hyperspectral cube. `EnStatusLine` replaces an image row when enabled;
-it must not silently become a wavelength-calibrated band.
-
-Unknown nodes use `{value: null, status: ...}`. AIE remains unknown (no verified
-node name). `sdk.header_version` comes from `PvVersion.h`'s `NVERSION_STRING`
-(verified in the bundled 6.5.1.6797 SDK headers); `sdk.runtime_version` is null
-because the loaded binary version is not inferred from build-time headers.
-Camera firmware/version readbacks are separate. `factory_preparation.completed` records acknowledged
-commands and subsequent control readiness, not proof of every factory setting.
-MROI writes retain their selector context through the ordered apply log; that
-log is not a reread of every region after arbitrary raw overrides.
-
-The startup log displays trigger/exposure and output-line values from this same
-snapshot, including explicit absent/unreadable states. Output-line reads describe
-only the final `LineSelector` context. `LineStatus` is an idle sample before
-`AcquisitionStart`, not evidence of an exposure or a verified connector pin.
-`runtime.stream_local_ip` / `stream_local_port` record the receive endpoint passed
-to `SetStreamDestination`; successful command acknowledgement does not prove
-that GVSP packets reach it.
-
-For a zero-frame run, retain `device.json`, `stream_stats.txt`, `telemetry.jsonl`
-and the shared `sensor_trigger.log`. Compare final trigger/exposure values and
-the selected output line with the actual device's node-map/pin mapping; inspect
-stream receive/error counters independently. SensorSync `T` records are PWM
-interrupt observations, not voltage measurements at the camera connector. Zero
-`S` edges can mean no exposure or missing/misrouted feedback; zero missed-trigger
-events does not establish that the camera received a trigger. These observations
-alone do not justify changing the trigger source, strobe polarity or calibration
-ROI, or weakening the final timing checks.
-
-Telemetry reuses the existing monitor-thread reads; it adds no device reads in
-the image callback. Its persistence is independent of `logging.stats_interval_s`.
-The start sample establishes a baseline before this process enables SensorSync
-pulses. The raw counter is not a trigger total. Delta is null unless the initial
-`Counter1_EventSource` readback confirms `MissedTrigger` and the counter baseline
-and current value are usable. A regression is latched (reset versus wrap is not
-guessed); a verified missed-trigger counter regression ends the session as an
-integrity failure. Host times and raw SDK timestamps remain observations: no UTC
-epoch or trigger/BlockID association is inferred. `sensor_trigger.log` and a
-separately verified association anchor remain necessary for the intended timing.
-
-Metadata I/O failures are visible and prevent a successful main-session result.
-Device metadata must publish before acquisition begins. Low-frequency JSONL rows
-are fully written and `fdatasync`ed; failed partial appends are truncated to the
-last complete prefix where possible, then latched against retries. Stream text
-is checked on close but has no separate durability barrier. Segment summaries
-are synced during existing segment finalization, not on every image line.
-
-The `.hdr` remains the authority for a finalized ENVI segment. `closed_clean`
-describes finalization only, **not** absence of lost frames. A summary can be
-missing after a crash or a summary-write failure even when `.hdr` exists; scan
-the files and index rather than treating the manifest as an exhaustive inventory.
-An event-only segment has zero BIL lines and null first/last frame identities.
-Gap counts belong to the segment containing the gap event; its synthetic padding
-can span later segments. Global line intervals are zero-based, end-exclusive.
-
-Verification to execute separately: SDK-free metadata/index/recorder tests,
-legacy and v2 preview reads, hardware node availability and readbacks, an idle
-external-trigger run, a run shorter than 60 s, disconnect/disk-full shutdown,
-and capture throughput with metadata enabled. These checks have not been run as
-part of this implementation's static-only validation.
+Each RAW record independently describes SDK byte count, image offset and layout,
+padding, PixelFormat, Chunk count, operation status, ID and timestamps.
+A counter unavailable to the profile remains null; unknown metadata cannot be
+promoted to a synchronization claim. The historical capture.json, .hdr, .lines.csv,
+segments.jsonl and telemetry.jsonl belong to the legacy ENVI format, which the
+reader still supports.
 
 ## Not done, and why
 

@@ -17,7 +17,6 @@
 #include "logger.h"
 #include "string_util.h"
 #include "user_set.h"
-#include "util.h"
 #include "ebus/sdk_error.h"
 
 namespace gox::ebus {
@@ -117,6 +116,7 @@ namespace gox::ebus {
             }
 
             CommandTimeoutGuard(const CommandTimeoutGuard &) = delete;
+
             CommandTimeoutGuard &operator=(const CommandTimeoutGuard &) = delete;
 
         private:
@@ -133,9 +133,11 @@ namespace gox::ebus {
         // command completion reporting is taken as done once Execute returned.
         // Returns whether IsDone was actually usable (recorded in device.json:
         // without it the factory load is only known to have been *sent*).
-        bool WaitCommandDone(PvGenCommand *cmd, const char *name, const std::string &camera_id) {
+        bool WaitCommandDone(PvGenCommand *cmd, const char *name, const std::string &camera_id,
+                             const std::function<bool()> &stop) {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUserSetLoadDeadlineMs);
             for (;;) {
+                if (stop && stop()) throw SdkError("factory preparation interrupted");
                 bool done = false;
                 const PvResult r = cmd->IsDone(done);
                 if (!r.IsOK()) {
@@ -502,52 +504,13 @@ namespace gox::ebus {
     }
 
 
-    CameraController::CameraController(std::string camera_id, StopController *stop)
-        : camera_id_(std::move(camera_id)), stop_(stop) {
+    CameraController::CameraController(std::string camera_id, PvDeviceGEV &device)
+        : camera_id_(std::move(camera_id)), device_(&device) {
     }
 
 
-    CameraController::~CameraController() {
-        try {
-            Disconnect();
-        } catch (const std::exception &e) {
-            g_log.Warn("[{}] [eBUS] Disconnect during teardown failed: {}", camera_id_, e.what());
-        }
-    }
-
-
-    void CameraController::Connect(const std::string &target, DiscoveredDevice identity) {
-        identity_ = std::move(identity);
-        device_ = std::make_unique<PvDeviceGEV>();
-        g_log.Info("[{}] [eBUS] Connecting to {} ...", camera_id_, target);
-        CHECK_PV(device_->Connect(PvString(target.c_str()), PvAccessControl), "PvDeviceGEV::Connect");
-
-        // Direct dials skip discovery
-        if (identity_.model.empty()) {
-            ReadFeatureAsString(Params(), "DeviceModelName", identity_.model);
-        }
-        if (identity_.serial.empty()) {
-            ReadFeatureAsString(Params(), "DeviceSerialNumber", identity_.serial);
-        }
-        if (identity_.vendor.empty()) {
-            ReadFeatureAsString(Params(), "DeviceVendorName", identity_.vendor);
-        }
-        if (identity_.firmware.empty() && !ReadFeatureAsString(Params(), "DeviceVersion", identity_.firmware)) {
-            ReadFeatureAsString(Params(), "DeviceFirmwareVersion", identity_.firmware);
-        }
-        if (identity_.user_name.empty()) {
-            ReadFeatureAsString(Params(), "DeviceUserID", identity_.user_name);
-        }
-
-        PvResult r = device_->RegisterEventSink(this);
-        if (!r.IsOK()) {
-            g_log.Warn("[{}] [eBUS] RegisterEventSink failed (link-loss detection degraded): {}", camera_id_,
-                       PvResultToString(r));
-        }
-    }
-
-
-    FactoryLoadResult CameraController::LoadFactoryDefaults() {
+    FactoryLoadResult CameraController::LoadFactoryDefaults(const std::function<bool()> &stop) {
+        if (stop && stop()) throw SdkError("factory preparation interrupted");
         if (!device_) {
             throw SdkError("load_factory_defaults: device not connected");
         }
@@ -567,7 +530,8 @@ namespace gox::ebus {
         const auto entries = EnumEntryNames(selector);
         const auto target = gox::PickDefaultUserSetEntry(entries);
         if (!target) {
-            throw SdkError("UserSetSelector has no 'Default' entry (available: " + AvailableEnumEntries(selector) + ")");
+            throw SdkError(
+                "UserSetSelector has no 'Default' entry (available: " + AvailableEnumEntries(selector) + ")");
         }
 
         // Manual p.34: user sets load only while acquisition is stopped — a
@@ -581,7 +545,7 @@ namespace gox::ebus {
         CHECK_PV(load->Execute(), "UserSetLoad");
         FactoryLoadResult result;
         result.selector_entry = *target;
-        result.is_done_supported = WaitCommandDone(load, "UserSetLoad", camera_id_);
+        result.is_done_supported = WaitCommandDone(load, "UserSetLoad", camera_id_, stop);
 
         // The node cache does not know the device values changed
         CHECK_PV(p->InvalidateCache(), "PvGenParameterArray::InvalidateCache");
@@ -602,33 +566,8 @@ namespace gox::ebus {
     }
 
 
-    void CameraController::Disconnect() {
-        if (!device_) {
-            return;
-        }
-        device_->UnregisterEventSink(this);
-        if (device_->IsConnected()) {
-            device_->Disconnect();
-        }
-        device_.reset();
-    }
-
-
-    bool CameraController::Connected() const {
-        return device_ && device_->IsConnected();
-    }
-
-
     PvGenParameterArray *CameraController::Params() {
         return device_ ? device_->GetParameters() : nullptr;
-    }
-
-
-    uint32_t CameraController::PayloadSize() {
-        if (!device_) {
-            throw SdkError("payload_size: device not connected");
-        }
-        return device_->GetPayloadSize();
     }
 
 
@@ -672,11 +611,11 @@ namespace gox::ebus {
 
 
     DeviceReport CameraController::CollectDeviceReport(const CameraConfig &cfg, std::vector<AppliedFeature> applied,
-                                                         const PtpSummary &ptp, const FactoryLoadResult &factory_load,
-                                                         const RuntimeShape &runtime) {
+                                                       const PtpSummary &ptp, const FactoryLoadResult &factory_load,
+                                                       const RuntimeShape &runtime) {
         DeviceReport r;
         r.camera_id = camera_id_;
-        r.ip = identity_.ip;
+        r.ip = ToStd(device_->GetIPAddress());
         r.connection_path = cfg.device.mac.empty() ? "direct_ip" : "mac_discovery";
         r.created_realtime_ns = common::TimeUtil::RealtimeNowNs();
         r.factory_load = factory_load;
@@ -836,8 +775,8 @@ namespace gox::ebus {
             // Same FrameStart and Line5 mapping as BuildApplyPlan and the
             // rig wiring contract (manual p.141), after features.raw overrides.
             s.trig_input_verified = ReadEnumFeature(p, "TriggerSelector", selector) && selector == "FrameStart" &&
-                ReadEnumFeature(p, "TriggerMode", mode) && mode == "On" &&
-                ReadEnumIntFeature(p, "TriggerSource", source) && source == 24;
+                                    ReadEnumFeature(p, "TriggerMode", mode) && mode == "On" &&
+                                    ReadEnumIntFeature(p, "TriggerSource", source) && source == 24;
             int64_t value = 0;
             if (s.trig_binding_verified && ReadIntFeature(p, "CounterValue", value)) {
                 s.trig = value;
@@ -845,7 +784,8 @@ namespace gox::ebus {
             // CounterStatus 4 = CounterOverflow (manual p.160): the counter is
             // 32-bit, so a long external-trigger session can wrap it.
             int64_t status = -1;
-            if (s.trig_binding_verified && ReadEnumIntFeature(p, "CounterStatus", status) && status >= 0 && status <= 4) {
+            if (s.trig_binding_verified && ReadEnumIntFeature(p, "CounterStatus", status) && status >= 0 && status <=
+                4) {
                 s.trig_status_read = true;
                 s.trig_overflow = status == 4;
             }
@@ -858,73 +798,5 @@ namespace gox::ebus {
             }
         }
         return s;
-    }
-
-
-    void CameraController::StreamEnable() {
-        if (!device_) {
-            throw SdkError("stream_enable: device not connected");
-        }
-        CHECK_PV(device_->StreamEnable(), "PvDevice::StreamEnable");
-    }
-
-    void CameraController::StreamDisable(bool ignore_errors) {
-        if (!device_) {
-            return;
-        }
-        PvResult r = device_->StreamDisable();
-        if (!r.IsOK()) {
-            if (!ignore_errors && !LinkLost()) {
-                throw SdkError("PvDevice::StreamDisable", r);
-            }
-            g_log.Trace("[{}] [eBUS] StreamDisable ignored failure: {}", camera_id_, PvResultToString(r));
-        }
-    }
-
-
-    void CameraController::AcquisitionStart() {
-        if (!device_) {
-            throw SdkError("acquisition_start: device not connected");
-        }
-        auto *cmd = dynamic_cast<PvGenCommand *>(Params()->Get(PvString("AcquisitionStart")));
-        if (cmd == nullptr) {
-            throw SdkError("AcquisitionStart command not found on device");
-        }
-        CHECK_PV(cmd->Execute(), "AcquisitionStart");
-        g_log.Info("[{}] [eBUS] AcquisitionStart executed", camera_id_);
-    }
-
-
-    void CameraController::AcquisitionStop(bool ignore_errors) {
-        if (!device_ || !device_->IsConnected()) {
-            return;
-        }
-        auto *cmd = dynamic_cast<PvGenCommand *>(Params()->Get(PvString("AcquisitionStop")));
-        if (cmd == nullptr) {
-            if (ignore_errors) {
-                return;
-            }
-            throw SdkError("AcquisitionStop command not found on device");
-        }
-        PvResult r = cmd->Execute();
-        if (!r.IsOK()) {
-            if (!ignore_errors && !LinkLost()) {
-                throw SdkError("AcquisitionStop", r);
-            }
-            g_log.Debug("[{}] [eBUS] AcquisitionStop ignored failure: {}", camera_id_, PvResultToString(r));
-        } else {
-            g_log.Info("[{}] [eBUS] AcquisitionStop executed", camera_id_);
-        }
-    }
-
-
-    void CameraController::OnLinkDisconnected(PvDevice *) {
-        link_lost_.store(true, std::memory_order_relaxed);
-        g_log.Error(
-            "[{}] [eBUS] device link lost; stopping to preserve captured data (automatic reconnect is not implemented in v1)",
-            camera_id_);
-        if (stop_ != nullptr) {
-            stop_->RequestStop(StopReason::kError);
-        }
     }
 } // namespace gox::ebus

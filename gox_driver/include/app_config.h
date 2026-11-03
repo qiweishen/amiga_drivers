@@ -100,11 +100,11 @@ namespace gox {
 
     struct OutputConfig {
         uint32_t segment_size_mb = 2048;
-        uint32_t record_align = 4096; // power of two; 1 = no alignment
+        uint32_t record_align = 4096; // legacy input; ebus-raw-v1 has no record alignment
         uint32_t queue_max_frames = 0; // 0 = auto; pool allocates +2 chunks
         QueueOnFull queue_on_full = QueueOnFull::kDropNewest;
         OnBufferError on_buffer_error = OnBufferError::kRecordFlagged;
-        uint32_t flush_interval_mb = 64; // data + index fdatasync cadence on the writer thread
+        uint32_t flush_interval_mb = 64; // RAW data fdatasync cadence on the writer thread
         uint64_t max_frames = 0; // 0 = unlimited
         double max_duration_s = 0; // 0 = unlimited
     };

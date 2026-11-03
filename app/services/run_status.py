@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from ..constants import RUNTIME_DIR
@@ -68,7 +69,31 @@ def sensor_statuses(enables: dict[str, bool], lms_names: list[str]) -> dict[str,
 
 def sensor_update(doc: dict, sensors: dict[str, SensorStatus]) -> dict[str, tuple[SensorState, str]]:
     lifecycle = doc["lifecycle"]
-    states = lifecycle["sensors"]
+    states = dict(lifecycle["sensors"])
+    cameras = {key: value for key, value in states.items() if key.startswith("gox:")}
+    if cameras:
+        if "gox" in states:
+            raise ValueError("Lifecycle mixes legacy GoX group and per-camera identities")
+        parsed_cameras = []
+        for key, value in cameras.items():
+            if not re.fullmatch(r"gox:[A-Za-z0-9_-]{1,63}", key):
+                raise ValueError("Invalid GoX camera identity")
+            state = SensorState(value["state"])
+            if state is SensorState.DISABLED:
+                raise ValueError("An enabled GoX camera cannot become disabled within a run")
+            parsed_cameras.append(state)
+        if SensorState.FAILED in parsed_cameras:
+            aggregate = SensorState.FAILED
+        elif all(state is SensorState.RUNNING for state in parsed_cameras):
+            aggregate = SensorState.RUNNING
+        elif all(state is SensorState.STOPPED for state in parsed_cameras):
+            aggregate = SensorState.STOPPED
+        else:
+            aggregate = SensorState.WAITING
+        errors = "; ".join(f"{key.removeprefix('gox:')}: {value['error']}"
+                           for key, value in cameras.items() if value.get("error"))
+        states = {key: value for key, value in states.items() if key not in cameras}
+        states["gox"] = {"state": aggregate.value, "error": errors}
     # Validate the entire update before exposing any part of it.
     enabled = {key for key, sensor in sensors.items() if sensor.state is not SensorState.DISABLED}
     if set(states) != enabled:

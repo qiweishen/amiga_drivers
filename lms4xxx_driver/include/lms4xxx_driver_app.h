@@ -10,7 +10,7 @@
 #include "data_type.h"
 #include "driver_app.h"
 #include "driver.h"
-#include "scan_record_writer.h"
+#include "raw_recorder.h"
 
 
 // One app per enabled lidar[] entry; main.cpp loads the yaml once and fans out.
@@ -20,7 +20,7 @@ public:
 
     ~Lms4xxxDriverApp() override;
 
-    // external_stop unused: connect/configure are timeout-bounded
+    // Connection/configuration waits are bounded; cancellation checked between phases.
     bool Init(const std::function<bool()> &external_stop = {}) override;
 
     void Run() override;
@@ -33,14 +33,10 @@ public:
     [[nodiscard]] std::optional<std::uint64_t> MicrosSinceLastData() const override;
 
 private:
-    struct Impl {
-        std::unique_ptr<lms4xxx::Lms4xxxDriver> driver;
-        std::unique_ptr<lms4xxx::ScanRecordWriter> writer;
-        std::chrono::steady_clock::time_point scan_start{};
-        lms4xxx::TelemetrySample last_telemetry; // most recent reading for the status line
-    };
-
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<lms4xxx::Lms4xxxDriver> driver_;
+    std::unique_ptr<lms4xxx::RawRecorder> recorder_;
+    std::chrono::steady_clock::time_point scan_start_{};
+    lms4xxx::TelemetrySample last_telemetry_;
     std::string instance_name_;
     nlohmann::ordered_json final_statistics_ = nlohmann::ordered_json::object();
     lms4xxx::DriverConfig driver_config_;

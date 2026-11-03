@@ -44,7 +44,7 @@ find_package(Threads REQUIRED)
 
 
 ################################################################################
-# Shared FetchContent libraries (sensor_trigger, HDF5, spdlog, yaml-cpp, and nlohmann/json)
+# Shared FetchContent libraries (sensor_trigger, spdlog, yaml-cpp, and nlohmann/json)
 include(${CMAKE_SOURCE_DIR}/cmake/Dependencies.cmake)
 
 # Shared find modules (cmake/FindeBUS.cmake serves gox_driver and fx10_driver)
@@ -70,6 +70,7 @@ add_subdirectory(lms4xxx_driver)
 add_subdirectory(gox_driver)
 add_subdirectory(asterx_driver)
 add_subdirectory(fx10_driver)
+add_subdirectory(ebus_driver)
 
 
 ################################################################################
@@ -83,8 +84,7 @@ target_link_libraries(AmigaDrivers PRIVATE
         amiga_common
         asterx_lib
         lms4xxx_lib
-        fx10_lib
-        gox_lib
+        ebus_camera
 )
 
 set_target_properties(AmigaDrivers PROPERTIES
@@ -104,7 +104,6 @@ message(STATUS "  Output Dir:       ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "")
 message(STATUS "  Shared Dependencies:")
 message(STATUS "    sensor_trigger: ${sensor_trigger_SOURCE_DIR}")
-message(STATUS "    hdf5:           ${hdf5_SOURCE_DIR}")
 message(STATUS "    spdlog:         ${spdlog_SOURCE_DIR}")
 message(STATUS "    yaml-cpp:       ${yaml-cpp_SOURCE_DIR}")
 message(STATUS "    nlohmann/json:  ${nlohmann-json_SOURCE_DIR}")

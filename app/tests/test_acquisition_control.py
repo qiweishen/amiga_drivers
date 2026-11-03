@@ -198,6 +198,25 @@ class ManifestTests(unittest.TestCase):
             run_status.sensor_update(self.doc, sensors)
         self.assertEqual(sensors["gox"].state.value, "waiting")
 
+    def test_per_camera_gox_lifecycle_aggregates_without_hiding_a_failure(self):
+        sensors = run_status.sensor_statuses({"gox": True}, [])
+        self.doc["lifecycle"]["sensors"] = {"gox:cam0": {"state": "running"},
+                                             "gox:cam1": {"state": "waiting"}}
+        self.assertEqual(run_status.sensor_update(self.doc, sensors)["gox"][0].value, "waiting")
+        self.doc["lifecycle"]["sensors"]["gox:cam1"] = {"state": "running"}
+        self.assertEqual(run_status.sensor_update(self.doc, sensors)["gox"][0].value, "running")
+        self.doc["lifecycle"]["sensors"]["gox:cam1"] = {"state": "failed", "error": "disk full"}
+        state, error = run_status.sensor_update(self.doc, sensors)["gox"]
+        self.assertEqual(state.value, "failed")
+        self.assertIn("cam1: disk full", error)
+        self.assertEqual(sensors["gox"].state.value, "waiting")
+
+    def test_gox_group_and_camera_keys_cannot_be_mixed(self):
+        sensors = run_status.sensor_statuses({"gox": True}, [])
+        self.doc["lifecycle"]["sensors"]["gox:cam0"] = {"state": "stopped"}
+        with self.assertRaises(ValueError):
+            run_status.sensor_update(self.doc, sensors)
+
     def test_failed_finish_preserves_result_without_repeating_existing_log(self):
         owner = process.AcquisitionController()
         owner._ref = self.ref

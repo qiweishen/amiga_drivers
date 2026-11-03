@@ -7,7 +7,6 @@
 
 #include "logger.h"
 #include "string_util.h"
-#include "util.h"
 #include "apply_plan.h"
 #include "ebus/camera_controller.h"
 
@@ -53,14 +52,6 @@ namespace gox::ebus {
         synchronized_ = false;
         last_status_.clear();
         lock_wait_ms_ = 0;
-
-        if (!cfg_.enabled) {
-            // Host time is never recorded as a time source on this platform; PTP is the
-            // camera's only absolute time
-            g_log.Warn("[{}] [eBUS] ptp.enabled=false: device timestamps are free-running 1 GHz ticks with NO "
-                       "absolute time; offline association with GNSS time is impossible for this run", camera_id_);
-            return true;
-        }
 
         const auto degrade = [&](const std::string &msg) {
             if (cfg_.on_timeout == PtpOnTimeout::kAbort) {
@@ -108,12 +99,12 @@ namespace gox::ebus {
     }
 
 
-    bool PtpManager::WaitForSync(StopController *stop) {
-        if (!cfg_.enabled || !enabled_) {
+    bool PtpManager::WaitForSync(const std::function<bool()> &stop) {
+        if (!enabled_) {
             return true; // nothing to wait for (disabled, or already degraded via warn_continue)
         }
         const uint64_t start_mono = common::TimeUtil::MonotonicNowNs();
-        const uint64_t budget_ns = static_cast<uint64_t>(cfg_.sync_timeout_s * 1e9);
+        const auto budget_ns = static_cast<uint64_t>(cfg_.sync_timeout_s * 1e9);
 
         const auto degrade = [&](const std::string &msg) {
             if (cfg_.on_timeout == PtpOnTimeout::kAbort) {
@@ -126,7 +117,7 @@ namespace gox::ebus {
         };
 
         while (true) {
-            if (stop != nullptr && stop->StopRequested()) {
+            if (stop && stop()) {
                 g_log.Warn("[{}] [eBUS] PTP wait interrupted by stop request", camera_id_);
                 return false;
             }
@@ -178,7 +169,7 @@ namespace gox::ebus {
     }
 
 
-    bool PtpManager::CheckHealth(StopController *stop) {
+    bool PtpManager::CheckHealth(const std::function<bool()> &stop) {
         if (!cfg_.enabled || !synchronized_) {
             return true; // nothing to guard
         }
@@ -192,7 +183,7 @@ namespace gox::ebus {
                 // for the next 5 s tick before ending a recording. The wait is
                 // sliced so a shutdown request is not delayed by it.
                 for (int slept = 0; slept < kHealthRetryDelayMs; slept += 100) {
-                    if (stop != nullptr && stop->StopRequested()) {
+                    if (stop && stop()) {
                         return true; // the session is ending; do not fail it here
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));

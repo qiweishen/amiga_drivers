@@ -8,7 +8,7 @@
 
 
 namespace lms4xxx {
-    // Earliest device time the driver accepts as NTP-synchronised: 2026-01-01T00:00:00Z. The
+    // Earliest device date considered plausible: 2026-01-01T00:00:00Z. The
     // LMS4xxx has no RTC (manual p.97) and streams a free-running clock (1970 epoch) until its
     // first NTP sync; anything before this floor is that unsynchronised clock. Host time is
     // deliberately not consulted (the platform does not trust it)
@@ -19,6 +19,7 @@ namespace lms4xxx {
 
     // First-telegram proof that the configuration took effect: "" when the scan carries exactly
     // DIST1 + remission + ANGL1 + QLTY1 with the ScanFixed geometry and the expected optional blocks,
-    // otherwise a comma-separated problem list
+    // and configured channel scaling, otherwise a comma-separated problem list.
+    // Used for the first scan only; it does not prove ongoing data quality.
     std::string VerifyScanContent(const ScanData &scan, const ScanConfig &scan_config, bool ntp_enabled);
 } // namespace lms4xxx

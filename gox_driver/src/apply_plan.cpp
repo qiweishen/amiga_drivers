@@ -155,7 +155,8 @@ namespace gox {
             add(plan, "TriggerActivation", acq.trigger.activation == TriggerActivation::kRising ? "1" : "2", false);
             if (acq.trigger.delay_ms > 0.0) {
                 // TriggerDelay is in microseconds (0..500000, p.142); the factory value is 0
-                add(plan, "TriggerDelay", std::to_string(static_cast<long long>(std::llround(acq.trigger.delay_ms * 1000.0))),
+                add(plan, "TriggerDelay",
+                    std::to_string(static_cast<long long>(std::llround(acq.trigger.delay_ms * 1000.0))),
                     false);
             }
             if (acq.trigger.input_filter_ns != 0) {

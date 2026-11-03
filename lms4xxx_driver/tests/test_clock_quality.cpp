@@ -1,6 +1,6 @@
 #include <doctest/doctest.h>
 #include "clock_quality.h"
-#include "scan_record.h"
+#include "scan_time.h"
 #include "cola_b.h"
 
 TEST_CASE("LiDAR STOP acknowledgement is a control reply, not a malformed scan") {
@@ -154,15 +154,15 @@ TEST_CASE("LiDAR log policy handles repeated UTC, invalid samples and unusable u
     CHECK_FALSE(lms4xxx::ShouldLogClockChange({lms4xxx::ClockFlag::kAssessed | lms4xxx::ClockFlag::kNtpDisabled, 0}));
 }
 
-TEST_CASE("LiDAR quality metadata accompanies unmodified scan data into the writer record") {
-    lms4xxx::ScanData scan;
-    scan.time_since_startup_us = 101644;
-    scan.host_receive_monotonic_us = 900000;
-    scan.clock_observation = {lms4xxx::ClockFlag::kAssessed | lms4xxx::ClockFlag::kBackwardUtc, -20644};
-    lms4xxx::ScanRecord record{};
-    lms4xxx::FillScanRecord(scan, 0, record);
-    CHECK(record.meta.time_since_startup_us == 101644);
-    CHECK(record.meta.host_receive_monotonic_us == 900000);
-    CHECK(record.meta.clock_step_us == -20644);
-    CHECK(record.meta.clock_quality_flags == scan.clock_observation.flags);
+TEST_CASE("LiDAR calendar conversion remains independent of the recording format and host clock") {
+    lms4xxx::ScanTimestamp timestamp{2026, 9, 4, 12, 34, 56, 789012};
+    CHECK(lms4xxx::DeviceTimeUnixUs(timestamp) == 1788525296789012LL);
+    timestamp = {2024, 2, 29, 0, 0, 0, 0};
+    CHECK(lms4xxx::DeviceTimeUnixUs(timestamp) == 1709164800000000LL);
+    timestamp = {1969, 12, 31, 23, 59, 59, 0};
+    CHECK(lms4xxx::DeviceTimeUnixUs(timestamp) == -1000000LL);
+    timestamp = {2026, 13, 4, 12, 34, 56, 0};
+    CHECK(lms4xxx::DeviceTimeUnixUs(timestamp) == 0);
+    timestamp = {2026, 9, 4, 12, 34, 56, 1000000};
+    CHECK(lms4xxx::DeviceTimeUnixUs(timestamp) == 0);
 }

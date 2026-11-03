@@ -37,7 +37,7 @@ cameras:
 # --- Output (jai-raw-seg) ---
 output:
     segment_size_mb: 1024               # > 0
-    record_align: 4096                  # power of two
+    record_align: 4096                  # legacy input; unified RAW has no alignment
     queue_max_frames: 4                 # >= 2; pool = queue + 2
     queue_on_full: block                # the single frame must never be dropped
     on_buffer_error: record_flagged     # unpack pads incomplete frames with --pad-incomplete

@@ -5,17 +5,17 @@
 
 
 namespace lms4xxx {
-    // Atomic counters updated by the receive and parse threads
+    // Atomic counters observed by the application while receive/NTP workers run.
     struct DriverStatistics {
         // --- Receive thread counters ---
         std::atomic<std::uint64_t> bytes_received{0}; ///< Total TCP bytes read
         std::atomic<std::uint64_t> frames_received{0}; ///< Complete CoLa B frames extracted
-        std::atomic<std::uint64_t> frames_dropped{0}; ///< Frames dropped (ring buffer full)
+        std::atomic<std::uint64_t> frames_dropped{0}; ///< Legacy field, no intermediate receive queue
         std::atomic<std::uint64_t> crc_errors{0}; ///< CRC8 validation failures
         std::atomic<std::uint64_t> framing_errors{0}; ///< Invalid frame structure
 
-        // --- Parse thread counters ---
-        std::atomic<std::uint64_t> frames_parsed{0}; ///< Parsed scans that passed configured content checks
+        // --- Lightweight receive-thread monitor counters ---
+        std::atomic<std::uint64_t> frames_parsed{0}; ///< Scans with readable time metadata; full content checked once
         std::atomic<std::uint64_t> non_scan_frames{0}; ///< Decoded CoLa B frames classified as non-scan replies
         std::atomic<std::uint64_t> parse_errors{0}; ///< Parse failures
         std::atomic<std::uint64_t> counter_gaps{0}; ///< Telegram/scan counter discontinuities
@@ -86,12 +86,12 @@ namespace lms4xxx {
 
             // Exclude only frames positively identified as non-scan replies.
             // Undecodable, dropped and pending frames remain candidates, so a
-            // receive-ring loss or parse failure cannot improve the rate.
+            // unclassified or malformed frames cannot improve the rate.
             std::uint64_t ScanCandidateFrames() const {
                 return frames_received > non_scan_frames ? frames_received - non_scan_frames : 0;
             }
 
-            // Parsed, content-verified scans / received scan candidates, percent.
+            // Scans with readable time metadata / received scan candidates, percent.
             // This is not callback delivery, writer success or end-to-end loss:
             // missing telegrams and frames rejected before extraction have their
             // own counters and never enter frames_received.

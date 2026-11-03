@@ -18,9 +18,8 @@ set(LIB_SOURCES
         src/command_channel.cpp
         src/tcp_client.cpp
         src/lms4xxx_driver_app.cpp
-        src/scan_record.cpp
-        src/scan_h5_file.cpp
-        src/scan_record_writer.cpp
+        src/raw_recorder.cpp
+        src/scan_time.cpp
         src/app_config.cpp
         src/ntp_probe.cpp
         src/scan_verify.cpp
@@ -50,10 +49,6 @@ target_link_libraries(lms4xxx_lib PUBLIC
         Boost::boost # Asio
         amiga_common
 )
-
-# PRIVATE: no public header includes hdf5.h
-target_link_libraries(lms4xxx_lib PRIVATE hdf5-static)
-
 
 ################################################################################
 # Tests

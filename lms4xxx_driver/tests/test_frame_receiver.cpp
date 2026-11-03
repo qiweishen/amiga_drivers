@@ -2,13 +2,14 @@
 /// @brief FrameReceiver: framing, resynchronisation and error reporting.
 ///
 /// This is the boundary between a TCP byte stream and the parser. Recovery must
-/// preserve split/overlapping STX candidates, report corruption once and keep
-/// reporting new garbage so a dead stream remains detectable.
+/// preserve original bounded telegrams (including corrupt checksums), avoid
+/// duplicate bytes and report garbage or an incomplete end of stream.
 
 #include <doctest/doctest.h>
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cola_b.h"
@@ -24,11 +25,15 @@ namespace {
     struct Collector {
         std::vector<std::vector<std::uint8_t> > frames;
         std::vector<FrameReceiver::FrameError> errors;
+        std::vector<bool> checksum_valid;
         std::uint64_t last_consecutive = 0;
 
         FrameReceiver Make(std::size_t max_frame = 64 * 1024) {
             return {
-                [this](RawFrame &&frame) { frames.push_back(frame.data); },
+                [this](RawFrame &&frame) {
+                    checksum_valid.push_back(frame.checksum_valid);
+                    frames.push_back(std::move(frame.data));
+                },
                 [this](FrameReceiver::FrameError error, std::uint64_t consecutive) {
                     errors.push_back(error);
                     last_consecutive = consecutive;
@@ -41,10 +46,6 @@ namespace {
         return ColaBCodec::Encode(CommandType::kEventNotify, name, params);
     }
 
-    // The data part of an encoded frame, i.e. what the callback receives.
-    std::vector<std::uint8_t> DataOf(const std::vector<std::uint8_t> &frame) {
-        return {frame.begin() + 8, frame.end() - 1};
-    }
 } // namespace
 
 
@@ -55,7 +56,8 @@ TEST_CASE("FrameReceiver extracts a single well-formed frame") {
     receiver.Feed(frame.data(), frame.size());
 
     REQUIRE(c.frames.size() == 1);
-    CHECK(c.frames[0] == DataOf(frame));
+    CHECK(c.frames[0] == frame);
+    CHECK(c.checksum_valid[0]);
     CHECK(c.errors.empty());
 }
 
@@ -70,7 +72,7 @@ TEST_CASE("FrameReceiver counts a sustained stream with no STX") {
     const auto good = Frame("LMDscandata", {1, 2, 3});
     receiver.Feed(good.data(), good.size());
     REQUIRE(c.frames.size() == 1);
-    CHECK(c.frames.front() == DataOf(good));
+    CHECK(c.frames.front() == good);
 }
 
 TEST_CASE("FrameReceiver reassembles a frame split across Feed calls") {
@@ -84,7 +86,7 @@ TEST_CASE("FrameReceiver reassembles a frame split across Feed calls") {
         receiver.Feed(frame.data() + split, frame.size() - split);
         CHECK_MESSAGE(c.frames.size() == 1, "split after " << split << " byte(s)");
         if (c.frames.size() == 1) {
-            CHECK(c.frames[0] == DataOf(frame));
+            CHECK(c.frames[0] == frame);
         }
         CHECK(c.errors.empty());
     }
@@ -100,7 +102,7 @@ TEST_CASE("FrameReceiver delivers several frames from one Feed") {
     }
     receiver.Feed(stream.data(), stream.size());
     REQUIRE(c.frames.size() == 5);
-    CHECK(c.frames[4].back() == 4);
+    CHECK(c.frames[4] == Frame("LMDscandata", {4}));
 }
 
 TEST_CASE("FrameReceiver skips leading garbage and finds the next STX") {
@@ -112,13 +114,13 @@ TEST_CASE("FrameReceiver skips leading garbage and finds the next STX") {
     receiver.Feed(stream.data(), stream.size());
 
     REQUIRE(c.frames.size() == 1);
-    CHECK(c.frames[0] == DataOf(frame));
+    CHECK(c.frames[0] == frame);
     // Skipped bytes are reported once so a wrong-protocol peer is visible
     REQUIRE(c.errors.size() == 1);
     CHECK(c.errors[0] == FrameReceiver::FrameError::kGarbage);
 }
 
-TEST_CASE("FrameReceiver reports a checksum mismatch and recovers") {
+TEST_CASE("FrameReceiver retains a checksum mismatch and the following telegram unchanged") {
     Collector c;
     auto receiver = c.Make();
     auto bad = Frame("LMDscandata", {0x01});
@@ -131,9 +133,11 @@ TEST_CASE("FrameReceiver reports a checksum mismatch and recovers") {
 
     REQUIRE(c.errors.size() == 1);
     CHECK(c.errors[0] == FrameReceiver::FrameError::kChecksumMismatch);
-    // The good frame behind it must still arrive.
-    REQUIRE(c.frames.size() == 1);
-    CHECK(c.frames[0] == DataOf(good));
+    REQUIRE(c.frames.size() == 2);
+    CHECK(c.frames[0] == bad);
+    CHECK_FALSE(c.checksum_valid[0]);
+    CHECK(c.frames[1] == good);
+    CHECK(c.checksum_valid[1]);
 }
 
 TEST_CASE("FrameReceiver accounts rejected tails once across every Feed boundary") {
@@ -156,8 +160,12 @@ TEST_CASE("FrameReceiver accounts rejected tails once across every Feed boundary
             REQUIRE(c.errors.size() == 1);
             CHECK(c.errors.front() == (bad == checksum_bad ? FrameReceiver::FrameError::kChecksumMismatch
                                                          : FrameReceiver::FrameError::kLengthOutOfRange));
-            REQUIRE(c.frames.size() == 1);
-            CHECK(c.frames.front() == DataOf(good));
+            REQUIRE(c.frames.size() == (bad == checksum_bad ? 2u : 1u));
+            CHECK(c.frames.back() == good);
+            if (bad == checksum_bad) {
+                CHECK(c.frames.front() == checksum_bad);
+                CHECK_FALSE(c.checksum_valid.front());
+            }
 
             // Recovery resets the consecutive counter; the carried tail must
             // not leak into the accounting of a later corrupted telegram.
@@ -183,7 +191,9 @@ TEST_CASE("FrameReceiver keeps detecting new garbage after a rejected candidate"
         CHECK(c.errors.back() == FrameReceiver::FrameError::kGarbage);
         CHECK(c.last_consecutive == i + 2);
     }
-    CHECK(c.frames.empty());
+    REQUIRE(c.frames.size() == 1);
+    CHECK(c.frames.front() == bad);
+    CHECK_FALSE(c.checksum_valid.front());
 }
 
 TEST_CASE("FrameReceiver recovers an STX overlapping a rejected candidate") {
@@ -200,7 +210,7 @@ TEST_CASE("FrameReceiver recovers an STX overlapping a rejected candidate") {
             receiver.Feed(stream.data() + split, stream.size() - split);
             CHECK_FALSE(c.errors.empty());
             REQUIRE(c.frames.size() == 1);
-            CHECK(c.frames.front() == DataOf(good));
+            CHECK(c.frames.front() == good);
         }
     }
 }
@@ -289,7 +299,7 @@ TEST_CASE("FrameReceiver counts bytes between frames as garbage and never rewind
     receiver.Feed(second.data(), 2);
     receiver.Feed(second.data() + 2, second.size() - 2);
     REQUIRE(c.frames.size() == 2);
-    CHECK(c.frames[1] == DataOf(second));
+    CHECK(c.frames[1] == second);
     CHECK(c.errors.size() == 1); // the good frame reset the burst; no new error
 }
 
@@ -301,4 +311,44 @@ TEST_CASE("FrameReceiver rejects an empty data part") {
     CHECK(c.frames.empty());
     REQUIRE(c.errors.size() == 1);
     CHECK(c.errors[0] == FrameReceiver::FrameError::kLengthOutOfRange);
+}
+
+TEST_CASE("FrameReceiver never emits an embedded telegram twice when its outer checksum is bad") {
+    Collector c;
+    auto receiver = c.Make();
+    const auto embedded = Frame("LMDscandata", {0x42});
+    auto outer = Frame("LMDscandata", embedded);
+    outer.back() ^= 0xff;
+    receiver.Feed(outer.data(), outer.size());
+    REQUIRE(c.frames.size() == 1);
+    CHECK(c.frames.front() == outer);
+    CHECK_FALSE(c.checksum_valid.front());
+    CHECK(receiver.Finish() == 0);
+}
+
+TEST_CASE("FrameReceiver reports an incomplete tail once at every frame cut") {
+    const auto frame = Frame("LMDscandata", {0x11, 0x22});
+    for (std::size_t length = 1; length < frame.size(); ++length) {
+        CAPTURE(length);
+        Collector c;
+        auto receiver = c.Make();
+        receiver.Feed(frame.data(), length);
+        CHECK(c.frames.empty());
+        CHECK(receiver.Finish() == length);
+        REQUIRE(c.errors.size() == 1);
+        CHECK(c.errors.front() == FrameReceiver::FrameError::kIncomplete);
+        CHECK(receiver.Finish() == 0);
+        CHECK(c.errors.size() == 1);
+    }
+}
+
+TEST_CASE("FrameReceiver has no incomplete tail after complete telegrams") {
+    Collector c;
+    auto receiver = c.Make();
+    const auto frame = Frame("LMDscandata", {0x55});
+    receiver.Feed(frame.data(), frame.size());
+    CHECK(receiver.Finish() == 0);
+    CHECK(c.errors.empty());
+    REQUIRE(c.frames.size() == 1);
+    CHECK(c.frames.front() == frame);
 }

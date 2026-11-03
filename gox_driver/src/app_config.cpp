@@ -75,8 +75,10 @@ namespace gox {
 
         void ParseAcquisition(const YAML::Node &cam, const std::string &path, AcquisitionConfig &acq) {
             const YAML::Node a = OptionalMap(cam, path, "acquisition",
-                                             {"exposure_ms", "gain", "frame_rate_hz", "pixel_format",
-                                              "blemish_correction", "trigger", "roi"});
+                                             {
+                                                 "exposure_ms", "gain", "frame_rate_hz", "pixel_format",
+                                                 "blemish_correction", "trigger", "roi"
+                                             });
             const std::string p = path + ".acquisition";
             if (Read(a, p, "exposure_ms", acq.exposure_ms) && *acq.exposure_ms <= 0.0) {
                 Fail(p + ".exposure_ms", "must be > 0");
@@ -110,13 +112,19 @@ namespace gox {
             }
 
             const YAML::Node t = OptionalMap(a, p, "trigger",
-                                             {"mode", "activation", "selector_entry", "source_entry", "delay_ms",
-                                              "input_filter_ns", "exposure_active_output", "sensor_channel"});
+                                             {
+                                                 "mode", "activation", "selector_entry", "source_entry", "delay_ms",
+                                                 "input_filter_ns", "exposure_active_output", "sensor_channel"
+                                             });
             const std::string tp = p + ".trigger";
-            ReadEnum<TriggerMode>(t, tp, "mode", {{"freerun", TriggerMode::kFreerun}, {"external", TriggerMode::kExternal}},
+            ReadEnum<TriggerMode>(t, tp, "mode",
+                                  {{"freerun", TriggerMode::kFreerun}, {"external", TriggerMode::kExternal}},
                                   acq.trigger.mode);
             ReadEnum<TriggerActivation>(t, tp, "activation",
-                                        {{"rising", TriggerActivation::kRising}, {"falling", TriggerActivation::kFalling}},
+                                        {
+                                            {"rising", TriggerActivation::kRising},
+                                            {"falling", TriggerActivation::kFalling}
+                                        },
                                         acq.trigger.activation);
             ReadText(t, tp, "selector_entry", acq.trigger.selector_entry);
             if (Read(t, tp, "source_entry", acq.trigger.source_entry)) {
@@ -135,8 +143,10 @@ namespace gox {
 
         void ParseNetwork(const YAML::Node &cam, const std::string &path, NetworkConfig &net) {
             const YAML::Node n = OptionalMap(cam, path, "network",
-                                             {"buffer_count", "packet_size", "socket_rx_buffer_mb", "local_ip",
-                                              "throughput_safety_margin_pct", "receiver_tuning"});
+                                             {
+                                                 "buffer_count", "packet_size", "socket_rx_buffer_mb", "local_ip",
+                                                 "throughput_safety_margin_pct", "receiver_tuning"
+                                             });
             const std::string p = path + ".network";
             if (Read(n, p, "buffer_count", net.buffer_count) && net.buffer_count != 0 && net.buffer_count < 4) {
                 Fail(p + ".buffer_count", "must be 0 (auto) or >= 4");
@@ -269,15 +279,20 @@ namespace gox {
             AppConfig cfg;
 
             const YAML::Node out = OptionalMap(root, "", "output",
-                                               {"segment_size_mb", "record_align", "queue_max_frames", "queue_on_full",
-                                                "on_buffer_error", "flush_interval_mb", "max_frames", "max_duration_s"});
+                                               {
+                                                   "segment_size_mb", "record_align", "queue_max_frames",
+                                                   "queue_on_full",
+                                                   "on_buffer_error", "flush_interval_mb", "max_frames",
+                                                   "max_duration_s"
+                                               });
             ReadRange<uint32_t>(out, "output", "segment_size_mb", 1, 1024 * 1024, cfg.output.segment_size_mb);
             if (Read(out, "output", "record_align", cfg.output.record_align) &&
                 (cfg.output.record_align == 0 || (cfg.output.record_align & (cfg.output.record_align - 1)) != 0)) {
                 Fail("output.record_align", "must be a power of two (1 disables alignment)");
             }
             // 0 = auto (buffering.hpp); an explicit value leaves one chunk for the writer and one for the acquirer
-            if (Read(out, "output", "queue_max_frames", cfg.output.queue_max_frames) && cfg.output.queue_max_frames == 1) {
+            if (Read(out, "output", "queue_max_frames", cfg.output.queue_max_frames) && cfg.output.queue_max_frames ==
+                1) {
                 Fail("output.queue_max_frames", "must be >= 2 (or 0 for auto)");
             }
             ReadEnum<QueueOnFull>(out, "output", "queue_on_full",

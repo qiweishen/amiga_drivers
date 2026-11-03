@@ -3,10 +3,9 @@
 Nothing polls: each fetch is a single read of the files the drivers are
 appending to right now, restricted to committed bytes.
 
-- GoX: newest frame from the live jai-raw-seg segment — idx.jsonl tail gives
-  the record offset; jai_raw validates matching headers and decodes native DN.
-- FX10: image-row statistics over committed BIL lines, using capture.json
-  geometry and the line index. SensorSync edge observations require a verified
+- GoX: newest complete eBUS image, or an indexed legacy jai-raw-seg frame.
+- FX10: image-row statistics over valid raw frames, or committed legacy BIL
+  lines. Device/profile metadata fixes the interpretation. SensorSync edges require a verified
   association before they can be treated as GNSS camera-line timestamps.
 """
 
@@ -22,6 +21,7 @@ from pathlib import Path
 import cv2
 
 from gox_driver.scripts.jai_raw import pixels, recording
+from ebus_driver.scripts.ebus_raw import recording as raw_recording
 
 from ..formats import fx10
 from ..state import STATE, ProcState
@@ -53,7 +53,7 @@ class Fx10Live:
     frames: int = 0
     bands: int = 0
     samples: int = 0
-    age_s: float = 0.0  # click time minus the .bil.part mtime (newest line)
+    age_s: float = 0.0  # raw: host receive time; legacy BIL: file mtime
     request: PreviewRequest | None = None
 
 
@@ -129,14 +129,21 @@ def gox_latest_frame(session: Path) -> GoxLive:
     try:
         cameras = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
         for cam_dir in cameras:
-            indexes = sorted(cam_dir.glob("seg_*.idx.jsonl"))
-            if not indexes:
-                continue
-            rows = list(recording.index_records(indexes[-1], tail_bytes=recording.INDEX_TAIL_BYTES))
-            if not rows:
-                return GoxLive(False, reason="No committed frames yet — retry after the index flush")
-            frame, payload = recording.read_indexed_frame(recording.segment_for_index(indexes[-1]), rows[-1])
-            native, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
+            if raw_recording.is_session(cam_dir):
+                frames = raw_recording.latest_records(cam_dir, 1)
+                if not frames:
+                    return GoxLive(False, reason="No complete valid raw image yet")
+                frame = frames[-1]
+                native, name, _ = pixels.decode_record(frame, raw_recording.read_payload(frame))
+            else:
+                indexes = sorted(cam_dir.glob("seg_*.idx.jsonl"))
+                if not indexes:
+                    continue
+                rows = list(recording.index_records(indexes[-1], tail_bytes=recording.INDEX_TAIL_BYTES))
+                if not rows:
+                    return GoxLive(False, reason="No committed frames yet — retry after the index flush")
+                frame, payload = recording.read_indexed_frame(recording.segment_for_index(indexes[-1]), rows[-1])
+                native, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
             img8 = pixels.live_image(native, pixels.format_for_code(frame.pf))
             ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if not ok:
@@ -152,17 +159,26 @@ def gox_latest_frame(session: Path) -> GoxLive:
 # --- FX10 --------------------------------------------------------------------
 
 def fx10_spectrum(session: Path) -> Fx10Live:
-    """One-second bounded tail, interpreted by the same format library as snapshots."""
+    """Bounded frame-count window at expected rate; not a timestamp-filtered second."""
     root = session / "raw" / "fx10"
     try:
         directories = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
         if not directories:
             return Fx10Live(False, reason=f"No FX10 session under {root} yet")
+        capture = fx10.load_capture(directories[-1])
+        if capture.recording_format == "ebus-raw-v1":
+            window = max(1, round(capture.expected_frame_rate_hz * _WINDOW_S))
+            cube, host_timestamp = fx10.raw_tail_cube(directories[-1], capture, window)
+            age = max(0.0, time.time() - host_timestamp / 1e9)
+            if age > _FX10_STALE_S:
+                return Fx10Live(False, reason=f"Newest valid raw image is {age:.1f} s old")
+            values, _, _ = fx10.spectrum(cube, capture.full_scale)
+            return Fx10Live(True, wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
+                            frames=cube.shape[0], bands=capture.bands, samples=capture.samples, age_s=age)
         files = sorted(directories[-1].glob("segment_*.bil.part")) or sorted(directories[-1].glob("segment_*.bil"))
         if not files:
             return Fx10Live(False, reason="No open segment yet")
         data = files[-1]
-        capture = fx10.load_capture(data.parent)
         segment = fx10.open_segment(data, capture)
         stat = data.stat()
         if stat.st_size < capture.line_bytes:

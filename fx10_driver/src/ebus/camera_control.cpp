@@ -1,5 +1,4 @@
 #include "ebus/camera_control.h"
-#include "ebus/stream_receiver.h"
 
 #include <PvDevice.h>
 #include <PvGenBoolean.h>
@@ -200,6 +199,7 @@ namespace fx10 {
             }
 
             CommandTimeoutGuard(const CommandTimeoutGuard &) = delete;
+
             CommandTimeoutGuard &operator=(const CommandTimeoutGuard &) = delete;
 
         private:
@@ -209,8 +209,6 @@ namespace fx10 {
             bool old_disconnect_ = false;
             bool have_disconnect_ = false;
         };
-
-
     } // namespace
 
 
@@ -251,9 +249,9 @@ namespace fx10 {
         const auto execute_start = std::chrono::steady_clock::now();
         const PvResult result = command->Execute();
         g_log.Trace("[eBUS] {} Execute result={} detail={} elapsed={} ms", name, pv(result.GetCodeString()),
-                   pv(result.GetDescription()),
-                   std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - execute_start).count());
+                    pv(result.GetDescription()),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - execute_start).count());
         // An unacknowledged command is ambiguous: never automatically replay it.
         Check(result, name, "execute (not retried)");
         // eBUS 6.5.1 UserSetsManager::Load also avoids IsDone. On this FX10
@@ -294,12 +292,14 @@ namespace fx10 {
         const char *pulse_node_name = open ? "MotorShutter_PulseRev" : "MotorShutter_PulseFwd";
         constexpr std::int64_t kPulseValue = 255;
         const auto started = std::chrono::steady_clock::now();
-        shutter_preparation_ = {{"status", "pending"},
+        shutter_preparation_ = {
+            {"status", "pending"},
             {"operation", open ? "open" : "close"}, {"node", pulse_node_name},
             {"type", "integer pulse value"}, {"requested", kPulseValue},
             {"binding_source", "operator-provided FX10e node definition"},
             {"write_acknowledged", false}, {"state_verified", false},
-            {"completion", "SDK write acknowledgement only; pulse value is not shutter state"}};
+            {"completion", "SDK write acknowledgement only; pulse value is not shutter state"}
+        };
         const auto check_ready = [&] {
             if (stop && stop()) throw ControlError("[eBUS] shutter operation interrupted");
             if (!device_.IsConnected()) throw ControlError("[eBUS] control link lost during shutter operation");
@@ -321,10 +321,11 @@ namespace fx10 {
             shutter_preparation_["node_max"] = maximum;
             if (kPulseValue < minimum || kPulseValue > maximum) {
                 failNode(pulse_node_name, "shutter pulse 255 is outside the reported range [" +
-                    std::to_string(minimum) + ", " + std::to_string(maximum) + "]");
+                                          std::to_string(minimum) + ", " + std::to_string(maximum) + "]");
             }
             check_ready();
-            g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing", pulse_node_name, kPulseValue);
+            g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing", pulse_node_name,
+                       kPulseValue);
 
             // Always call SetValue, including when a previous run wrote 255.
             // Do not use SetInt/GetValue, equality checks, state polling or
@@ -352,17 +353,17 @@ namespace fx10 {
     }
 
 
-    bool PrepareFactoryDefaults(StreamReceiver &receiver, const std::function<bool()> &stop) {
+    bool PrepareFactoryDefaults(PvDevice &device, const std::function<bool()> &stop) {
         const auto cancelled = [&] { return stop && stop(); };
         for (const char *name: {"CameraHeadFactoryReset", "UserSetLoad"}) {
             if (cancelled()) {
                 return false;
             }
-            if (receiver.Device() == nullptr || !receiver.Device()->IsConnected() || receiver.Failed()) {
+            if (!device.IsConnected()) {
                 throw ControlError(std::string("[eBUS] ") + name + ": no healthy control connection");
             }
             {
-                CameraControl control(*receiver.Device());
+                CameraControl control(device);
                 try {
                     control.ExecuteFactoryCommand(name, stop);
                 } catch (...) {
@@ -375,7 +376,7 @@ namespace fx10 {
             if (cancelled()) {
                 return false;
             }
-            CameraControl control(*receiver.Device());
+            CameraControl control(device);
             const auto started = std::chrono::steady_clock::now();
             const auto deadline = started + std::chrono::milliseconds(kControlReadyTimeoutMs);
             auto next_log = started;
@@ -384,8 +385,9 @@ namespace fx10 {
                 if (cancelled()) {
                     return false;
                 }
-                if (!receiver.Device()->IsConnected() || receiver.Failed()) {
-                    throw ControlError(std::string("[eBUS] ") + name + ": control link lost while waiting for readiness");
+                if (!device.IsConnected()) {
+                    throw ControlError(
+                        std::string("[eBUS] ") + name + ": control link lost while waiting for readiness");
                 }
                 bool ready = false;
                 try {
@@ -398,7 +400,7 @@ namespace fx10 {
                 if (cancelled()) {
                     return false;
                 }
-                if (!receiver.Device()->IsConnected() || receiver.Failed()) {
+                if (!device.IsConnected()) {
                     throw ControlError(std::string("[eBUS] ") + name + ": control link lost during readback");
                 }
                 if (now >= deadline) {
@@ -417,7 +419,8 @@ namespace fx10 {
                 std::this_thread::sleep_for(std::chrono::milliseconds(kControlReadyPollMs));
             }
         }
-        g_log.Info("[eBUS] Factory preparation finished; control readback verified; applying acquisition configuration next");
+        g_log.Info(
+            "[eBUS] Factory preparation finished; control readback verified; applying acquisition configuration next");
         return true;
     }
 
@@ -478,18 +481,24 @@ namespace fx10 {
         const std::string &node = write.node;
         nlohmann::json requested = nullptr;
         switch (write.kind) {
-            case WriteKind::kInt: requested = write.int_value; break;
-            case WriteKind::kFloat: requested = write.float_value; break;
-            case WriteKind::kBool: requested = write.bool_value; break;
+            case WriteKind::kInt: requested = write.int_value;
+                break;
+            case WriteKind::kFloat: requested = write.float_value;
+                break;
+            case WriteKind::kBool: requested = write.bool_value;
+                break;
             case WriteKind::kEnum:
-            case WriteKind::kString: requested = write.text; break;
+            case WriteKind::kString: requested = write.text;
+                break;
             case WriteKind::kCommand: break;
         }
-        applied_.push_back({{"node", node}, {"requested", requested}, {"attempted", requested},
+        applied_.push_back({
+            {"node", node}, {"requested", requested}, {"attempted", requested},
             {"readback", nullptr}, {"required", write.required}, {"strict", write.strict},
             {"float_tolerance_relative", write.kind == WriteKind::kFloat ? 1e-3 : 0.0},
             {"float_tolerance_absolute", write.kind == WriteKind::kFloat ? 1e-9 : 0.0},
-            {"status", "pending"}});
+            {"status", "pending"}
+        });
         auto &entry = applied_.back();
         // An optional write whose node this firmware does not implement is skipped
         if (!write.required && device_.GetParameters()->Get(PvString(node.c_str())) == nullptr) {
@@ -584,7 +593,7 @@ namespace fx10 {
             GetBool(node::kStatusLine) != acquisition.status_line ||
             GetBool(node::kMroiEnable) != acquisition.mroi.enabled) {
             throw ControlError("[eBUS] final image configuration disagrees with acquisition settings; "
-                               "remove conflicting features.raw overrides");
+                "remove conflicting features.raw overrides");
         }
         g_log.Info("[eBUS] Acquisition configuration applied ({} feature writes)", plan.size());
     }
@@ -618,13 +627,18 @@ namespace fx10 {
             if (dynamic_cast<PvGenInteger *>(p)) out["value"] = GetInt(name);
             else if (dynamic_cast<PvGenFloat *>(p)) {
                 const double value = GetFloat(name);
-                if (!std::isfinite(value)) { out["status"] = "non-finite"; return out; }
+                if (!std::isfinite(value)) {
+                    out["status"] = "non-finite";
+                    return out;
+                }
                 out["value"] = value;
-            }
-            else if (dynamic_cast<PvGenBoolean *>(p)) out["value"] = GetBool(name);
+            } else if (dynamic_cast<PvGenBoolean *>(p)) out["value"] = GetBool(name);
             else if (dynamic_cast<PvGenEnum *>(p)) out["value"] = GetEnum(name);
             else if (dynamic_cast<PvGenString *>(p)) out["value"] = GetString(name);
-            else { out["status"] = "unsupported-type"; return out; }
+            else {
+                out["status"] = "unsupported-type";
+                return out;
+            }
             out["status"] = "ok";
         } catch (const ControlError &e) {
             out["status"] = "read-error";
@@ -635,29 +649,35 @@ namespace fx10 {
 
     nlohmann::json CameraControl::CollectDeviceMetadata() const {
         nlohmann::json doc = {{"format", "fx10-device-v1"}, {"applied", applied_}};
-        doc["shutter_preparation"] = shutter_preparation_;
-        doc["applied_semantics"] = "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
-        for (const char *name : {"DeviceVendorName", "DeviceModelName", "DeviceSerialNumber",
-                "DeviceVersion", "DeviceFirmwareVersion", "DeviceSFNCVersionMajor", "DeviceSFNCVersionMinor",
-                "DeviceSFNCVersionSubMinor", "GevMACAddress", "GevCurrentIPAddress"})
+        doc["applied_semantics"] =
+                "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
+        for (const char *name: {
+                 "DeviceVendorName", "DeviceModelName", "DeviceSerialNumber",
+                 "DeviceVersion", "DeviceFirmwareVersion", "DeviceSFNCVersionMajor", "DeviceSFNCVersionMinor",
+                 "DeviceSFNCVersionSubMinor", "GevMACAddress", "GevCurrentIPAddress"
+             })
             doc["identity"][name] = ReadNodeMetadata(name);
-        for (const char *name : {"Width", "Height", "OffsetX", "OffsetY", "SensorWidth", "SensorHeight",
-                "WidthMax", "HeightMax", node::kPixelFormat, node::kSpatialBinning, node::kSpectralBinning,
-                node::kStatusLine, node::kMroiEnable, node::kExposureMode, node::kExposureTime,
-                node::kFrameRateEnable, node::kFrameRate, node::kTriggerSelector, node::kTriggerMode,
-                node::kTriggerSource, node::kTriggerActivation, node::kTriggerDelay,
-                node::kMissedTriggerSource, "UserSetSelector", "LineSelector", "LineSource",
-                "LineMode", "LineInverter", "LineStatus"})
+        for (const char *name: {
+                 "Width", "Height", "OffsetX", "OffsetY", "SensorWidth", "SensorHeight",
+                 "WidthMax", "HeightMax", node::kPixelFormat, node::kSpatialBinning, node::kSpectralBinning,
+                 node::kStatusLine, node::kMroiEnable, node::kExposureMode, node::kExposureTime,
+                 node::kFrameRateEnable, node::kFrameRate, node::kTriggerSelector, node::kTriggerMode,
+                 node::kTriggerSource, node::kTriggerActivation, node::kTriggerDelay,
+                 node::kMissedTriggerSource, "UserSetSelector", "LineSelector", "LineSource",
+                 "LineMode", "LineInverter", "LineStatus"
+             })
             doc["final_readback"][name] = ReadNodeMetadata(name);
         doc["line_readback_semantics"] =
-            "final LineSelector context only; not an audit of all lines or a verified physical pin mapping; "
-            "LineStatus is one idle sample before AcquisitionStart, not an exposure observation";
-        for (const char *name : {"PayloadSize", "GevSCPSPacketSize", "GevSCPD"})
+                "final LineSelector context only; not an audit of all lines or a verified physical pin mapping; "
+                "LineStatus is one idle sample before AcquisitionStart, not an exposure observation";
+        for (const char *name: {"PayloadSize", "GevSCPSPacketSize", "GevSCPD"})
             doc["transport"][name] = ReadNodeMetadata(name);
-        doc["sdk"] = {{"name", "Pleora eBUS"}, {"header_version", NVERSION_STRING},
-                      {"header_version_source", "PvVersion.h NVERSION_STRING at build time"},
-                      {"runtime_version", nullptr},
-                      {"runtime_version_status", "not queried; loaded binary version not inferred from headers"}};
+        doc["sdk"] = {
+            {"name", "Pleora eBUS"}, {"header_version", NVERSION_STRING},
+            {"header_version_source", "PvVersion.h NVERSION_STRING at build time"},
+            {"runtime_version", nullptr},
+            {"runtime_version_status", "not queried; loaded binary version not inferred from headers"}
+        };
         return doc;
     }
 } // namespace fx10

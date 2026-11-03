@@ -1,0 +1,126 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "driver.h"
+#include "clock_quality.h"
+#include "command_channel.h"
+#include "frame_receiver.h"
+#include "raw_record.h"
+#include "scan_data.h"
+
+namespace lms4xxx {
+    // Private shared state. Lifecycle owns connections/threads; configuration
+    // runs before stream ownership transfers to the receive worker. The only
+    // cross-thread control replies and telemetry are guarded by telemetry_mutex.
+    struct Lms4xxxDriver::Impl {
+        DriverConfig config;
+        CommandChannel commands;
+
+        // --- Components ---
+        std::unique_ptr<TcpClient> tcp_client;
+        std::unique_ptr<FrameReceiver> frame_receiver;
+
+        // --- State ---
+        std::atomic<ConnectionState> state{ConnectionState::kDisconnected};
+        std::atomic<bool> scanning{false};
+        std::atomic<bool> receive_running{false};
+        // Polled via HasFault(); raw bytes remain recordable after a monitor fault.
+        std::atomic<bool> fault{false};
+        std::atomic<bool> time_fault{false};
+        std::atomic<bool> stop_stream_requested{false};
+        MeasurementShutdown measurement_shutdown; // independent of the host stream/threads
+        bool stream_start_requested = false; // owner thread; the reply may be lost
+
+        // --- Threads ---
+        std::thread receive_thread;
+        std::thread ntp_watch_thread;
+        std::atomic<bool> ntp_watch_running{false};
+
+        // --- Callbacks ---
+        TelegramCallback telegram_callback;
+        ErrorCallback error_callback;
+        std::mutex callback_mutex; // Protects callback registration (not invocation)
+
+        // --- Statistics ---
+        DriverStatistics stats;
+
+        // --- Device self-report ---
+        DeviceIdentity identity; // written by ReadIdentity() on the control thread
+        DeviceAudit audit; // written at the end of Configure(), read after it
+
+        // Telemetry crosses threads: the owner asks (Write), the receive thread
+        // answers (decode), the owner collects.
+        mutable std::mutex telemetry_mutex;
+        TelemetrySample telemetry_latest;
+        bool telemetry_dirty = false;
+        // Receive-thread owned; never refreshed by unrelated temperature/state replies.
+        std::uint64_t device_warnings_monotonic_us = 0;
+        bool device_no_ntp = false;
+
+        // Last sAN seen on the STREAMING path. Once the stream is running the
+        // receive thread owns the socket, so a method issued at shutdown cannot
+        // use send_and_receive; it is written here and its answer collected by
+        // the receive thread (guarded by telemetry_mutex).
+        std::string last_method_name;
+        int last_method_status = -1;
+
+
+        explicit Impl(const DriverConfig &cfg);
+        [[nodiscard]] const std::string &Tag() const { return config.name; }
+        void SetState(ConnectionState new_state) { state.store(new_state, std::memory_order_release); }
+        void ReportError(std::error_code ec, const std::string &detail = "");
+
+        // Command-phase configuration and readback (driver_configuration.cpp).
+        enum class Readback { kStrict, kTolerateSfa };
+
+        struct ParamRow {
+            std::string_view name;
+            std::vector<std::uint8_t> frame;
+            Readback readback;
+            const char *why;
+        };
+        static bool IsTolerableSfa(const std::error_code &ec);
+        std::error_code ApplyParameter(const ParamRow &row, int timeout_ms, int &changed);
+        static std::string PrefixedString(const std::vector<std::uint8_t> &p);
+        void ReadIdentity(int timeout_ms);
+        static std::vector<std::string> DecodeActiveMessages(const std::vector<std::uint8_t> &p,
+                                                              bool *complete = nullptr);
+        void LogActiveMessages(int timeout_ms);
+        void ReadAudit(int timeout_ms);
+        std::error_code WaitDeviceReady(int timeout_ms);
+
+        // Worker execution and streaming control replies (driver_stream.cpp).
+        void RequestTelemetry();
+        void HandleNonScanFrame(const ColaBMessage &msg);
+        bool CallMethodStreaming(const std::vector<std::uint8_t> &frame, const std::string &name,
+                                 int expected_status, int timeout_ms);
+        bool TakeTelemetry(TelemetrySample &out);
+        void ConfigureReceiveThread();
+        void ReceiveLoop();
+        void VerifyFirstScan(const ScanData &scan);
+        bool ProbeNtpServer(std::string &detail) const;
+        void NtpWatchLoop();
+        struct TimeGate {
+            std::chrono::steady_clock::time_point deadline;
+            bool plausible_seen = false;
+            bool anomaly_seen = false;
+            ClockQualityTracker tracker;
+        };
+        TimeGate time_gate;
+        bool first_scan = true;
+        bool previous_scan_counter_valid = false;
+        void AssessScanTime(ScanData &scan, TimeGate &gate);
+        void HandleFrame(RawFrame &&frame);
+        void MonitorFrame(RawRecord &record);
+
+        // Lifecycle cleanup (driver.cpp); reconnect requires all workers joined.
+        std::error_code StopMeasurement(bool streaming, bool reconnect);
+    };
+} // namespace lms4xxx

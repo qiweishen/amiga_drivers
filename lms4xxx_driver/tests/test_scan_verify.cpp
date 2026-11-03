@@ -1,9 +1,10 @@
 // VerifyScanContent: the first telegram must match the fixed measurement setup exactly;
-// DeviceTimePlausible: the NTP time lock's notion of a synchronised device clock
+// DeviceTimePlausible: a calendar plausibility check, not proof of NTP synchronization
 
 #include <doctest/doctest.h>
 
 #include <string>
+#include <limits>
 
 #include "scan_verify.h"
 
@@ -13,6 +14,9 @@ namespace {
     ChannelData16 Channel16(ChannelContent16 content) {
         ChannelData16 ch;
         ch.content = content;
+        if (content == ChannelContent16::kDist1) ch.scale_factor = 0.1f;
+        if (content == ChannelContent16::kRefl1) ch.scale_factor = 0.01f;
+        if (content == ChannelContent16::kAngl1) ch.scale_offset = -32768.0f;
         ch.num_data = ScanFixed::kPointsPerScan;
         ch.data.resize(ch.num_data);
         ch.angle_step = static_cast<std::uint16_t>(ScanFixed::kAngularResolution1e4);
@@ -93,9 +97,19 @@ TEST_CASE("Every deviation is named") {
         CHECK(problems.find("encoder") != std::string::npos);
         CHECK(problems.find("device name") != std::string::npos);
     }
+    SUBCASE("first scan scaling must match the configured units") {
+        ScanData s = GoodScan(Remission::kRssi, false);
+        s.channels_16bit[0].scale_factor = 1.0f;
+        s.channels_16bit[2].scale_offset = 0.0f;
+        s.channels_8bit[0].scale_factor = std::numeric_limits<float>::quiet_NaN();
+        const auto problems = VerifyScanContent(s, Config(Remission::kRssi), false);
+        CHECK(problems.find("DIST1: scale") != std::string::npos);
+        CHECK(problems.find("ANGL1: scale") != std::string::npos);
+        CHECK(problems.find("QLTY1: scale") != std::string::npos);
+    }
 }
 
-TEST_CASE("DeviceTimePlausible separates a synchronised clock from the free-running boot clock") {
+TEST_CASE("DeviceTimePlausible separates plausible dates from the free-running boot clock") {
     ScanTimestamp ts;
     SUBCASE("the epoch the device boots at is not plausible") {
         ts.year = 1970;

@@ -16,11 +16,9 @@ class PvGenParameterArray;
 
 
 namespace fx10 {
-    class StreamReceiver;
-
-    // Connected receiver, no stream open. Refreshes the node cache and checks
+    // Borrowed device, no stream open. Refreshes the node cache and checks
     // readback after each command, without reconnecting. False means cancellation.
-    bool PrepareFactoryDefaults(StreamReceiver &receiver, const std::function<bool()> &stop = {});
+    bool PrepareFactoryDefaults(PvDevice &device, const std::function<bool()> &stop = {});
     class ControlError : public std::runtime_error {
     public:
         using std::runtime_error::runtime_error;
@@ -68,6 +66,8 @@ namespace fx10 {
         void OpenShutter(const std::function<bool()> &stop = {});
         // Reference capture only: same pulse semantics, MotorShutter_PulseFwd = 255.
         void CloseShutter(const std::function<bool()> &stop = {});
+        // Cached outcome of the latest pulse; no SDK reads and no state verification.
+        [[nodiscard]] const nlohmann::json &ShutterPreparation() const noexcept { return shutter_preparation_; }
 
         // Best-effort telemetry reads, safe while Streaming (control channel only); nullopt when
         // unreadable (logged DEBUG). The temperature read writes DeviceTemperatureSelector first:
@@ -102,7 +102,8 @@ namespace fx10 {
         };
 
         Geometry ReadGeometry();
-        // Read-only snapshot of supported nodes; unknown/unreadable is explicit.
+        // Static configuration snapshot; unknown/unreadable nodes are explicit.
+        // Start-time shutter results are returned separately by ShutterPreparation().
         // Collect only while acquisition is idle. Selector-scoped apply entries
         // retain their immediate readback in plan order.
         nlohmann::json CollectDeviceMetadata() const;

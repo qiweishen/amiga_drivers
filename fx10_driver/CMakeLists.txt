@@ -1,107 +1,21 @@
-################################################################################
-# Specim FX10e Hyperspectral Camera Driver (Pleora eBUS SDK 6.x)
-# This is a subdirectory of the top-level AmigaDrivers project.
-
-
-# Warnings apply to fx10 targets only; eBUS headers are SYSTEM via eBUS::eBUS
-add_library(fx10_warnings INTERFACE)
-target_compile_options(fx10_warnings INTERFACE -Wall -Wextra -Wpedantic)
-
-
-################################################################################
-# eBUS SDK (proprietary, installed out-of-tree; see root cmake/FindeBUS.cmake).
-# The GenICam env bootstrap, discovery and PvResult plumbing come from common/ (amiga_ebus);
-# this call only (re)creates the directory-scoped eBUS::eBUS target.
+# FX10-specific configuration; transport and storage live in ebus_driver.
 find_package(eBUS REQUIRED)
+add_library(fx10_config_core STATIC src/app_config.cpp src/apply_plan.cpp src/wavelengths.cpp)
+target_include_directories(fx10_config_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(fx10_config_core PUBLIC amiga_common)
+target_compile_options(fx10_config_core PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(fx10_device_config STATIC src/ebus/camera_control.cpp ../ebus_driver/src/fx10_config.cpp)
+target_include_directories(fx10_device_config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/ebus_driver/include)
+target_link_libraries(fx10_device_config PRIVATE fx10_config_core amiga_ebus eBUS::eBUS)
+target_compile_options(fx10_device_config PRIVATE -Wall -Wextra -Wpedantic)
 
-################################################################################
-# fx10_core - SDK-free library (config, recorder, accounting)
-add_library(fx10_core STATIC
-        src/accounting.cpp
-        src/pixel_format.cpp
-        src/recording_pipeline.cpp
-        src/session_metadata.cpp
-        src/buffer_sizing.cpp
-        src/app_config.cpp
-        src/apply_plan.cpp
-        src/envi_header.cpp
-        src/envi_recorder.cpp
-        src/stats_line.cpp
-        src/wavelengths.cpp
-)
-
-# SensorSync-Logger: the session wrapper (common::SensorSyncLog) and the shared
-# hub live in amiga_common; trigger_groups.h comes through its include dirs
-# NOTE: gox_driver/include exposes the SAME relative paths (core/..., ebus/...)
-target_include_directories(fx10_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-# amiga_common carries the unified logging layer and provides spdlog/yaml-cpp/
-# Threads transitively
-target_link_libraries(fx10_core
-    PUBLIC amiga_common
-    PRIVATE fx10_warnings
-)
-
-
-################################################################################
-# fx10_ebus - eBUS SDK glue (camera control + streaming)
-add_library(fx10_ebus STATIC
-    src/ebus/camera_control.cpp
-    src/ebus/stream_receiver.cpp
-)
-target_link_libraries(fx10_ebus
-    PUBLIC fx10_core amiga_ebus eBUS::eBUS
-    PRIVATE fx10_warnings
-)
-
-
-################################################################################
-# fx10_session - acquisition lifecycle, independent of IDriverApp and common::Config
-add_library(fx10_session STATIC
-    src/session.cpp
-    src/session_setup.cpp
-    src/session_monitor.cpp
-)
-target_link_libraries(fx10_session PUBLIC fx10_core PRIVATE fx10_ebus fx10_warnings)
-
-# fx10_lib - Amiga-facing IDriverApp adapter
-add_library(fx10_lib STATIC
-    src/fx10_driver_app.cpp
-)
-target_link_libraries(fx10_lib PUBLIC
-    fx10_session
-    amiga_common
-)
-
-
-################################################################################
-# fx10_snapshot - one-shot GUI preview grab
 add_executable(fx10_snapshot tools/snapshot_main.cpp)
-target_link_libraries(fx10_snapshot PRIVATE fx10_ebus fx10_warnings)
-set_target_properties(fx10_snapshot PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-# Paired white/dark reference capture, preserving the saved acquisition settings.
 add_executable(fx10_reference tools/reference_main.cpp)
-target_link_libraries(fx10_reference PRIVATE fx10_ebus fx10_warnings)
-set_target_properties(fx10_reference PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-
-################################################################################
-# Tests (doctest, SDK-free; enable_testing() is called at the top level)
+foreach(tool fx10_snapshot fx10_reference)
+    target_include_directories(${tool} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(${tool} PRIVATE ebus_camera fx10_config_core)
+    set_target_properties(${tool} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
 add_subdirectory(tests)
-
-
-################################################################################
-# Status Messages
-message(STATUS "")
-message(STATUS "----------------------------------------")
-message(STATUS "   Fx10_Driver Configuration")
-message(STATUS "----------------------------------------")
-message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
-message(STATUS "  eBUS SDK:         ${EBUS_SDK_ROOT_DIR}")
-message(STATUS "----------------------------------------")
-message(STATUS "")

@@ -31,8 +31,9 @@ namespace fx10 {
             const double period_ms = 900.0 / acq.frame_rate_hz;
             if (acq.exposure_ms >= period_ms) {
                 Fail(p + ".exposure_ms/.frame_rate_hz", "exposure_ms (" + std::to_string(acq.exposure_ms) +
-                                            ") must be below the frame period 900/frame_rate_hz (" +
-                                            std::to_string(period_ms) + " ms); lower the exposure or the frame rate");
+                                                        ") must be below the frame period 900/frame_rate_hz (" +
+                                                        std::to_string(period_ms) +
+                                                        " ms); lower the exposure or the frame rate");
             }
             Read(n, p, "status_line", acq.status_line);
             if (Read(n, p, "image_enhancement", acq.image_enhancement) && !acq.image_enhancement) {
@@ -97,8 +98,8 @@ namespace fx10 {
             if (st.enabled && acq.trigger.mode == TriggerMode::kExternal &&
                 !trigger::validRate(group, acq.frame_rate_hz)) {
                 Fail("acquisition.frame_rate_hz", group == trigger::Group::FX
-                    ? "must be >= 20 Hz for the SensorSync FX group (outputs 0/1)"
-                    : "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
+                                                      ? "must be >= 20 Hz for the SensorSync FX group (outputs 0/1)"
+                                                      : "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
             }
         }
 
@@ -215,7 +216,8 @@ namespace fx10 {
 
         AppConfig ParseRoot(const YAML::Node &root) {
             CheckKeys(root, "", {
-                          "device", "acquisition", "sensor_trigger", "features", "output", "network", "logging", "reference"
+                          "device", "acquisition", "sensor_trigger", "features", "output", "network", "logging",
+                          "reference"
                       });
             AppConfig c;
 

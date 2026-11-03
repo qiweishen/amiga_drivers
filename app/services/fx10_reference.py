@@ -14,6 +14,7 @@ import yaml
 
 from ..constants import BIN_FX10_REFERENCE
 from ..state import STATE
+from ..formats import fx10
 from . import camera_operations, config_store, runtime, tool_jobs
 from .fx10_reference_preview import ReferenceSpectrum, read_spectrum
 
@@ -76,9 +77,12 @@ def _validate_result(emitted: str, output_root: Path, duration_s: float) -> tupl
     if session.parent != output_root.resolve() or not session.name.startswith("reference_"):
         raise ValueError("Reference result is outside the requested output directory")
     manifest = session / "reference.json"
-    if manifest.stat().st_size > 65536:
+    # Two verified signatures and wavelength/FWHM arrays can exceed 64 KiB.
+    with manifest.open(encoding="utf-8") as source:
+        text = source.read(4 * 1024 * 1024 + 1)
+    if len(text) > 4 * 1024 * 1024:
         raise ValueError("Reference manifest is unexpectedly large")
-    doc = json.loads(manifest.read_text(encoding="utf-8"))
+    doc = json.loads(text)
     if not isinstance(doc, dict):
         raise ValueError("Invalid reference manifest")
     phases = doc.get("phases", [])
@@ -94,14 +98,15 @@ def _validate_result(emitted: str, output_root: Path, duration_s: float) -> tupl
         path = (session / phase["session_dir"]).resolve()
         if path.parent != session / "raw" / "fx10" / name:
             raise ValueError("Reference phase path does not match its label")
-        headers = list(path.glob("segment_*.hdr"))
-        if not (path / "capture.json").is_file() or not (path / "device.json").is_file() or not headers:
+        if not (path / "device.json").is_file():
             raise ValueError(f"{name.capitalize()} reference is missing finalized data")
-        for header in headers:
-            for suffix in (".bil", ".lines.csv"):
-                data = header.with_suffix(suffix)
-                if not data.is_file() or data.stat().st_size == 0:
-                    raise ValueError(f"{name.capitalize()} reference is missing {data.name}")
+        fx10.validate_finalized(path)
+        capture = fx10.load_capture(path)
+        if capture.recording_format == "ebus-raw-v1":
+            ending = fx10.raw_recording.session_end(path)
+            if (phase["frames_written"] != ending["valid_frames_written"]
+                    or phase.get("records_written") != ending["records_written"]):
+                raise ValueError(f"{name.capitalize()} reference counters disagree with raw records")
     return session, doc
 
 

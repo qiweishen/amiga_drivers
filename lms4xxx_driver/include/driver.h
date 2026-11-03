@@ -29,7 +29,7 @@ namespace lms4xxx {
     };
 
 
-    // SICK LMS4xxx driver: connect -> configure -> stream, callbacks from the parse thread
+    // SICK LMS4xxx driver: connect -> configure -> stream, callbacks from the receive thread
     class Lms4xxxDriver {
     public:
         explicit Lms4xxxDriver(const DriverConfig &config);
@@ -62,8 +62,8 @@ namespace lms4xxx {
         // teardown alone never implies that the device acknowledged LMCstopmeas.
         [[nodiscard]] MeasurementShutdownStatus GetMeasurementShutdownStatus() const;
 
-        // Invoked on the parse thread
-        void SetScanCallback(ScanDataCallback callback);
+        // Invoked on the receive thread, with ownership of each complete telegram.
+        void SetTelegramCallback(TelegramCallback callback);
 
         void SetErrorCallback(ErrorCallback callback);
 
@@ -89,7 +89,7 @@ namespace lms4xxx {
         // Ask the device for one telemetry round WHILE STREAMING. Control and
         // data share one TCP connection and the receive thread owns the socket,
         // so this only WRITES the queries (they need no login, manual p.69); the
-        // answers come back as ordinary frames and are decoded on the parse
+        // answers come back as ordinary frames and are decoded on the receive
         // thread. Call from the owner thread only.
         void RequestTelemetry();
 

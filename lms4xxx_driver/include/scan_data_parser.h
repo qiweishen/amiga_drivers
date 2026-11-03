@@ -13,6 +13,12 @@ namespace lms4xxx::ScanDataParser {
     // `tag`: instance log prefix
     std::error_code Parse(const std::uint8_t *data, std::size_t len, ScanData &out, std::string_view tag = {});
 
+    // Live monitoring after the first scan: read counters, uptime and calendar time.
+    // Variable sections are length-checked and skipped; no channel samples, names
+    // or scale/geometry values are decoded or allocated. Channel vectors stay empty.
+    std::error_code ParseTimestamp(const std::uint8_t *data, std::size_t len, ScanData &out,
+                                  std::string_view tag = {});
+
     // Sequential field reader; carries the log tag for parse warnings
     struct Reader {
         const std::uint8_t *data;
@@ -20,7 +26,7 @@ namespace lms4xxx::ScanDataParser {
         std::size_t pos = 0;
         std::string_view tag{};
 
-        [[nodiscard]] bool HasBytes(std::size_t n) const { return pos + n <= len; }
+        [[nodiscard]] bool HasBytes(std::size_t n) const { return pos <= len && n <= len - pos; }
         [[nodiscard]] std::size_t Remaining() const { return len - pos; }
 
         std::uint8_t ReadUint8();

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unpack frames from "jai-raw-seg" capture segments into numpy arrays / image files.
+"""Unpack eBUS raw and legacy jai-raw-seg images into arrays / image files.
 
 Builds on scripts/inspect_raw.py (same directory) for the segment walk; this script adds
 PixelFormat decoding. Supported PFNC codes:
@@ -25,6 +25,12 @@ Run --self-test to verify every bit-unpacking routine against hand-computed vect
 import argparse
 import os
 import sys
+from pathlib import Path
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ebus_driver.scripts.ebus_raw import recording as raw_recording, inspection
 
 if __package__:
     from . import inspect_raw as ir
@@ -50,18 +56,22 @@ def write_pnm(path, img):
     """Pure-python PGM (gray, 8/16-bit) or PPM (RGB, 8-bit). 16-bit samples are big-endian per spec."""
     if img.ndim == 2:
         maxval = 255 if img.dtype == np.uint8 else int(img.max()) or 1
-        with open(path, "wb") as f:
+        with open(path, "xb") as f:
             f.write(b"P5\n%d %d\n%d\n" % (img.shape[1], img.shape[0], maxval))
             f.write(img.astype(">u2" if maxval > 255 else "u1").tobytes())
     else:
-        with open(path, "wb") as f:
+        with open(path, "xb") as f:
             f.write(b"P6\n%d %d\n255\n" % (img.shape[1], img.shape[0]))
             f.write(img[:, :, ::-1].tobytes() if img.shape[2] == 3 else img.tobytes())
 
 
 def save(img, path_base, fmt):
+    suffix = {"npy": ".npy", "png": ".png", "pnm": ".ppm" if img.ndim == 3 else ".pgm"}[fmt]
+    if os.path.lexists(path_base + suffix):
+        raise FileExistsError("refusing to overwrite existing output: " + path_base + suffix)
     if fmt == "npy":
-        np.save(path_base + ".npy", img)
+        with open(path_base + ".npy", "xb") as out:
+            np.save(out, img, allow_pickle=False)
         return path_base + ".npy"
     if fmt == "pnm":
         ext = ".ppm" if img.ndim == 3 else ".pgm"
@@ -69,7 +79,11 @@ def save(img, path_base, fmt):
         return path_base + ext
     if fmt == "png":
         import cv2
-        cv2.imwrite(path_base + ".png", img)
+        ok, encoded = cv2.imencode(".png", img)
+        if not ok:
+            raise ValueError("PNG encoding failed")
+        with open(path_base + ".png", "xb") as out:
+            out.write(encoded.tobytes())
         return path_base + ".png"
     raise ValueError(fmt)
 
@@ -81,15 +95,17 @@ def save(img, path_base, fmt):
 
 def iter_frames(path):
     """Yields (segment_path, Frame, payload_bytes) for a segment file or a camera/session dir."""
-    groups = ir.collect_targets(path)
-    if groups is None:
-        print("error: no such file or directory: %s" % path, file=sys.stderr)
-        sys.exit(2)
-    if not groups:
+    segments = inspection.targets(path)
+    if not segments:
         print("error: no seg_*.raw files found under %s" % path, file=sys.stderr)
         sys.exit(2)
-    for d in sorted(groups):
-        for seg in sorted(groups[d]):
+    for segment in segments:
+        seg = str(segment)
+        if raw_recording.is_segment(segment):
+            for record in raw_recording.iter_records(segment):
+                payload = raw_recording.read_payload(record, verify_crc=True) if record.valid_frame else b""
+                yield seg, record, payload
+        else:
             f, size = ir.open_segment(seg)
             with f:
                 fh = ir.header_or_fallback(f, seg, size, strict=False)
@@ -147,7 +163,7 @@ def self_test():
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="unpack_raw.py",
-        description="Unpack jai-raw-seg frames (Bayer/Mono packed formats) to npy/pnm/png.")
+        description="Unpack eBUS raw and legacy jai-raw-seg images to npy/pnm/png.")
     ap.add_argument("path", nargs="?", help="seg_NNNNN.raw, camera dir, or session dir")
     ap.add_argument("-o", "--out-dir", default="./unpacked", help="output directory (default ./unpacked)")
     ap.add_argument("--format", choices=["npy", "pnm", "png"], default="npy",
@@ -161,7 +177,7 @@ def main(argv=None):
     ap.add_argument("--shift-to-16bit", action="store_true",
                     help="left-shift 10/12-bit values to the full 16-bit range (viewing aid)")
     ap.add_argument("--pad-incomplete", action="store_true",
-                    help="zero-fill frames flagged INCOMPLETE and unpack them anyway "
+                    help="legacy jai-raw-seg only: zero-fill frames flagged INCOMPLETE "
                          "(default: skip them with a warning)")
     ap.add_argument("--self-test", action="store_true", help="verify unpackers and exit")
     args = ap.parse_args(argv)
@@ -173,12 +189,19 @@ def main(argv=None):
 
     os.makedirs(args.out_dir, exist_ok=True)
     wanted = set(args.seq) if args.seq else None
+    source_root = Path(args.path) if Path(args.path).is_dir() else Path(args.path).parent
+    groups = {segment.parent for segment in inspection.targets(args.path)}
+    multiple_cameras = len(groups) > 1
     done = 0
     kept = 0
     for seg, fr, payload in iter_frames(args.path):
         if wanted is not None and fr.seq not in wanted:
             continue
-        if fr.fl & ir.FRAME_FLAG_INCOMPLETE:
+        is_raw = isinstance(fr, raw_recording.Record)
+        if is_raw and not fr.valid_frame:
+            print("warning: skipping raw record seq=%d (not a valid frame; raw retained)" % fr.seq, file=sys.stderr)
+            continue
+        if not is_raw and fr.fl & ir.FRAME_FLAG_INCOMPLETE:
             if not args.pad_incomplete:
                 print("warning: skipping seq=%d (INCOMPLETE, %d bytes; --pad-incomplete to keep)"
                       % (fr.seq, fr.psz), file=sys.stderr)
@@ -190,7 +213,7 @@ def main(argv=None):
         if args.every > 1 and (kept - 1) % args.every != 0:
             continue
         try:
-            img, name, pattern = decode(fr.pf, fr.w, fr.h, payload)
+            img, name, pattern = decode_record(fr, payload) if is_raw else decode(fr.pf, fr.w, fr.h, payload)
         except ValueError as e:
             print("error: seq=%d: %s" % (fr.seq, e), file=sys.stderr)
             return 1
@@ -198,8 +221,16 @@ def main(argv=None):
             img = shift_to_16bit(img, format_for_code(fr.pf))
         if args.demosaic and pattern in CV_BAYER:
             img = demosaic(img, pattern)
-        base = os.path.join(args.out_dir, "seq%08d_%s" % (fr.seq, name))
-        out_path = save(img, base, args.format)
+        destination = args.out_dir
+        if multiple_cameras:
+            destination = os.path.join(destination, os.path.relpath(os.path.dirname(seg), source_root))
+            os.makedirs(destination, exist_ok=True)
+        base = os.path.join(destination, "seq%08d_%s" % (fr.seq, name))
+        try:
+            out_path = save(img, base, args.format)
+        except (OSError, ValueError) as error:
+            print("error: %s" % error, file=sys.stderr)
+            return 1
         print("seq=%d bid=%d %s %dx%d dts=%d -> %s" % (fr.seq, fr.bid, name, fr.w, fr.h, fr.dts,
                                                         out_path))
         done += 1

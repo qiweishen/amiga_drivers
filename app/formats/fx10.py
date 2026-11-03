@@ -1,4 +1,4 @@
-"""FX10 capture-v1 / ENVI BIL / line-index-v1,v2 recording contract.
+"""FX10 ebus-raw-v1 and legacy capture-v1 / ENVI BIL readers.
 
 Full snapshots, bounded live tails and streaming reference reductions share this
 parser. A newline-terminated frame/padding index row commits one BIL line;
@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Iterator
 
 import numpy as np
+
+from ebus_driver.scripts.ebus_raw import pixels as raw_pixels, recording as raw_recording
 
 METADATA_BYTES = 2 * 1024 * 1024
 MAX_LINE_BYTES = 64 * 1024 * 1024
@@ -77,6 +79,7 @@ class Capture:
     wavelengths_nm: tuple[float, ...]
     expected_frame_rate_hz: float
     line_index_format: str | None
+    recording_format: str = "envi"
 
     @property
     def line_bytes(self) -> int:
@@ -88,9 +91,22 @@ class Capture:
 
 
 def load_capture(directory: Path) -> Capture:
-    doc = json.loads(_text(directory / "capture.json"))
-    if not isinstance(doc, dict) or doc.get("format") != "fx10-capture-v1" or doc.get("byte_order") != "little":
-        raise ValueError("Unsupported capture metadata")
+    raw = raw_recording.is_session(directory)
+    if raw:
+        device = raw_recording.device_metadata(directory)
+        if device["kind"] != "fx10" or not isinstance(device.get("profile"), dict):
+            raise ValueError("Recording is not an FX10 camera profile")
+        doc = dict(device["profile"])
+        pixel = _PIXELS.get(doc.get("pixel_format"))
+        if pixel is None:
+            raise ValueError("Unsupported FX10 PixelFormat")
+        # These describe the decoded array, not the packed raw buffer width.
+        doc["bytes_per_pixel"] = pixel[0]
+        doc["line_index_format"] = None
+    else:
+        doc = json.loads(_text(directory / "capture.json"))
+        if not isinstance(doc, dict) or doc.get("format") != "fx10-capture-v1" or doc.get("byte_order") != "little":
+            raise ValueError("Unsupported capture metadata")
     samples = _uint(doc["samples"], "capture samples", positive=True)
     bands = _uint(doc["bands"], "capture bands", positive=True)
     bpp = _uint(doc["bytes_per_pixel"], "capture bytes_per_pixel", positive=True)
@@ -107,7 +123,52 @@ def load_capture(directory: Path) -> Capture:
     if version not in (None, "fx10-line-index-v1", "fx10-line-index-v2"):
         raise ValueError("Unsupported capture line-index version")
     return Capture(samples, bands, bpp, full_scale, pixel_format,
-                   _axis(doc.get("wavelengths_nm", []), bands, "wavelength"), float(rate), version)
+                   _axis(doc.get("wavelengths_nm", []), bands, "wavelength"), float(rate), version,
+                   "ebus-raw-v1" if raw else "envi")
+
+
+def _decode_raw(record, capture: Capture):
+    image, name, _ = raw_pixels.decode_record(record, raw_recording.read_payload(record))
+    if name != capture.pixel_format or image.shape != (capture.bands, capture.samples):
+        raise ValueError("Recorded image disagrees with the FX10 profile")
+    # Mono8/unpacked decode can be a view into the acquired buffer. Detach the
+    # DN array so batched statistics cannot retain large chunk/padding tails.
+    return image.copy()
+
+
+def raw_frame_batches(directory: Path, capture: Capture, *, batch_bytes=8 * 1024 * 1024):
+    batch = []
+    for record in raw_recording.session_records(directory):
+        if not record.valid_frame:
+            continue
+        batch.append(_decode_raw(record, capture))
+        if len(batch) * capture.line_bytes >= batch_bytes:
+            yield np.stack(batch)
+            batch.clear()
+    if batch:
+        yield np.stack(batch)
+
+
+def validate_finalized(directory: Path) -> None:
+    """Validate finalization and counts without loading or changing pixel bytes."""
+    capture = load_capture(directory)
+    if capture.recording_format == "ebus-raw-v1":
+        valid = sum(record.valid_frame for record in raw_recording.session_records(directory))
+        if not valid:
+            raise ValueError("Finalized FX10 recording has no valid frames")
+    else:
+        for segment in finalized_segments(directory, capture):
+            # Legacy completion requires the committed index as well as .hdr.
+            for _ in committed_lines(segment, segment.data.stat().st_size):
+                pass
+
+
+def raw_tail_cube(directory: Path, capture: Capture, limit: int):
+    limit = min(max(1, limit), max(1, MAX_LINE_BYTES // capture.line_bytes))
+    records = raw_recording.latest_records(directory, limit)
+    if not records:
+        raise ValueError("No complete valid raw image yet")
+    return np.stack([_decode_raw(record, capture) for record in records]), records[-1].hrt
 
 
 def _header_fields(text: str) -> dict[str, str]:
@@ -299,6 +360,16 @@ def frame_batches(segment: Segment, *, batch_bytes: int = 8 * 1024 * 1024) -> It
 
 def snapshot_cube(directory: Path) -> tuple[Capture, np.ndarray]:
     capture = load_capture(directory)
+    if capture.recording_format == "ebus-raw-v1":
+        chunks, count = [], 0
+        for batch in raw_frame_batches(directory, capture):
+            count += batch.shape[0]
+            if count > 4096 or count * capture.line_bytes > 256 * 1024 * 1024:
+                raise ValueError("Snapshot exceeds preview memory budget")
+            chunks.append(batch)
+        if not chunks:
+            raise ValueError("No valid raw image frames")
+        return capture, np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
     segments = finalized_segments(directory, capture)
     if len(segments) != 1:
         raise ValueError("Snapshot unexpectedly contains multiple segments")
@@ -412,10 +483,13 @@ def reference_spectrum(directory: Path, expected_frames: int, *, normalized: boo
     capture = load_capture(directory)
     histograms = BandHistograms(capture.bands, capture.full_scale)
     count = 0
-    for segment in finalized_segments(directory, capture):
-        for cube in frame_batches(segment):
-            histograms.add(cube)
-            count += cube.shape[0]
+    if capture.recording_format == "ebus-raw-v1":
+        batches = raw_frame_batches(directory, capture)
+    else:
+        batches = (cube for segment in finalized_segments(directory, capture) for cube in frame_batches(segment))
+    for cube in batches:
+        histograms.add(cube)
+        count += cube.shape[0]
     if count != expected_frames:
         raise ValueError("Reference frame index disagrees with the completed phase frame count")
     values, mean, clipped = histograms.finish(normalized=normalized)

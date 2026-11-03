@@ -1,9 +1,8 @@
 #include "cola_b.h"
 
-#include "byte_util.h"
-
 #include <cstring>
 
+#include "byte_util.h"
 #include "error.h"
 #include "logger.h"
 #include "utility.h"

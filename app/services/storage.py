@@ -13,9 +13,9 @@ from pathlib import Path
 from ..state import STATE, ProcState, StorageStatus
 from . import config_store
 
-# scan_<InstanceName>_<YYYYMMDD_HHMMSS>_NNN.h5 (HDF5 split files) — the name
+# Raw segments and their sidecars; also recognise historical HDF5 files. The name
 # may contain underscores; the timestamp anchors the greedy group.
-_LMS_FILE_RE = re.compile(r"^scan_(.+)_\d{8}_\d{6}(?:_\d+)?\.h5$")
+_LMS_FILE_RE = re.compile(r"^scan_(.+)_\d{8}_\d{6}(?:_\d+)?\.(?:bin|csv|json|h5)$")
 
 _prev: dict[str, tuple[float, int]] = {}  # key -> (t, bytes)
 _prev_session: tuple | None = None
