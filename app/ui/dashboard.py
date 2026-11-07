@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import time
 import json
+import time
 from collections.abc import Callable
-
 from nicegui import ui
 
+from . import components, layout, recording_settings
 from ..constants import DRIVERS, UI_TICK_S
 from ..services import config_store, config_actions, process
 from ..services.storage import human_bytes
 from ..state import STATE, ProcState, SensorState
-from . import components, layout, recording_settings
 
 
 def _driver_of(sensor_key: str) -> str:
@@ -62,7 +61,8 @@ def dashboard_page() -> None:
                     session_label = ui.label("No active session").classes("session-id mono")
                 with ui.row().classes("recording-buttons"):
                     start_btn = ui.button("Start recording", icon="play_arrow", on_click=start_recording)
-                    stop_btn = ui.button("Stop recording", icon="stop", color="negative", on_click=_confirm_stop).props("outline")
+                    stop_btn = ui.button("Stop recording", icon="stop", color="negative", on_click=_confirm_stop).props(
+                        "outline")
                     start_btn.disable()
                     stop_btn.disable()
             control_reason = ui.label().classes("control-reason w-full")
@@ -134,7 +134,8 @@ def dashboard_page() -> None:
 
         with ui.column().classes("overview-diagnostics"):
             with ui.expansion("Control command history", icon="history").classes("w-full"):
-                ui.label("Check the command ID and device state before retrying a disconnected request.").classes("section-copy")
+                ui.label("Check the command ID and device state before retrying a disconnected request.").classes(
+                    "section-copy")
                 commands = ui.table(
                     columns=[{"name": name, "label": name.replace("_", " ").title(),
                               "field": name, "align": "left"}
@@ -142,7 +143,8 @@ def dashboard_page() -> None:
                     rows=[], row_key="id", pagination=8,
                 ).classes("w-full").props("dense flat")
             with ui.expansion("Session result and driver counters", icon="description").classes("w-full"):
-                ui.label("Recorded driver results; these do not independently verify data integrity.").classes("section-copy")
+                ui.label("Recorded driver results; these do not independently verify data integrity.").classes(
+                    "section-copy")
                 run_result = ui.label().classes("terminal-surface whitespace-pre-wrap max-h-80 overflow-auto w-full")
 
         shown_commands = [None]
@@ -182,7 +184,8 @@ def dashboard_page() -> None:
 
         def refresh() -> None:
             if shown_result[0] != STATE.run_result:
-                run_result.set_text(json.dumps(STATE.run_result, indent=2, ensure_ascii=False) if STATE.run_result else "No recorded result available")
+                run_result.set_text(json.dumps(STATE.run_result, indent=2,
+                                               ensure_ascii=False) if STATE.run_result else "No recorded result available")
                 shown_result[0] = STATE.run_result
             recent = ([{
                 "id": STATE.tool_operation.get("id", ""), "action": STATE.tool_operation.get("kind", ""),
@@ -193,9 +196,10 @@ def dashboard_page() -> None:
                 commands.update()
                 shown_commands[0] = recent
             running = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING)
-            start_btn.set_enabled(STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy and not STATE.tool_uncertain
-                                  and not running and STATE.process_state is not ProcState.STOPPING
-                                  and not _start_in_flight and details.ready)
+            start_btn.set_enabled(
+                STATE.env_ok and not STATE.control_uncertain and not STATE.snapshot_busy and not STATE.tool_uncertain
+                and not running and STATE.process_state is not ProcState.STOPPING
+                and not _start_in_flight and details.ready)
             stop_btn.set_enabled(STATE.env_ok and running)
             details.set_enabled(STATE.env_ok and not STATE.config_locked and not STATE.control_uncertain
                                 and not STATE.snapshot_busy and not STATE.tool_uncertain and not _start_in_flight)
@@ -219,7 +223,8 @@ def dashboard_page() -> None:
                 reason = ""
             control_reason.set_text(reason)
             control_reason.set_visibility(bool(reason))
-            session_caption.set_text("Current session" if running or STATE.process_state is ProcState.STOPPING else "Last session")
+            session_caption.set_text(
+                "Current session" if running or STATE.process_state is ProcState.STOPPING else "Last session")
             session_label.set_text(STATE.active_session.name if STATE.active_session else "No session available")
             started = STATE.session_started_at
             if running and started is not None and started > 0:
@@ -295,7 +300,7 @@ _start_in_flight = False  # single-flight guard: preflight awaits several execs
 async def _on_start(settings_ready: Callable[[], bool] | None = None) -> None:
     global _start_in_flight
     if _start_in_flight or STATE.process_state in (
-        ProcState.STARTING, ProcState.RUNNING, ProcState.STOPPING
+            ProcState.STARTING, ProcState.RUNNING, ProcState.STOPPING
     ):
         return
     _start_in_flight = True

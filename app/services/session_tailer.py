@@ -10,8 +10,8 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
-from ..constants import LOG_POLL_S
 from .log_buffer import LogLine, parse_line
+from ..constants import LOG_POLL_S
 
 REPLAY_TAIL_LINES = 500
 

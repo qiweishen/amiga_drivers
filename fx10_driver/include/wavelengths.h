@@ -6,10 +6,10 @@
 #include "app_config.h"
 
 namespace fx10 {
-    // Resolved per-band wavelength axis for the ENVI header.
+    // Resolved per-band wavelength axis for recorded device/profile metadata.
     struct Wavelengths {
         std::vector<double> nm; // size == bands
-        std::vector<double> fwhm; // size == bands, or empty (omitted from the .hdr)
+        std::vector<double> fwhm; // size == bands, or empty when unavailable
         std::string source_tag; // "file:<path>" | "list" | "generated-linear"
     };
 

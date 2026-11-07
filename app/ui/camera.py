@@ -1,6 +1,6 @@
 """Camera Tools: one discovery table for both camera drivers, a Set IP action
 for field re-addressing, then a per-driver exposure workbench (preview +
-Apply to the recording config).
+Apply to the recording and snapshot configs).
 
 Discovery is shared because the two backends answer the same question about the
 same GigE segment: one `ebus_discover --json` scan (common/) fills one table,
@@ -15,20 +15,20 @@ persistent-IP GenICam nodes (kept across power cycles), then optionally rewrites
 `device.ip` in the driver's config. Both sections tune AGAINST A LIVE CAMERA
 without touching any config: the snapshot tools take the values as CLI
 overrides. "Apply to config" is the separate, explicit step that writes the
-winning values into the driver's recording config (comment-preserving, see
+winning values into both the driver's recording and snapshot configs (comment-preserving, see
 services/config_store.py).
 """
 
 from __future__ import annotations
 
 import ipaddress
-
 from nicegui import app, ui
 
-from ..constants import TOOL_TICK_S
-from ..services import config_store, config_actions, ebus_tools, fx10_tools, gox_tools
-from ..state import STATE, ProcState
 from . import fx10_plot, layout
+from ..constants import TOOL_TICK_S
+from ..decoder.gox.preview import DISPLAY_LONG_EDGE
+from ..services import config_actions, ebus_tools, fx10_tools, gox_tools, preview_images
+from ..state import STATE, ProcState
 
 _COLUMNS = [
     {"name": "kind", "label": "Driver", "field": "kind", "align": "left"},
@@ -107,7 +107,8 @@ def camera_page() -> None:
                 set_ip_busy = ui.spinner(size="sm").classes("hidden")
                 scan_status = ui.label("").classes("text-sm muted")
             table = ui.table(columns=_COLUMNS, rows=[], row_key="key", selection="single").classes("w-full")
-            table.add_slot("no-data", '<div class="section-copy">No cameras listed. Use Scan cameras to refresh the list.</div>')
+            table.add_slot("no-data",
+                           '<div class="section-copy">No cameras listed. Use Scan cameras to refresh the list.</div>')
 
         with ui.element("div").classes("workspace-grid"):
             # ==================================================== GoX section
@@ -116,7 +117,9 @@ def camera_page() -> None:
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("photo_camera").classes("muted")
                         ui.label("GoX · Exposure workbench").classes("section-title")
-                ui.label("Preview with temporary settings; Apply to config saves them for recording.").classes("section-copy")
+                ui.label("Preview with temporary settings. Apply to config saves exposure and gain to both "
+                         "the recording and snapshot configs for the next recording and reference capture.").classes(
+                    "section-copy")
                 gox_target_label = ui.label().classes("text-sm mono break-all")
                 gox_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
@@ -126,7 +129,8 @@ def camera_page() -> None:
                         # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
                         gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
                                                  value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
-                        ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes("w-full")
+                        ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes(
+                            "w-full")
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Gain (magnification)").classes("font-medium")
                         # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
@@ -137,7 +141,8 @@ def camera_page() -> None:
                         ui.number(min=1.0, max=126.0, step=0.1, prefix="x").bind_value(gox_gain).classes("w-full")
                 with ui.row().classes("console-toolbar"):
                     gox_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _gox_snap())
-                    gox_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _gox_apply()).props("outline")
+                    gox_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _gox_apply()).props(
+                        "outline")
                     gox_busy = ui.spinner(size="sm").classes("hidden")
                 gox_warn = ui.label("").classes("text-sm text-amber-700")
                 with ui.column().classes("preview-surface w-full justify-center"):
@@ -148,9 +153,22 @@ def camera_page() -> None:
                         ui.icon("photo_camera", size="36px")
                         ui.label("No snapshot displayed")
                         ui.label("Select a GoX camera and take a snapshot to inspect exposure.").classes("text-xs")
+                with ui.row().classes("w-full items-center gap-3") as gox_download_row:
+                    gox_download = ui.link("Download full-resolution 16-bit PNG", "#").classes("text-xs")
+                    ui.label(f"Screen preview: linear DN, 8-bit, downscaled to ≤ {DISPLAY_LONG_EDGE} px. "
+                             "The download is lossless (DN × 16) and is decoded on first request.").classes(
+                        "text-xs muted")
+                gox_download_row.set_visibility(False)
+                gox_urls: list[str] = []
+
+                def _release_gox_urls() -> None:
+                    preview_images.release(*gox_urls)
+                    gox_urls.clear()
+
+                ui.context.client.on_delete(_release_gox_urls)
                 gox_meta = ui.label("").classes("text-sm muted mono break-all")
                 with ui.column().classes("plot-surface w-full"):
-                    ui.label("Pixel intensity distribution").classes("text-xs muted")
+                    ui.label("Bayer photosite distribution · native DN 0–4095").classes("text-xs muted")
                     gox_chart = ui.echart({
                         "xAxis": {"type": "category", "show": False},
                         "yAxis": {"type": "value", "show": False},
@@ -167,7 +185,9 @@ def camera_page() -> None:
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("ssid_chart").classes("muted")
                         ui.label("FX10 · Spectral workbench").classes("section-title")
-                ui.label("Inspect spectral response with temporary settings before applying to config.").classes("section-copy")
+                ui.label("Preview with temporary settings. Apply to config saves exposure and both binning values "
+                         "to the recording and snapshot configs for the next recording and reference capture.").classes(
+                    "section-copy")
                 fx10_target_label = ui.label().classes("text-sm mono break-all")
                 fx10_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
@@ -176,31 +196,38 @@ def camera_page() -> None:
                         ui.label("FX10e · 0.010–419.000 ms").classes("text-xs muted")
                         # Camera limit: ExposureTime is 10..419000 µs (0.01..419 ms) on the FX10e
                         fx10_exposure = ui.slider(min=0.010, max=419.000, step=0.001,
-                                                  value=min(419.000, app.storage.general.get("fx10_exposure_ms", 50.000)))
-                        ui.number(min=0.010, max=419.000, step=0.001, suffix="ms").bind_value(fx10_exposure).classes("w-full")
+                                                  value=min(419.000,
+                                                            app.storage.general.get("fx10_exposure_ms", 50.000)))
+                        ui.number(min=0.010, max=419.000, step=0.001, suffix="ms").bind_value(fx10_exposure).classes(
+                            "w-full")
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Spatial binning").classes("font-medium")
                         ui.label("1024 / 512 / 256 / 128 px wide").classes("text-xs muted")
-                        fx10_spatial = ui.select(_BINNING, value=app.storage.general.get("fx10_spatial_binning", 1)).props(
+                        fx10_spatial = ui.select(_BINNING,
+                                                 value=app.storage.general.get("fx10_spatial_binning", 1)).props(
                             "outlined dense").classes("w-full")
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Spectral binning").classes("font-medium")
                         ui.label("448 / 224 / 112 / 56 bands · 2 = factory").classes("text-xs muted")
                         # Default 2, like the driver: the factory offset / black-level /
                         # bad-pixel calibration was performed at 2x spectral binning.
-                        fx10_spectral = ui.select(_BINNING, value=app.storage.general.get("fx10_spectral_binning", 2)).props(
+                        fx10_spectral = ui.select(_BINNING,
+                                                  value=app.storage.general.get("fx10_spectral_binning", 2)).props(
                             "outlined dense").classes("w-full")
                 with ui.row().classes("console-toolbar"):
                     fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
-                    fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props("outline")
+                    fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props(
+                        "outline")
                     fx10_busy = ui.spinner(size="sm").classes("hidden")
                 # Per-band raw DN over ~1 s; thresholds use the capture's PixelFormat.
                 with ui.column().classes("plot-surface w-full"):
                     fx10_chart = ui.echart(fx10_plot.workbench_options()).classes("w-full h-96")
                     ui.label("No spectrum displayed · take an FX10 snapshot to inspect band statistics.").classes(
                         "empty-state w-full text-xs").bind_visibility_from(
-                            fx10_chart.options, "series", backward=lambda series: not series)
-                fx10_axis_note = ui.label("400–1000 nm · 100 nm ticks. Saturation guides use the captured pixel format.").classes("section-copy")
+                        fx10_chart.options, "series", backward=lambda series: not series)
+                fx10_axis_note = ui.label(
+                    "400–1000 nm · 100 nm ticks. Saturation guides use the captured pixel format.").classes(
+                    "section-copy")
                 fx10_meta = ui.label("").classes("text-sm muted mono break-all")
                 ui.link("Collect white and dark references →", "/reference").classes("text-sm")
 
@@ -376,7 +403,7 @@ def camera_page() -> None:
             refresh_guard()
             try:
                 result = await ebus_tools.set_ip(row.get("mac", ""), new_ip, mask, gateway, allow_foreign,
-                                                kind=kind)
+                                                 kind=kind)
             except Exception as e:
                 ui.notify(f"Set IP was not completed: {e}", type="negative", multi_line=True)
                 return
@@ -389,7 +416,8 @@ def camera_page() -> None:
                 ui.notify(result.message, type="positive", multi_line=True)
                 if writeback:
                     try:
-                        summary = await config_actions.change("apply_device_ip", kind, row.get("ip", ""), row.get("mac", ""), new_ip)
+                        summary = await config_actions.change("apply_device_ip", kind, row.get("ip", ""),
+                                                              row.get("mac", ""), new_ip)
                     except Exception as e:
                         ui.notify(f"Camera re-addressed, but the config write failed: {e}",
                                   type="negative", multi_line=True)
@@ -440,16 +468,20 @@ def camera_page() -> None:
                 ui.notify(f"Snapshot failed: {result.reason}", type="negative", multi_line=True)
                 gox_meta.set_text(f"Failed ({result.elapsed_s:.1f}s): {result.reason}")
                 return
-            gox_image.set_source(f"data:image/jpeg;base64,{result.jpeg_b64}")
+            _release_gox_urls()
+            gox_urls.extend((result.image_url, result.full_image_url))
+            gox_image.set_source(result.image_url)
+            gox_download.props["href"] = preview_images.download_url(result.full_image_url)
+            gox_download_row.set_visibility(True)
             gox_chart.options["series"][0]["data"] = result.histogram
-            gox_chart.options["xAxis"]["data"] = list(range(len(result.histogram)))
+            gox_chart.options["xAxis"]["data"] = [index * 64 for index in range(len(result.histogram))]
             gox_chart.update()
             request = result.request
             requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
                          f"gain x{request.gain:g} · " if request else "request metadata unavailable · ")
             gox_meta.set_text(
                 f"{result.decode_name} · {requested}"
-                f"mean {result.mean_16 / 65535 * 100:.1f}% · clipped {result.clipped_pct:.2f}% · "
+                f"mean {result.mean_dn:.1f} DN · clipped {result.clipped_pct:.2f}% · "
                 f"{result.elapsed_s:.1f}s"
             )
             gox_warn.set_text("Incomplete frame (packet loss? check MTU/rmem)" if result.incomplete else "")
@@ -461,7 +493,7 @@ def camera_page() -> None:
                 return
             try:
                 summary = await config_actions.change("apply_gox_acquisition",
-                    ip, mac, float(gox_exposure.value), float(gox_gain.value))
+                                                      ip, mac, float(gox_exposure.value), float(gox_gain.value))
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return
@@ -522,18 +554,21 @@ def camera_page() -> None:
         async def _fx10_apply() -> None:
             try:
                 summary = await config_actions.change("apply_fx10_acquisition",
-                    float(fx10_exposure.value), int(fx10_spatial.value), int(fx10_spectral.value))
+                                                      float(fx10_exposure.value), int(fx10_spatial.value),
+                                                      int(fx10_spectral.value))
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return
             _after_apply(summary)
 
         def _after_apply(summary: str) -> None:
-            """Same contract as the dashboard's Enable switches: the running
-            binary already loaded its config, so a write lands on the NEXT start."""
+            """Both saved profiles apply to subsequent recording/reference captures."""
             if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING):
                 STATE.pending_config_notice = True
-                ui.notify(f"Saved ({summary}) — takes effect on the next recording start",
+                ui.notify(f"Saved recording and snapshot configs ({summary}) — "
+                          "used by the next recording and reference capture",
                           type="info", multi_line=True)
             else:
-                ui.notify(f"Saved to {summary}", type="positive", multi_line=True)
+                ui.notify(f"Saved recording and snapshot configs ({summary}) — "
+                          "used by the next recording and reference capture",
+                          type="positive", multi_line=True)

@@ -49,6 +49,14 @@ std::vector<nlohmann::json> Events(const std::filesystem::path &directory) {
     for (std::string line; std::getline(input, line);) events.push_back(nlohmann::json::parse(line));
     return events;
 }
+nlohmann::json DeviceMetadata() {
+    return {
+        {"id", "test-camera"}, {"kind", "gox"},
+        {"format", "ebus-device-eBUS_SDK_v6.5.1.6797"},
+        {"recording_format", "ebus-raw-eBUS_SDK_v6.5.1.6797"},
+        {"sdk", {{"name", "Pleora eBUS"}, {"header_version", "6.5.1.6797"}}}
+    };
+}
 // Bound a real regular-file write so the kernel first accepts a prefix and
 // then returns EFBIG. Restore the process limit and signal handler before any
 // recorder finalization; no production failure-injection seam is needed.
@@ -90,7 +98,8 @@ TEST_CASE("raw preserves SDK bytes, flags and global sequence across rotation") 
     options.segment_bytes = 256; // The second oversized record must remain whole.
     options.flush_bytes = 1;
     ebus_driver::RawRecorder writer(options);
-    writer.Open({{"id", "test-camera"}, {"recording_format", "ebus-raw-v1"}});
+    const auto device = DeviceMetadata();
+    writer.Open(device);
     const std::vector<ebus_driver::RawBuffer> buffers{
         {{{"valid_frame", true}, {"block_id", 65535}, {"image", {{"padding_x", 3}, {"padding_y", 7}}}},
          {0, 255, 128, 7, 0, 9}},
@@ -102,6 +111,9 @@ TEST_CASE("raw preserves SDK bytes, flags and global sequence across rotation") 
     CHECK(writer.FramesWritten() == 2);
     writer.Close(true, "test complete");
     writer.Close(true, "idempotent");
+    const auto stored_device = Read(options.directory / "device.json");
+    CHECK(nlohmann::json::parse(stored_device.begin(), stored_device.end()) == device);
+    CHECK(writer.Summary().at("format") == device.at("recording_format"));
     for (std::size_t i = 0; i < buffers.size(); ++i) {
         const auto file = options.directory / ("seg_0000" + std::to_string(i + 1) + ".raw");
         const auto bytes = Read(file);
@@ -128,12 +140,30 @@ TEST_CASE("raw preserves SDK bytes, flags and global sequence across rotation") 
     }
     const auto events = Events(options.directory);
     REQUIRE(!events.empty());
+    CHECK(events.front().at("event") == "session_start");
+    CHECK(events.front().at("format") == device.at("recording_format"));
     const auto &end = events.back();
     CHECK(end.at("event") == "session_end");
+    CHECK(end.at("format") == device.at("recording_format"));
     CHECK(end.at("complete") == true);
     CHECK(end.at("records_written") == 3);
     CHECK(end.at("valid_frames_written") == 2);
     CHECK(end.at("segments_created") == 3);
+}
+
+TEST_CASE("missing or invalid recording identity cannot create an unidentified session") {
+    Temp temp;
+    for (const auto &device : std::vector<nlohmann::json>{
+             nlohmann::json::object(),
+             {{"recording_format", nullptr}},
+             {{"recording_format", 1}},
+             {{"recording_format", ""}}}) {
+        ebus_driver::RecorderOptions options;
+        options.directory = temp.root / "new-parent" / "camera";
+        ebus_driver::RawRecorder writer(options);
+        CHECK_THROWS(writer.Open(device));
+        CHECK_FALSE(std::filesystem::exists(options.directory.parent_path()));
+    }
 }
 
 TEST_CASE("recording never overwrites an existing camera directory") {
@@ -143,7 +173,7 @@ TEST_CASE("recording never overwrites an existing camera directory") {
     std::filesystem::create_directory(options.directory);
     { std::ofstream file(options.directory / "seg_00001.raw"); file << "previous data"; }
     ebus_driver::RawRecorder writer(options);
-    CHECK_THROWS(writer.Open(nlohmann::json::object()));
+    CHECK_THROWS(writer.Open(DeviceMetadata()));
     const auto bytes = Read(options.directory / "seg_00001.raw");
     CHECK(std::string(bytes.begin(), bytes.end()) == "previous data");
 }
@@ -153,7 +183,7 @@ TEST_CASE("failure rejects later appends and finalization reports incomplete") {
     ebus_driver::RecorderOptions options;
     options.directory = temp.root / "camera";
     ebus_driver::RawRecorder writer(options);
-    writer.Open(nlohmann::json::object());
+    writer.Open(DeviceMetadata());
     writer.Append({{{"valid_frame", true}}, {1, 2, 3}});
     CHECK_THROWS(writer.Append({nlohmann::json::array(), {4}}));
     CHECK(writer.Failed());
@@ -168,7 +198,7 @@ TEST_CASE("partial raw write rolls back without advancing record counts") {
     ebus_driver::RecorderOptions options;
     options.directory = temp.root / "camera";
     ebus_driver::RawRecorder writer(options);
-    writer.Open(nlohmann::json::object());
+    writer.Open(DeviceMetadata());
     writer.Append({{{"valid_frame", true}}, {1, 2, 3}});
     const auto file = options.directory / "seg_00001.raw";
     const auto original = Read(file);
@@ -192,7 +222,7 @@ TEST_CASE("partial event write retains parseable prefix and incomplete finalizat
     ebus_driver::RecorderOptions options;
     options.directory = temp.root / "camera";
     ebus_driver::RawRecorder writer(options);
-    writer.Open(nlohmann::json::object());
+    writer.Open(DeviceMetadata());
     const auto file = options.directory / "events.jsonl";
     const auto original = Read(file);
     {
@@ -213,7 +243,7 @@ TEST_CASE("failed exclusive segment creation does not count or overwrite that pa
     options.directory = temp.root / "camera";
     options.segment_records = 1;
     ebus_driver::RawRecorder writer(options);
-    writer.Open(nlohmann::json::object());
+    writer.Open(DeviceMetadata());
     writer.Append({{{"valid_frame", true}}, {1}});
     const auto occupied = options.directory / "seg_00002.raw";
     { std::ofstream file(occupied); file << "do not overwrite"; }

@@ -84,7 +84,7 @@ TEST_CASE("templates: config-gox-snapshot.yaml keeps the single-shot invariants"
     const CameraConfig &cam = cfg.cameras[0];
     CHECK(cam.id == "cam0");
     REQUIRE(cam.acquisition.pixel_format.has_value());
-    CHECK(*cam.acquisition.pixel_format == "BayerRG12Packed"); // must be in unpack_raw.py's PFNC table
+    CHECK(*cam.acquisition.pixel_format == "BayerRG12Packed");
     // Absent on purpose: the default must match what config-gox.yaml records with
     CHECK_FALSE(cam.acquisition.blemish_correction);
 

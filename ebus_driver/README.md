@@ -11,6 +11,11 @@ GOX 与 FX10 共用 `EbusCameraDriver`、接收线程、写盘线程和 `RawReco
 `Run` 启动两个 worker，执行 profile 的开始前动作，发送 AcquisitionStart，
 打开接收门闩并 Arm SensorSync；所有相机注册后才可能启动共享触发。
 
+GOX 仅在 `ptp.enabled: true` 时创建 PTP 管理对象、启用并等待同步。
+关闭 PTP 时仍允许外部触发采集，也允许关闭触发后的 freerun 采集；PTP 与外部触发
+均关闭时记录 warning，不因此拒绝启动。设备元数据将 PTP 记为未启用、未同步，
+普通遥测、触发计数和温度检查继续执行，不依赖 PTP 对象存在。
+
 接收线程先读取 SDK 状态及主机接收时间，检查有效范围，把
 `PvBuffer::GetDataPointer()` 的 `GetAcquiredSize()` 字节复制到独立拥有的内存，
 随后 requeue SDK buffer，再交给有界写盘队列。写盘线程不访问 SDK 对象。
@@ -38,11 +43,17 @@ max_frames 统计有效 image buffer，停止排空中的额外有效帧记为�
 
 每台相机目录只有三个主要产物：
 
-- `device.json`：ebus-device-v1，实际回读、设备身份、编译时 SDK 版本、配置来源、
+- `device.json`：`ebus-device-eBUS_SDK_v<SDK version>`，实际回读、设备身份、编译时 SDK 版本、配置来源、
   profile、缓冲预算和时间语义；运行时 SDK 版本未查询则为 null。
-- `seg_00001.raw`、后续分段：ebus-raw-v1，每条记录自带完整 JSON 元数据与 payload。
+- `seg_00001.raw`、后续分段：`ebus-raw-eBUS_SDK_v<SDK version>`，每条记录自带完整 JSON 元数据与 payload。
 - `events.jsonl`：初始化、开始前动作结果、健康采样、拒绝/排除、分段关闭、
   SensorSync 核对、最终统计和 session_end。
+
+两个格式标识的版本均来自编译时 Pleora SDK 的 `PvVersion.h` 中的
+`NVERSION_STRING`，与 `sdk.header_version` 一致。例如 SDK `6.5.1.6797` 生成
+`ebus-device-eBUS_SDK_v6.5.1.6797` 和 `ebus-raw-eBUS_SDK_v6.5.1.6797`。
+这个后缀记录编译所用 SDK 头文件版本，不代表已查询运行时 SDK，也不使用
+AmigaDrivers 项目版本。RAW 文件头的数字布局版本独立保存，当前仍为 `1`。
 
 `device.json` 只在 Init 完成配置后写一次，保存设备身份、配置请求及回读、SDK、
 缓冲配置和记录语义。Run 不再重新读取并复制整份设备元数据。
@@ -69,26 +80,29 @@ FX10 的旧 max_lines 对新 RAW 按 SDK 记录数轮转，max_mb 包含记录�
 GOX 的 record_align、queue_on_full、on_buffer_error 继续接受旧 YAML，
 但采用统一 RAW 策略；device.json 明确保存请求值与实际策略。统计周期继续按配置生效。
 
-读取端同时支持旧 GOX jai-raw-seg 和旧 FX10 ENVI；旧采集文件不迁写。
-CLI 名称 jai_snapshot、fx10_snapshot、fx10_reference 及 YAML 入口保留。
-新增工具：
-
-```text
-ebus_driver/scripts/inspect_raw.py list CAMERA_DIRECTORY/seg_00001.raw
-ebus_driver/scripts/inspect_raw.py verify CAMERA_DIRECTORY
-ebus_driver/scripts/export_envi.py FX10_CAMERA_DIRECTORY NEW_EXPORT_DIRECTORY
-```
-
-具体参数见各工具源码；这些命令本次未执行。离线 ENVI 是 DN 派生产物，
-包含来源记录映射，原始 RAW 保留用于重新解码；不声称从 ENVI 恢复被省略的 padding/Chunk。
-不支持的 PFNC 仍可原样采集，预览/导出明确拒绝未知解码规则。
+GUI 数据处理位于 `app/decoder/`，不属于 C++ 采集驱动依赖。
+`ebus/` 读取统一 RAW 并解码像素，`fx10/` 处理预览 DN 数据立方体和光谱，
+`gox/` 处理 Go-X 快照与实时图像。相机读取端只接受
+`ebus-raw-eBUS_SDK_v<SDK version>` 及匹配的设备元数据标识，仍单独核对二进制布局。
+旧 `-v1` 和无版本后缀的标识不兼容；已移除旧 GOX jai-raw-seg 和旧 FX10 ENVI
+读取路径，已有采集文件不迁写。
+`asterx/` 读取当前 AsteRx CSV 遥测，不使用相机 RAW 格式；app 中没有 LMS payload 解码器。
+`app/services/` 负责调度与控制，`app/ui/` 负责展示。
+FX10 快照、白/暗参考及实时光谱和均值均使用 DN，坐标范围依据 PixelFormat 满量程；
+不作 0–1 归一化或反射率换算。图像显示编码的亮度缩放不改变 RAW 或光谱 DN。
+GOX 快照保留原始 RAW，GUI 预览 JPEG 和直方图在内存生成，不另存 PNG。
+采集工具名称 jai_snapshot、fx10_snapshot、fx10_reference 及 YAML 入口保留。
+本项目负责设备驱动、原始数据流落盘和 GUI 临时展示。离线导出、格式转换及
+离线校准由 `amiga_decoders` 承接；这里不提供 RAW 检查/导出命令行工具、
+ENVI 导出器或色卡校准工具。不支持的 PFNC 仍可原样采集，GUI 预览明确拒绝
+未知解码规则。
 
 FX10 白/暗参考现在是 **两次独立连接的采集阶段**：同一不可变配置分别应用，
 暗场开始前核对 serial/model、几何、PixelFormat、明确的成像回读与校准引用。
 结果标记 `connection_scope="separate verified phases"`；这不证明未公开相机状态、
 机械快门位置或物理白板位置一致。任一阶段失败不会发布成功参考结果。
 
-## 二进制格式（v1）
+## 二进制布局
 
 所有整数为 little endian；不写 C++ 结构体内存，不做对齐填充。
 CRC 使用 CRC32C/Castagnoli。每段按完整记录轮转，单条超过容量时独占一段。
@@ -133,7 +147,7 @@ payload_offset 无法证明时为 null，读取端不得猜测。
 磁盘错误保持失败；写入半条记录尽力截回完整前缀，截断失败仍可由长度及 CRC 定位损坏尾部。
 文件系统/设备对 fsync 的实际保证不由静态代码证明。
 
-实时读取允许最后文件暂时存在半条记录；正常离线读取必须验证完整记录、
+实时读取允许最后文件暂时存在半条记录；完成会话的读取必须验证完整记录、
 序号、CRC 和 session_end 的计数/complete。无最终事件或损坏尾部不得当作完整成功会话；
 恢复只能取明确完整的前缀。相机会话结果还须结合主程序 drivers.json 或工具最终结果，
 因为最后事件写成后仍可能发生关闭/持久化失败。目录的存在或一张可预览图像不证明采集成功。
@@ -142,9 +156,10 @@ payload_offset 无法证明时为 null，读取端不得猜测。
 
 本次仅修改源码并做文本级静态核对，未执行 Git、依赖安装、CMake、C++ 编译/测试、
 Python 项目脚本或硬件操作。增加了 RAW 布局/轮转/CRC/失败锁存、BlockID
-及 Python 新旧格式/损坏输入/导出测试源码，尚未运行。
+及 Python 当前 RAW 格式、旧格式拒绝、DN 光谱和损坏输入的测试源码，尚未运行。
 
 需要在另行允许的环境执行构建及测试，再用实际设备验证：两种相机快照及长时吞吐；
 双相机共同 Arm/任一路失败；SIGINT、AcquisitionStop 失败与断链；满队列和磁盘错误；
 packed 像素、padding、Chunk、错误 buffer、16/64 位 ID；白/暗独立阶段匹配；
-新旧 GUI/CLI 解码和 ENVI 导出。静态核对不能证明硬件行为或无丢帧。
+GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示。
+静态核对不能证明硬件行为或无丢帧。

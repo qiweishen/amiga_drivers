@@ -88,7 +88,7 @@ namespace fx10 {
         std::vector<double> list; // explicit nm values
         double grid_start_nm = 400.0;
         double grid_end_nm = 1000.0;
-        std::vector<double> fwhm_list; // empty = omit fwhm from the .hdr
+        std::vector<double> fwhm_list; // empty = FWHM metadata unavailable
     };
 
     struct RotationConfig {

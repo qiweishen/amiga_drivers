@@ -42,23 +42,29 @@ namespace {
     }
 } // namespace
 
-TEST_CASE("apply_plan: a bare camera forces the 64-bit block IDs, the raw blemish state and the strobe") {
+TEST_CASE("apply_plan: a bare camera forces native BayerRG12Packed, 64-bit block IDs, raw blemish state and strobe") {
     const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(BaseCamera());
-    REQUIRE(plan.size() == 5u);
+    REQUIRE(plan.size() == 7u);
     CHECK(plan[0].name == "GevGVSPExtendedIDMode");
     CHECK(plan[0].value == "On");
     CHECK(plan[0].value_is_string);
     CHECK(plan[0].strict);
     CHECK(plan[0].required);
+    CHECK(plan[1].name == "SensorDigitizationBits");
+    CHECK(plan[1].value == "12");
+    CHECK(plan[1].strict);
+    CHECK(plan[2].name == "PixelFormat");
+    CHECK(plan[2].value == "BayerRG12Packed");
+    CHECK(plan[2].strict);
     // blemish_correction defaults to false (the rawest state), and false is not
     // the factory value, so even a config that asks for nothing else writes it.
-    CHECK(plan[1].name == "BlemishEnable");
-    CHECK(plan[1].value == "0");
+    CHECK(plan[3].name == "BlemishEnable");
+    CHECK(plan[3].value == "0");
     // The Line2 ExposureActive strobe is the rig's default too: the factory
     // LineSource for Line2 copies the Line5 input, useless for timing.
-    CHECK(plan[2].name == "LineSelector");
-    CHECK(plan[3].name == "LineSource");
-    CHECK(plan[4].name == "LineInverter");
+    CHECK(plan[4].name == "LineSelector");
+    CHECK(plan[5].name == "LineSource");
+    CHECK(plan[6].name == "LineInverter");
     // freerun needs no trigger write at all: the factory TriggerMode is Off.
     CHECK(IndexOf(plan, "TriggerMode") == -1);
 }
@@ -228,10 +234,12 @@ TEST_CASE("apply_plan: SensorDigitizationBits follows the pixel format's depth")
         }
     }
 
-    // No pixel format configured: nothing to derive from, nothing written.
+    // Omitting the YAML key must still request native 12-bit Bayer capture.
     const std::vector<gox::FeatureWrite> bare = gox::BuildApplyPlan(BaseCamera());
-    CHECK(Find(bare, "SensorDigitizationBits") == nullptr);
-    CHECK(Find(bare, "PixelFormat") == nullptr);
+    REQUIRE(Find(bare, "SensorDigitizationBits") != nullptr);
+    CHECK(Find(bare, "SensorDigitizationBits")->value == "12");
+    REQUIRE(Find(bare, "PixelFormat") != nullptr);
+    CHECK(Find(bare, "PixelFormat")->value == "BayerRG12Packed");
 }
 
 TEST_CASE("apply_plan: pixel_format_bit_depth") {

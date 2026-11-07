@@ -23,7 +23,7 @@ namespace gox {
         bool required = true; // false: a missing feature is skipped, a refused value warns (Counter0 binding)
     };
 
-    // A/D depth implied by a pixel format name ("BayerRG12Packed" -> 12), 0 = unknown
+    // A/D depth implied by a pixel format name ("BayerRG12" -> 12), 0 = unknown
     int PixelFormatBitDepth(const std::string &pixel_format);
 
     // Never throws; an absent optional leaves the feature at its factory value

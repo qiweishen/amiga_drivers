@@ -1,10 +1,11 @@
 # =============================================================
 # GoX Driver Configuration - Snapshot
 # =============================================================
-# Single-frame profile for jai_snapshot (GUI preview / exposure tuning).
+# Shared camera profile for jai_snapshot (Camera workbench and ColorChecker reference).
 # The tool forces: max_frames 1, max_duration_s 15, ptp off, trigger freerun,
-# statistics off, cameras[0] enabled, output under --out.
-# Placeholders overridden by the GUI: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain).
+# SensorSync off, cameras[0] enabled, output under --out.
+# Workbench overrides: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain).
+# ColorChecker reference uses this profile's camera parameters without workbench overrides.
 # Unknown keys are errors; omitted keys keep the driver defaults.
 
 
@@ -12,13 +13,16 @@
 cameras:
     -   id: cam0
         device:
-            mac: ""                     # --mac
-            ip: "10.95.76.106"          # --ip
+            mac: ""                         # --mac
+            ip: "10.95.1.101"               # --ip
         acquisition:
-            exposure_ms: 20.0           # > 0; < 900 / frame_rate_hz (10% timing margin)
-            gain: 1.0                   # 1.0..126.0
-            pixel_format: BayerRG12Packed   # must be in scripts/unpack_raw.py's PFNC table
-            frame_rate_hz: 3.0          # >= 0.125; sets the exposure ceiling (factory 8 fps clamps > ~114 ms)
+            exposure_ms: 176.4              # > 0; < 900 / frame_rate_hz (10% timing margin)
+            gain: 1.0                       # 1.0..126.0
+            pixel_format: BayerRG12Packed   # only accepted value: native 12-bit DN, 2 px / 3 B, also used by GUI previews
+            frame_rate_hz: 2.5              # >= 0.125; sets the exposure ceiling (factory 8 fps clamps > ~114 ms)
+            trigger:
+                mode: freerun
+                exposure_active_output: false
 
         # =============================================================
         # ADVANCED: do not change without a reason
@@ -34,11 +38,17 @@ cameras:
 # =============================================================
 # ADVANCED: do not change without a reason
 # =============================================================
-# --- Output (jai-raw-seg) ---
+# --- Standalone timing ---
+ptp:
+    enabled: false
+sensor_trigger:
+    enabled: false
+
+# --- Output (eBUS RAW) ---
 output:
     segment_size_mb: 1024               # > 0
     record_align: 4096                  # legacy input; unified RAW has no alignment
     queue_max_frames: 4                 # >= 2; pool = queue + 2
     queue_on_full: block                # the single frame must never be dropped
-    on_buffer_error: record_flagged     # unpack pads incomplete frames with --pad-incomplete
+    on_buffer_error: record_flagged     # preserve flagged RAW buffers; GUI skips invalid images
     flush_interval_mb: 64               # > 0

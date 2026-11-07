@@ -1,6 +1,6 @@
 #pragma once
 
-// SDK-free sizing rules for the two buffer pools. A GOX-12405C frame is
+// SDK-free sizing rules for the two buffer pools. A GOX-12405C BayerRG12Packed frame is
 // 4128 x 3008 x 1.5 B = 18.6 MB, so both counts are real memory: the defaults
 // buy a couple of seconds of jitter absorption, not ten.
 

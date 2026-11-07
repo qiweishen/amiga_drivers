@@ -12,7 +12,6 @@ from pathlib import Path
 
 from . import config_store
 
-
 _MAX_DIRECTORIES = 500
 
 

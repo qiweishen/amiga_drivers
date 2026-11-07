@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-
 from nicegui import ui
 
 from ..services import folder_picker

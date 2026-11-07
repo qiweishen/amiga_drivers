@@ -276,7 +276,7 @@ namespace gox {
 
     ordered_json BuildDeviceJson(const DeviceReport &r) {
         ordered_json doc;
-        doc["format"] = "gox-device-json/1";
+        // The shared camera engine adds the SDK-derived document identity.
         doc["camera_id"] = r.camera_id;
         doc["ip"] = r.ip;
         doc["connection_path"] = r.connection_path;

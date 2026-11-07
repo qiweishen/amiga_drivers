@@ -1,16 +1,17 @@
 """Data Live page: on-demand preview of the RUNNING acquisition session.
 
-Nothing auto-refreshes — each click reads the last second of data straight
-from the files the drivers are writing (see services/live_view.py)."""
+Nothing auto-refreshes. Each click reads completed data from the current session;
+FX10 uses a bounded frame-count window (see services/live_view.py)."""
 
 from __future__ import annotations
 
 from nicegui import ui
 
+from . import fx10_plot, layout
 from ..constants import TOOL_TICK_S
-from ..services import live_view
+from ..decoder.gox.preview import DISPLAY_LONG_EDGE
+from ..services import live_view, preview_images
 from ..state import STATE, ProcState
-from . import layout
 
 
 @ui.page("/live")
@@ -18,10 +19,15 @@ def live_page() -> None:
     with layout.frame("Data Live"):
         pending = {"gox": False, "fx10": False}
         versions = {"gox": 0, "fx10": 0}
-        page = {"alive": True, "generation": STATE.session_generation}
+        page = {"alive": True, "generation": STATE.session_generation, "gox_urls": []}
+
+        def release_gox_urls() -> None:
+            preview_images.release(*page["gox_urls"])
+            page["gox_urls"] = []
 
         def dispose() -> None:
             page["alive"] = False
+            release_gox_urls()
             versions["gox"] += 1
             versions["fx10"] += 1
 
@@ -44,28 +50,28 @@ def live_page() -> None:
                         ui.icon("image_search", size="36px")
                         ui.label("No recorded frame displayed")
                         ui.label("Use Fetch frame during an active GoX recording.").classes("text-xs")
+                with ui.row().classes("w-full items-center gap-3") as gox_download_row:
+                    gox_download = ui.link("Download full-resolution 16-bit PNG", "#").classes("text-xs")
+                    ui.label(f"Screen preview: linear DN, 8-bit, downscaled to ≤ {DISPLAY_LONG_EDGE} px. "
+                             "The download is lossless (DN × 16) and is decoded on first request.").classes(
+                        "text-xs muted")
+                gox_download_row.set_visibility(False)
                 gox_meta = ui.label("").classes("text-sm muted mono break-all")
 
             # -------------------------------------------------------- FX10
             with ui.column().classes("console-panel w-full min-w-0"):
                 ui.label("FX10 spectral statistics").classes("section-title")
-                ui.label("Band statistics across the last 1 s of recorded frames.").classes("section-copy")
+                ui.label("Raw DN statistics over recent frames; window size follows the expected frame rate.").classes(
+                    "section-copy")
                 with ui.row().classes("console-toolbar"):
                     fx10_btn = ui.button("Fetch spectrum", icon="ssid_chart", on_click=lambda: _fetch_fx10())
                     fx10_busy = ui.spinner(size="sm").classes("hidden")
                 with ui.column().classes("plot-surface w-full"):
-                    chart = ui.echart({
-                        "xAxis": {"type": "value", "name": "Wavelength (nm)", "nameLocation": "middle",
-                                  "nameGap": 28, "min": "dataMin", "max": "dataMax"},
-                        "yAxis": {"type": "value", "name": "Normalized (%)", "min": 0, "max": 100},
-                        "grid": {"left": 56, "right": 24, "top": 32, "bottom": 44},
-                        "legend": {"top": 0},
-                        "tooltip": {"trigger": "axis"},
-                        "series": [],
-                    }).classes("w-full h-80")
+                    chart = ui.echart(fx10_plot.workbench_options()).classes("w-full h-80")
                     ui.label("No spectrum displayed · use Fetch spectrum during an active FX10 recording.").classes(
                         "empty-state w-full text-xs").bind_visibility_from(
-                            chart.options, "series", backward=lambda series: not series)
+                        chart.options, "series", backward=lambda series: not series)
+                fx10_axis_note = ui.label("").classes("text-xs muted")
                 fx10_meta = ui.label("").classes("text-sm muted mono break-all")
 
         # ---------------------------------------------------------------- glue
@@ -77,9 +83,12 @@ def live_page() -> None:
                 versions["gox"] += 1
                 versions["fx10"] += 1
                 gox_image.set_source("")
+                gox_download_row.set_visibility(False)
+                release_gox_urls()
                 gox_meta.set_text("")
                 fx10_meta.set_text("")
-                chart.options["series"] = []
+                fx10_axis_note.set_text("")
+                chart.options.update(fx10_plot.workbench_options())
                 chart.update()
             # Pure state reads, and NiceGUI drops setter calls that change
             # nothing — an idle tick sends nothing however often it runs.
@@ -138,7 +147,11 @@ def live_page() -> None:
                 ui.notify(result.reason, type="warning", multi_line=True)
                 gox_meta.set_text(result.reason)
                 return
-            gox_image.set_source(f"data:image/jpeg;base64,{result.jpeg_b64}")
+            release_gox_urls()
+            page["gox_urls"] = [result.image_url, result.full_image_url]
+            gox_image.set_source(result.image_url)
+            gox_download.props["href"] = preview_images.download_url(result.full_image_url)
+            gox_download_row.set_visibility(True)
             gox_meta.set_text(
                 f"{result.camera} · seq {result.seq} · {result.width}×{result.height} · "
                 f"{result.pixel_format} · {result.age_s:.1f}s ago"
@@ -172,15 +185,13 @@ def live_page() -> None:
                 ui.notify(result.reason, type="warning", multi_line=True)
                 fx10_meta.set_text(result.reason)
                 return
-            axis = result.wavelengths_nm or list(range(result.bands))
-            chart.options["xAxis"]["name"] = "Wavelength (nm)" if result.wavelengths_nm else "Image row (uncalibrated)"
-            chart.options["series"] = [
-                {"name": name, "type": "line", "showSymbol": False, "animation": False,
-                 "data": [[x, v] for x, v in zip(axis, values)]}
-                for name, values in result.spectrum_pct.items()
-            ]
+            chart.options.update(fx10_plot.workbench_options(
+                result.spectrum_dn, full_scale=result.full_scale, bands=result.bands,
+                wavelengths_nm=result.wavelengths_nm,
+            ))
             chart.update()
+            fx10_axis_note.set_text(fx10_plot.axis_note(result.wavelengths_nm))
             fx10_meta.set_text(
                 f"{result.frames} frames · {result.bands} bands · {result.samples} px/line · "
-                f"newest {result.age_s:.1f}s ago"
+                f"{result.pixel_format} · full scale {result.full_scale} DN · newest {result.age_s:.1f}s ago"
             )

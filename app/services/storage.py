@@ -10,8 +10,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..state import STATE, ProcState, StorageStatus
 from . import config_store
+from ..state import STATE, ProcState, StorageStatus
 
 # Raw segments and their sidecars; also recognise historical HDF5 files. The name
 # may contain underscores; the timestamp anchors the greedy group.

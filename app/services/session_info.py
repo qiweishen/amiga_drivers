@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ..constants import DRIVERS
 from . import runtime, run_status
+from ..constants import DRIVERS
 
 
 class SessionMetadataPending(ValueError):

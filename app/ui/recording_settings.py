@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-
 from nicegui import ui
 
-from ..services import config_actions, config_store
 from . import folder_browser
-
+from ..services import config_actions, config_store
 
 _FIELDS = (("Operator", "operator"), ("Field", "field"),
            ("Output Directory", "output_dir_raw"))
@@ -46,8 +44,8 @@ class RecordingSettings:
             with ui.element("div").classes("metadata-grid"):
                 for key, _ in _FIELDS:
                     with ui.column().classes(
-                        "metadata-field w-full min-w-0 gap-1"
-                        + (" metadata-output" if key == "Output Directory" else "")
+                            "metadata-field w-full min-w-0 gap-1"
+                            + (" metadata-output" if key == "Output Directory" else "")
                     ):
                         with ui.row().classes("metadata-input-row w-full items-center gap-2 flex-nowrap"):
                             field = ui.input(key).props("outlined dense").classes("flex-1 min-w-0")
@@ -60,7 +58,8 @@ class RecordingSettings:
                         field.on_value_change(lambda e, k=key: self._edit(k, e.value))
                         self._inputs[key] = field
                         self._hints[key] = ui.label().classes("metadata-hint")
-            ui.label("Paths refer to the GUI server/container. Relative paths use the project root.").classes("metadata-help")
+            ui.label("Paths refer to the GUI server/container. Relative paths use the project root.").classes(
+                "metadata-help")
             with ui.row().classes("metadata-actions"):
                 self._status = ui.label("Loading recording details…").classes("metadata-status")
                 self._save = ui.button("Save", icon="save", on_click=self.save).props("unelevated dense")
@@ -260,6 +259,6 @@ class RecordingSettings:
         self._reload.set_enabled(not saving and not self._selecting_folder)
         notice = (f"Configuration unavailable: {self._read_error}" if self._read_error
                   else self._folder_error or ("Configuration is temporarily locked."
-                                             if pending and not self._enabled else ""))
+                                              if pending and not self._enabled else ""))
         self._notice.set_text(notice)
         self._notice.set_visibility(bool(notice))

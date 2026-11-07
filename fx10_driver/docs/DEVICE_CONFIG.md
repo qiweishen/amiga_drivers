@@ -67,7 +67,7 @@ values from **Table 8, p.44**:
 | `frame_rate_hz` | 50 | 50 | Freerun line rate; under an external trigger it is the EXPECTED pulse rate and is used only to size the buffer pool |
 | `spectral_binning` | **2** | **2** | 2/4/8 → 224/112/56 bands (p.46). The factory offset, black-level and bad-pixel calibration was performed at 2, and the optical FWHM is 5.5 nm, so 1× (1.35 nm sampling) oversamples and departs from the calibrated state. 1 is accepted and is required by MROI |
 | `spatial_binning` | 1 | 1 | 1/2/4/8 → 1024/512/256/128 samples |
-| `pixel_format` | Mono12 | Mono12Packed | Same bit depth, less wire bandwidth; unpacked to uint16 before the recorder sees it |
+| `pixel_format` | Mono12 | Mono12Packed | Same bit depth, less wire bandwidth; the recorder preserves the SDK buffer, while GUI preview unpacks supported pixels |
 | `image_enhancement` (AIE) | Enabled | true | See below — it decides whether the data is resampled and which calibration pack applies |
 | `status_line` | off | false | It **replaces the last image row** with camera status (p.34), i.e. it destroys a band |
 | `mroi` | Disabled | disabled | 1..512 regions, 1×1 binning only (p.9, p.26) |
@@ -80,7 +80,8 @@ It is factory-enabled and the calibration pack that applies depends on it (the
 pack with `FX` in its name is for AIE on; the manual recommends it, p.44). The
 driver therefore writes it **only when the config asks for `false`**, which is
 also why a default configuration never needs a node name the manual does not
-print. The state and the matching pack are recorded in device/profile metadata and offline-export provenance.
+print. The state and the matching pack are recorded in device/profile metadata
+for later interpretation of the original recording.
 
 Deliberately left at the factory value and **not** exposed:
 
@@ -174,10 +175,20 @@ hardware verification were not run for this change.
 
 ### Collect Reference page
 
-The UI invokes `fx10_reference` using the saved FX10 YAML and output root.
+The UI invokes `fx10_reference` using `config-fx10-snapshot.yaml` and the output root.
 The operator places an illuminated white reference before starting. The tool
 captures white/open and dark/closed phases, each for reference.duration_s.
-The config text is read once and snapshotted.
+The config text is read once and snapshotted. Exposure, frame rate, binning,
+pixel format and other camera settings come from this snapshot profile.
+Camera workbench overrides are not carried into reference capture.
+
+Both tools enforce freerun with SensorSync disabled. Required final timing
+writes follow `features.raw`, are verified by readback and appear in `device.json`.
+Reference capture requires `TriggerMode=Off`, `ExposureMode=Timed` and
+`EnAcquisitionFrameRate=true` in its final readbacks. It does not wait for PTP,
+hardware pulses or a trigger-board serial port, and does not claim an absolute
+device time scale. The original SDK timestamps and host clock readings remain
+recorded with their existing provenance.
 
 Both phases now use independent EbusCameraDriver instances and connections.
 Before dark acquisition, serial/model, geometry, PixelFormat, exposure/trigger
@@ -188,15 +199,18 @@ are not proven identical. The shutter remains closed after the dark phase until
 a subsequent normal/snapshot run requests opening it.
 
 Each phase records device.json, seg_*.raw and events.jsonl, plus
-reference_phase.json. A SensorSync participant has its own phase timing log.
+reference_phase.json. No SensorSync timing log is created for GUI references.
 The root stores raw/config/config-fx10.yaml, reference.request.json,
 reference.json and reference.log. An interrupted or failed phase preserves its
 partial recording and publishes no successful pair.
 
 CLI markers CONFIG/SESSION/PHASE/OK/FAIL and the GUI workflow remain supported.
-Plots decode supported RAW image buffers offline in DN, exclude invalid records,
-and retain the RAW data if rendering fails. Old ENVI reference sessions remain
-readable. See [format and lifecycle details](../../ebus_driver/README.md).
+GUI plots decode supported RAW image buffers in DN and exclude invalid records.
+The RAW data remains available if rendering fails. Camera readers accept only
+`ebus-raw-eBUS_SDK_v<SDK version>`; old ENVI reference sessions are not supported.
+Offline export and format conversion belong to `amiga_decoders`, outside this
+repository's scope.
+See [format and lifecycle details](../../ebus_driver/README.md).
 
 ### Receive payload and image layout
 
@@ -207,8 +221,8 @@ PixelFormat, geometry, image offset, padding, image/effective sizes and status.
 An SDK image represents one pushbroom scan line with spatial samples across
 width and spectral rows across height; a sequence forms a scan over time.
 
-Known image formats are decoded by the shared Python reader for preview and
-explicit offline ENVI export. Unsupported PFNC is not a reason to transform or
+Known image formats are decoded by the shared Python reader for GUI snapshots,
+reference plots and live preview. Unsupported PFNC is not a reason to transform or
 discard safe payload bytes. A decoder rejects unknown layouts rather than guessing.
 Actual ROI, MROI, binning and device-side processing still determine what the
 camera has already output.
@@ -271,14 +285,22 @@ device apply semantics remain in the FX10 profile.
 The shared engine records safe flagged buffers and fails on loss, queue
 exhaustion, SDK or file errors. It drains admitted buffers, synchronizes segments
 and records session_end only during finalization. A missing/failed final result
-is incomplete. Native RAW remains authoritative after an offline ENVI export;
-the exporter publishes a derivative header only after its data/index are complete.
+is incomplete. Native RAW remains the authoritative record; this repository does
+not export ENVI or other offline derivative formats.
 
 ## Dataset metadata
 
-device.json contains ebus-device-v1 identity, factory actions, applied writes,
-final configuration readbacks, calibration/profile, SDK header version and the
-actual buffer budget. Runtime SDK version is unknown unless queried.
+device.json contains `ebus-device-eBUS_SDK_v<SDK version>` identity, factory
+actions, applied writes, final configuration readbacks, calibration/profile,
+SDK header version and the actual buffer budget. Runtime SDK version is unknown
+unless queried.
+Both the device identity and `recording_format` (`ebus-raw-eBUS_SDK_v<SDK version>`)
+use the compiled Pleora SDK's `PvVersion.h` `NVERSION_STRING`, matching
+`sdk.header_version`; for example, `ebus-device-eBUS_SDK_v6.5.1.6797` and
+`ebus-raw-eBUS_SDK_v6.5.1.6797`. This is not the AmigaDrivers project version or
+a runtime SDK version query. The RAW binary header's numeric layout version
+remains `1` and is validated separately. Old `-v1` and unversioned identities
+are not accepted; existing recordings are not rewritten.
 The profile records the actual geometry and expected frame rate separately;
 configuration is not evidence of an achieved rate.
 
@@ -295,8 +317,8 @@ Each RAW record independently describes SDK byte count, image offset and layout,
 padding, PixelFormat, Chunk count, operation status, ID and timestamps.
 A counter unavailable to the profile remains null; unknown metadata cannot be
 promoted to a synchronization claim. The historical capture.json, .hdr, .lines.csv,
-segments.jsonl and telemetry.jsonl belong to the legacy ENVI format, which the
-reader still supports.
+segments.jsonl and telemetry.jsonl belong to the legacy ENVI format and are not
+accepted by the current GUI reader.
 
 ## Not done, and why
 

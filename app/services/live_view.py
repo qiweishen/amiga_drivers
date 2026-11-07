@@ -3,38 +3,37 @@
 Nothing polls: each fetch is a single read of the files the drivers are
 appending to right now, restricted to committed bytes.
 
-- GoX: newest complete eBUS image, or an indexed legacy jai-raw-seg frame.
-- FX10: image-row statistics over valid raw frames, or committed legacy BIL
-  lines. Device/profile metadata fixes the interpretation. SensorSync edges require a verified
+- GoX: newest complete ebus-raw image.
+- FX10: raw DN statistics over valid ebus-raw frames.
+  Device/profile metadata fixes the interpretation. SensorSync edges require a verified
   association before they can be treated as GNSS camera-line timestamps.
 """
 
 from __future__ import annotations
 
-import base64
 import asyncio
-import csv
+import cv2
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
-
-from gox_driver.scripts.jai_raw import pixels, recording
-from ebus_driver.scripts.ebus_raw import recording as raw_recording
-
-from ..formats import fx10
+from ..decoder import fx10
+from ..decoder.gox import preview as gox_preview, recording as gox_recording
 from ..state import STATE, ProcState
+from . import preview_images
 
-_WINDOW_S = 1.0  # "the last second before the click"
-_FX10_STALE_S = 3.0  # .bil.part mtime older than this = the lines stopped
+_WINDOW_S = 1.0  # frame-count window estimated from the configured rate
+_FX10_STALE_S = 3.0  # age of the newest frame's host receive timestamp
 
 
 @dataclass
 class GoxLive:
     ok: bool
     reason: str = ""
-    jpeg_b64: str = ""
+    # preview_images URL paths: 8-bit screen preview, and the on-demand
+    # full-resolution 16-bit PNG re-decoded from the same committed record.
+    image_url: str = ""
+    full_image_url: str = ""
     camera: str = ""
     seq: int = 0
     width: int = 0
@@ -49,11 +48,13 @@ class Fx10Live:
     ok: bool
     reason: str = ""
     wavelengths_nm: list[float] = field(default_factory=list)
-    spectrum_pct: dict[str, list[float]] = field(default_factory=dict)
+    spectrum_dn: dict[str, list[float]] = field(default_factory=dict)
+    full_scale: int = 0
+    pixel_format: str = ""
     frames: int = 0
     bands: int = 0
     samples: int = 0
-    age_s: float = 0.0  # raw: host receive time; legacy BIL: file mtime
+    age_s: float = 0.0  # host receive time
     request: PreviewRequest | None = None
 
 
@@ -129,28 +130,15 @@ def gox_latest_frame(session: Path) -> GoxLive:
     try:
         cameras = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
         for cam_dir in cameras:
-            if raw_recording.is_session(cam_dir):
-                frames = raw_recording.latest_records(cam_dir, 1)
-                if not frames:
-                    return GoxLive(False, reason="No complete valid raw image yet")
-                frame = frames[-1]
-                native, name, _ = pixels.decode_record(frame, raw_recording.read_payload(frame))
-            else:
-                indexes = sorted(cam_dir.glob("seg_*.idx.jsonl"))
-                if not indexes:
-                    continue
-                rows = list(recording.index_records(indexes[-1], tail_bytes=recording.INDEX_TAIL_BYTES))
-                if not rows:
-                    return GoxLive(False, reason="No committed frames yet — retry after the index flush")
-                frame, payload = recording.read_indexed_frame(recording.segment_for_index(indexes[-1]), rows[-1])
-                native, name, _ = pixels.decode(frame.pf, frame.w, frame.h, payload)
-            img8 = pixels.live_image(native, pixels.format_for_code(frame.pf))
-            ok, jpg = cv2.imencode(".jpg", img8, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-            if not ok:
-                return GoxLive(False, reason="JPEG encoding failed")
-            return GoxLive(True, jpeg_b64=base64.b64encode(jpg.tobytes()).decode(),
+            image = gox_recording.latest_frame(cam_dir)
+            frame = image.record
+            stem = f"gox_live_{session.name}_{cam_dir.name}_seq{frame.seq}"
+            image_url = preview_images.put(gox_preview.live_display_png(image), f"{stem}_screen.png")
+            full_image_url = preview_images.lazy(lambda: gox_preview.record_full_png16(frame),
+                                                 f"{stem}_16bit.png")
+            return GoxLive(True, image_url=image_url, full_image_url=full_image_url,
                            camera=cam_dir.name, seq=frame.seq, width=frame.w, height=frame.h,
-                           pixel_format=name, age_s=max(0.0, time.time() - frame.hrt / 1e9))
+                           pixel_format=image.pixel_format, age_s=max(0.0, time.time() - frame.hrt / 1e9))
     except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, cv2.error) as error:
         return GoxLive(False, reason=f"Cannot read committed GoX frame: {error}")
     return GoxLive(False, reason=f"No camera data under {root} yet")
@@ -166,31 +154,14 @@ def fx10_spectrum(session: Path) -> Fx10Live:
         if not directories:
             return Fx10Live(False, reason=f"No FX10 session under {root} yet")
         capture = fx10.load_capture(directories[-1])
-        if capture.recording_format == "ebus-raw-v1":
-            window = max(1, round(capture.expected_frame_rate_hz * _WINDOW_S))
-            cube, host_timestamp = fx10.raw_tail_cube(directories[-1], capture, window)
-            age = max(0.0, time.time() - host_timestamp / 1e9)
-            if age > _FX10_STALE_S:
-                return Fx10Live(False, reason=f"Newest valid raw image is {age:.1f} s old")
-            values, _, _ = fx10.spectrum(cube, capture.full_scale)
-            return Fx10Live(True, wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
-                            frames=cube.shape[0], bands=capture.bands, samples=capture.samples, age_s=age)
-        files = sorted(directories[-1].glob("segment_*.bil.part")) or sorted(directories[-1].glob("segment_*.bil"))
-        if not files:
-            return Fx10Live(False, reason="No open segment yet")
-        data = files[-1]
-        segment = fx10.open_segment(data, capture)
-        stat = data.stat()
-        if stat.st_size < capture.line_bytes:
-            return Fx10Live(False, reason="No complete line on disk yet — retry")
-        age = max(0.0, time.time() - stat.st_mtime)
-        if age > _FX10_STALE_S:
-            return Fx10Live(False, reason=f"No frames in the last {_WINDOW_S:.0f} s "
-                                          f"(newest line is {age:.1f} s old — trigger pulses missing?)")
         window = max(1, round(capture.expected_frame_rate_hz * _WINDOW_S))
-        cube = fx10.tail_cube(segment, window)
+        cube, host_timestamp = fx10.raw_tail_cube(directories[-1], capture, window)
+        age = max(0.0, time.time() - host_timestamp / 1e9)
+        if age > _FX10_STALE_S:
+            return Fx10Live(False, reason=f"Newest valid raw image is {age:.1f} s old")
         values, _, _ = fx10.spectrum(cube, capture.full_scale)
-        return Fx10Live(True, wavelengths_nm=list(capture.wavelengths_nm), spectrum_pct=values,
+        return Fx10Live(True, wavelengths_nm=list(capture.wavelengths_nm), spectrum_dn=values,
+                        full_scale=capture.full_scale, pixel_format=capture.pixel_format,
                         frames=cube.shape[0], bands=capture.bands, samples=capture.samples, age_s=age)
-    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, csv.Error) as error:
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError) as error:
         return Fx10Live(False, reason=f"Cannot read committed FX10 data (retry after rotation): {error}")

@@ -1,22 +1,27 @@
-"""Collect a persistent FX10 white/dark pair with the recording configuration."""
+"""Collect a persistent FX10 white/dark pair with the snapshot configuration.
+
+Pairs are collected under <Output Directory>/tmp; the operator moves one into
+the output directory with save_to_data() once the exposure check passes.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import math
 import time
+import yaml
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
-from ..constants import BIN_FX10_REFERENCE
-from ..state import STATE
-from ..formats import fx10
-from . import camera_operations, config_store, runtime, tool_jobs
+from . import atomic_json, camera_operations, config_store, fx10_exposure, reference_storage, runtime, tool_jobs
 from .fx10_reference_preview import ReferenceSpectrum, read_spectrum
+from ..constants import BIN_FX10_REFERENCE, FX10_SNAPSHOT_CONFIG
+from ..decoder import fx10
+from ..decoder.ebus import recording as raw_recording
 
 TOOL_NAME = "fx10_reference"
 SETUP_AND_FINALIZE_TIMEOUT_S = 180.0  # added to BOTH configured capture intervals
@@ -32,6 +37,8 @@ class ReferenceResult:
     raw_output: str = ""
     duration_s: float | None = None
     spectra: dict[str, ReferenceSpectrum] = field(default_factory=dict)
+    exposure_check: fx10_exposure.ExposureCheck | None = None
+    saved: bool = False  # moved from <output>/tmp into <output>
 
 
 _last_result: ReferenceResult | None = None
@@ -53,14 +60,14 @@ def _duration(value: object) -> float:
 
 def configured_duration() -> tuple[Path, float | None]:
     """For page display only; the collector announces its actual loaded value."""
-    loaded = config_store.read("fx10")
-    doc = yaml.safe_load(loaded.text)
+    path = config_store.checked_snapshot_path(FX10_SNAPSHOT_CONFIG)
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     if doc is None:
         doc = {}
     if not isinstance(doc, dict) or not isinstance(doc.get("reference", {}), dict):
         raise ValueError("FX10 config and reference must be mappings")
     reference = doc.get("reference", {})
-    return loaded.file.path, _duration(reference["duration_s"]) if "duration_s" in reference else None
+    return path, _duration(reference["duration_s"]) if "duration_s" in reference else None
 
 
 def status() -> str:
@@ -101,13 +108,49 @@ def _validate_result(emitted: str, output_root: Path, duration_s: float) -> tupl
         if not (path / "device.json").is_file():
             raise ValueError(f"{name.capitalize()} reference is missing finalized data")
         fx10.validate_finalized(path)
-        capture = fx10.load_capture(path)
-        if capture.recording_format == "ebus-raw-v1":
-            ending = fx10.raw_recording.session_end(path)
-            if (phase["frames_written"] != ending["valid_frames_written"]
-                    or phase.get("records_written") != ending["records_written"]):
-                raise ValueError(f"{name.capitalize()} reference counters disagree with raw records")
+        ending = raw_recording.session_end(path)
+        if (phase["frames_written"] != ending["valid_frames_written"]
+                or phase.get("records_written") != ending["records_written"]):
+            raise ValueError(f"{name.capitalize()} reference counters disagree with raw records")
     return session, doc
+
+
+def _exposure_check(session: Path, manifest: dict, white: ReferenceSpectrum | None):
+    """The white phase against the active exposure series; None if there is none or it does not apply."""
+    if white is None or not white.ok or "p90" not in white.spectrum_dn:
+        return None
+    phase = next(phase for phase in manifest["phases"] if phase["phase"] == "white")
+    white_dir = session / phase["session_dir"]
+    return fx10_exposure.check_reference(white_dir, white.spectrum_dn["p90"], white.full_scale,
+                                         f"{session.name}/{phase['session_dir']}")
+
+
+def _move_to_output(session: Path) -> Path:
+    root = reference_storage.output_root()
+    if session.parent != root / reference_storage.TMP_FOLDER:
+        raise ValueError(f"Only references under {root / reference_storage.TMP_FOLDER} can be saved")
+    if (root / session.name).exists():
+        raise ValueError(f"{root / session.name} already exists")
+    # The collector's reference.json stays exactly as written; the move is recorded beside it.
+    atomic_json.write(session / "saved.json", {
+        "format": "fx10-reference-saved-v1", "saved_utc": datetime.now(timezone.utc).isoformat(),
+        "saved_from": session.relative_to(root).as_posix(),
+    }, limit=64 * 1024)
+    return reference_storage.move_to_output(session, root)
+
+
+async def save_to_data() -> ReferenceResult:
+    """Move the last completed pair from <output>/tmp into <output>."""
+    global _last_result, _status
+    result = _last_result
+    if result is None or not result.ok or not result.session_dir:
+        raise ValueError("There is no completed reference pair to save")
+    if result.saved:
+        raise ValueError(f"This reference pair is already saved: {result.session_dir}")
+    target = await asyncio.to_thread(_move_to_output, Path(result.session_dir))
+    _last_result = dataclasses.replace(result, session_dir=str(target), saved=True)
+    _status = f"FX10 reference pair saved: {target}"
+    return _last_result
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
@@ -121,7 +164,7 @@ async def collect_reference() -> ReferenceResult:
 async def _collect() -> ReferenceResult:
     global _status, _last_result
     started = time.monotonic()
-    _status = "Preparing reference capture using the saved FX10 recording configuration…"
+    _status = "Preparing reference capture using the FX10 snapshot configuration…"
     _last_result = None
     proc = None
     completed = None
@@ -141,19 +184,15 @@ async def _collect() -> ReferenceResult:
             raise RuntimeError("A reference collector is already running")
         if await runtime.pgrep("AmigaDrivers"):
             raise RuntimeError("Stop the main recording before collecting references")
-        config = config_store.get("fx10")
-        settings = config_store.main_settings()
-        output_root = settings["output_dir"]
+        config = config_store.checked_snapshot_path(FX10_SNAPSHOT_CONFIG)
+        output_root = await asyncio.to_thread(reference_storage.tmp_root)
         # No preview slider values or selected-camera overrides. The C++ tool
         # reads this config once and preserves that exact text alongside the pair.
-        # Acquisition/trigger settings come from the same config as recording.
-        # The collector uses the rig's port only when sensor_trigger.enabled.
+        # Reference capture always uses freerun; it does not use SensorSync.
         argv = [
-            runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config.path),
+            runtime.exec_path(BIN_FX10_REFERENCE), "--config", runtime.exec_path(config),
             "--out", runtime.exec_path(output_root),
         ]
-        if settings["sensor_trigger_port"]:
-            argv += ["--sensor-port", settings["sensor_trigger_port"]]
         proc = await tool_jobs.spawn(argv)
 
         async def read_stdout() -> None:
@@ -212,7 +251,8 @@ async def _collect() -> ReferenceResult:
             raise
         await tool_jobs.confirm_exit(proc)
         if proc.returncode != 0 or failure or not success_path:
-            raise RuntimeError(failure or f"Reference collector exited without a complete pair (exit {proc.returncode})")
+            raise RuntimeError(
+                failure or f"Reference collector exited without a complete pair (exit {proc.returncode})")
         if duration_s is None:
             raise RuntimeError("Collector did not announce the configured duration; rebuild fx10_reference")
         session, manifest = await asyncio.to_thread(_validate_result, success_path, output_root, duration_s)
@@ -221,15 +261,24 @@ async def _collect() -> ReferenceResult:
             name = phase["phase"]
             _status = f"References saved — calculating the complete {name} spectrum…"
             try:
-                spectrum = await asyncio.to_thread(read_spectrum, session / phase["session_dir"], phase["frames_written"])
+                spectrum = await asyncio.to_thread(read_spectrum, session / phase["session_dir"],
+                                                   phase["frames_written"])
             except Exception as error:
                 # Recording already completed. A display/analysis error must
                 # not reclassify the saved pair as a failed acquisition.
                 spectrum = ReferenceSpectrum(False, reason=f"Cannot display reference spectrum: {error}")
             spectra[name] = spectrum
             _last_result = ReferenceResult(True, session_dir=str(session), duration_s=duration_s,
-                spectra=dict(spectra), elapsed_s=time.monotonic() - started, raw_output="\n".join(output))
-        _status = f"White and dark references saved: {session}"
+                                           spectra=dict(spectra), elapsed_s=time.monotonic() - started,
+                                           raw_output="\n".join(output))
+        try:
+            check = await asyncio.to_thread(_exposure_check, session, manifest, spectra.get("white"))
+        except Exception:  # an analysis error never reclassifies the recorded pair
+            check = None
+        if check is not None:
+            await fx10_exposure.save_current()
+            _last_result = dataclasses.replace(_last_result, exposure_check=check)
+        _status = f"White and dark references collected under tmp: {session}"
         if any(not spectrum.ok for spectrum in spectra.values()):
             _status += " — some plots are unavailable; recorded data are retained"
         return _last_result
@@ -237,12 +286,14 @@ async def _collect() -> ReferenceResult:
         _status = "Reference collection interrupted; any partial data are retained"
         raise
     except Exception as error:
-        reason = f"Reference collection timed out after {timeout_s:g}s" if isinstance(error, asyncio.TimeoutError) else str(error)
+        reason = f"Reference collection timed out after {timeout_s:g}s" if isinstance(error,
+                                                                                      asyncio.TimeoutError) else str(
+            error)
         _status = f"Reference collection failed: {reason}"
         if session_path:
             _status += f" — partial data retained at {session_path}"
         _last_result = ReferenceResult(False, reason=reason, session_dir=session_path, duration_s=duration_s,
-                                      elapsed_s=time.monotonic() - started, raw_output="\n".join(output))
+                                       elapsed_s=time.monotonic() - started, raw_output="\n".join(output))
         return _last_result
     finally:
         if ready_wait is not None:

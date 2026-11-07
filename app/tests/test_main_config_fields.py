@@ -1,19 +1,17 @@
 """Offline contracts for Overview writeback; only temporary YAML files are used."""
 
-from contextlib import ExitStack
 import os
+import unittest
+import yaml
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
-
-import yaml
 
 from app.constants import ConfigFile
 from app.services import config_store
 from app.state import ProcState
-
 
 MAIN = """# Main configuration
 General:
@@ -168,7 +166,7 @@ class MainConfigFieldTests(unittest.TestCase):
         with patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(self.directory)}):
             with self.assertRaises(ValueError):
                 config_store.set_main_field("Output Directory", str(self.directory.parent / "outside"),
-                                           expected_value="./data")
+                                            expected_value="./data")
             config_store.set_main_field("Output Directory", str(allowed), expected_value="./data")
         self.assertFalse(allowed.exists())
         self.assertEqual(yaml.safe_load(self.contents())["General"]["Output Directory"], str(allowed))

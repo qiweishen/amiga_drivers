@@ -11,8 +11,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..constants import DRIVERS, SESSION_DIR_RE
 from .run_status import SCHEMA
+from ..constants import DRIVERS, SESSION_DIR_RE
 
 _SLOTS = asyncio.Semaphore(2)
 MAX_SESSIONS = 5000
@@ -29,7 +29,6 @@ class Session:
     status: str
     detail: str
     duration_s: float | None
-    replay: bool
 
 
 def _scan(root: Path, active: Path | None, cancel: threading.Event) -> tuple[list[Session], str]:
@@ -79,7 +78,8 @@ def _scan(root: Path, active: Path | None, cancel: threading.Event) -> tuple[lis
             elif finalized and run.get("recording_failed") is True:
                 status = "failed"
             elif finalized and run.get("recording_failed") is False:
-                status = "completed" if detail == "completed" else "stopped" if detail.startswith("interrupted (signal ") else "unknown"
+                status = "completed" if detail == "completed" else "stopped" if detail.startswith(
+                    "interrupted (signal ") else "unknown"
             else:
                 status = "unfinished"
             value = run.get("duration_s")
@@ -87,10 +87,7 @@ def _scan(root: Path, active: Path | None, cancel: threading.Event) -> tuple[lis
                 duration = float(value)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             detail = f"Metadata unavailable: {exc}"
-        csv_available = any((path / "raw" / "asterx" / filename).is_file()
-                            for filename in ("live_insnavgeod.csv", "live_receiverstatus.csv"))
-        result.append(Session(path, started, drivers, status, detail, duration,
-                              finalized and path != active and csv_available))
+        result.append(Session(path, started, drivers, status, detail, duration))
     note = f"{len(result)} sessions indexed; only top-level directories and small manifests were read"
     if limited or matching > MAX_SESSIONS:
         note += f". Partial listing: limit {MAX_SESSIONS} sessions / {MAX_ENTRIES} entries / 64 MiB metadata"

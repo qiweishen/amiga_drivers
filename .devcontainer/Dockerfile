@@ -48,6 +48,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmock-dev
 
 # =============================================================
+# Wayland client libraries (GUI forwarding defaults to X11/XWayland)
+# =============================================================
+RUN apt-get install -y --no-install-recommends \
+    libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0
+
+# =============================================================
 # eBUS SDK dependencies
 # =============================================================
 RUN apt-get install -y --no-install-recommends \

@@ -129,7 +129,7 @@ namespace fx10 {
                               " does not match wavelength count " + std::to_string(out.nm.size()));
         }
 
-        // Guard the .hdr against garbage: values must be finite and physically sane
+        // Validate recorded wavelength metadata: values must be finite and physically sane
         // (the FX10 family spans 400-1000 nm; anything outside 1-100000 nm is a
         // malformed calibration file or config, not a real camera).
         for (const double v: out.nm) {

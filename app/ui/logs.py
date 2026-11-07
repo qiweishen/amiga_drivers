@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from ..services.log_buffer import BUFFER, LEVELS, LogLine
 from . import layout
-
+from ..services.log_buffer import BUFFER, LEVELS, LogLine
 
 _DEFAULT_LEVELS = {"info", "warning", "error", "critical"}
 

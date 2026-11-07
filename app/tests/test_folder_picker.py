@@ -3,12 +3,12 @@
 These tests do not start the GUI, launch a desktop dialog, or access devices.
 """
 
-from contextlib import ExitStack
 import os
+import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 from unittest.mock import Mock, patch
 
 from app.services import folder_picker
@@ -250,7 +250,8 @@ class FolderBrowserTests(unittest.TestCase):
         with patch.object(folder_picker.config_store, "output_dir_problems", return_value=[]) as validate:
             self.assertEqual(folder_picker.checked_selection(str(child)), str(child))
         validate.assert_called_once_with(str(child))
-        with patch.object(folder_picker.config_store, "output_dir_problems", return_value=["recording mount unavailable"]):
+        with patch.object(folder_picker.config_store, "output_dir_problems",
+                          return_value=["recording mount unavailable"]):
             with self.assertRaisesRegex(RuntimeError, "recording mount unavailable"):
                 folder_picker.checked_selection(str(child))
 

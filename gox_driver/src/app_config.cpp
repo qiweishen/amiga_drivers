@@ -91,6 +91,9 @@ namespace gox {
                 Fail(p + ".frame_rate_hz", "must be >= 0.125");
             }
             Read(a, p, "pixel_format", acq.pixel_format);
+            if (!acq.pixel_format || *acq.pixel_format != kNativePixelFormat) {
+                Fail(p + ".pixel_format", "must be BayerRG12Packed (native 12-bit Bayer DN, 2 px / 3 B)");
+            }
             Read(a, p, "blemish_correction", acq.blemish_correction);
 
             const YAML::Node roi = OptionalMap(a, p, "roi", {"width", "height", "offset_x", "offset_y"});

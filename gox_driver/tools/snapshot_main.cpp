@@ -9,7 +9,7 @@
 namespace {
 void Usage(const char *program) {
     std::printf("Usage: %s --config <snapshot.yaml> --out <dir> [overrides]\n"
-        "Captures one GOX frame as ebus-raw-v1 under <dir>/<camera_id>.\n"
+        "Captures one GOX frame in freerun (PTP and SensorSync off) under <dir>/<camera_id>.\n"
         "Overrides: --ip <address> | --mac <address>, --exposure-ms <value>, --gain <value>\n"
         "Last stdout line: SNAPSHOT: OK <camera_dir> or SNAPSHOT: FAIL <code> <reason>\n", program);
 }
@@ -51,8 +51,19 @@ int main(int argc, char **argv) {
             *camera.acquisition.exposure_ms >= 1000.0 / *camera.acquisition.frame_rate_hz)
             return SnapshotFail(2, "exposure does not fit the configured frame period");
         camera.acquisition.trigger.mode = gox::TriggerMode::kFreerun;
+        camera.acquisition.trigger.selector_entry = "FrameStart";
+        camera.acquisition.trigger.exposure_active_output = false;
         config.sensor_trigger.enabled = false;
         config.ptp.enabled = false;
+        // Apply after the YAML escape hatch. Bool/enum writes are required and
+        // equality-checked by CameraController, and retained in device.json.
+        // Disable the raw override's current trigger selector before FrameStart.
+        camera.features.raw.push_back({"TriggerMode", "Off", true});
+        camera.features.raw.push_back({"TriggerSelector", "FrameStart", true});
+        camera.features.raw.push_back({"TriggerMode", "Off", true});
+        camera.features.raw.push_back({"ExposureMode", "Timed", true});
+        camera.features.raw.push_back({"AcquisitionMode", "Continuous", true});
+        camera.features.raw.push_back({"GevIEEE1588", "false", false});
         config.output.max_frames = 1;
         if (config.output.max_duration_s <= 0.0 || config.output.max_duration_s > 15.0)
             config.output.max_duration_s = 15.0;

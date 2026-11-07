@@ -8,13 +8,13 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import replace
 
-from ..constants import BIN_AMIGA, MAIN_CONFIG
-from ..state import STATE, ProcState, RecordingSnapshot
 from . import config_store, runtime, session_info, tool_jobs, control_owner, run_status
 from .asterx_live import LIVE as ASTERX_LIVE
 from .driver_stats import STATS
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
+from ..constants import BIN_AMIGA, MAIN_CONFIG
+from ..state import STATE, ProcState, RecordingSnapshot
 
 PROCESS_NAME = "AmigaDrivers"
 _ACTIVE = (ProcState.STARTING, ProcState.RUNNING, ProcState.STOPPING)
@@ -144,7 +144,8 @@ class AcquisitionController:
     async def start(self) -> bool:
         """Reserve startup synchronously; page cancellation cannot abandon the launch."""
         control_owner.require()
-        if (self._closing or self._state.process_state in _ACTIVE or STATE.snapshot_busy or STATE.tool_uncertain or self._state.control_uncertain
+        if (
+                self._closing or self._state.process_state in _ACTIVE or STATE.snapshot_busy or STATE.tool_uncertain or self._state.control_uncertain
                 or self._adopting or (self._start_task is not None and not self._start_task.done())):
             return False
         generation = self._reset_run()
@@ -206,7 +207,7 @@ class AcquisitionController:
         lifecycle = doc["lifecycle"]
         phase = lifecycle["phase"]
         self._update(status_source=run_status.SCHEMA, status_detail=phase,
-                run_result={"run": doc["run"], "driver_results": doc.get("driver_results", [])})
+                     run_result={"run": doc["run"], "driver_results": doc.get("driver_results", [])})
         if phase == "running" and lifecycle["configuration_read"]:
             self._update(config_locked=False)
             if not self._state.stop_requested:
@@ -223,7 +224,7 @@ class AcquisitionController:
                 return
             doc = run_status.read_session(info.path, ref)
             self._update(active_session=info.path, session_started_at=info.started_at,
-                    enables_at_start=dict(info.enables), ownership_verified=True)
+                         enables_at_start=dict(info.enables), ownership_verified=True)
             STATE.sensors = run_status.sensor_statuses(info.enables, info.lms_names)
             STATS.reset()
             TAILER.start(info.path / "raw" / f"log_{info.path.name}.log", replay=True)

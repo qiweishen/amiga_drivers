@@ -1,7 +1,6 @@
-// The session metadata contract (src/device_json.cpp): the shape of
-// <cam>/device.json and <cam>/telemetry.jsonl, the factory-value expectation
-// tables behind the raw audit, and the manual constants recorded alongside the
-// pixels. All SDK-free.
+// GOX profile metadata (src/device_json.cpp), factory-value audit expectations
+// and manual constants. The shared camera engine adds the document identity
+// before publishing device.json. All SDK-free.
 
 #include "device_json.h"
 
@@ -167,10 +166,8 @@ TEST_CASE("device_json: build_device_json renders a stable, self-describing docu
 
     const nlohmann::ordered_json doc = gox::BuildDeviceJson(r);
 
-    // A reader must be able to tell what it is looking at from the first key.
-    REQUIRE(doc.begin() != doc.end());
-    CHECK(doc.begin().key() == "format");
-    CHECK(doc["format"] == "gox-device-json/1");
+    // SDK-specific format identity belongs to the shared camera engine.
+    CHECK_FALSE(doc.contains("format"));
     CHECK(doc["camera_id"] == "cam0");
     CHECK(doc["factory_load"]["selector_entry"] == "Default");
     CHECK(doc["factory_load"]["is_done_supported"] == true);

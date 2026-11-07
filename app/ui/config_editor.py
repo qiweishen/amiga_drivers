@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from . import layout
 from ..constants import CONFIG_FILES
 from ..services import config_store, config_actions
 from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
-from . import layout
 
-
-_EDIT_ORDER = ("main", "asterx", "fx10", "fx10_snapshot", "gox", "lms4xxx")
+_EDIT_ORDER = ("main", "asterx", "fx10", "gox", "lms4xxx")
 
 
 @ui.page("/config")

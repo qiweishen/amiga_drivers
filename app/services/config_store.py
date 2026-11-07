@@ -4,19 +4,21 @@ so every comment survives; the C++ loaders remain the final validators)."""
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
+import tempfile
+import yaml
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-
-import yaml
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken
 
-from ..constants import CONFIG_FILES, ENABLE_KEYS, REPO_ROOT, ConfigFile
-from ..state import STATE
 from . import control_owner
+from ..constants import CONFIG_FILES, ENABLE_KEYS, FX10_SNAPSHOT_CONFIG, REPO_ROOT, SNAPSHOT_CONFIG, ConfigFile
+from ..state import STATE
 
 
 class ConflictError(Exception):
@@ -44,16 +46,23 @@ class LoadedConfig:
     mtime: int  # nanoseconds, for conflict detection
 
 
-def _checked_config(file: ConfigFile) -> ConfigFile:
+def checked_snapshot_path(path: Path) -> Path:
+    """Resolve a tool-only config under the same root policy as editable configs."""
+    path = path.resolve()
     root = os.environ.get("AMIGA_CONFIG_ROOT", "")
-    if root and not file.path.resolve().is_relative_to(Path(root).resolve()):
-        raise ValueError(f"Configuration must remain inside {root}: {file.path}")
+    if root and not path.is_relative_to(Path(root).resolve()):
+        raise ValueError(f"Configuration must remain inside {root}: {path}")
+    return path
+
+
+def _checked_config(file: ConfigFile) -> ConfigFile:
+    checked_snapshot_path(file.path)
     return file
 
 
 def get(config_id: str) -> ConfigFile:
     template = CONFIG_FILES[config_id]
-    if config_id in ("main", "fx10_snapshot"):
+    if config_id == "main":
         return _checked_config(ConfigFile(template.id, template.label, template.path.resolve()))
     general = _main_document().get("General") or {}
     default = template.path.relative_to(REPO_ROOT).as_posix()
@@ -76,8 +85,10 @@ def _main_document(text: str | None = None) -> dict:
 
 
 def read(config_id: str) -> LoadedConfig:
-    cf = get(config_id)
+    return _read_file(get(config_id))
 
+
+def _read_file(cf: ConfigFile) -> LoadedConfig:
     def signature(stat) -> tuple:
         return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
@@ -110,15 +121,7 @@ def save(config_id: str, text: str, expected_mtime: int | None, *,
     Raises ConflictError when the on-disk file changed after `expected_mtime`
     (another editor / another GUI tab); caller decides reload-vs-overwrite.
     """
-    # Every editor, Apply action and enable switch ends here. Check at commit,
-    # including after a conflict/validation dialog has yielded to another page.
-    control_owner.require()
-    if STATE.snapshot_busy or STATE.tool_uncertain:
-        raise ConfigBusyError("Configuration is locked while a device tool is running or its exit is unknown")
-    if STATE.control_uncertain:
-        raise ConfigBusyError("Configuration is locked until the acquisition process can be verified")
-    if STATE.config_locked:
-        raise ConfigBusyError("Configuration is locked until acquisition initialization or shutdown finishes")
+    _require_writable()
     cf = get(config_id)
     if expected_path is not None and cf.path.resolve() != expected_path.resolve():
         raise ConfigPathChangedError(f"Config path changed to {cf.path}; reload before saving")
@@ -136,6 +139,17 @@ def save(config_id: str, text: str, expected_mtime: int | None, *,
     tmp.replace(cf.path)  # atomic within the same directory
     STATE.pending_config_notice = STATE.process_state.value in ("starting", "running", "stopping")
     return cf.path.stat().st_mtime_ns
+
+
+def _require_writable() -> None:
+    # Shared by editor saves and paired workbench saves, checked at commit.
+    control_owner.require()
+    if STATE.snapshot_busy or STATE.tool_uncertain:
+        raise ConfigBusyError("Configuration is locked while a device tool is running or its exit is unknown")
+    if STATE.control_uncertain:
+        raise ConfigBusyError("Configuration is locked until the acquisition process can be verified")
+    if STATE.config_locked:
+        raise ConfigBusyError("Configuration is locked until acquisition initialization or shutdown finishes")
 
 
 # --- config-main.yaml helpers -------------------------------------------------
@@ -179,9 +193,10 @@ def main_settings() -> dict:
         "output_dir_raw": output_dir,
         "enables": enables,
         "enable_logging": True,  # The main executable always initializes session logging.
-        "lms_config_path": str(general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
+        "lms_config_path": str(
+            general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
         # The rig's one SensorSync board; "" = none. Recording drivers receive
-        # it through main; reference capture forwards it to the standalone collector.
+        # it through main; standalone snapshot/reference tools use freerun without this port.
         "sensor_trigger_port": sensor_trigger_port,
     }
 
@@ -288,7 +303,7 @@ def _fmt(value: float | int) -> str:
     return text
 
 
-def _verify_and_save(loaded: LoadedConfig, lines: list[str], checks: list[tuple[list[str], object]]) -> None:
+def _verified_text(lines: list[str], checks: list[tuple[list[str | int], object]]) -> str:
     """Re-parse the edited text and confirm every (key path, value) round-trips
     before writing. A silently wrong acquisition parameter would corrupt every
     dataset recorded with it."""
@@ -309,7 +324,117 @@ def _verify_and_save(loaded: LoadedConfig, lines: list[str], checks: list[tuple[
             ok = node == expected
         if not ok:
             raise ApplyError(f"{'.'.join(map(str, path))} read back as {node!r}, expected {expected!r}")
-    save(loaded.file.id, text, expected_mtime=loaded.mtime, expected_path=loaded.file.path)
+    return text
+
+
+def _verify_and_save(loaded: LoadedConfig, lines: list[str], checks: list[tuple[list[str | int], object]]) -> None:
+    save(loaded.file.id, _verified_text(lines, checks), expected_mtime=loaded.mtime, expected_path=loaded.file.path)
+
+
+def _apply_file(config_id: str) -> ConfigFile:
+    # Tool profiles stay out of CONFIG_FILES and the Configuration editor.
+    if config_id in ("gox_snapshot", "fx10_snapshot"):
+        source = SNAPSHOT_CONFIG if config_id == "gox_snapshot" else FX10_SNAPSHOT_CONFIG
+        return ConfigFile(config_id, config_id, checked_snapshot_path(source))
+    return get(config_id)
+
+
+def _check_apply_source(loaded: LoadedConfig) -> None:
+    current = _apply_file(loaded.file.id)
+    if current.path != loaded.file.path:
+        raise ConfigPathChangedError(f"Config path changed to {current.path}; retry Apply")
+    try:
+        latest = _read_file(current)
+    except FileNotFoundError:
+        raise ConflictError(f"{current.path} was removed from disk") from None
+    if latest.mtime != loaded.mtime or latest.text != loaded.text:
+        raise ConflictError(f"{current.path} was modified on disk; retry Apply")
+
+
+def _stage_apply(loaded: LoadedConfig, text: str | None) -> Path:
+    path = loaded.file.path
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    staged = Path(name)
+    try:
+        shutil.copy2(path, staged)  # retain the existing config's file mode
+        if text is not None:
+            staged.write_text(text, encoding="utf-8")
+        return staged
+    except Exception:
+        with suppress(OSError):
+            staged.unlink()
+        raise
+
+
+def _save_acquisition_pair(edits: list[tuple[LoadedConfig, str]]) -> None:
+    """Stage both validated edits before publishing; restore on a caught failure.
+
+    Each rename is atomic. Two paths cannot be published atomically together;
+    .bak files also preserve the originals if the process is interrupted.
+    GUI writes run synchronously in the control owner, without an await between
+    commits. External edits are checked again before replacement and rollback.
+    """
+    _require_writable()
+    unique: dict[Path, tuple[LoadedConfig, str]] = {}
+    for loaded, text in edits:
+        _check_apply_source(loaded)
+        previous = unique.get(loaded.file.path)
+        if previous is not None and previous[1] != text:
+            raise ApplyError(f"Recording and snapshot edits disagree for {loaded.file.path}")
+        unique.setdefault(loaded.file.path, (loaded, text))
+    backups = {}
+    for path in unique:
+        backup = path.with_suffix(path.suffix + ".bak")
+        if checked_snapshot_path(backup.parent) != backup.parent:
+            raise ConfigPathChangedError(f"Backup directory changed for {path}; retry Apply")
+        if backup in unique or backup.resolve() in unique:
+            raise ApplyError(f"Backup path {backup} overlaps an active configuration")
+        backups[path] = backup
+    staged: list[tuple[LoadedConfig, str, Path]] = []
+    committed: list[tuple[LoadedConfig, LoadedConfig]] = []
+    temporary: list[Path] = []
+    try:
+        for loaded, text in unique.values():
+            path = _stage_apply(loaded, text)
+            temporary.append(path)
+            staged.append((loaded, text, path))
+        for loaded, _ in edits:
+            _check_apply_source(loaded)
+        for loaded, _, _ in staged:
+            backup = _stage_apply(loaded, None)
+            temporary.append(backup)
+            # Replacing the directory entry never follows an existing .bak
+            # symlink into another configuration or outside the allowed root.
+            backup.replace(backups[loaded.file.path])
+        for loaded, text, path in staged:
+            _require_writable()
+            _check_apply_source(loaded)
+            written = LoadedConfig(loaded.file, text, path.stat().st_mtime_ns)
+            path.replace(loaded.file.path)
+            committed.append((loaded, written))
+    except Exception as error:
+        unrestored = []
+        for original, written in reversed(committed):
+            try:
+                _check_apply_source(written)
+                restored = _stage_apply(original, original.text)
+                temporary.append(restored)
+                _check_apply_source(written)
+                restored.replace(original.file.path)
+            except Exception as restore_error:
+                unrestored.append(f"{original.file.path}: {restore_error}")
+        if unrestored:
+            raise ApplyError(f"Could not save both configs ({error}); could not restore "
+                             + "; ".join(unrestored) + ". Original contents remain in .bak files.") from error
+        if committed:
+            raise ApplyError(f"Could not save both configs; earlier writes were restored: {error}") from error
+        raise
+    finally:
+        for path in temporary:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+    STATE.pending_config_notice = STATE.process_state.value in ("starting", "running", "stopping")
 
 
 def _gox_camera_entry(lines: list[str], target_ip: str, target_mac: str) -> tuple[int, int, int, dict]:
@@ -381,37 +506,112 @@ def _sub_block_bounds(lines: list[str], key: str, start: int, end: int) -> tuple
     raise ApplyError(f"no '{key}:' block in the expected section")
 
 
-def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float) -> str:
-    """Write exposure/gain into the config-gox.yaml camera entry that identifies
-    the selected camera. Returns a human-readable summary of what changed."""
-    loaded = read("gox")
+def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float | None) -> str:
+    """Write the selected camera's exposure (and gain, unless None) to recording and snapshot YAML.
+
+    ``gain=None`` writes the exposure only and leaves each config's gain as it is.
+    """
+    exposure_ms = float(exposure_ms)
+    if not math.isfinite(exposure_ms) or exposure_ms <= 0:
+        raise ApplyError("exposure_ms must be finite and positive")
+    if gain is not None:
+        gain = float(gain)
+        if not math.isfinite(gain) or not 1 <= gain <= 126:
+            raise ApplyError("gain must be finite and within [1, 126]")
+    edits = []
+    descriptions = []
+    for config_id in ("gox", "gox_snapshot"):
+        loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
+        try:
+            text, camera_id = _gox_acquisition_text(loaded, target_ip, target_mac, exposure_ms, gain,
+                                                   freerun=config_id == "gox_snapshot")
+        except ApplyError as error:
+            raise ApplyError(f"{loaded.file.path}: {error}") from error
+        edits.append((loaded, text))
+        descriptions.append(f"{loaded.file.path} · {camera_id} ({target_ip})")
+    _save_acquisition_pair(edits)
+    return ("\n".join(descriptions) + f"\nexposure_ms={_fmt(exposure_ms)}"
+            + (f", gain={_fmt(gain)}" if gain is not None else " (gain unchanged)"))
+
+
+def gox_exposure_limit_ms(target_ip: str, target_mac: str = "") -> tuple[float | None, list[str]]:
+    """The exposure ceiling apply_gox_acquisition enforces for this camera (read-only).
+
+    Returns the strictest 900 / frame_rate_hz over the recording and snapshot
+    configs that apply the period check, or None when neither does, plus a
+    description of each binding constraint.
+    """
+    limits, notes = [], []
+    for config_id in ("gox", "gox_snapshot"):
+        loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
+        lines = loaded.text.splitlines()
+        _index, _start, _end, camera = _gox_camera_entry(lines, target_ip, target_mac)
+        acquisition = camera.get("acquisition") or {}
+        trigger = acquisition.get("trigger") or {}
+        frame_rate = acquisition.get("frame_rate_hz")
+        document = yaml.safe_load(loaded.text) or {}
+        sensor_trigger = document.get("sensor_trigger") or {}
+        controlled_trigger = (sensor_trigger.get("enabled", False) and camera.get("enabled", True)
+                              and trigger.get("mode") == "external")
+        checked = config_id == "gox_snapshot" or controlled_trigger or trigger.get("mode", "freerun") == "freerun"
+        if frame_rate is None or not checked or isinstance(frame_rate, bool):
+            continue
+        try:
+            rate = float(frame_rate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(rate) and rate > 0:
+            limits.append(900.0 / rate)
+            notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure < {900.0 / rate:g} ms")
+    return (min(limits) if limits else None), notes
+
+
+def _check_exposure_period(exposure_ms: float, frame_rate: object) -> None:
+    try:
+        if isinstance(frame_rate, bool):
+            raise ValueError
+        rate = float(frame_rate)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ApplyError("acquisition.frame_rate_hz must be finite and positive") from error
+    if not math.isfinite(rate) or rate <= 0:
+        raise ApplyError("acquisition.frame_rate_hz must be finite and positive")
+    limit_ms = 900.0 / rate
+    if exposure_ms >= limit_ms:
+        raise ApplyError(
+            f"exposure {exposure_ms:g} ms must be below {limit_ms:g} ms "
+            f"at {rate:g} Hz (10% timing margin). Lower the exposure, "
+            "or lower acquisition.frame_rate_hz in this config first."
+        )
+
+
+def _gox_acquisition_text(loaded: LoadedConfig, target_ip: str, target_mac: str,
+                         exposure_ms: float, gain: float | None, *, freerun: bool) -> tuple[str, str]:
     lines = loaded.text.splitlines()
     index, start, end, camera = _gox_camera_entry(lines, target_ip, target_mac)
+    if freerun and index != 0:
+        raise ApplyError("The selected camera must be the first cameras: entry in the snapshot config; "
+                         "jai_snapshot and ColorChecker reference capture use cameras[0]")
 
-    # The driver rejects a freerun exposure that does not fit in the frame period
-    # (gox_driver/src/app_config.cpp): the camera would clamp it, and a clamped
-    # value is baked into every recorded frame. Refuse here rather than write a
-    # config that no longer starts.
+    # Match the driver's 10% timing margin. Snapshot tools force freerun even
+    # when their source YAML still names an external trigger mode.
     acquisition = camera.get("acquisition") or {}
     trigger = acquisition.get("trigger") or {}
     frame_rate = acquisition.get("frame_rate_hz")
-    if trigger.get("mode", "freerun") == "freerun" and isinstance(frame_rate, (int, float)) and frame_rate > 0:
-        period_ms = 1000.0 / float(frame_rate)
-        if float(exposure_ms) >= period_ms:
-            raise ApplyError(
-                f"exposure {float(exposure_ms):g} ms does not fit in the frame period "
-                f"({period_ms:.1f} ms at {frame_rate:g} Hz). Lower the exposure, or lower "
-                f"acquisition.frame_rate_hz in config-gox.yaml first."
-            )
+    document = yaml.safe_load(loaded.text) or {}
+    sensor_trigger = document.get("sensor_trigger") or {}
+    controlled_trigger = (sensor_trigger.get("enabled", False) and camera.get("enabled", True)
+                          and trigger.get("mode") == "external")
+    if frame_rate is not None and (freerun or controlled_trigger or trigger.get("mode", "freerun") == "freerun"):
+        _check_exposure_period(exposure_ms, frame_rate)
 
-    _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
-    _replace_scalar(lines, "gain", _fmt(float(gain)), start=start, end=end)
-    _verify_and_save(loaded, lines, [
-        (["cameras", index, "acquisition", "exposure_ms"], float(exposure_ms)),
-        (["cameras", index, "acquisition", "gain"], float(gain)),
-    ])
-    camera_id = str(camera.get("id", f"#{index}"))
-    return f"{loaded.file.path} · {camera_id} ({target_ip}): exposure_ms={_fmt(float(exposure_ms))}, gain={_fmt(float(gain))}"
+    start, end = _sub_block_bounds(lines, "acquisition", start, end)
+    _replace_scalar(lines, "exposure_ms", _fmt(exposure_ms), start=start, end=end)
+    checks = [(["cameras", index, "acquisition", "exposure_ms"], exposure_ms)]
+    if gain is not None:
+        _replace_scalar(lines, "gain", _fmt(gain), start=start, end=end)
+        checks.append((["cameras", index, "acquisition", "gain"], gain))
+    text = _verified_text(lines, checks)
+    return text, str(camera.get("id", f"#{index}"))
 
 
 def _gox_entry_for_readdress(lines: list[str], target_ip: str, target_mac: str,
@@ -435,7 +635,8 @@ def _gox_entry_for_readdress(lines: list[str], target_ip: str, target_mac: str,
         candidates = [
             (i, c) for i, c in enumerate(cameras)
             if isinstance(c, dict)
-            and (not _mac((c.get("device") or {}).get("mac")) or _mac((c.get("device") or {}).get("mac")) == _mac(target_mac))
+               and (not _mac((c.get("device") or {}).get("mac")) or _mac((c.get("device") or {}).get("mac")) == _mac(
+                target_mac))
         ]
         if any(str((c.get("device") or {}).get("ip", "")) == new_ip for _, c in candidates):
             return (*_gox_camera_entry(lines, new_ip, ""), True)
@@ -488,35 +689,83 @@ def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> 
     raise ApplyError(f"no driver config for a {kind} device")
 
 
-def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int, spectral_binning: int) -> str:
-    """Write exposure/binning into config-fx10.yaml's acquisition block."""
-    loaded = read("fx10")
+def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spectral_binning: int | None) -> str:
+    """Write exposure/binning to both recording and snapshot acquisition blocks.
+
+    Both binnings None writes the exposure only and leaves each config's binning as it is.
+    """
+    exposure_ms = float(exposure_ms)
+    if not math.isfinite(exposure_ms) or exposure_ms <= 0:
+        raise ApplyError("exposure_ms must be finite and positive")
+    if (spatial_binning is None) != (spectral_binning is None):
+        raise ApplyError("spatial_binning and spectral_binning are applied together or not at all")
+    for value, name in ((spatial_binning, "spatial_binning"), (spectral_binning, "spectral_binning")):
+        if value is not None and (type(value) is not int or value not in (1, 2, 4, 8)):
+            raise ApplyError(f"{name} must be 1, 2, 4, or 8")
+    edits = []
+    for config_id in ("fx10", "fx10_snapshot"):
+        loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
+        try:
+            text = _fx10_acquisition_text(loaded, exposure_ms, spatial_binning, spectral_binning)
+        except ApplyError as error:
+            raise ApplyError(f"{loaded.file.path}: {error}") from error
+        edits.append((loaded, text))
+    _save_acquisition_pair(edits)
+    return ("\n".join(str(loaded.file.path) for loaded, _ in edits) + f"\nexposure_ms={_fmt(exposure_ms)}"
+            + (f", spatial_binning={spatial_binning}, spectral_binning={spectral_binning}"
+               if spatial_binning is not None else " (binning unchanged)"))
+
+
+def _fx10_acquisition_text(loaded: LoadedConfig, exposure_ms: float,
+                          spatial_binning: int | None, spectral_binning: int | None) -> str:
     lines = loaded.text.splitlines()
     doc = yaml.safe_load("\n".join(lines)) or {}
     acquisition = doc.get("acquisition")
     if not isinstance(acquisition, dict):
-        raise ApplyError("config-fx10.yaml has no 'acquisition:' block")
-    for value, name in ((spatial_binning, "spatial_binning"), (spectral_binning, "spectral_binning")):
-        if value not in (1, 2, 4, 8):
-            raise ApplyError(f"{name} must be 1, 2, 4, or 8")
+        raise ApplyError("config has no 'acquisition:' block")
+    # ParseAcquisition enforces this before CLI overrides, in both trigger modes.
+    # 50 Hz is fx10::AcquisitionConfig's default when the field is omitted.
+    _check_exposure_period(exposure_ms, acquisition.get("frame_rate_hz", 50.0))
     # The camera cannot do both; the C++ loader rejects the combination, which
     # would leave a config that no longer starts. MROI needs 1 x 1 binning on
     # BOTH axes (FX10 manual p.9, p.26), not just the spectral one.
-    if (acquisition.get("mroi") or {}).get("enabled") and (spectral_binning != 1 or spatial_binning != 1):
+    if spatial_binning is not None and (acquisition.get("mroi") or {}).get("enabled") \
+            and (spectral_binning != 1 or spatial_binning != 1):
         raise ApplyError("acquisition.mroi is enabled, which requires 1 x 1 binning: spatial_binning and "
                          "spectral_binning must both be 1 (FX10 constraint)")
 
     start, end = _block_bounds(lines, "acquisition")
-    _replace_scalar(lines, "exposure_ms", _fmt(float(exposure_ms)), start=start, end=end)
-    _replace_scalar(lines, "spatial_binning", str(spatial_binning), start=start, end=end)
-    _replace_scalar(lines, "spectral_binning", str(spectral_binning), start=start, end=end)
-    _verify_and_save(loaded, lines, [
-        (["acquisition", "exposure_ms"], float(exposure_ms)),
-        (["acquisition", "spatial_binning"], spatial_binning),
-        (["acquisition", "spectral_binning"], spectral_binning),
-    ])
-    return (f"{loaded.file.path} · exposure_ms={_fmt(float(exposure_ms))}, spatial_binning={spatial_binning}, "
-            f"spectral_binning={spectral_binning}")
+    _replace_scalar(lines, "exposure_ms", _fmt(exposure_ms), start=start, end=end)
+    checks = [(["acquisition", "exposure_ms"], exposure_ms)]
+    if spatial_binning is not None:
+        _replace_scalar(lines, "spatial_binning", str(spatial_binning), start=start, end=end)
+        _replace_scalar(lines, "spectral_binning", str(spectral_binning), start=start, end=end)
+        checks += [(["acquisition", "spatial_binning"], spatial_binning),
+                   (["acquisition", "spectral_binning"], spectral_binning)]
+    return _verified_text(lines, checks)
+
+
+def fx10_exposure_limit_ms() -> tuple[float, list[str]]:
+    """The exposure ceiling apply_fx10_acquisition enforces (read-only): the
+    strictest 900 / frame_rate_hz over the recording and snapshot configs."""
+    limits, notes = [], []
+    for config_id in ("fx10", "fx10_snapshot"):
+        loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
+        acquisition = (yaml.safe_load(loaded.text) or {}).get("acquisition")
+        if not isinstance(acquisition, dict):
+            raise ApplyError(f"{loaded.file.path}: config has no 'acquisition:' block")
+        frame_rate = acquisition.get("frame_rate_hz", 50.0)
+        try:
+            if isinstance(frame_rate, bool):
+                raise ValueError
+            rate = float(frame_rate)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ApplyError(f"{loaded.file.path}: acquisition.frame_rate_hz must be finite and positive") from error
+        if not math.isfinite(rate) or rate <= 0:
+            raise ApplyError(f"{loaded.file.path}: acquisition.frame_rate_hz must be finite and positive")
+        limits.append(900.0 / rate)
+        notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure < {900.0 / rate:g} ms")
+    return min(limits), notes
 
 
 def set_enable(driver: str, value: bool) -> None:

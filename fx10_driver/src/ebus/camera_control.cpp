@@ -648,7 +648,8 @@ namespace fx10 {
     }
 
     nlohmann::json CameraControl::CollectDeviceMetadata() const {
-        nlohmann::json doc = {{"format", "fx10-device-v1"}, {"applied", applied_}};
+        // The shared camera engine adds the SDK-derived document identity.
+        nlohmann::json doc = {{"applied", applied_}};
         doc["applied_semantics"] =
                 "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
         for (const char *name: {

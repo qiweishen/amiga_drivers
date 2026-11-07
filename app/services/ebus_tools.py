@@ -13,8 +13,8 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
 from . import camera_operations, fx10_tools, gox_tools, runtime, tool_jobs
+from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
 
 SET_IP_TOOL = "ebus_set_ip"
 # GUI-side hard timeout; the tool's own budget is discovery (4 s) + the

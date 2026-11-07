@@ -10,14 +10,12 @@ tick sends nothing and the refresh interval stays a free parameter.
 
 from __future__ import annotations
 
-from typing import Callable
-
 from nicegui import ui
+from typing import Callable
 
 from ..services.driver_stats import STATS
 from ..services.storage import human_bytes
 from ..state import STATE, SensorState, SensorStatus
-
 
 # Brand names (constants.PALETTE), not literal hues, so retheming reaches these.
 # grey/blue-grey stay literal: Quasar has no brand slot for a neutral.

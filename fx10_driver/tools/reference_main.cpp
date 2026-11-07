@@ -3,15 +3,14 @@
 #include "../include/app_config.h"
 #include "../include/apply_plan.h"
 #include "ebus_driver/tool_support.h"
+#include "freerun_config.h"
 #include "logger.h"
-#include "sensor_sync_hub.h"
 
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <iterator>
-#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <unistd.h>
@@ -73,7 +72,7 @@ Json RequiredNode(const Json &device, const char *group, const char *name) {
     return node.at("value");
 }
 
-Json PhaseSignature(const Json &device, const fx10::AppConfig &config) {
+Json PhaseSignature(const Json &device) {
     Json signature = Json::object();
     signature["serial"] = RequiredNode(device, "identity", "DeviceSerialNumber");
     if (!signature["serial"].is_string() || signature["serial"].get<std::string>().empty())
@@ -84,13 +83,13 @@ Json PhaseSignature(const Json &device, const fx10::AppConfig &config) {
             fx10::node::kMroiEnable, fx10::node::kExposureMode, fx10::node::kFrameRateEnable,
             fx10::node::kTriggerSelector, fx10::node::kTriggerMode})
         signature["imaging"][name] = RequiredNode(device, "final_readback", name);
-    const bool external = config.acquisition.trigger.mode == fx10::TriggerMode::kExternal;
-    if (!external || config.acquisition.trigger.exposure_control == fx10::ExposureControl::kCamera)
-        signature["imaging"][fx10::node::kExposureTime] = RequiredNode(device, "final_readback", fx10::node::kExposureTime);
-    if (external) {
-        for (const char *name : {fx10::node::kTriggerSource, fx10::node::kTriggerActivation, fx10::node::kTriggerDelay})
-            signature["imaging"][name] = RequiredNode(device, "final_readback", name);
-    } else signature["imaging"][fx10::node::kFrameRate] = RequiredNode(device, "final_readback", fx10::node::kFrameRate);
+    signature["imaging"][fx10::node::kExposureTime] = RequiredNode(device, "final_readback", fx10::node::kExposureTime);
+    signature["imaging"][fx10::node::kFrameRate] = RequiredNode(device, "final_readback", fx10::node::kFrameRate);
+    const auto &imaging = signature["imaging"];
+    if (imaging[fx10::node::kTriggerSelector] != "FrameStart" ||
+        imaging[fx10::node::kTriggerMode] != "Off" || imaging[fx10::node::kFrameRateEnable] != true ||
+        imaging[fx10::node::kExposureMode] != "Timed")
+        throw std::runtime_error("reference requires verified freerun timing after all camera overrides");
     // Ordered applied entries preserve selector-scoped MROI and operator writes
     // that cannot be recovered from a single final selector position.
     signature["applied"] = device.at("applied");
@@ -102,7 +101,7 @@ Json PhaseSignature(const Json &device, const fx10::AppConfig &config) {
 }
 
 void CapturePhase(const char *phase, const fx10::AppConfig &saved,
-                  const std::filesystem::path &config_snapshot, const std::string &sensor_port,
+                  const std::filesystem::path &config_snapshot,
                   const std::filesystem::path &root, std::optional<Json> &white_signature, Json &result) {
     CheckCancelled();
     auto config = saved;
@@ -110,18 +109,11 @@ void CapturePhase(const char *phase, const fx10::AppConfig &saved,
     config.recording.max_frames = 0;
     const auto phase_parent = root / "raw" / "fx10" / phase;
     const auto directory = Tool::TimestampedPath(phase_parent, "fx10");
-    // Hub registration may create the observation file's parent. Keep that
-    // separate from the camera directory RawRecorder creates exclusively.
-    std::shared_ptr<common::SensorSyncHub> sync;
-    if (config.sensor_trigger.enabled) {
-        std::filesystem::create_directories(phase_parent);
-        sync = std::make_shared<common::SensorSyncHub>(phase_parent / "sensor_trigger.log", sensor_port);
-    }
     auto definition = ebus_driver::MakeFx10Camera(config, config_snapshot, directory, std::string(phase) == "dark");
-    ebus_driver::EbusCameraDriver driver(std::move(definition), sync);
+    ebus_driver::EbusCameraDriver driver(std::move(definition));
     result = {{"phase", phase}, {"status", "incomplete"},
         {"session_dir", std::filesystem::relative(directory, root).generic_string()},
-        {"recording_format", "ebus-raw-v1"}, {"requested_duration_s", config.reference.duration_s},
+        {"recording_format", ebus_driver::RawRecordingFormat()}, {"requested_duration_s", config.reference.duration_s},
         {"connection_scope", "separate verified phases"}, {"shutter_state_verified", false}};
     try {
         if (!driver.Init([] { return Tool::signal != 0; })) {
@@ -132,7 +124,7 @@ void CapturePhase(const char *phase, const fx10::AppConfig &saved,
         if (!metadata) throw std::runtime_error("reference device metadata is missing");
         Json device;
         metadata >> device;
-        const auto signature = PhaseSignature(device, config);
+        const auto signature = PhaseSignature(device);
         if (white_signature && *white_signature != signature)
             throw std::runtime_error("white/dark serial, geometry, PixelFormat or imaging readbacks differ; reference pair rejected");
         if (!white_signature) white_signature = signature;
@@ -149,11 +141,10 @@ void CapturePhase(const char *phase, const fx10::AppConfig &saved,
         result["bytes_written"] = Tool::Count(statistics, "payload_bytes_written");
         if (driver.HasFailed()) throw std::runtime_error(statistics.value("error", std::string("reference capture failed")));
         if (Tool::Count(statistics, "frames_written") == 0)
-            throw std::runtime_error("reference contains no valid frames; check the configured trigger source");
+            throw std::runtime_error("freerun reference contains no valid frames");
         result["status"] = "completed";
         result["finalized_monotonic_ns"] = common::TimeUtil::MonotonicNowNs();
         result["duration_semantics"] = "host monotonic window from AcquisitionStart command; startup/drain buffers retain native timestamps";
-        if (sync) result["sensor_sync"] = sync->Summary();
         PublishJson(directory / "reference_phase.json", result);
     } catch (const std::exception &error) {
         driver.Shutdown();
@@ -172,25 +163,25 @@ void CapturePhase(const char *phase, const fx10::AppConfig &saved,
 }
 
 int main(int argc, char **argv) {
-    std::string config_path, output, sensor_port;
+    std::string config_path, output;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
-            std::puts("Usage: fx10_reference --config <saved FX10 YAML> --out <root> [--sensor-port <tty>]\n"
-                "White/open then dark/closed, each reference.duration_s; native ebus-raw-v1 records.\n"
+            std::puts("Usage: fx10_reference --config <FX10 snapshot YAML> --out <root>\n"
+                "White/open then dark/closed in freerun, each reference.duration_s; native ebus-raw records.\n"
                 "Each phase has a separate connection; verified device/imaging readbacks must match.");
             return 0;
         }
-        if ((arg != "--config" && arg != "--out" && arg != "--sensor-port") || i + 1 >= argc) {
+        if ((arg != "--config" && arg != "--out") || i + 1 >= argc) {
             Marker("FAIL invalid arguments"); return 2;
         }
-        (arg == "--config" ? config_path : arg == "--out" ? output : sensor_port) = argv[++i];
+        (arg == "--config" ? config_path : output) = argv[++i];
     }
     if (config_path.empty() || output.empty()) { Marker("FAIL --config and --out are required"); return 2; }
     Tool::InstallSignals();
     std::filesystem::path root;
     Json summary = {{"format", "fx10-reference-v1"}, {"status", "incomplete"},
-        {"phases", Json::array()}, {"config_source", config_path}, {"recording_format", "ebus-raw-v1"},
+        {"phases", Json::array()}, {"config_source", config_path}, {"recording_format", ebus_driver::RawRecordingFormat()},
         {"connection_scope", "separate verified phases"},
         {"white_target", "operator positions illuminated white reference before starting"}};
     try {
@@ -198,9 +189,8 @@ int main(int argc, char **argv) {
         if (!input) throw std::runtime_error("cannot open FX10 config");
         const std::string yaml{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
         if (input.bad()) throw std::runtime_error("cannot read FX10 config");
-        const auto config = fx10::LoadAppConfigText(yaml);
-        if (config.sensor_trigger.enabled && sensor_port.empty())
-            throw std::runtime_error("SensorSync reference requires --sensor-port");
+        auto config = fx10::LoadAppConfigText(yaml);
+        fx10::tool::ForceFreerun(config);
         summary["phase_duration_s"] = config.reference.duration_s;
         Marker("CONFIG " + Json{{"duration_s", config.reference.duration_s}}.dump());
         root = Tool::TimestampedPath(output, "reference");
@@ -215,12 +205,17 @@ int main(int argc, char **argv) {
         logging.log_file = (root / "reference.log").string();
         common::Logger::Init(logging, "FX10Reference");
         summary["config_snapshot"] = "raw/config/config-fx10.yaml";
-        summary["overrides"] = {{"output.max_duration_s", config.reference.duration_s}, {"output.max_frames", 0}};
+        summary["overrides"] = {
+            {"acquisition.trigger.mode", "freerun"}, {"acquisition.trigger.selector_entry", "FrameStart"},
+            {"acquisition.trigger.exposure_control", "camera"}, {"sensor_trigger.enabled", false},
+            {"output.max_duration_s", config.reference.duration_s}, {"output.max_frames", 0}
+        };
+        summary["timing_policy"] = "freerun; no PTP or hardware-trigger absolute-time requirement";
         PublishJson(root / "reference.request.json", summary);
         std::optional<Json> white_signature;
         for (const char *phase : {"white", "dark"}) {
             summary["phases"].push_back(Json::object());
-            CapturePhase(phase, config, config_snapshot, sensor_port, root, white_signature, summary["phases"].back());
+            CapturePhase(phase, config, config_snapshot, root, white_signature, summary["phases"].back());
         }
         CheckCancelled();
         summary["status"] = "completed";

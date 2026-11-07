@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from nicegui import ui
 from pathlib import Path
 
-from nicegui import ui
-
 from ..constants import UI_TICK_S
-from ..state import STATE, ProcState
 from ..services import tool_jobs
-
+from ..state import STATE, ProcState
 
 _STYLES = Path(__file__).resolve().parent.parent / "resource" / "console.css"
 _PROC_BADGE = {
@@ -26,9 +24,9 @@ _PROC_BADGE = {
 _NAV = (
     ("Operations", "/", "Overview", "Overview", "dashboard"),
     ("Operations", "/live", "Data Live", "Data preview", "monitor_heart"),
-    ("Operations", "/asterx", "AsteRx · Live & History", "Navigation & IMU", "explore"),
+    ("Operations", "/asterx", "AsteRx · Live", "Navigation & IMU", "explore"),
     ("Device setup", "/camera", "Camera Tools", "Camera workbench", "photo_camera"),
-    ("Device setup", "/reference", "Collect Reference — FX10", "Reference capture", "contrast"),
+    ("Device setup", "/reference", "Collect Reference — FX10 / GOX", "Reference capture", "contrast"),
     ("Device setup", "/config", "Config", "Configuration", "tune"),
     ("Diagnostics", "/logs", "Logs", "System logs", "terminal"),
     ("Diagnostics", "/sessions", "Recording history", "Recording history", "inventory_2"),
@@ -47,7 +45,7 @@ def frame(title: str):
     page_name = current[3] if current else title
 
     with ui.left_drawer(value=None, top_corner=True, bottom_corner=True).props(
-        "width=200 breakpoint=1024"
+            "width=200 breakpoint=1024"
     ).classes("console-sidebar") as drawer:
         with ui.link(target="/").classes("console-brand").props('aria-label="Amiga console overview"'):
             ui.label("AMIGA").classes("brand-name")
@@ -114,7 +112,8 @@ def frame(title: str):
                 else "notice-warning" if operation.get("state") == "unknown"
                 else "notice-tool"))
             tool_label.set_text(" · ".join(str(v) for v in
-                                (operation.get("kind"), operation.get("id"), operation.get("state"), operation.get("error")) if v))
+                                           (operation.get("kind"), operation.get("id"), operation.get("state"),
+                                            operation.get("error")) if v))
             tool_stop.set_visibility(bool(operation.get("process")) and
                                      operation.get("state") in ("starting", "running", "stopping", "unknown"))
             tool_stop.set_enabled(STATE.env_ok)
@@ -127,7 +126,8 @@ def frame(title: str):
                 text += " (reattached)"
             badge.set_text(text)
             badge.props(f'color="{color}"')
-            env_label.set_text(f"{STATE.env_detail or 'Runtime environment unavailable'} — device controls unavailable; offline views remain available")
+            env_label.set_text(
+                f"{STATE.env_detail or 'Runtime environment unavailable'} — device controls unavailable; recording history remains available")
             env_notice.set_visibility(not STATE.env_ok)
             pending_notice.set_visibility(STATE.pending_config_notice)
 

@@ -1,20 +1,16 @@
 """Synthetic eBUS byte/layout contracts. No SDK or hardware; not executed by this migration."""
 
-import contextlib
 import copy
-import io
 import json
+import numpy as np
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
-
-from app.formats import fx10
-from ebus_driver.scripts.ebus_raw import envi, inspection, pixels, recording
-from gox_driver.scripts import unpack_raw
+from app.decoder import fx10
+from app.decoder.ebus import pixels, recording
 
 
 def fixture_crc(data):
@@ -51,7 +47,7 @@ def fixture_image(payload_size):
                       "full_line_missing": False, "data_overrun": False}}
 
 
-def write_fixture(directory, *, invalid=True, kind="fx10"):
+def write_fixture(directory, *, invalid=True, kind="fx10", sdk_version="6.5.1.6797"):
     directory.mkdir(parents=True)
     payload = b"\xaa\xbb" + bytes([0xAB, 0x3C, 0x12, 0xEE, 0xFF, 0x0F, 0x00, 0xDD]) + b"\xcc\xccTAIL"
     meta = fixture_image(len(payload))
@@ -63,12 +59,15 @@ def write_fixture(directory, *, invalid=True, kind="fx10"):
         raw += fixture_record(rejected, b"BAD", 1)
         payload_bytes += 3
     (directory / "seg_00001.raw").write_bytes(raw)
+    recording_format = f"ebus-raw-eBUS_SDK_v{sdk_version}"
     (directory / "device.json").write_text(json.dumps({
-        "format": "ebus-device-v1", "kind": kind, "id": directory.name, "recording_format": "ebus-raw-v1",
+        "format": f"ebus-device-eBUS_SDK_v{sdk_version}", "kind": kind, "id": directory.name,
+        "recording_format": recording_format, "sdk": {"name": "Pleora eBUS", "header_version": sdk_version},
         "profile": {"samples": 2, "bands": 2, "pixel_format": "Mono12Packed", "full_scale": 4095,
                     "expected_frame_rate_hz": 50.0, "wavelengths_nm": [500.0, 700.0]}}), encoding="utf-8")
     (directory / "events.jsonl").write_text(json.dumps({
-        "event": "session_end", "complete": True, "records_written": 2 if invalid else 1,
+        "event": "session_end", "format": recording_format, "complete": True,
+        "records_written": 2 if invalid else 1,
         "frames_written": 1, "valid_frames_written": 1, "payload_bytes_written": payload_bytes,
         "segments_created": 1}) + "\n", encoding="utf-8")
     return payload, meta
@@ -95,6 +94,58 @@ class EbusRawFormatTests(unittest.TestCase):
         self.assertEqual(recording.read_payload(records[0], verify_crc=True), self.payload)
         self.assertEqual(recording.read_payload(records[1], verify_crc=True), b"BAD")
         self.assertEqual(records[0].dts, 9007199254740993)
+
+    def test_sdk_version_identifies_producer_without_pinning_one_sdk_release(self):
+        for version in ("6.5.1.6797", "6.6.0.7000"):
+            with self.subTest(version=version):
+                camera = self.root / version
+                write_fixture(camera, sdk_version=version)
+                device = recording.device_metadata(camera)
+                self.assertEqual(device["sdk"]["header_version"], version)
+                self.assertTrue(recording.is_session(camera))
+                self.assertEqual(len(list(recording.session_records(camera))), 2)
+
+    def test_metadata_rejects_legacy_and_inconsistent_sdk_identities(self):
+        path = self.camera / "device.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        changes = [
+            {"format": "ebus-device", "recording_format": "ebus-raw"},
+            {"format": "ebus-device-v1", "recording_format": "ebus-raw-v1"},
+            {"format": "ebus-device-eBUS_SDK_v6.5.1.6798"},
+            {"recording_format": "ebus-raw-eBUS_SDK_v6.5.1.6798"},
+            {"sdk": None},
+            {"sdk": {"header_version": 6516797}},
+            {"sdk": {"header_version": "6.5.1.6798"}},
+        ]
+        for version in ("6.5.1", "6.5.1.bad", "6.5.1.6797\n", "６.5.1.6797"):
+            changes.append({"format": f"ebus-device-eBUS_SDK_v{version}",
+                            "recording_format": f"ebus-raw-eBUS_SDK_v{version}",
+                            "sdk": {"header_version": version}})
+        for change in changes:
+            with self.subTest(change=change):
+                path.write_text(json.dumps(dict(original, **change)), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Unsupported eBUS device metadata"):
+                    recording.device_metadata(self.camera)
+                # A valid RAW magic must not hide invalid metadata already present beside it.
+                self.assertFalse(recording.is_session(self.camera))
+
+    def test_session_end_format_must_match_device_sdk_identity(self):
+        path = self.camera / "events.jsonl"
+        ending = json.loads(path.read_text(encoding="utf-8"))
+        for identity in (None, "ebus-raw", "ebus-raw-v1", "ebus-raw-eBUS_SDK_v6.5.1.6798"):
+            with self.subTest(identity=identity):
+                ending["format"] = identity
+                path.write_text(json.dumps(ending) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "session_end format disagrees"):
+                    list(recording.session_records(self.camera))
+
+    def test_sdk_identity_does_not_bypass_binary_layout_version(self):
+        header = bytearray(fixture_header())
+        struct.pack_into("<H", header, 8, 2)
+        struct.pack_into("<I", header, 60, fixture_crc(header[:60]))
+        self.segment.write_bytes(header + fixture_record(self.meta, self.payload))
+        with self.assertRaisesRegex(ValueError, "Unsupported eBUS file header"):
+            list(recording.session_records(self.camera))
 
     def test_padding_offset_and_chunk_tail_decode_without_changing_payload(self):
         record = next(recording.iter_records(self.segment))
@@ -134,8 +185,6 @@ class EbusRawFormatTests(unittest.TestCase):
         record = next(recording.iter_records(self.segment))
         recording.read_payload(record)  # explicit preview policy, not a payload integrity audit
         with self.assertRaises(ValueError):
-            recording.verify_payload(record)
-        with self.assertRaises(ValueError):
             recording.read_payload(record, verify_crc=True)
 
     def test_acquired_size_and_session_count_disagreements_are_rejected(self):
@@ -153,14 +202,17 @@ class EbusRawFormatTests(unittest.TestCase):
 
     def test_fx10_snapshot_tail_and_reference_count_valid_frames(self):
         capture, cube = fx10.snapshot_cube(self.camera)
-        self.assertEqual(capture.recording_format, "ebus-raw-v1")
+        self.assertEqual(capture.pixel_format, "Mono12Packed")
+        self.assertEqual(capture.full_scale, 4095)
         np.testing.assert_array_equal(cube, self.expected[None, ...])
         tail, timestamp = fx10.raw_tail_cube(self.camera, capture, 50)
         np.testing.assert_array_equal(tail, cube)
         self.assertEqual(timestamp, self.meta["host_realtime_ns"])
-        _, count, values, mean, clipped = fx10.reference_spectrum(self.camera, 1, normalized=False)
+        _, count, values, mean, clipped = fx10.reference_spectrum(self.camera, 1)
         self.assertEqual(count, 1)
-        self.assertEqual(values, fx10.spectrum(cube, 4095, normalized=False)[0])
+        self.assertEqual(values, fx10.spectrum(cube, 4095)[0])
+        self.assertEqual(values["mean"], [1519.5, 2047.5])
+        self.assertEqual(mean, 1783.5)
         self.assertEqual(clipped, 25.0)
         with self.assertRaises(ValueError):
             fx10.reference_spectrum(self.camera, 2)
@@ -170,55 +222,14 @@ class EbusRawFormatTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 recording.latest_records(self.camera, 1)
 
-    def test_envi_export_round_trips_through_legacy_reader_and_preserves_source(self):
-        before = self.segment.read_bytes()
-        output = self.root / "export"
-        self.assertEqual(envi.export_envi(self.camera, output), 1)
-        self.assertEqual(self.segment.read_bytes(), before)
-        capture, cube = fx10.snapshot_cube(output)
-        self.assertEqual(capture.recording_format, "envi")
-        np.testing.assert_array_equal(cube, self.expected[None, ...])
-        lineage = [json.loads(line) for line in (output / "source.records.jsonl").read_text().splitlines()]
-        self.assertEqual([row["output_line"] for row in lineage], [0, None])
-        self.assertEqual(lineage[1]["metadata"]["operation_name"], "INCOMPLETE")
-        with self.assertRaises(FileExistsError):
-            envi.export_envi(self.camera, output)
-
-    def test_multi_camera_unpack_keeps_identity_and_refuses_overwrite(self):
-        root = self.root / "gox"
-        write_fixture(root / "cam0", invalid=False, kind="gox")
-        write_fixture(root / "cam1", invalid=False, kind="gox")
-        output = self.root / "images"
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(unpack_raw.main([str(root), "-o", str(output)]), 0)
-            self.assertEqual(unpack_raw.main([str(root), "-o", str(output)]), 1)
-        for name in ("cam0", "cam1"):
-            np.testing.assert_array_equal(np.load(output / name / "seq00000000_Mono12Packed.npy", allow_pickle=False), self.expected)
-
-    def test_inspection_commands_preserve_invalid_record_bytes_and_source(self):
-        before = self.segment.read_bytes()
-        index = self.root / "rebuilt.jsonl"
-        extracted = self.root / "invalid.bin"
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(inspection.main(["list", str(self.segment), "--limit", "1"]), 0)
-            self.assertEqual(inspection.main(["verify", str(self.camera)]), 0)
-            self.assertEqual(inspection.main(["rebuild-index", str(self.segment), "-o", str(index)]), 0)
-            self.assertEqual(inspection.main(["extract", str(self.segment), "--seq", "1", "-o", str(extracted)]), 0)
-        self.assertEqual(self.segment.read_bytes(), before)
-        self.assertEqual(extracted.read_bytes(), b"BAD")
-        rows = [json.loads(line) for line in index.read_text().splitlines()]
-        self.assertEqual([row["metadata"]["valid_frame"] for row in rows], [True, False])
-
-    def test_invalid_payload_crc_is_checked_before_export_can_complete(self):
+    def test_invalid_record_payload_crc_can_be_checked_by_reader(self):
         damaged = bytearray(self.segment.read_bytes())
-        damaged[-1] ^= 1  # the invalid record is retained and must still be audited
+        damaged[-1] ^= 1
         self.segment.write_bytes(damaged)
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(inspection.main(["verify", str(self.camera)]), 1)
-        output = self.root / "bad-export"
+        records = list(recording.session_records(self.camera))
+        self.assertFalse(records[-1].valid_frame)
         with self.assertRaises(ValueError):
-            envi.export_envi(self.camera, output)
-        self.assertFalse((output / "segment_0001.hdr").exists())
+            recording.read_payload(records[-1], verify_crc=True)
 
     def test_reference_validator_accepts_raw_phases_without_envi_sidecars(self):
         from app.services import fx10_reference

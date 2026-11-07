@@ -6,9 +6,9 @@ import json
 import re
 from pathlib import Path
 
+from . import runtime
 from ..constants import RUNTIME_DIR
 from ..state import SensorState, SensorStatus
-from . import runtime
 
 SCHEMA = "amiga-run-v1"
 
@@ -26,7 +26,8 @@ def read_json(path: Path) -> dict:
 
 def _matches(doc: dict, ref: runtime.ProcessIdentity) -> bool:
     identity = doc.get("process", {})
-    return (isinstance(identity, dict) and identity.get("pid") == ref.pid and identity.get("start_ticks") == ref.start_ticks
+    return (isinstance(identity, dict) and identity.get("pid") == ref.pid and identity.get(
+        "start_ticks") == ref.start_ticks
             and identity.get("boot_id") == ref.boot_id)
 
 

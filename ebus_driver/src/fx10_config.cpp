@@ -120,10 +120,9 @@ namespace ebus_driver {
         };
         hooks.metadata = [state](PvDeviceGEV &) {
             auto doc = state->control->CollectDeviceMetadata();
-            doc["format"] = "ebus-device-v1";
+            // The common engine supplies the SDK format identities.
             doc["kind"] = "fx10";
             doc["id"] = "fx10";
-            doc["recording_format"] = "ebus-raw-v1";
             doc["config_source"] = state->source.string();
             const auto &geometry = state->geometry;
             const auto &cal = state->config.recording.wavelengths.calibration;

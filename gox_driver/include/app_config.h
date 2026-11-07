@@ -14,6 +14,8 @@
 namespace gox {
     using ConfigError = common::ConfigError;
 
+    inline constexpr const char *kNativePixelFormat = "BayerRG12Packed";
+
     // The driver never writes network settings; re-addressing is the GUI's ebus_set_ip.
     struct DeviceConfig {
         std::string mac; // discovery match; wins over ip
@@ -58,7 +60,10 @@ namespace gox {
         // Freerun rate; under an external trigger with sensor_trigger.enabled it is the pulse
         // rate this driver commands on the SensorSync JAI pair (1..10 Hz) and is required
         std::optional<double> frame_rate_hz;
-        std::optional<std::string> pixel_format; // GenICam enum entry, verbatim
+        // Native 12-bit DN in the camera's GVSP 12Packed Bayer layout: 2 px in 3 bytes, 12 bits/px
+        // (manual "Pixel Format", PixelSize table: BayerRG12Packed = 12). The only accepted format.
+        // Omission must not leave the camera at its BayerRG8 factory default.
+        std::optional<std::string> pixel_format = kNativePixelFormat;
         std::optional<RoiConfig> roi;
         // BlemishEnable (manual p.156): false = "Disable all", the sensor's own pixels, hot pixels included.
         // Only written when false; true is the factory value.
@@ -100,7 +105,7 @@ namespace gox {
 
     struct OutputConfig {
         uint32_t segment_size_mb = 2048;
-        uint32_t record_align = 4096; // legacy input; ebus-raw-v1 has no record alignment
+        uint32_t record_align = 4096; // legacy input; ebus-raw has no record alignment
         uint32_t queue_max_frames = 0; // 0 = auto; pool allocates +2 chunks
         QueueOnFull queue_on_full = QueueOnFull::kDropNewest;
         OnBufferError on_buffer_error = OnBufferError::kRecordFlagged;

@@ -6,7 +6,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GUI and binaries run in one container and share these paths.
@@ -19,7 +18,11 @@ BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 BIN_FX10_REFERENCE = BUILD_BIN / "fx10_reference"
 
 MAIN_CONFIG = Path(os.environ.get("AMIGA_MAIN_CONFIG", str(REPO_ROOT / "config" / "config-main.yaml")))
-SNAPSHOT_CONFIG = Path(os.environ.get("AMIGA_SNAPSHOT_CONFIG", str(REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml")))
+SNAPSHOT_CONFIG = Path(
+    os.environ.get("AMIGA_SNAPSHOT_CONFIG", str(REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml")))
+FX10_SNAPSHOT_CONFIG = Path(
+    os.environ.get("AMIGA_FX10_SNAPSHOT_CONFIG",
+                   str(REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml")))
 
 # --- GUI ---------------------------------------------------------------------
 GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
@@ -37,12 +40,12 @@ GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
 #   - Tailwind utility classes (text-gray-600, bg-red-50, text-amber-700, ...)
 #     used for subtle text and panel backgrounds; those are per-class edits.
 PALETTE = {
-    "primary": "#3d596b",    # primary actions and storage indicators
+    "primary": "#3d596b",  # primary actions and storage indicators
     "secondary": "#66747d",
     "accent": "#526b7a",
-    "positive": "#35754a",   # driver-reported RUNNING state
-    "negative": "#ad3e36",   # FAILED, Stop recording, disk below the hard floor
-    "warning": "#aa721d",    # INITIALIZING / STOPPING, disk warning floor
+    "positive": "#35754a",  # driver-reported RUNNING state
+    "negative": "#ad3e36",  # FAILED, Stop recording, disk below the hard floor
+    "warning": "#aa721d",  # INITIALIZING / STOPPING, disk warning floor
     "info": "#526b7a",
 }
 
@@ -56,7 +59,6 @@ PALETTE = {
 LOG_POLL_S = 0.2  # session log tail
 UI_TICK_S = 0.25  # pages showing live sensor/session state (Overview, headers)
 TOOL_TICK_S = 0.5  # tool pages whose tick only mirrors process state
-
 
 RUNTIME_DIR = Path(os.environ.get("AMIGA_RUNTIME_DIR", str(REPO_ROOT / "app" / "_runtime")))
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
@@ -80,12 +82,10 @@ CONFIG_FILES: dict[str, ConfigFile] = {
         ConfigFile("main", "Main (config-main.yaml)", MAIN_CONFIG),
         ConfigFile("asterx", "AsteRx", REPO_ROOT / "asterx_driver" / "config" / "config-asterx.yaml"),
         ConfigFile("fx10", "FX10", REPO_ROOT / "fx10_driver" / "config" / "config-fx10.yaml"),
-        ConfigFile("fx10_snapshot", "FX10 snapshot", REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml"),
         ConfigFile("gox", "GoX", REPO_ROOT / "gox_driver" / "config" / "config-gox.yaml"),
         ConfigFile("lms4xxx", "LMS4xxx", REPO_ROOT / "lms4xxx_driver" / "config" / "config-lms4xxx.yaml")
     ]
 }
-
 
 # Sensors shown on the dashboard; lms4xxx expands into one card per instance.
 DRIVERS = ("asterx", "fx10", "gox", "lms4xxx")

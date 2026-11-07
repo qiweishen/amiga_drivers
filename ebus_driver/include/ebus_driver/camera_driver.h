@@ -29,6 +29,12 @@ namespace fx10 {
 }
 
 namespace ebus_driver {
+    // Identities use the SDK headers this camera engine was compiled against.
+    // The RAW binary layout version is independent of this SDK provenance.
+    const char *SdkHeaderVersion() noexcept;
+    std::string DeviceMetadataFormat();
+    std::string RawRecordingFormat();
+
     using StopPredicate = std::function<bool()>;
 
     struct HealthSample {
@@ -43,7 +49,8 @@ namespace ebus_driver {
         std::function<void(PvStreamGEV &)> configure_stream;
         // Perform start-time actions and return only their results for profile_start.actions.
         std::function<nlohmann::json(PvDeviceGEV &, const StopPredicate &)> before_start;
-        // Called once during Init to publish device.json after configuration.
+        // Called once during Init for profile metadata after configuration.
+        // The engine supplies the SDK identity and recording format in device.json.
         std::function<nlohmann::json(PvDeviceGEV &)> metadata;
         std::function<HealthSample(PvDeviceGEV &)> sample;
     };

@@ -16,10 +16,10 @@ cameras:
             ip: "10.95.1.101"           # direct connect; used when mac is empty
 
         acquisition:
-            exposure_ms: 150.0              # > 0; < 900 / frame_rate_hz (10% period margin, freerun and SensorSync pulses alike)
+            exposure_ms: 176.4              # > 0; < 900 / frame_rate_hz (10% period margin, freerun and SensorSync pulses alike)
             gain: 1.0                       # 1.0..126.0 (magnification, not dB, p.148)
-            pixel_format: BayerRG12Packed   # GenICam entry, verbatim; 12-bit formats also set SensorDigitizationBits
-            frame_rate_hz: 5.0              # >= 0.125 freerun; external + sensor_trigger: the SensorSync pulse rate, 1..10 Hz (12-bit packed full frame: <= ~5.8 fps, p.48-53)
+            pixel_format: BayerRG12Packed   # only accepted value: native 12-bit DN, 2 px / 3 B; SensorDigitizationBits=12 is required
+            frame_rate_hz: 5.0              # >= 0.125 freerun; external + sensor_trigger: pulse rate, 1..10 Hz; must fit the packed payload bandwidth
             blemish_correction: false       # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
                 mode: freerun           # freerun | external
@@ -43,7 +43,7 @@ cameras:
         # ADVANCED: do not change without a reason
         # =============================================================
         network:
-            buffer_count: 0             # 0 = auto | >= 4 (one buffer = one frame, ~18.6 MB)
+            buffer_count: 0             # 0 = auto | >= 4 (4128 x 3008 BayerRG12Packed: ~18.6 MB/frame)
             packet_size: 0              # 0 = negotiate | 1476..12036 (p.130)
             socket_rx_buffer_mb: 16     # 1..1024
             local_ip: ""                # bind to this NIC; "" = auto

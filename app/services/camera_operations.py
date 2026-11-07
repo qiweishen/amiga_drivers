@@ -6,8 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from ..state import STATE, ProcState
 from . import control_owner, tool_jobs
+from ..state import STATE, ProcState
 
 T = TypeVar("T")
 _task: asyncio.Task | None = None

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "apply_plan.h"
+#include "../tools/freerun_config.h"
 
 using namespace fx10;
 
@@ -269,4 +270,48 @@ TEST_CASE("plan: only the frame rate is clamped against the node range") {
         CAPTURE(w.node);
         CHECK(w.clamp_to_node_range == (w.node == node::kFrameRate));
     }
+}
+
+TEST_CASE("GUI freerun keeps snapshot imaging settings and overrides raw trigger requests") {
+    AppConfig config;
+    config.acquisition.trigger.mode = TriggerMode::kExternal;
+    config.acquisition.trigger.exposure_control = ExposureControl::kPulseWidth;
+    config.acquisition.exposure_ms = 7.0;
+    config.acquisition.frame_rate_hz = 37.0;
+    config.acquisition.spatial_binning = 2;
+    config.acquisition.spectral_binning = 4;
+    config.acquisition.pixel_format = "Mono12";
+    config.sensor_trigger.enabled = true;
+    config.features.raw = {
+        {node::kTriggerMode, "enum", "On"},
+        {node::kExposureMode, "enum", "TriggerControlled"},
+        {node::kFrameRateEnable, "bool", "", 0, 0.0, false}
+    };
+
+    fx10::tool::ForceFreerun(config);
+    CHECK_FALSE(config.sensor_trigger.enabled);
+    CHECK(config.acquisition.trigger.mode == TriggerMode::kFreerun);
+    CHECK(config.acquisition.trigger.exposure_control == ExposureControl::kCamera);
+    CHECK(config.acquisition.exposure_ms == doctest::Approx(7.0));
+    CHECK(config.acquisition.frame_rate_hz == doctest::Approx(37.0));
+    CHECK(config.acquisition.spatial_binning == 2);
+    CHECK(config.acquisition.spectral_binning == 4);
+    CHECK(config.acquisition.pixel_format == "Mono12");
+
+    const auto plan = BuildApplyPlan(config.acquisition, config.features.raw);
+    CHECK(IndexOf(plan, node::kMissedTriggerReset) == -1);
+    CHECK(WriteFor(plan, node::kExposureTime).float_value == doctest::Approx(7000.0));
+    CHECK(WriteFor(plan, node::kFrameRate).float_value == doctest::Approx(37.0));
+    const auto final_write = [&](const char *name) -> const FeatureWrite & {
+        const auto it = std::find_if(plan.rbegin(), plan.rend(),
+                                    [&](const FeatureWrite &write) { return write.node == name; });
+        REQUIRE(it != plan.rend());
+        CHECK(it->required); // missing nodes or failed readbacks must not silently continue
+        return *it;
+    };
+    CHECK(final_write(node::kTriggerSelector).text == "FrameStart");
+    CHECK(final_write(node::kTriggerMode).text == "Off");
+    CHECK(final_write(node::kExposureMode).text == "Timed");
+    CHECK(final_write(node::kAcquisitionMode).text == "Continuous");
+    CHECK(final_write(node::kFrameRateEnable).bool_value);
 }

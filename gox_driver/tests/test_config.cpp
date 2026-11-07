@@ -57,6 +57,8 @@ TEST_CASE("config: minimal valid config fills every default") {
     CHECK(cam.device.mac.empty());
     CHECK(cam.device.ip == "10.0.0.2");
     CHECK_FALSE(cam.acquisition.exposure_ms.has_value());
+    REQUIRE(cam.acquisition.pixel_format.has_value());
+    CHECK(*cam.acquisition.pixel_format == "BayerRG12Packed");
     CHECK_FALSE(cam.acquisition.roi.has_value());
     CHECK_FALSE(cam.acquisition.blemish_correction); // rawest state
     CHECK(cam.acquisition.trigger.mode == TriggerMode::kFreerun);
@@ -122,6 +124,10 @@ TEST_CASE("config: invariants are rejected with the dotted key") {
         {DocWithCamera("    acquisition: {gain: 0.5}"), "gain: must be in [1.0, 126.0]"},
         {DocWithCamera("    acquisition: {gain: 200}"), "gain: must be in [1.0, 126.0]"},
         {DocWithCamera("    acquisition: {frame_rate_hz: 0.1}"), "frame_rate_hz: must be >= 0.125"},
+        {DocWithCamera("    acquisition: {pixel_format: BayerRG8}"), "pixel_format: must be BayerRG12Packed"},
+        {DocWithCamera("    acquisition: {pixel_format: BayerRG12}"), "pixel_format: must be BayerRG12Packed"},
+        {DocWithCamera("    acquisition: {pixel_format: BayerRG12p}"), "pixel_format: must be BayerRG12Packed"},
+        {DocWithCamera("    acquisition: {pixel_format: Mono12}"), "pixel_format: must be BayerRG12Packed"},
         {DocWithCamera("    acquisition: {roi: {width: 100}}"), "roi.width: must be a multiple of 8"},
         {DocWithCamera("    acquisition: {roi: {width: 64}}"), "must be 0 (keep) or >= 96"},
         {DocWithCamera("    acquisition: {roi: {height: 4}}"), "must be 0 (keep) or >= 8"},

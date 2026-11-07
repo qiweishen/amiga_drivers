@@ -1,4 +1,4 @@
-"""Shared chart options for the FX10 snapshot workbench and white/dark references.
+"""Shared chart options for FX10 snapshots, white/dark references and live spectra.
 
 Statistics remain in recorded digital numbers (DN); no normalization, clipping,
 or interpolation of the signal is performed. Captured wavelength coordinates
@@ -22,11 +22,11 @@ def axis_note(wavelengths_nm: Sequence[float]) -> str:
 
 
 def workbench_options(
-    spectrum_dn: dict[str, list[float]] | None = None,
-    *,
-    full_scale: int | None = None,
-    bands: int = 0,
-    wavelengths_nm: Sequence[float] = (),
+        spectrum_dn: dict[str, list[float]] | None = None,
+        *,
+        full_scale: int | None = None,
+        bands: int = 0,
+        wavelengths_nm: Sequence[float] = (),
 ) -> dict:
     """Build raw-DN curves and independent full-scale reference lines.
 

@@ -13,9 +13,9 @@ session per run (`common::SensorSyncHub`, log at `raw/sensor_trigger.log`).
 Actual receiver timescales, the ZDA-to-GPS conversion, wiring and time lock must
 be established for the deployed rig; configuration alone does not demonstrate
 cross-sensor synchronization. Native device timestamps remain distinct from
-recorded `host_*` diagnostics. AsteRx CSV history playback uses `host_unix_ns`
-for its display timeline, not as a replacement for GNSS/INS measurement time.
-Host monotonic clocks also drive operational deadlines, rates and playback.
+recorded `host_*` diagnostics. AsteRx CSV `host_unix_ns` records host reception
+time, not GNSS/INS measurement time. Host monotonic clocks also drive operational
+deadlines and rates.
 FX10 recordings without SensorSync lack that cross-sensor timing association.
 The user-confirmed PTP topology has AsteRx as its sole grandmaster; the Go-X
 driver does not verify the master's identity. Go-X retains slave-status
@@ -57,8 +57,8 @@ are named at second resolution and an existing one is refused, never reused.
 | Sensor | Driver | Transport | Records |
 |---|---|---|---|
 | Septentrio **AsteRx RBi3 Pro+** (GNSS/INS; the rig's NTP + PTP server) | `asterx_driver` | Qt + vendored SsnRx SDK over TCP | `*.sbf` blocks (including warm-up) + `live_*.csv` telemetry sidecar |
-| JAI **Go-X** GigE cameras (×N) | `ebus_driver` + GOX config | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `ebus-raw-v1` SDK buffers + `device.json` + `events.jsonl`; its channel in `raw/sensor_trigger.log` |
-| Specim **FX10e** hyperspectral pushbroom | `ebus_driver` + FX10 config | Pleora eBUS SDK (GVSP), SensorSync-triggered | The same `ebus-raw-v1` SDK buffers + metadata/events; ENVI is an offline derivative |
+| JAI **Go-X** GigE cameras (×N) | `ebus_driver` + GOX config | Pleora eBUS SDK (GVSP), PTP slave, SensorSync-triggered | `ebus-raw` SDK buffers + `device.json` + `events.jsonl`; its channel in `raw/sensor_trigger.log` |
+| Specim **FX10e** hyperspectral pushbroom | `ebus_driver` + FX10 config | Pleora eBUS SDK (GVSP), SensorSync-triggered | The same `ebus-raw` SDK buffers + metadata/events |
 | SICK **LMS4xxx** 2D LiDARs (LMS4121R / LMS4124R family, ×N) | `lms4xxx_driver` | CoLa B binary over TCP 2111, NTP client | Complete telegrams in `scan_<id>_<ts>_NNN.bin` + CSV index + JSON metadata |
 
 Every driver **resets the device to a known baseline on each start** and then
@@ -119,15 +119,30 @@ Lifecycle ownership is explicit:
 - `AcquisitionController` in `app/services/process.py`: process identity,
   tasks, stop latch and immutable recording snapshots; UI code observes state.
 
-The shared `ebus_driver/scripts/ebus_raw/` package reads the new camera RAW
-format and decodes supported pixels offline. `app/formats/fx10.py` and
-`gox_driver/scripts/jai_raw/` retain historical ENVI / jai-raw-seg compatibility.
-CLI names and YAML inputs remain supported; new recordings use a different format.
-See [the unified driver and binary format](ebus_driver/README.md).
+This repository owns sensor control, raw stream recording, and the parsing and
+temporary presentation needed by the GUI. Offline exports, format conversion and
+calibration workflows belong to `amiga_decoders`; no such command-line tools are
+provided here.
 
-The existing Go-X RGB8 preview path still passes RGB arrays to OpenCV image
-writers that interpret channels as BGR. That display limitation is unchanged by
-this refactor; native sample accounting and raw recording bytes are unaffected.
+GUI data processing lives in `app/decoder/`: `ebus/` reads `ebus-raw`
+and decodes supported camera pixels; `fx10/` computes raw DN spectra and previews;
+`gox/` handles Go-X snapshot/live presentation and GUI ColorChecker references; `asterx/` parses
+the current live CSV telemetry and recorded scan tracks for GUI maps.
+Camera input supports only `ebus-raw-eBUS_SDK_v<SDK version>`;
+historical jai-raw-seg and FX10 ENVI recording readers have been removed. AsteRx
+CSV remains a separate format, and the app has no LMS payload decoder.
+`app/services/` owns process and operation scheduling; `app/ui/` presents results.
+These Python GUI readers are not required by the C++ acquisition drivers.
+C++ acquisition CLI names and YAML inputs remain supported.
+See [the app layering guide](app/README.md) and
+[the unified driver and binary format](ebus_driver/README.md).
+
+GOX acquisition and GUI input require native `BayerRG12Packed` (GVSP 12Packed,
+2 pixels in 3 bytes), with verified 12-bit sensor digitization. The GUI unpacks
+Bayer DN to 0–4095 in `uint16`; demosaicing uses `uint16`, and snapshot/live previews use in-memory 16-bit PNG with `DN << 4`.
+RGB-to-BGR conversion at the PNG encoder preserves the intended channel order.
+The source RAW bytes remain unchanged; actual browser/display output precision
+has not been verified.
 
 ### GUI and control service
 
@@ -142,8 +157,9 @@ Browser → amiga-drivers-dev container
 ```
 
 The control service owns process identities, recording/tool reservations,
-configuration writes and request recovery. Preview and historical replay read recorded files;
-they do not replace the C++ recording path. Acquisition binaries must publish the
+configuration writes and request recovery. GUI preview reads the active recording
+or a newly acquired snapshot; it does not replace the C++ recording path.
+Acquisition binaries must publish the
 `amiga-run-v1` lifecycle protocol. Logs provide diagnostics and display statistics;
 they do not establish readiness or a successful recording result. The supported
 deployment is the single container shown above. See [Web GUI](#web-gui) for recovery.
@@ -155,7 +171,7 @@ deployment is the single container shown above. See [Web GUI](#web-gui) for reco
 | `AmigaDrivers` | The unified executable for multi-sensor recording |
 | `ebus_discover` / `ebus_set_ip` | GigE Vision enumeration for both camera drivers / camera re-addressing (FORCEIP + persistent IP); both live in `common/` and are used by the web GUI |
 | `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
-| `fx10_reference` | Collect Reference page: white then dark, each for `reference.duration_s` (default 5 s), with separate spectral plots and a persistent `reference_<UTC>` session using the unified RAW recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
+| `fx10_reference` | Collect Reference page: white then dark, each for the snapshot configuration's `reference.duration_s` (default 5 s), in freerun without PTP or SensorSync, with separate spectral plots and a persistent `reference_<UTC>` session using the unified RAW recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
 | `asterx_lib`, `lms4xxx_lib`, `ebus_camera` | Sensor adapters; both cameras share `ebus_camera` |
 | `ebus_raw`, `gox_device_config`, `fx10_device_config` | Shared SDK-free recorder and isolated device configuration profiles |
 | `amiga_common` | SDK-independent infrastructure: session coordinator, logging, strict config loading, queues, rig guards, SensorSync host wrapper and `drivers.json` |
@@ -363,7 +379,7 @@ configuration snapshot and run metadata under `raw/`:
     │                                 #   exposure (S) edges of every channel, PPS (P) and NMEA (Z)
     ├── asterx/                       # asterx-<UTC>-N.sbf + live_*.csv; warm-up and ready
     │                                 #   phases share the same SBF file sequence
-    ├── gox/<cam>/                    # seg_NNNNN.raw (ebus-raw-v1) + device.json + events.jsonl
+    ├── gox/<cam>/                    # seg_NNNNN.raw (ebus-raw) + device.json + events.jsonl
     ├── fx10/fx10_<UTC>Z/             # the same RAW format and sidecars
     └── lms4xxx/                      # scan_<instance>_<ts>_NNN.bin + .csv + .json
 ```
@@ -381,8 +397,9 @@ Controller journals and temporary previews are separate from acquisition data:
 
 `raw/drivers.json` remains the per-session record. The runtime status file is a
 recovery aid for locating the current session, not a history archive. FX10
-reference collection uses separate `reference_<UTC>` output sessions. Historical
-AsteRx replay reads the CSV sidecars without modifying any of these files.
+reference collection uses separate `reference_<UTC>` output sessions. Go-X
+snapshot previews are encoded as 16-bit PNG in memory; their raw acquisition
+files remain in the snapshot work directory, without a separate preview export.
 
 The recording formats are self-describing enough to read without this repository:
 
@@ -392,12 +409,18 @@ The recording formats are self-describing enough to read without this repository
   the ready phase use the same writer. Opening the warm-up gate does not split
   the file; the configured size/time rotation still applies. Warm-up blocks
   retain their original device time and validity fields.
-- **`ebus-raw-v1`** (GOX and FX10) — unchanged SDK acquired bytes, with
+- **`ebus-raw-eBUS_SDK_v<SDK version>`** (GOX and FX10) — unchanged SDK acquired bytes, with
   per-record JSON layout/status/timestamps and CRC32C for prefix, metadata and payload.
-  `device.json` stores configuration and `events.jsonl` records health and completion.
-  The native SDK timestamp's unit/epoch are not assumed. Historical jai-raw-seg
-  and FX10 ENVI recordings remain readable. New FX10 ENVI files are created only
-  by the separate offline exporter; the authoritative bytes remain in RAW.
+  `device.json` uses `ebus-device-eBUS_SDK_v<SDK version>` and stores configuration;
+  `events.jsonl` records health and completion. The suffix comes from the compiled
+  Pleora SDK's `PvVersion.h` `NVERSION_STRING`, also stored in `sdk.header_version`:
+  for example, `ebus-raw-eBUS_SDK_v6.5.1.6797` and
+  `ebus-device-eBUS_SDK_v6.5.1.6797`. It identifies the SDK headers used for the build,
+  not the loaded runtime SDK or the AmigaDrivers project version. The RAW binary
+  header's numeric layout version remains `1` and is checked independently.
+  The native SDK timestamp's unit/epoch are not assumed. GUI camera readers
+  accept only this recording format. Offline export and format conversion belong
+  to `amiga_decoders`; this repository retains the authoritative RAW bytes.
 - **`lms4xxx-cola-b` v1** (lms4xxx) — complete received telegrams, including
   STX, length, command bytes and checksum, concatenated in BIN files. CSV indexes
   preserve byte offsets, host reception and clock observations; JSON carries
@@ -516,9 +539,9 @@ See [Docker deployment](#docker-deployment) for the single-container configurati
 | `/config` **Config** | Raw-text editor for the selected main and driver configs; YAML validation, path/version conflict detection, atomic save and a `.bak`. |
 | `/logs` **Logs** | The unified session log with level/module filters and follow mode. |
 | `/live` **Data Live** | On-demand Go-X/FX10 previews from files in the RUNNING session, using bounded background work and the session/settings captured at request time. |
-| `/asterx` **AsteRx** | Live CSV telemetry plus independent historical replay, seek timeline, playback speed, indexing progress and stream-gap indicators. |
-| `/sessions` **History** | Bounded session metadata listing, date/device/state filters, pagination and links to finalized AsteRx recordings. |
-| `/reference` **Collect Reference** | FX10 white/dark reference collection with saved configuration and retained results. |
+| `/asterx` **AsteRx** | Current-session CSV telemetry, live navigation state, receiver status and route display. |
+| `/sessions` **History** | Bounded session metadata listing, date/device/state filters, pagination and a zoomable map of the selected session's scan track. |
+| `/reference` **Reference capture** | FX10 white/dark collection and GOX ColorChecker detection/calibration, with saved configuration and retained RAW reference data. |
 | `/camera` **Camera Tools** | One shared device discovery for both camera drivers, then a Go-X and an FX10 exposure workbench. |
 
 ### Recording output directory
@@ -541,35 +564,21 @@ changes**. Click **Save** to write the settings to `config-main.yaml`; selection
 alone does not save. The saved directory applies to the next recording and does
 not relocate an active session.
 
-### AsteRx history playback
+### Session metadata
 
-1. Open **History** (`/sessions`) and select a recording root. Filter by date,
-   enabled device or recorded state; the list displays 20 sessions per page.
-2. Use the AsteRx replay action on a finalized, inactive session containing live
-   CSV data. This opens `/asterx` in **History** mode with that session selected.
-3. Alternatively, enter a path directly on the AsteRx page: a session directory,
-   `raw/`, `raw/asterx/`, or a supported CSV file. Paths refer to the GUI server's
-   filesystem/shared volume, not the browser's computer. Direct entry also works
-   for relocated or older recordings outside the catalog.
-4. Load the file(s), then use **Play/Pause**, **Restart**, the seek slider or
-   **Jump to**, and playback speeds from **0.25× to 8×**. Indexing shows byte
-   progress and can be cancelled.
+Open **History** (`/sessions`) and select a recording root. Filter by date,
+enabled device or recorded state; the list displays 20 sessions per page.
+Select a session to inspect its scan track on a zoomable map and check the
+recorded route extent. This is a read-only GUI view; it does not export the route or provide
+historical timeline playback or frame-by-frame telemetry. The AsteRx page reads
+the running session's `live_insnavgeod.csv` and
+`live_receiverstatus.csv` telemetry sidecars for temporary GUI presentation;
+it does not decode full SBF recordings.
 
-Supported streams are `live_insnavgeod.csv` and `live_receiverstatus.csv`;
-selecting a directory combines both when present. Each page has an independent
-player. It uses the recorded integer `host_unix_ns` values to order the display;
-the live receiver and active acquisition remain independent of playback. These
-CSV files contain derived telemetry, so this feature does **not** decode full
-SBF recordings or replay raw GNSS/IMU observations to a device.
-
-Use files that have finished writing. Indexing/playback checks for file changes,
-reports malformed rows and incomplete tails, and rejects backwards host time
-for automatic playback. Gaps longer than 2 seconds are counted per stream, with
-up to 512 intervals retained for display. Sparse indexing and a bounded route
-preview limit memory use; original CSV values and files are not rewritten.
-
-History reads top-level timestamped directories and small `raw/drivers.json`
-files, without traversing raw sensor payloads. Scans are bounded to 100,000
+The History catalog reads top-level timestamped directories and small
+`raw/drivers.json` files without traversing raw sensor payloads. The selected
+session's CSV telemetry is read separately for its scan-track map. Catalog
+scans are bounded to 100,000
 directory entries, 5,000 candidate sessions, 256 KiB per manifest and 64 MiB of
 metadata; the page reports when a listing is partial. Catalog states describe
 the recorded manifest result, not an independent integrity audit of every file.
@@ -601,17 +610,79 @@ that driver's workbench. Three rules shape the page:
 - *Preview never writes the config.* Exposure, gain and the FX10
   spatial/spectral binning are passed to the snapshot tools as CLI overrides, so
   trying a setting cannot mutate what the next recording uses. **Apply to config**
-  is the explicit writeback: it edits the driver config as text so the
-  documentation in it survives, re-reads the value back before saving, and takes
-  effect at the next recording start. For Go-X it writes the `cameras:` entry that
+  is the explicit writeback to both the recording and snapshot configurations:
+  Go-X saves exposure and gain; FX10 saves exposure and spatial/spectral binning.
+  The saved values are used by subsequent recordings and reference captures.
+  It edits the configs as text so their documentation survives and re-reads the
+  values before saving. In each Go-X config it writes the `cameras:` entry that
   identifies the selected camera — by MAC when the entry is MAC-bound (the driver
   ignores `device.ip` there), otherwise by IP.
 
-**Collect Reference** runs the FX10 white/dark workflow with saved settings,
-separate spectral plots and retained results. Discovery, Set IP, both snapshot
+**Device Setup → Reference capture** uses `config-fx10-snapshot.yaml` for FX10
+white/dark collection and `config-gox-snapshot.yaml` for GOX ColorChecker capture.
+Both run in freerun without PTP, external triggering or SensorSync. These
+snapshot profiles are separate from the recording profiles shown on the
+Configuration page and are not exposed in that editor. The reference page shows
+the selected configuration paths; FX10 also shows each phase's duration from
+`reference.duration_s` (the driver default is 5 seconds).
+FX10 retains separate spectral plots and collection results.
+Camera Tools' **Apply to config** synchronizes its tuning values into the
+corresponding snapshot profile so subsequent reference captures use them.
+Discovery, Set IP, both snapshot
 tools and reference collection share service-owned operation tracking. Leaving
 a page does not make its device operation available for a second launch.
 The shared header displays the tool ID, status/error and **Stop tool** action.
+FX10 snapshot, reference and live spectra and mean intensities use native DN,
+with axes based on the PixelFormat full scale. They are not normalized to
+0–1 or converted to reflectance. Display encoding may scale DN to image brightness;
+it does not change the underlying RAW or spectral values.
+Go-X acquisition requires `PixelFormat=BayerRG12Packed` and
+`SensorDigitizationBits=12`, verified after all raw-feature overrides; no other
+pixel format is accepted. The GUI accepts only this format and unpacks it
+losslessly to 12-bit DN stored in `uint16`; RAW keeps the packed SDK bytes.
+Snapshot and live previews demosaic at that depth and encode 16-bit PNG in
+memory using `DN << 4`; this mapping preserves every demosaiced DN code without
+8-bit quantization. Snapshot histograms use the native Bayer DN values.
+Acquisition keeps the original RAW files without creating a preview export.
+Browser compositing and monitor output depth have not been verified.
+
+A packed 4128×3008 frame occupies 18,625,536 bytes (12 bits per pixel, manual
+"Pixel Format" PixelSize table), three quarters of unpacked `BayerRG12`. At the
+main profile's 5 fps the image payload is approximately 93.13 MB/s. The recorded
+device link is 125,000,000 B/s with `NetworkThroughputSafetyMargin=92`,
+corresponding to about 115 MB/s before protocol overhead. Continuous capture at
+this setting has not been verified.
+
+GOX ColorChecker capture requires an explicit choice of `cv.mcc.MCC24`,
+`cv.mcc.SG140` or `cv.mcc.VINYL18` before acquisition. The page shows all three
+clickable chart illustrations from `app/resource/`, highlighting the selected card
+with no default selection. Camera identity, exposure and gain come exclusively
+from the GOX snapshot configuration; reference capture provides no IP, exposure
+or gain overrides and does not inherit Camera Tools slider values. It checks
+the required OpenCV 5 `mcc`/`ccm` APIs before reserving the camera and reports
+missing capabilities without changing the environment. `cv.mcc.CCheckerDetector`
+locates the selected chart on a temporary 8-bit image and supplies only patch
+geometry. This detection stage is the sole image-depth exception: patch
+measurements use full-resolution 12-bit DN with `uint16` demosaicing and
+floating-point matrix fitting through `cv.ccm`. Detection-image pixels are not
+used for patch means, calibration fitting or GUI previews. The complete workflow
+has not been verified by execution or hardware testing. Calibration verifies the selected
+RAW payload's CRC32C; ordinary snapshot/live preview reading remains unchanged.
+The fitted matrix maps
+normalized linear camera RGB to linear sRGB (D65); the GUI applies the sRGB
+display transfer function only to corrected previews, encoded as 16-bit PNG.
+Original and annotated previews use the same `DN << 4` mapping as snapshots.
+Required camera-state audit
+evidence, chart detection, clipping and fit checks must succeed.
+
+Reference RAW, a copy of the snapshot configuration and `reference.json` are
+retained under `reference_gox_<UTC>_<ID>/` in the configured output directory.
+The metadata includes chart type, matrix, fit metrics and relative paths to
+the source recording. These references are outside temporary snapshot cleanup;
+failed detection or calibration preserves acquired RAW and records failure.
+Original, annotated and corrected images remain GUI previews in memory. The
+matrix is not written back to the camera or automatically applied to later
+recordings. Offline batch correction remains in `amiga_decoders`.
 
 ### Lifecycle, results and recovery
 
@@ -658,7 +729,8 @@ Do not run a second control service against the same devices.
 | --- | --- |
 | `AMIGA_GUI_HOST`, `AMIGA_GUI_PORT` | GUI and Compose default to `0.0.0.0:8619`, accepting connections through localhost, LAN and Tailscale IPv4 addresses. Set `AMIGA_GUI_HOST` to restrict the listening address. |
 | `AMIGA_MAIN_CONFIG` | Default `<repo>/config/config-main.yaml`; selects the actual per-driver config paths. |
-| `AMIGA_SNAPSHOT_CONFIG` | Default `<repo>/gox_driver/config/config-gox-snapshot.yaml`. |
+| `AMIGA_SNAPSHOT_CONFIG` | GOX snapshot and ColorChecker reference profile; default `<repo>/gox_driver/config/config-gox-snapshot.yaml`. |
+| `AMIGA_FX10_SNAPSHOT_CONFIG` | FX10 snapshot and white/dark reference profile; default `<repo>/fx10_driver/config/config-fx10-snapshot.yaml`. |
 | `AMIGA_CONFIG_ROOT`, `AMIGA_DATA_ROOT` | Optional resolved configuration/output boundaries; Compose sets both to `/workspace`. |
 | `AMIGA_RUNTIME_DIR` | Default `<repo>/app/_runtime`; operation journals and temporary previews; Compose keeps them on the workspace volume. |
 | `AMIGA_CONTROL_LOCK` | Default `<AMIGA_RUNTIME_DIR>/controller.lock`; exclusive local control ownership lock. |
@@ -843,14 +915,18 @@ amiga_drivers/
 ├── resource/                 # eBUS SDK .deb + devices_ip.yaml (rig addresses, time server)
 ├── common/                   # amiga_common + amiga_ebus + tests/
 ├── asterx_driver/            # Qt/SsnRx session, SBF write queue, live CSV sidecar, tests/
-├── ebus_driver/             # one camera runtime + RAW recorder + offline readers/export + tests/
+├── ebus_driver/              # one camera runtime + RAW recorder + tests/
 ├── fx10_driver/              # FX10 configuration, GenICam control, tools and config tests
-├── gox_driver/               # GOX configuration, PTP/control, legacy reader and config tests
+├── gox_driver/               # GOX configuration, PTP/control and config tests
 ├── lms4xxx_driver/           # CoLa B communication, first-scan/time monitor, RAW recorder, tests/
-├── app/                      # Python GUI/control services (pip-managed dependencies)
+├── app/                      # Python GUI/control services and temporary data presentation
 │   ├── main.py               # NiceGUI single-container entry point
-│   ├── formats/              # shared FX10 recording-format readers
-│   ├── services/             # process/tool lifecycle, config actions, status, file previews and replay
+│   ├── decoder/              # sensor parsing and statistics needed by the GUI
+│   │   ├── ebus/            # ebus-raw readers and pixel decoding
+│   │   ├── fx10/            # FX10 DN cubes and spectral summaries
+│   │   ├── gox/             # Go-X snapshot and live image presentation
+│   │   └── asterx/          # live CSV telemetry and scan-track parsing for GUI maps
+│   ├── services/             # process/tool lifecycle, config actions, status and live preview scheduling
 │   └── ui/                   # Overview, Config, Logs, Live, AsteRx, History, Camera Tools, Reference
 ├── tools/                    # repo tooling (contract checker, …)
 ├── requirements.txt          # pinned direct Python dependencies; pip resolves transitives

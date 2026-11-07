@@ -101,7 +101,7 @@ class LogBuffer:
     def last_error_line(self) -> LogLine | None:
         for ln in reversed(self._lines):
             if ln.level in ("error", "critical") or (
-                ln.module == "Main" and ("failed" in ln.msg or "exception" in ln.msg)
+                    ln.module == "Main" and ("failed" in ln.msg or "exception" in ln.msg)
             ):
                 return ln
         return None

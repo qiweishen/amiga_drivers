@@ -33,6 +33,7 @@ namespace ebus_driver {
 
         RawRecorder &operator=(const RawRecorder &) = delete;
 
+        // Requires device.recording_format; events and statistics preserve that identity.
         void Open(const nlohmann::json &device);
 
         // Single writer. A failed append latches failure and must not be retried.
@@ -61,6 +62,7 @@ namespace ebus_driver {
         void Fail();
 
         RecorderOptions options_;
+        std::string recording_format_;
         int directory_fd_ = -1, data_fd_ = -1, events_fd_ = -1;
         std::uint64_t segment_ = 0, offset_ = 0, synced_ = 0, segment_records_ = 0;
         std::atomic<std::uint64_t> records_{0}, frames_{0}, bytes_{0};

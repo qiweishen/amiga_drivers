@@ -67,6 +67,12 @@ namespace ebus_driver {
     void RawRecorder::Open(const nlohmann::json &device) {
         if (opened_ || closed_) throw std::logic_error("raw recorder is single-use");
         try {
+            if (!device.is_object() || !device.contains("recording_format") ||
+                !device.at("recording_format").is_string())
+                throw std::invalid_argument("raw device metadata requires a recording_format string");
+            recording_format_ = device.at("recording_format").get<std::string>();
+            if (recording_format_.empty())
+                throw std::invalid_argument("raw device metadata recording_format must not be empty");
             const auto parent = options_.directory.parent_path();
             if (!parent.empty()) std::filesystem::create_directories(parent);
             if (!std::filesystem::create_directory(options_.directory))
@@ -106,7 +112,7 @@ namespace ebus_driver {
                 throw;
             }
             Event({
-                {"event", "session_start"}, {"format", "ebus-raw-v1"},
+                {"event", "session_start"}, {"format", recording_format_},
                 {"host_realtime_ns", common::TimeUtil::RealtimeNowNs()}
             });
         } catch (...) {
@@ -268,7 +274,7 @@ namespace ebus_driver {
 
     nlohmann::json RawRecorder::Summary() const {
         return {
-            {"format", "ebus-raw-v1"}, {"directory", options_.directory.string()},
+            {"format", recording_format_}, {"directory", options_.directory.string()},
             {"records_written", records_.load()}, {"frames_written", frames_.load()},
             {"valid_frames_written", frames_.load()}, {"payload_bytes_written", bytes_.load()},
             {"segments_created", segment_}, {"failed", Failed()},

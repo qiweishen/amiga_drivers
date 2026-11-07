@@ -1,17 +1,16 @@
-"""AsteRx live telemetry and independent, read-only history playback."""
+"""AsteRx live telemetry presentation for the current acquisition."""
 
 from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-
 from nicegui import ui
 
-from ..constants import TOOL_TICK_S
-from ..services.asterx_live import LIVE, STALE_S, sample_age_s
-from ..services.asterx_replay import HistoryPlayer
-from ..state import STATE, ProcState
 from . import layout
+from ..constants import TOOL_TICK_S
+from ..decoder.asterx.telemetry import STALE_S, sample_age_s
+from ..services.asterx_live import LIVE
+from ..state import STATE, ProcState
 
 _FIX_TEXT = {0: "No PVT", 1: "Stand-Alone", 2: "DGNSS", 3: "Fixed pos",
              4: "RTK Fixed", 5: "RTK Float", 6: "SBAS", 7: "MB RTK Fixed",
@@ -30,7 +29,7 @@ def _is_live() -> bool:
 
 def _guard_text() -> str:
     if LIVE.session_dir is None:
-        return "No live recording yet — start recording with AsteRx enabled, or load history below"
+        return "No live recording yet — start recording with AsteRx enabled"
     if STATE.control_uncertain:
         return "Acquisition ownership is unknown — displayed telemetry is not verified live"
     if not _is_live():
@@ -43,7 +42,8 @@ def _stamp(ns: int | None) -> str:
         return "Unknown"
     try:
         seconds, nano = divmod(ns, 1_000_000_000)
-        return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + f".{nano // 1_000_000:03d} UTC"
+        return datetime.fromtimestamp(seconds, timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S") + f".{nano // 1_000_000:03d} UTC"
     except (OverflowError, OSError, ValueError):
         return "Unknown"
 
@@ -131,58 +131,19 @@ def _kv_card(title: str, keys: list[str]) -> tuple[ui.card, ui.label, dict[str, 
 
 
 @ui.page("/asterx")
-def asterx_page(session: str = "") -> None:
-    player = HistoryPlayer()
-    page = {"alive": True, "scrubbing": False}
+def asterx_page() -> None:
+    page = {"alive": True}
 
     def close() -> None:
         page["alive"] = False
-        player.close()
 
     ui.context.client.on_delete(close)
-    with layout.frame("AsteRx · Live & History"):
+    with layout.frame("AsteRx · Live"):
         with ui.column().classes("console-panel w-full gap-3"):
             with ui.row().classes("console-toolbar w-full justify-between"):
                 ui.label("AsteRx GNSS / INS").classes("section-title")
-                with ui.row().classes("items-center gap-3"):
-                    source_mode = ui.toggle({"live": "Live", "history": "History replay"}, value="history" if session else "live",
-                                            on_change=lambda _: _mode_changed())
-                    source_badge = ui.badge("LIVE").props('color="blue-grey"')
+                source_badge = ui.badge("LIVE").props('color="blue-grey"')
             guard_label = ui.label("").classes("text-sm text-amber-700")
-
-        with ui.column().classes("console-panel w-full gap-3") as history_controls:
-            ui.label("Replay a finalized recording").classes("section-title")
-            ui.label("Enter a path on the GUI server: a session directory, raw/asterx directory, or a single CSV. "
-                     "A directory loads both live_insnavgeod.csv and live_receiverstatus.csv when available."
-                     ).classes("section-copy")
-            with ui.row().classes("console-toolbar w-full"):
-                history_path = ui.input("Session directory or CSV path",
-                                        value=session,
-                                        placeholder="recordings/<session>/raw/asterx").classes("flex-1 min-w-0").props("outlined dense")
-                load_btn = ui.button("Load history", icon="folder_open", on_click=lambda: _load())
-                cancel_btn = ui.button("Cancel read", icon="close", on_click=player.cancel_read).props("flat")
-                loading = ui.spinner(size="sm")
-            with ui.row().classes("console-toolbar filter-bar w-full"):
-                play_btn = ui.button("Play", icon="play_arrow", on_click=lambda: _play())
-                pause_btn = ui.button("Pause", icon="pause", on_click=player.pause).props("outline")
-                restart_btn = ui.button("Restart", icon="replay", on_click=lambda: _seek(0.0)).props("outline")
-                speed = ui.select({0.25: "0.25×", 0.5: "0.5×", 1.0: "1×", 2.0: "2×", 4.0: "4×", 8.0: "8×"},
-                                  value=1.0, label="Speed",
-                                  on_change=lambda e: player.set_speed(float(e.value))).classes("w-24").props("outlined dense")
-                seek_position = ui.number("Jump to", value=0.0, min=0.0, step=0.1, suffix="s").classes("w-32").props("outlined dense")
-                seek_btn = ui.button("Jump", icon="skip_next",
-                                     on_click=lambda: _seek(seek_position.value)).props("outline")
-            progress = ui.linear_progress(value=0.0, show_value=False).classes("w-full")
-            timeline = ui.slider(min=0, max=1, step=0.01, value=0).props("label").classes("w-full")
-            timeline.on("pan", lambda e: page.__setitem__("scrubbing", e.args["phase"] == "start"), ["phase"])
-            timeline.on("change", lambda e: _seek(e.args), [None])
-            index_progress = ui.label().classes("section-copy")
-            gap_label = ui.label().classes("text-xs text-amber-700 whitespace-pre-line")
-            playback_label = ui.label("").classes("text-sm mono")
-            history_info = ui.label("").classes("text-xs muted whitespace-pre-line break-all")
-            history_error = ui.label("").classes("text-sm text-red-700 whitespace-pre-line")
-            ui.label("Timeline: recorded host time. Playback only changes this page; it does not control the receiver. "
-                     "The route is simplified for display.").classes("section-copy")
 
         with ui.column().classes("console-panel w-full gap-3"):
             with ui.row().classes("console-toolbar w-full"):
@@ -208,23 +169,10 @@ def asterx_page(session: str = "") -> None:
         track_seen = [-1]
         source_seen = [None]
 
-        def _history() -> bool:
-            return source_mode.value == "history"
-
-        def _data():
-            return player.data if _history() else LIVE
-
-        def _age(sample) -> float | None:
-            return sample_age_s(sample, reference_ns=player.timestamp_ns) if _history() else sample_age_s(sample)
-
         def _stale_title(card: ui.card, title_label: ui.label, name: str, sample) -> None:
-            age = _age(sample) if sample is not None else None
+            age = sample_age_s(sample) if sample is not None else None
             if sample is None:
                 suffix, dim = "no data", True
-            elif _history():
-                suffix = "history" if age is not None and age <= STALE_S else (
-                    "history · time unknown" if age is None else f"history · gap {age:.1f}s")
-                dim = age is None or age > STALE_S
             elif not _is_live():
                 suffix, dim = "not live", True
             elif age is None:
@@ -241,9 +189,9 @@ def asterx_page(session: str = "") -> None:
             ins = data.ins
             mode = (ins.gnss_mode & 0x0F) if ins is not None and ins.gnss_mode is not None else None
             text = _FIX_TEXT.get(mode, f"mode {mode}") if mode is not None else "Unknown fix"
-            age = _age(ins) if ins is not None else None
-            live = not _history() and _is_live() and age is not None and age <= STALE_S
-            prefix = "History · " if _history() else ("" if live else "Last sample · ")
+            age = sample_age_s(ins) if ins is not None else None
+            live = _is_live() and age is not None and age <= STALE_S
+            prefix = "" if live else "Last sample · "
             fix_badge.set_text(prefix + text)
             fix_badge.props(f'color="{_FIX_COLOR.get(mode, "blue-grey") if live else "grey"}"')
 
@@ -263,10 +211,12 @@ def asterx_page(session: str = "") -> None:
                 mode = (ins.gnss_mode & 0x0F) if ins.gnss_mode is not None else None
                 ins_f["Fix (GNSS)"].set_text(_FIX_TEXT.get(mode, "Unknown" if mode is None else f"mode {mode}"))
                 _alert(ins_f["Error"], ins.error not in (None, 0))
-                ins_f["Error"].set_text("Unknown" if ins.error is None else "OK" if ins.error == 0 else f"INS error {ins.error}")
+                ins_f["Error"].set_text(
+                    "Unknown" if ins.error is None else "OK" if ins.error == 0 else f"INS error {ins.error}")
                 _alert(ins_f["GNSS age"], math.isfinite(ins.gnss_age_s) and ins.gnss_age_s > 1.0, "text-amber-700")
                 ins_f["GNSS age"].set_text(_fmt(ins.gnss_age_s, "{:.2f}", " s"))
-                ins_f["Lat / Lon"].set_text(f"{ins.lat_deg:.7f}, {ins.lon_deg:.7f}" if _finite(ins.lat_deg, ins.lon_deg) else "—")
+                ins_f["Lat / Lon"].set_text(
+                    f"{ins.lat_deg:.7f}, {ins.lon_deg:.7f}" if _finite(ins.lat_deg, ins.lon_deg) else "—")
                 ins_f["Height"].set_text(_fmt(ins.height_m, "{:.2f}", " m"))
                 ins_f["Accuracy"].set_text(_fmt(ins.accuracy_m, "{:.2f}", " m"))
                 ins_f["Host CSV time"].set_text(_stamp(ins.host_unix_ns))
@@ -284,9 +234,11 @@ def asterx_page(session: str = "") -> None:
                 rx_f["Temperature"].set_text(_fmt(rx.temp_c, "{:.0f}", " °C"))
                 rx_f["Uptime"].set_text(_uptime(rx.up_time_s))
                 _alert(rx_f["RX error"], rx.rx_error not in (None, 0))
-                rx_f["RX error"].set_text("Unknown" if rx.rx_error is None else "OK" if rx.rx_error == 0 else f"RX ERROR 0x{rx.rx_error:X}")
+                rx_f["RX error"].set_text(
+                    "Unknown" if rx.rx_error is None else "OK" if rx.rx_error == 0 else f"RX ERROR 0x{rx.rx_error:X}")
                 _alert(rx_f["Ext error"], rx.ext_error not in (None, 0), "text-amber-700")
-                rx_f["Ext error"].set_text("Unknown" if rx.ext_error is None else "OK" if rx.ext_error == 0 else f"EXT ERROR 0x{rx.ext_error:X}")
+                rx_f["Ext error"].set_text(
+                    "Unknown" if rx.ext_error is None else "OK" if rx.ext_error == 0 else f"EXT ERROR 0x{rx.ext_error:X}")
                 rx_f["Host CSV time"].set_text(_stamp(rx.host_unix_ns))
 
         def _remove_marker() -> None:
@@ -303,10 +255,10 @@ def asterx_page(session: str = "") -> None:
                 track_layer.args[0] = latlngs
                 m.run_layer_method(track_layer.id, "setLatLngs", latlngs)
             ins = data.ins
-            age = _age(ins) if ins else None
+            age = sample_age_s(ins) if ins else None
             valid = (ins is not None and _finite(ins.lat_deg, ins.lon_deg)
                      and -90 <= ins.lat_deg <= 90 and -180 <= ins.lon_deg <= 180)
-            if not valid or (not _history() and (not _is_live() or age is None or age > STALE_S)):
+            if not valid or not _is_live() or age is None or age > STALE_S:
                 _remove_marker()
                 return
             lat, lon = ins.lat_deg, ins.lon_deg
@@ -320,49 +272,11 @@ def asterx_page(session: str = "") -> None:
                 if follow.value:
                     m.set_center((lat, lon))
 
-        def _controls() -> None:
-            history_controls.set_visibility(_history())
-            ready = player.index is not None
-            load_btn.set_enabled(not player.busy)
-            cancel_btn.set_enabled(player.busy)
-            play_btn.set_enabled(ready and not player.busy and not player.playing)
-            pause_btn.set_enabled(player.playing)
-            restart_btn.set_enabled(ready and not player.busy)
-            seek_btn.set_enabled(ready and not player.busy)
-            seek_position.set_enabled(ready and not player.busy)
-            speed.set_enabled(not player.busy)
-            loading.set_visibility(player.busy)
-            history_error.set_text(player.error)
-            name, done, total = player.progress
-            index_progress.set_text(f"Indexing {name}: {done / total:.0%} ({done:,} / {total:,} bytes)"
-                                    if player.busy and not ready and total else "")
-            timeline.set_enabled(ready and not player.busy)
-            if not ready:
-                progress.set_value(0.0)
-                playback_label.set_text("Loading…" if player.busy else "No history loaded")
-                history_info.set_text("")
-                gap_label.set_text("")
-                return
-            index = player.index
-            timeline.props(f"max={max(0.01, index.duration_s)}")
-            if not page["scrubbing"]:
-                timeline.set_value(player.position_s)
-            gap_label.set_text(f"{index.gap_count} stream gaps longer than 2 s; showing up to 512 intervals.\n" +
-                               "\n".join(f"{name}: {(start - index.first_ns) / 1e9:.1f}–{(end - index.first_ns) / 1e9:.1f} s"
-                                         for name, start, end in index.gaps if start <= (player.timestamp_ns or 0) < end)
-                               if index.gap_count else "No stream gaps longer than 2 s")
-            status = "Playing" if player.playing else "End" if player.position_s >= index.duration_s else "Paused"
-            progress.set_value(min(1.0, player.position_s / index.duration_s) if index.duration_s else 1.0)
-            playback_label.set_text(f"{status} · {player.position_s:.1f} / {index.duration_s:.1f} s · {_stamp(player.timestamp_ns)}")
-            history_info.set_text("\n".join(
-                f"{item.path} · {item.rows} rows · skipped {item.skipped} malformed/time-invalid rows · "
-                f"ignored {item.partial} incomplete tail rows" for item in index.streams))
-
         def _render() -> None:
             if not page["alive"]:
                 return
-            data = _data()
-            key = (source_mode.value, LIVE.session_dir if not _history() else id(player.index))
+            data = LIVE
+            key = LIVE.session_dir
             if key != source_seen[0]:
                 source_seen[0] = key
                 frd_seen[0] = track_seen[0] = -1
@@ -370,59 +284,12 @@ def asterx_page(session: str = "") -> None:
                 track_layer.args[0] = []
                 if m.is_initialized:
                     m.run_layer_method(track_layer.id, "setLatLngs", [])
-            _controls()
-            source_badge.set_text("HISTORY REPLAY" if _history() else "LIVE" if _is_live() else "NOT LIVE")
-            source_badge.props(f'color="{"orange" if _history() else "primary" if _is_live() else "grey"}"')
-            guard_label.set_text("Historical CSV playback — this page is independent of the running acquisition"
-                                 if _history() else " · ".join(filter(None, (_guard_text(), LIVE.error))))
+            source_badge.set_text("LIVE" if _is_live() else "NOT LIVE")
+            source_badge.props(f'color="{"primary" if _is_live() else "grey"}"')
+            guard_label.set_text(" · ".join(filter(None, (_guard_text(), LIVE.error))))
             _refresh_badge(data)
             _refresh_health(data)
             _refresh_map(data)
 
-        async def _load() -> None:
-            try:
-                await player.load(history_path.value or "")
-            except Exception as e:
-                if page["alive"]:
-                    ui.notify(f"History unavailable: {e}", type="negative", multi_line=True)
-            _render()
-
-        async def _seek(seconds) -> bool:
-            page["scrubbing"] = False
-            try:
-                await player.seek(float(seconds))
-            except Exception as e:
-                if page["alive"]:
-                    ui.notify(f"Cannot jump: {e}", type="warning", multi_line=True)
-                return False
-            _render()
-            return True
-
-        async def _play() -> None:
-            if player.busy:
-                return
-            if player.index is not None and player.position_s >= player.index.duration_s:
-                if not await _seek(0.0):
-                    return
-            player.play()
-            _render()
-
-        def _mode_changed() -> None:
-            if not _history():
-                player.pause()
-            _render()
-
-        async def _refresh() -> None:
-            if not page["alive"]:
-                return
-            if _history():
-                try:
-                    await player.tick()
-                except Exception:
-                    pass  # player.error is persistent and displayed below the controls
-            _render()
-
-        ui.timer(TOOL_TICK_S, _refresh)
-        if session:
-            ui.timer(0.1, _load, once=True)
+        ui.timer(TOOL_TICK_S, _render)
         _render()

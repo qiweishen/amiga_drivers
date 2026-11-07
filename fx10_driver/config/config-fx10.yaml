@@ -62,7 +62,7 @@ features:
         -   { name: LineSource, type: enum, value: ExposureActive }
 
 
-# --- Output (eBUS RAW; ENVI is an offline derivative) ---
+# --- Output (eBUS RAW; offline conversion belongs to amiga_decoders) ---
 output:
     rotation:
         max_lines: 0                    # RAW SDK records; 0 = no count-based rotation
@@ -74,7 +74,7 @@ output:
         file: ""                        # calibration-pack text file
         list: []
         grid: { start_nm: 400.0, end_nm: 1000.0 }   # start_nm < end_nm
-        fwhm_list: []                   # empty = no fwhm in the .hdr
+        fwhm_list: []                   # optional per-band FWHM metadata; empty = unspecified
         # For file/list, add calibration from THIS device's pack (do not guess):
         # calibration: { reference: PACK_REVISION, device_serial: SERIAL,
         #                samples: WIDTH, bands: HEIGHT, offset_x: X, offset_y: Y }

@@ -1,11 +1,12 @@
 # =============================================================
 # FX10e Driver Configuration - Snapshot
 # =============================================================
-# Used by the Spectral workbench; Collect Reference uses config-fx10.yaml.
-# fx10_snapshot forces: trigger freerun, frame_rate_hz from --fps, one segment under --out,
-# on_gap record, no frame/duration limit, statistics off; the sensor trigger is never used.
+# Shared camera profile for the Camera workbench and white/dark Reference capture.
+# Both tools force freerun without SensorSync or an absolute-time requirement.
+# fx10_snapshot captures --frames with a bounded duration into one segment under --out.
+# fx10_reference keeps these camera parameters and captures reference.duration_s per phase.
 # Workbench-only overrides: device.ip (--ip), exposure_ms (--exposure-ms),
-# spatial_binning / spectral_binning (--spatial-binning / --spectral-binning).
+# spatial_binning / spectral_binning (--spatial-binning / --spectral-binning), --fps.
 # Unknown keys are errors; omitted keys keep the driver defaults.
 
 
@@ -21,11 +22,11 @@ acquisition:
     spectral_binning: 2                 # 1 | 2 | 4 | 8; mroi needs 1
     pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
     exposure_ms: 5.0                    # > 0
-    frame_rate_hz: 50.0                 # snapshot uses --fps
+    frame_rate_hz: 50.0                 # used unchanged unless workbench passes --fps
     status_line: false
     image_enhancement: true
     trigger:
-        mode: freerun                  # snapshot uses freerun
+        mode: freerun                  # both GUI capture tools enforce freerun
     mroi:
         enabled: false
         multiband_string: ""
@@ -33,7 +34,12 @@ acquisition:
 
 # --- Sensor Trigger ---
 sensor_trigger:
-    enabled: false                     # snapshot does not require a trigger board
+    enabled: false                     # neither GUI capture tool uses a trigger board
+
+
+# --- White/dark Reference ---
+reference:
+    duration_s: 5.0                     # seconds per phase
 
 
 # Mechanical shutter is a mandatory driver step, with no YAML override:
@@ -46,10 +52,10 @@ sensor_trigger:
 # =============================================================
 # --- Features ---
 features:
-    raw: []                             # no strobe wiring for snapshot
+    raw: []                             # tool timing overrides are appended and read back after these entries
 
 
-# --- Output (eBUS RAW; ENVI is an offline derivative) ---
+# --- Output (eBUS RAW; offline conversion belongs to amiga_decoders) ---
 output:
     flush_interval_mb: 64               # 0..4096
     wavelengths:

@@ -13,9 +13,9 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 
+from . import runtime, atomic_json
 from ..constants import RUNTIME_DIR
 from ..state import STATE
-from . import runtime, atomic_json
 
 NAMES = ("jai_snapshot", "fx10_snapshot", "ebus_set_ip", "fx10_reference", "ebus_discover")
 JOURNAL = RUNTIME_DIR / "tool-operation.json"
@@ -135,6 +135,7 @@ async def communicate(proc: asyncio.subprocess.Process, timeout: float) -> tuple
         await confirm_exit(proc)
         if out[1] or err[1]:
             raise RuntimeError("Tool output exceeded the capture limit; output was not interpreted")
+        await release(proc)  # A multi-capture operation (exposure bracket) may launch the next tool.
         return out[0], err[0]
     except BaseException:
         await terminate(proc)
@@ -153,6 +154,13 @@ async def confirm_exit(proc: asyncio.subprocess.Process) -> None:
         raise RuntimeError("Unknown tool handle")
     if not await _wait_absent(_handle.identity, 1):
         raise RuntimeError("The tool connection ended while its process was still alive")
+
+
+async def release(proc: asyncio.subprocess.Process) -> None:
+    """Confirm that this tool has exited, then free the slot for the next tool of the same operation."""
+    global _handle
+    await confirm_exit(proc)
+    _handle = None
 
 
 async def finish(error: str = "") -> None:

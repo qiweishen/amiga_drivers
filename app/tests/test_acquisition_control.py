@@ -1,16 +1,16 @@
 """Offline lifecycle contracts; all process and manifest I/O is substituted."""
 
 import asyncio
+import unittest
 from contextlib import ExitStack
 from dataclasses import asdict, FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.state import AppState, ProcState
 from app.services import control_service, process, run_status, runtime, session_info
 from app.services.log_buffer import LogBuffer, parse_line
+from app.state import AppState, ProcState
 
 
 class RecordingViewTests(unittest.TestCase):
@@ -73,7 +73,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             owner._update(session_generation=1)
             return SimpleNamespace(path=Path("/data/stale"), started_at=1, enables={"gox": True}, lms_names=[])
 
-        with patch.object(session_info, "recover", side_effect=recover), patch.object(run_status, "read_session") as read:
+        with patch.object(session_info, "recover", side_effect=recover), patch.object(run_status,
+                                                                                      "read_session") as read:
             await owner._observe_session(ref, 0)
             read.assert_not_called()
         self.assertIsNone(owner.snapshot().active_session)
@@ -201,7 +202,7 @@ class ManifestTests(unittest.TestCase):
     def test_per_camera_gox_lifecycle_aggregates_without_hiding_a_failure(self):
         sensors = run_status.sensor_statuses({"gox": True}, [])
         self.doc["lifecycle"]["sensors"] = {"gox:cam0": {"state": "running"},
-                                             "gox:cam1": {"state": "waiting"}}
+                                            "gox:cam1": {"state": "waiting"}}
         self.assertEqual(run_status.sensor_update(self.doc, sensors)["gox"][0].value, "waiting")
         self.doc["lifecycle"]["sensors"]["gox:cam1"] = {"state": "running"}
         self.assertEqual(run_status.sensor_update(self.doc, sensors)["gox"][0].value, "running")

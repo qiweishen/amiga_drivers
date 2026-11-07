@@ -34,6 +34,16 @@
 #include "time_util.h"
 
 namespace ebus_driver {
+    const char *SdkHeaderVersion() noexcept { return NVERSION_STRING; }
+
+    std::string DeviceMetadataFormat() {
+        return std::string("ebus-device-eBUS_SDK_v") + SdkHeaderVersion();
+    }
+
+    std::string RawRecordingFormat() {
+        return std::string("ebus-raw-eBUS_SDK_v") + SdkHeaderVersion();
+    }
+
     namespace {
         using Json = nlohmann::json;
         using Clock = std::chrono::steady_clock;
@@ -341,13 +351,13 @@ namespace ebus_driver {
             if (!metadata.is_object()) {
                 throw std::runtime_error("device profile metadata must be an object");
             }
-            metadata["format"] = "ebus-device";
+            metadata["format"] = DeviceMetadataFormat();
             metadata["kind"] = options.kind;
             metadata["id"] = options.id;
-            metadata["recording_format"] = "ebus-raw";
+            metadata["recording_format"] = RawRecordingFormat();
             metadata["runtime"] = runtime;
             metadata["sdk"] = {
-                {"name", "Pleora eBUS"}, {"header_version", NVERSION_STRING},
+                {"name", "Pleora eBUS"}, {"header_version", SdkHeaderVersion()},
                 {"header_version_source", "PvVersion.h NVERSION_STRING at build time"},
                 {"runtime_version", nullptr}, {"runtime_version_status", "not queried; never inferred from headers"}
             };

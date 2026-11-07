@@ -64,6 +64,10 @@ namespace ebus_driver {
             if (!camera.enabled) {
                 continue;
             }
+            if (!camera.acquisition.pixel_format ||
+                *camera.acquisition.pixel_format != gox::kNativePixelFormat) {
+                throw std::invalid_argument("GOX acquisition requires PixelFormat=BayerRG12Packed");
+            }
             auto state = std::make_shared<GoxState>();
             state->camera = camera;
             state->output = config.output;
@@ -123,6 +127,7 @@ namespace ebus_driver {
                 state->control = std::make_unique<gox::ebus::CameraController>(state->camera.id, device);
                 state->factory = state->control->LoadFactoryDefaults(stop);
 
+                // Trigger-only and freerun capture do not need a PTP manager.
                 if (state->ptp_config.enabled) {
                     state->ptp = std::make_unique<gox::ebus::PtpManager>(
                         state->camera.id, device.GetParameters(), state->ptp_config);
@@ -141,6 +146,18 @@ namespace ebus_driver {
                     != "On")
                     throw std::runtime_error(
                         "GOX requires verified GevGVSPExtendedIDMode=On; remove a conflicting raw override");
+                // The raw escape hatch can change these nodes or reload a user set.
+                // Verify the final device state before the engine sizes buffers or starts capture.
+                std::string pixel_format;
+                std::int64_t digitization_bits = 0;
+                if (!gox::ebus::ReadEnumFeature(state->control->Params(), "PixelFormat", pixel_format) ||
+                    pixel_format != gox::kNativePixelFormat ||
+                    !gox::ebus::ReadEnumIntFeature(state->control->Params(), "SensorDigitizationBits",
+                                                 digitization_bits) || digitization_bits != 12) {
+                    throw std::runtime_error(
+                        "GOX requires verified PixelFormat=BayerRG12Packed and SensorDigitizationBits=12; "
+                        "remove a conflicting raw override");
+                }
                 state->counter_bound = state->control->TriggerCounterBound();
                 CheckStop(stop);
             };
@@ -188,7 +205,9 @@ namespace ebus_driver {
             hooks.metadata = [state](PvDeviceGEV &device) {
                 gox::RuntimeShape runtime;
                 runtime.payload_size = device.GetPayloadSize();
-                auto report = state->control->CollectDeviceReport(state->camera, state->applied, state->ptp->Summary(), state->factory, runtime);
+                const auto ptp = state->ptp ? state->ptp->Summary() : gox::PtpSummary{};
+                auto report = state->control->CollectDeviceReport(
+                    state->camera, state->applied, ptp, state->factory, runtime);
                 report.timing.mode = state->camera.acquisition.trigger.mode == gox::TriggerMode::kExternal
                                          ? "external"
                                          : "freerun";
@@ -202,13 +221,11 @@ namespace ebus_driver {
                     report.timing.expected_pulse_rate_hz = state->camera.acquisition.frame_rate_hz;
                 }
                 nlohmann::json doc = gox::BuildDeviceJson(report);
-                // The generic engine supplies the actual allocated runtime and RAW contract.
+                // The engine supplies SDK format identities, allocated runtime and RAW contract.
                 doc.erase("runtime");
                 doc.erase("recording_contract");
-                doc["format"] = "ebus-device";
                 doc["kind"] = "gox";
                 doc["id"] = state->camera.id;
-                doc["recording_format"] = "ebus-raw";
                 doc["config_source"] = state->source.string();
                 doc["legacy_output_options"] = {
                     {
@@ -257,16 +274,16 @@ namespace ebus_driver {
 
             hooks.sample = [state](PvDeviceGEV &) {
                 HealthSample health;
-                if (!state->control || !state->ptp) {
+                if (!state->control || (state->ptp_config.enabled && !state->ptp)) {
                     health.values["status"] = "configuration_not_completed";
                     return health;
                 }
-                if (!state->ptp->CheckHealth(state->stop)) {
+                if (state->ptp && !state->ptp->CheckHealth(state->stop)) {
                     health.failure = "GOX PTP synchronization lost";
                 }
                 const auto sample = state->control->SampleTelemetry(state->counter_bound);
                 health.values = nlohmann::json::parse(gox::BuildTelemetryLine(sample));
-                const auto ptp = state->ptp->Summary();
+                const auto ptp = state->ptp ? state->ptp->Summary() : gox::PtpSummary{};
                 health.values["ptp"] = {
                     {"enabled", ptp.enabled}, {"synchronized", ptp.synchronized}, {"status", ptp.status}
                 };
