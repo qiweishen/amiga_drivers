@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "config_util.h"
@@ -14,9 +13,36 @@
 namespace fx10 {
     using ConfigError = common::ConfigError;
 
+    // Timing limits of the FX10e, set by the operator (2026-11-08); every trigger mode.
+    // AcquisitionFrameRate ceiling: 163.02 Hz at BinningHorizontal = BinningVertical = 1,
+    // 324.373 Hz for every other binning combination. ExposureTime maximum 419000 us.
+    inline constexpr double kMaxFrameRateHzUnbinned = 163.02;
+    inline constexpr double kMaxFrameRateHzBinned = 324.373;
+    inline constexpr double kMaxExposureMs = 419.0;
+    // The exposure may use at most 90 % of the frame (or pulse) period.
+    inline constexpr double kExposurePeriodFraction = 0.9;
+
+    inline double MaxFrameRateHz(int spatial_binning, int spectral_binning) {
+        return spatial_binning == 1 && spectral_binning == 1 ? kMaxFrameRateHzUnbinned : kMaxFrameRateHzBinned;
+    }
+
+    // Longest exposure that fits a frame rate, ms: 0.9 * 1000 / frame_rate_hz
+    inline double ExposureLimitMs(double frame_rate_hz) {
+        return kExposurePeriodFraction * 1000.0 / frame_rate_hz;
+    }
+
+    // Inclusive check with a relative 1e-9 allowance, so an exposure computed as
+    // exactly 90 % of a period is not rejected by floating-point rounding.
+    inline bool ExposureFitsPeriod(double exposure_ms, double frame_rate_hz) {
+        return exposure_ms <= ExposureLimitMs(frame_rate_hz) * (1.0 + 1e-9);
+    }
+
     struct DeviceConfig {
         std::string mac; // discovery match; wins over ip
         std::string ip; // direct connect; used when mac is empty
+        // eBUS Player .pvcfg restored after factory preparation; empty = not loaded.
+        // Relative paths resolve against the project root; see ebus_config_file.h.
+        std::string ebus_config;
     };
 
     struct NetworkConfig {
@@ -43,11 +69,6 @@ namespace fx10 {
         std::string source_entry = "Line0";
     };
 
-    struct MroiConfig {
-        bool enabled = false;
-        std::string multiband_string; // "y1 h1;y2 h2;..." native sensor rows
-    };
-
     // The board's serial port is the rig's (config-main.yaml "Sensor Trigger: Port")
     struct SensorTriggerConfig {
         bool enabled = false;
@@ -60,9 +81,6 @@ namespace fx10 {
         std::string pixel_format = "Mono12Packed";
         double exposure_ms = 5.0;
         double frame_rate_hz = 50.0; // freerun rate; expected pulse rate under external trigger
-        MroiConfig mroi;
-        bool status_line = false; // on: the camera overwrites the last image row
-        bool image_enhancement = true; // AIE; only true is supported (node name unknown)
         TriggerConfig trigger;
 
         int ExpectedBands() const;
@@ -143,6 +161,7 @@ namespace fx10 {
 
     AppConfig LoadAppConfigText(const std::string &yaml_text);
 
-    // "y1 h1;y2 h2;..." -> (start_row, height) list; throws ConfigError
-    std::vector<std::pair<int, int> > ParseMroiRegions(const std::string &multiband_string);
+    // Exposure <= kMaxExposureMs, frame rate <= MaxFrameRateHz(binning), exposure <= 90 % of
+    // the period. Run by the loader and again by tools after CLI overrides. Throws ConfigError.
+    void CheckAcquisitionTiming(const AcquisitionConfig &acq);
 } // namespace fx10

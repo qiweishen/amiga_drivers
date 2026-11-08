@@ -4,7 +4,7 @@
 # Shared camera profile for jai_snapshot (Camera workbench and ColorChecker reference).
 # The tool forces: max_frames 1, max_duration_s 15, ptp off, trigger freerun,
 # SensorSync off, cameras[0] enabled, output under --out.
-# Workbench overrides: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain).
+# Workbench overrides: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain), frame_rate_hz (--frame-rate-hz).
 # ColorChecker reference uses this profile's camera parameters without workbench overrides.
 # Unknown keys are errors; omitted keys keep the driver defaults.
 
@@ -16,10 +16,10 @@ cameras:
             mac: ""                         # --mac
             ip: "10.95.1.101"               # --ip
         acquisition:
-            exposure_ms: 176.4              # > 0; < 900 / frame_rate_hz (10% timing margin)
+            exposure_ms: 399.405            # 0 < x <= 399.405; <= 900 / frame_rate_hz (90% of the period)
             gain: 1.0                       # 1.0..126.0
             pixel_format: BayerRG12Packed   # only accepted value: native 12-bit DN, 2 px / 3 B, also used by GUI previews
-            frame_rate_hz: 2.5              # >= 0.125; sets the exposure ceiling (factory 8 fps clamps > ~114 ms)
+            frame_rate_hz: 2.253            # 0.125..6.054; sets the exposure ceiling; written by GUI Apply (factory 8 fps clamps > ~114 ms)
             trigger:
                 mode: freerun
                 exposure_active_output: false

@@ -51,23 +51,7 @@ namespace fx10 {
         AddInt(plan, node::kSpectralBinning, acq.spectral_binning);
         AddEnum(plan, node::kPixelFormat, acq.pixel_format);
 
-        // 2. MROI as an index register (p.26); "off" is asserted, it survives a power cycle
-        if (acq.mroi.enabled) {
-            const auto regions = ParseMroiRegions(acq.mroi.multiband_string);
-            for (std::size_t i = 0; i < regions.size(); ++i) {
-                AddInt(plan, node::kMroiIndex, static_cast<std::int64_t>(i));
-                AddInt(plan, node::kMroiY, regions[i].first);
-                AddInt(plan, node::kMroiH, regions[i].second);
-            }
-            AddBool(plan, node::kMroiEnable, true);
-        } else {
-            AddBool(plan, node::kMroiEnable, false);
-        }
-
-        // 3. Status line replaces the last image row (p.34)
-        AddBool(plan, node::kStatusLine, acq.status_line);
-
-        // 4. ExposureMode before ExposureTime: TriggerControlled makes ExposureTime unavailable (p.29)
+        // 2. ExposureMode before ExposureTime: TriggerControlled makes ExposureTime unavailable (p.29)
         const bool pulse_width = acq.trigger.mode == TriggerMode::kExternal &&
                                  acq.trigger.exposure_control == ExposureControl::kPulseWidth;
         AddEnum(plan, node::kExposureMode, pulse_width ? "TriggerControlled" : "Timed");
@@ -77,7 +61,7 @@ namespace fx10 {
 
         AddEnum(plan, node::kAcquisitionMode, "Continuous");
 
-        // 5. Trigger group; EnAcquisitionFrameRate in both branches (p.28)
+        // 3. Trigger group; EnAcquisitionFrameRate in both branches (p.28)
         if (acq.trigger.mode == TriggerMode::kFreerun) {
             AddEnum(plan, node::kTriggerSelector, acq.trigger.selector_entry);
             AddEnum(plan, node::kTriggerMode, "Off");
@@ -91,12 +75,12 @@ namespace fx10 {
             AddFloat(plan, node::kTriggerDelay, acq.trigger.delay_ms * 1000.0);
             AddEnum(plan, node::kTriggerMode, "On");
             AddBool(plan, node::kFrameRateEnable, false);
-            // 5b. Missed-trigger counter (p.27); optional: a firmware without it costs the metric only
+            // 3b. Missed-trigger counter (p.27); optional: a firmware without it costs the metric only
             AddEnum(plan, node::kMissedTriggerSource, "MissedTrigger", /*required=*/false);
             AddCommand(plan, node::kMissedTriggerReset, /*required=*/false);
         }
 
-        // 6. Operator escape hatch, last; a clamp only warns (not driver-derived intent)
+        // 4. Operator escape hatch, last; a clamp only warns (not driver-derived intent)
         for (const RawFeature &f: raw) {
             FeatureWrite w;
             w.node = f.name;

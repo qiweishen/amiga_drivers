@@ -55,13 +55,10 @@ int main(int argc, char **argv) {
         if (exposure) config.acquisition.exposure_ms = *exposure;
         if (spatial) config.acquisition.spatial_binning = *spatial;
         if (spectral) config.acquisition.spectral_binning = *spectral;
-        if (config.acquisition.mroi.enabled &&
-            (config.acquisition.spatial_binning != 1 || config.acquisition.spectral_binning != 1))
-            return SnapshotFail(2, "MROI requires 1 x 1 binning");
         if (fps) config.acquisition.frame_rate_hz = *fps;
-        if (exposure || fps)
-            config.acquisition.frame_rate_hz = std::min(config.acquisition.frame_rate_hz,
-                                                       1000.0 / config.acquisition.exposure_ms);
+        // Same limits as the loader, after the overrides (binning changes the rate ceiling).
+        // Nothing is capped silently: the GUI passes a rate that already fits.
+        fx10::CheckAcquisitionTiming(config.acquisition);
         fx10::tool::ForceFreerun(config);
         config.recording.max_frames = frames;
         config.recording.max_duration_s = std::max(5.0, static_cast<double>(frames) /

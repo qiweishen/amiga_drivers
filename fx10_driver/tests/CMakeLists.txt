@@ -1,4 +1,4 @@
-set(FX10_TEST_SOURCES test_apply_plan.cpp test_config.cpp test_wavelengths.cpp)
+set(FX10_TEST_SOURCES test_apply_plan.cpp test_config.cpp test_wavelengths.cpp test_ebus_config_file.cpp)
 add_executable(fx10_tests doctest_main.cpp ${FX10_TEST_SOURCES})
 target_include_directories(fx10_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_include_directories(fx10_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rd_party)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from . import camera_operations, config_store, runtime, tool_jobs
+from . import camera_operations, config_store, fx10_timing, runtime, tool_jobs
 from ..constants import (
     BIN_FX10_SNAPSHOT,
     FX10_SNAPSHOT_CONFIG,
@@ -29,10 +29,15 @@ MAX_CONFIG_BYTES = 1024 * 1024
 DEFAULT_FRAME_RATE_HZ = 50.0
 
 
-def _capture_plan(exposure_ms: float, config: Path | None = None) -> tuple[Path, float, int, float]:
-    """Read the snapshot rate and match the tool's exposure cap and time budget.
+def _capture_plan(exposure_ms: float, config: Path | None = None, *, frame_rate_hz: float | None = None,
+                  spatial_binning: int | None = None,
+                  spectral_binning: int | None = None) -> tuple[Path, float, int, float]:
+    """The rate, frame count and time budget for one ~1 s capture.
 
     ``config`` is a preserved copy of the snapshot configuration (exposure series).
+    ``frame_rate_hz`` is the workbench rate; None takes the config rate, lowered to the
+    highest rate at which ``exposure_ms`` still fits (exposure series). Binning None keeps
+    the config's value. fx10_snapshot applies the same checks and never caps silently.
     """
     config = config_store.checked_snapshot_path(FX10_SNAPSHOT_CONFIG) if config is None else config
     with config.open("rb") as source:
@@ -47,22 +52,29 @@ def _capture_plan(exposure_ms: float, config: Path | None = None) -> tuple[Path,
     acquisition = document.get("acquisition", {})
     if not isinstance(acquisition, dict):
         raise ValueError("FX10 snapshot acquisition must be a YAML mapping")
-    rate = acquisition.get("frame_rate_hz", DEFAULT_FRAME_RATE_HZ)
+    spatial = acquisition.get("spatial_binning", 1) if spatial_binning is None else spatial_binning
+    spectral = acquisition.get("spectral_binning", 2) if spectral_binning is None else spectral_binning
+    rate = acquisition.get("frame_rate_hz", DEFAULT_FRAME_RATE_HZ) if frame_rate_hz is None else frame_rate_hz
     try:
-        if isinstance(rate, bool) or isinstance(exposure_ms, bool):
+        if any(isinstance(value, bool) for value in (rate, exposure_ms, spatial, spectral)):
             raise ValueError
-        frame_rate_hz, exposure_ms = float(rate), float(exposure_ms)
+        rate, exposure_ms, spatial, spectral = float(rate), float(exposure_ms), int(spatial), int(spectral)
     except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("FX10 frame rate and exposure must be finite positive numbers") from error
-    if not all(math.isfinite(value) and value > 0 for value in (frame_rate_hz, exposure_ms)):
+        raise ValueError("FX10 frame rate, exposure and binning must be finite positive numbers") from error
+    if not all(math.isfinite(value) and value > 0 for value in (rate, exposure_ms)):
         raise ValueError("FX10 frame rate and exposure must be finite positive numbers")
-    effective_fps = min(frame_rate_hz, 1000.0 / exposure_ms)
-    frames = max(1, round(effective_fps))
-    tool_duration = frames / effective_fps * 3 + 5
+    fx10_timing.check_exposure(exposure_ms)
+    if frame_rate_hz is None:
+        rate = min(rate, fx10_timing.max_frame_rate_hz(exposure_ms, spatial, spectral))
+    fx10_timing.check_frame_rate(rate, spatial, spectral)
+    if not fx10_timing.exposure_fits(exposure_ms, rate):
+        raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz")
+    frames = max(1, round(rate))
+    tool_duration = frames / rate * 3 + 5
     if not math.isfinite(tool_duration) or tool_duration > 604800:
         raise ValueError("FX10 snapshot duration exceeds seven days")
     # Let the tool's recording deadline finish before the GUI terminates it.
-    return config, frame_rate_hz, frames, tool_duration + 5
+    return config, rate, frames, tool_duration + 5
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,7 @@ class SnapshotRequest:
     exposure_ms: float
     spatial_binning: int | None
     spectral_binning: int | None
+    frame_rate_hz: float | None = None  # None = the snapshot config's rate
 
 
 @dataclass
@@ -106,12 +119,14 @@ def guard_reason() -> str | None:
 
 async def snapshot(ip: str, exposure_ms: float,
                    spatial_binning: int | None = None,
-                   spectral_binning: int | None = None) -> SnapshotResult:
-    request = SnapshotRequest(ip, exposure_ms, spatial_binning, spectral_binning)
+                   spectral_binning: int | None = None,
+                   frame_rate_hz: float | None = None) -> SnapshotResult:
+    request = SnapshotRequest(ip, exposure_ms, spatial_binning, spectral_binning, frame_rate_hz)
 
     async def capture() -> SnapshotResult:
         result = await _snapshot(request.target_ip, request.exposure_ms,
-                                 request.spatial_binning, request.spectral_binning)
+                                 request.spatial_binning, request.spectral_binning,
+                                 request.frame_rate_hz)
         result.request = request
         return result
 
@@ -120,15 +135,18 @@ async def snapshot(ip: str, exposure_ms: float,
 
 async def _snapshot(ip: str, exposure_ms: float,
                     spatial_binning: int | None,
-                    spectral_binning: int | None) -> SnapshotResult:
+                    spectral_binning: int | None,
+                    frame_rate_hz: float | None = None) -> SnapshotResult:
     """One spectral preview: capture ~1 second of frames and reduce them to
     per-band statistics while the service owns the camera reservation.
 
-    The binning overrides let the page preview a setting WITHOUT writing it to
+    The binning/rate overrides let the page preview a setting WITHOUT writing it to
     config-fx10.yaml (which is also the live recording config) — persisting is
     the explicit job of the Apply button. None = keep the config's value."""
     t0 = time.monotonic()
-    config, frame_rate_hz, frames, timeout_s = await asyncio.to_thread(_capture_plan, exposure_ms)
+    config, frame_rate_hz, frames, timeout_s = await asyncio.to_thread(
+        lambda: _capture_plan(exposure_ms, frame_rate_hz=frame_rate_hz,
+                              spatial_binning=spatial_binning, spectral_binning=spectral_binning))
     sid = time.strftime("%Y%m%d_%H%M%S")
     out_host = FX10_SNAPSHOT_DIR / sid
     if out_host.exists():  # same-second collision on rapid consecutive shots

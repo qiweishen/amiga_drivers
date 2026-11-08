@@ -95,9 +95,9 @@ endif()
 
 # Core libraries (verify against <root>/share/samples Makefiles when a new
 # SDK version changes the list). PvBase/PvDevice/PvStream/PvBuffer/PvGenICam/
-# PvSystem are required; the rest are linked when present.
-set(_ebus_required_libs PvBase PvDevice PvStream PvBuffer PvGenICam PvSystem)
-set(_ebus_optional_libs PvPersistence PvSerial PvAppUtils EbTransportLayerLib EbUtilsLib)
+# PvSystem/PvPersistence (FX10 .pvcfg restore) are required; the rest are linked when present.
+set(_ebus_required_libs PvBase PvDevice PvStream PvBuffer PvGenICam PvSystem PvPersistence)
+set(_ebus_optional_libs PvSerial PvAppUtils EbTransportLayerLib EbUtilsLib)
 
 set(_ebus_libs "")
 set(_ebus_missing "")

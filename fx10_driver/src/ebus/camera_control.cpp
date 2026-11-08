@@ -1,5 +1,6 @@
 #include "ebus/camera_control.h"
 
+#include <PvConfigurationReader.h>
 #include <PvDevice.h>
 #include <PvGenBoolean.h>
 #include <PvGenCommand.h>
@@ -9,8 +10,10 @@
 #include <PvGenString.h>
 #include <PvGenParameterArray.h>
 #include <PvGenParameter.h>
+#include <PvStringList.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <sstream>
@@ -277,6 +280,46 @@ namespace fx10 {
     }
 
 
+    void CameraControl::RestoreEbusConfiguration(const std::filesystem::path &pvcfg,
+                                                 const std::function<bool()> &stop) {
+        ebus_config_ = {{"status", "pending"}, {"path", pvcfg.string()}};
+        try {
+            if (stop && stop()) throw ControlError("[eBUS] ebus_config restore interrupted");
+            // 1. The file's directory names the camera it was saved from.
+            Check(device_.GetParameters()->InvalidateCache(), "node cache", "invalidate before ebus_config");
+            const std::string serial = GetString("DeviceSerialNumber");
+            ebus_config_["device_serial"] = serial;
+            CheckEbusConfigSerial(pvcfg, serial);
+            // 2. SHA-256 against checksums.txt.
+            ebus_config_["sha256"] = CheckEbusConfigChecksum(pvcfg);
+
+            // 3. Full load with the SDK, as eBUS Player does on a connected device.
+            g_log.Info("[eBUS] Restoring eBUS configuration {} (serial {}, sha256 {})", pvcfg.string(), serial,
+                       ebus_config_["sha256"].get<std::string>());
+            PvStringList errors; // outlives the reader that reports into it
+            PvConfigurationReader reader;
+            Check(reader.Load(PvString(pvcfg.string().c_str())), "ebus_config", "load");
+            reader.SetErrorList(&errors, PvString(""));
+            const PvResult result = reader.Restore(0u, &device_);
+            nlohmann::json restore_errors = nlohmann::json::array();
+            for (std::uint32_t i = 0; i < errors.GetSize(); ++i) {
+                restore_errors.push_back(pv(*errors.GetItem(i)));
+                g_log.Warn("[eBUS] ebus_config restore: {}", restore_errors.back().get<std::string>());
+            }
+            ebus_config_["restore_result"] = pv(result.GetCodeString());
+            ebus_config_["restore_errors"] = restore_errors;
+            Check(result, "ebus_config", "restore (not retried)");
+            VerifyControlReady();
+            ebus_config_["status"] = "restored";
+            g_log.Info("[eBUS] eBUS configuration restored; applying acquisition configuration next");
+        } catch (const std::exception &e) {
+            ebus_config_["status"] = "failed";
+            ebus_config_["error"] = e.what();
+            throw;
+        }
+    }
+
+
     void CameraControl::OpenShutter(const std::function<bool()> &stop) {
         WriteShutterPulse(true, stop);
     }
@@ -287,17 +330,19 @@ namespace fx10 {
 
     void CameraControl::WriteShutterPulse(bool open, const std::function<bool()> &stop) {
         // Operator-supplied FX10e control definition: numeric pulse nodes,
-        // range 1..255. Rev=255 opens; Fwd=255 closes. WRITING causes motion;
-        // neither node's stored number reports position or motion completion.
+        // range 1..255. Rev opens; Fwd closes. WRITING causes motion; neither
+        // node's stored number reports position or motion completion.
+        // Each operation is two writes: 1, then the Specim .pvcfg value
+        // (Rev 200 / Fwd 204); the second is sent only after the first is acknowledged.
         const char *pulse_node_name = open ? "MotorShutter_PulseRev" : "MotorShutter_PulseFwd";
-        constexpr std::int64_t kPulseValue = 255;
+        const std::array<std::int64_t, 2> sequence = {1, open ? 200 : 204};
         const auto started = std::chrono::steady_clock::now();
         shutter_preparation_ = {
             {"status", "pending"},
             {"operation", open ? "open" : "close"}, {"node", pulse_node_name},
-            {"type", "integer pulse value"}, {"requested", kPulseValue},
+            {"type", "integer pulse value"}, {"sequence", sequence},
             {"binding_source", "operator-provided FX10e node definition"},
-            {"write_acknowledged", false}, {"state_verified", false},
+            {"writes_acknowledged", 0}, {"state_verified", false},
             {"completion", "SDK write acknowledgement only; pulse value is not shutter state"}
         };
         const auto check_ready = [&] {
@@ -319,30 +364,35 @@ namespace fx10 {
             Check(pulse_node->GetMax(maximum), pulse_node_name, "read maximum");
             shutter_preparation_["node_min"] = minimum;
             shutter_preparation_["node_max"] = maximum;
-            if (kPulseValue < minimum || kPulseValue > maximum) {
-                failNode(pulse_node_name, "shutter pulse 255 is outside the reported range [" +
-                                          std::to_string(minimum) + ", " + std::to_string(maximum) + "]");
+            for (const std::int64_t value: sequence) {
+                if (value < minimum || value > maximum) {
+                    failNode(pulse_node_name, "shutter pulse " + std::to_string(value) +
+                                              " is outside the reported range [" + std::to_string(minimum) + ", " +
+                                              std::to_string(maximum) + "]");
+                }
             }
-            check_ready();
-            g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing", pulse_node_name,
-                       kPulseValue);
 
-            // Always call SetValue, including when a previous run wrote 255.
-            // Do not use SetInt/GetValue, equality checks, state polling or
+            // Always call SetValue, including when a previous run wrote the same
+            // value. Do not use SetInt/GetValue, equality checks, state polling or
             // PvGenCommand::Execute for this numeric action node. A failed or
-            // ambiguous write is fatal and is never automatically repeated.
-            // Discard any values cached while checking access/range before the
-            // action write; no value read or comparison is needed afterwards.
-            Check(parameters->InvalidateCache(), "node cache", "invalidate before shutter pulse write");
-            check_ready();
-            Check(pulse_node->SetValue(kPulseValue), pulse_node_name, "write shutter pulse (not retried)");
-            shutter_preparation_["write_acknowledged"] = true;
+            // ambiguous write is fatal and is never automatically repeated, and
+            // the next write is sent only after the previous one is acknowledged.
+            for (const std::int64_t value: sequence) {
+                check_ready();
+                g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing",
+                           pulse_node_name, value);
+                Check(parameters->InvalidateCache(), "node cache", "invalidate before shutter pulse write");
+                Check(pulse_node->SetValue(value), pulse_node_name,
+                      ("write shutter pulse " + std::to_string(value) + " (not retried)").c_str());
+                shutter_preparation_["writes_acknowledged"] = shutter_preparation_["writes_acknowledged"].get<int>() + 1;
+                g_log.Info("[eBUS] {} = {} acknowledged ({} ms)", pulse_node_name, value, elapsed_ms());
+            }
             // SDK calls block without cancellation; recheck before letting the
-            // caller arm acquisition after the write returns.
+            // caller arm acquisition after the last write returns.
             check_ready();
-            shutter_preparation_["status"] = open ? "open-pulse-acknowledged" : "close-pulse-acknowledged";
+            shutter_preparation_["status"] = open ? "open-pulses-acknowledged" : "close-pulses-acknowledged";
             shutter_preparation_["elapsed_ms"] = elapsed_ms();
-            g_log.Info("[eBUS] Shutter-{} pulse acknowledged ({} ms); mechanical state is not reported by this node",
+            g_log.Info("[eBUS] Shutter-{} sequence acknowledged ({} ms); mechanical state is not reported by this node",
                        open ? "open" : "close", elapsed_ms());
         } catch (const std::exception &e) {
             shutter_preparation_["status"] = "failed";
@@ -351,6 +401,7 @@ namespace fx10 {
             throw;
         }
     }
+
 
 
     bool PrepareFactoryDefaults(PvDevice &device, const std::function<bool()> &stop) {
@@ -589,9 +640,7 @@ namespace fx10 {
         Check(device_.GetParameters()->InvalidateCache(), "node cache", "invalidate after configuration");
         if (GetEnum(node::kPixelFormat) != acquisition.pixel_format ||
             GetInt(node::kSpatialBinning) != acquisition.spatial_binning ||
-            GetInt(node::kSpectralBinning) != acquisition.spectral_binning ||
-            GetBool(node::kStatusLine) != acquisition.status_line ||
-            GetBool(node::kMroiEnable) != acquisition.mroi.enabled) {
+            GetInt(node::kSpectralBinning) != acquisition.spectral_binning) {
             throw ControlError("[eBUS] final image configuration disagrees with acquisition settings; "
                 "remove conflicting features.raw overrides");
         }
@@ -607,9 +656,11 @@ namespace fx10 {
         geometry.offset_y = TryGetInt("OffsetY").value_or(-1);
         geometry.payload_size = device_.GetPayloadSize();
         geometry.pixel_format = GetEnum("PixelFormat");
-        g_log.Info("[eBUS] Camera geometry: {} samples x {} bands, {} (payload {} B/line)", geometry.width,
+        geometry.status_line = GetBool(node::kStatusLine); // owned by the .pvcfg
+        g_log.Info("[eBUS] Camera geometry: {} samples x {} bands, {} (payload {} B/line, status line {})",
+                   geometry.width,
                    geometry.height,
-                   geometry.pixel_format, geometry.payload_size);
+                   geometry.pixel_format, geometry.payload_size, geometry.status_line ? "on" : "off");
         return geometry;
     }
 
@@ -649,7 +700,7 @@ namespace fx10 {
 
     nlohmann::json CameraControl::CollectDeviceMetadata() const {
         // The shared camera engine adds the SDK-derived document identity.
-        nlohmann::json doc = {{"applied", applied_}};
+        nlohmann::json doc = {{"applied", applied_}, {"ebus_config", ebus_config_}};
         doc["applied_semantics"] =
                 "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
         for (const char *name: {
@@ -665,7 +716,10 @@ namespace fx10 {
                  node::kFrameRateEnable, node::kFrameRate, node::kTriggerSelector, node::kTriggerMode,
                  node::kTriggerSource, node::kTriggerActivation, node::kTriggerDelay,
                  node::kMissedTriggerSource, "UserSetSelector", "LineSelector", "LineSource",
-                 "LineMode", "LineInverter", "LineStatus"
+                 "LineMode", "LineInverter", "LineStatus",
+                 // Values the restored eBUS configuration carries that the write plan does not touch
+                 "BinningBitshift", "BinningSaturationMode", "DigitalGain", "DigitalOffset", "BlackLevelOffset",
+                 "Correction_Mode", "AberCorrection_Enable", "LinLog_Mode", "TestPattern"
              })
             doc["final_readback"][name] = ReadNodeMetadata(name);
         doc["line_readback_semantics"] =

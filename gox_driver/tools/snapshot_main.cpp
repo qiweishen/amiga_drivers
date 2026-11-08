@@ -10,7 +10,8 @@ namespace {
 void Usage(const char *program) {
     std::printf("Usage: %s --config <snapshot.yaml> --out <dir> [overrides]\n"
         "Captures one GOX frame in freerun (PTP and SensorSync off) under <dir>/<camera_id>.\n"
-        "Overrides: --ip <address> | --mac <address>, --exposure-ms <value>, --gain <value>\n"
+        "Overrides: --ip <address> | --mac <address>, --exposure-ms <value>, --gain <value>,\n"
+        "           --frame-rate-hz <value>\n"
         "Last stdout line: SNAPSHOT: OK <camera_dir> or SNAPSHOT: FAIL <code> <reason>\n", program);
 }
 }
@@ -18,7 +19,7 @@ void Usage(const char *program) {
 int main(int argc, char **argv) {
     using namespace ebus_driver::tool;
     std::string config_path, output, ip, mac;
-    std::optional<double> exposure, gain;
+    std::optional<double> exposure, gain, frame_rate;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") { Usage(argv[0]); return 0; }
@@ -28,12 +29,14 @@ int main(int argc, char **argv) {
         else if (arg == "--out") output = value;
         else if (arg == "--ip") ip = value;
         else if (arg == "--mac") mac = value;
-        else if (arg == "--exposure-ms" || arg == "--gain") {
+        else if (arg == "--exposure-ms" || arg == "--gain" || arg == "--frame-rate-hz") {
             double number = 0;
-            if (!ParseDouble(value, number) ||
-                (arg == "--exposure-ms" ? number < 0.0 : number < 1.0 || number > 126.0))
-                return SnapshotFail(2, "invalid value for " + arg);
-            (arg == "--gain" ? gain : exposure) = number;
+            const bool bad = !ParseDouble(value, number) ||
+                (arg == "--exposure-ms" ? number <= 0.0 || number > gox::kMaxExposureMs
+                 : arg == "--gain" ? number < 1.0 || number > 126.0
+                 : number < 0.125 || number > gox::kMaxFrameRateHz);
+            if (bad) return SnapshotFail(2, "invalid value for " + arg);
+            (arg == "--gain" ? gain : arg == "--exposure-ms" ? exposure : frame_rate) = number;
         } else return SnapshotFail(2, "unknown option " + arg);
     }
     if (config_path.empty() || output.empty()) return SnapshotFail(2, "--config and --out are required");
@@ -47,9 +50,11 @@ int main(int argc, char **argv) {
         if (!mac.empty()) camera.device.mac = mac;
         if (exposure) camera.acquisition.exposure_ms = *exposure;
         if (gain) camera.acquisition.gain = *gain;
+        if (frame_rate) camera.acquisition.frame_rate_hz = *frame_rate;
+        // Same rule as the recording config: the exposure uses at most 90 % of the period.
         if (camera.acquisition.exposure_ms && camera.acquisition.frame_rate_hz &&
-            *camera.acquisition.exposure_ms >= 1000.0 / *camera.acquisition.frame_rate_hz)
-            return SnapshotFail(2, "exposure does not fit the configured frame period");
+            !gox::ExposureFitsPeriod(*camera.acquisition.exposure_ms, *camera.acquisition.frame_rate_hz))
+            return SnapshotFail(2, "exposure exceeds 90% of the frame period (900/frame_rate_hz ms)");
         camera.acquisition.trigger.mode = gox::TriggerMode::kFreerun;
         camera.acquisition.trigger.selector_entry = "FrameStart";
         camera.acquisition.trigger.exposure_active_output = false;

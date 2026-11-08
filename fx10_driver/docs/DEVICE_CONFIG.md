@@ -41,10 +41,30 @@ User Manual 2.2).
   are restored after each command stage. Readiness does not prove every
   factory value; subsequent required acquisition writes are still verified.
   The snapshot tool and acquisition app share this workflow.
+* **eBUS configuration file, right after factory preparation.** When
+  `device.ebus_config` is set (relative paths resolve against the project root;
+  the shipped value is `fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg`),
+  `CameraControl::RestoreEbusConfiguration` runs before the stream open and the
+  write plan:
+  1. `DeviceSerialNumber` (trimmed) must equal the file's directory name;
+  2. the file's SHA-256 must equal its single entry in `checksums.txt` in the
+     same directory (`sha256sum` format);
+  3. the whole file, unfiltered, is loaded with `PvConfigurationReader::Load`
+     and applied with `Restore(0, device)`, as eBUS Player does on a connected
+     device;
+  4. control readiness is re-verified.
+  The file was saved by Specim for this camera and is applied as is, including
+  its ROI (`Width/Height/OffsetX/OffsetY`) and `MotorShutter_*` values.
+  A failed check restores nothing and fails the bring-up. A non-OK `Restore`
+  result is fatal and not retried; per-parameter errors from the SDK error list
+  are logged as WARN and kept in `device.json` → `ebus_config`. `OpenStream`
+  then re-negotiates the packet size and the write plan overrides only the
+  nodes it owns. `""` skips the step.
 * **Volatile.** `UserSetSave` is never executed.
-* **The calibration ROI is never written.** "The ROI values are provided in the
+* **The driver never writes the calibration ROI itself.** "The ROI values are provided in the
   calibration pack. ROI feature is reserved for this purpose alone. Do not
-  change these values." (p.25). The driver has no ROI role and
+  change these values." (p.25). The driver has no ROI role (the window comes
+  from the Specim `device.ebus_config` file) and
   `features.raw` must never carry `OffsetX/OffsetY/Width/Height`
   (`tests/test_config.cpp` enforces this for the shipped templates).
 * **A clamp is a failure, not a warning.** Every driver-derived write is read
@@ -63,14 +83,14 @@ values from **Table 8, p.44**:
 
 | Parameter | Factory | Shipped | Why it is exposed |
 |---|---|---|---|
-| `exposure_ms` | 5 ms | 10 ms | The primary radiometric control. Config is ms, the node is µs |
-| `frame_rate_hz` | 50 | 50 | Freerun line rate; under an external trigger it is the EXPECTED pulse rate and is used only to size the buffer pool |
-| `spectral_binning` | **2** | **2** | 2/4/8 → 224/112/56 bands (p.46). The factory offset, black-level and bad-pixel calibration was performed at 2, and the optical FWHM is 5.5 nm, so 1× (1.35 nm sampling) oversamples and departs from the calibrated state. 1 is accepted and is required by MROI |
+| `exposure_ms` | 5 ms | 10 ms | The primary radiometric control. Config is ms, the node is µs. 0.01..419 ms, and at most 90 % of the frame period (`0.9 * 1000 / frame_rate_hz`, inclusive) in every trigger mode (`CheckAcquisitionTiming`) |
+| `frame_rate_hz` | 50 | 51 | Freerun line rate; under an external trigger it is the EXPECTED pulse rate and is used only to size the buffer pool. Ceiling: 163.02 Hz when both binnings are 1, 324.373 Hz for every other combination (operator values, 2026-11-08). The Camera workbench starts at the highest rate that fits the exposure and binning; it can only be lowered, and Apply writes it to both configs |
+| `spectral_binning` | **2** | **2** | 2/4/8 → 224/112/56 bands (p.46). The factory offset, black-level and bad-pixel calibration was performed at 2, and the optical FWHM is 5.5 nm, so 1× (1.35 nm sampling) oversamples and departs from the calibrated state. 1 is accepted |
 | `spatial_binning` | 1 | 1 | 1/2/4/8 → 1024/512/256/128 samples |
 | `pixel_format` | Mono12 | Mono12Packed | Same bit depth, less wire bandwidth; the recorder preserves the SDK buffer, while GUI preview unpacks supported pixels |
-| `image_enhancement` (AIE) | Enabled | true | See below — it decides whether the data is resampled and which calibration pack applies |
-| `status_line` | off | false | It **replaces the last image row** with camera status (p.34), i.e. it destroys a band |
-| `mroi` | Disabled | disabled | 1..512 regions, 1×1 binning only (p.9, p.26) |
+| AIE | Enabled | not a YAML key | Owned by the Specim `.pvcfg` (`AberCorrection_Enable 1`, read back into `device.json`). See below — it decides whether the data is resampled and which calibration pack applies |
+| Status line | off | not a YAML key | Owned by the Specim `.pvcfg` (`EnStatusLine 0`); not written by the plan, read back into `profile.status_line` and used by the calibration check. It **replaces the last image row** with camera status (p.34), i.e. it destroys a band |
+| MROI | Disabled | not a YAML key | Owned by the Specim `.pvcfg` (`MROI_Enable 0`); not written by the plan, `MROI_Enable` is read back into `device.json` |
 | `trigger.*` | camera-internal | external | mode / activation / delay / exposure_control / source and selector entries |
 
 **AIE (Automatic Image Enhancement, p.32-33, p.39).** In-camera wavelength
@@ -106,7 +126,6 @@ Written but **not** exposed (hidden, driver-internal):
 |---|---|
 | `AcquisitionMode = Continuous` | The only mode this driver supports |
 | `EnAcquisitionFrameRate` | `true` in freerun, **`false` under an external trigger** — a constant frame rate left on by a previous freerun session fights the pulse train (p.28) |
-| `MROI_Enable = false` | Written even when MROI is off: it survives a power cycle, so "off" must be asserted, not assumed |
 | Counter1 `EventSource = MissedTrigger` + `Counter1_Reset` | The missed-trigger counter (p.27) is BOUND and RESET by the driver, so `missed_triggers=` cannot report some other event source a previous user configured. Optional: a camera without those nodes costs the metric, not the recording |
 | `DeviceTemperatureSelector` before each temperature read | Two sensors with different limits — processing board 80 °C, FPGA 90 °C, and the camera CANCELS operation above them (p.44). A read without the selector means nothing |
 | `LineSelector` before `LineSource` (`features.raw`), when the node exists | `CameraControl` requires an explicit preceding selector write when the camera exposes `LineSelector`. A camera without this node can expose `LineSource` directly; the driver does not invent a `Line1` entry. The physical strobe routing still needs confirmation on the actual device. |
@@ -115,7 +134,8 @@ Written but **not** exposed (hidden, driver-internal):
 
 The shared [eBUS lifecycle](../../ebus_driver/README.md) owns connect, SDK
 buffers, workers and RAW storage. The FX10 profile loads factory defaults,
-applies the ordered write plan, reads actual image geometry and resolves the
+restores the verified `device.ebus_config` file, applies the ordered write
+plan, reads actual image geometry and resolves the
 calibration axis. It opens the shutter (or requests closed for a dark reference)
 before AcquisitionStart, then establishes the missed-trigger counter baseline.
 Device-specific shutter commands remain in CameraControl; no tool implements
@@ -129,15 +149,17 @@ operator's device information, not a claim of confirmation from that manual.
 
 | Node | Numeric range | Operation |
 |---|---|---|
-| `MotorShutter_PulseRev` | 1..255 | Writing 255 opens the shutter. |
-| `MotorShutter_PulseFwd` | 1..255 | Writing 255 closes the shutter. |
+| `MotorShutter_PulseRev` | 1..255 | Writing 1, then 200, opens the shutter. |
+| `MotorShutter_PulseFwd` | 1..255 | Writing 1, then 204, closes the shutter. |
 
 **The write causes the action; the stored value is not shutter state.** Both
 entry points call `OpenShutter` after all acquisition configuration writes and
 before `StreamReceiver::Start`. It invalidates the node cache, obtains the
 numeric node as `PvGenInteger`, checks writability and that its reported range
-contains 255, then calls `SetValue(255)` exactly once. It never skips the write
-because a previous value was 255, calls `PvGenCommand::Execute`, polls a stored
+contains both values, then calls `SetValue(1)` and, only after the SDK has
+acknowledged it, `SetValue(200)` (close: `SetValue(204)`; 200/204 are the values in
+the Specim `.pvcfg`). It never skips a write
+because the previous value was the same, calls `PvGenCommand::Execute`, polls a stored
 value as position, or uses the generic `SetInt` readback to claim motion completion.
 The driver has no configurable shutter binding or enable/disable switch; the
 normal acquisition and snapshot YAML files need no `shutter` section.
@@ -153,7 +175,7 @@ does not invent a state check or a fixed wait.
 `device.json` records the requested action in `profile.shutter_request`; it does
 not contain an unexecuted `shutter_preparation` placeholder. After the startup
 hook succeeds, `events.jsonl` records a `profile_start` event whose
-`actions.shutter_preparation` contains the actual pulse node/value,
+`actions.shutter_preparation` contains the pulse node, value sequence, acknowledged write count,
 device-reported range, SDK acknowledgement, elapsed time, acknowledged open/close
 status and `state_verified: false`. This result comes from the pulse operation's
 cached outcome, without another device-configuration readback. If the startup
@@ -167,7 +189,7 @@ follows `AcquisitionStart`; this does not establish that an independently
 controlled trigger source was idle beforehand.
 
 Future operator verification should cover repeated acquisitions with the stored
-value already at 255, initially open/closed shutters, missing or wrongly typed
+value already at 200/204, initially open/closed shutters, missing or wrongly typed
 nodes, incompatible range, rejected/timed-out writes, cancellation and both
 entry points. Check the actual motor response and whether the first retained
 exposure needs a documented settling interval. Config tests, C++ execution and
@@ -238,21 +260,16 @@ eBUS Player 6.5.1; `features.raw` is the escape hatch for anything else.
 1. `spatial_binning`, `spectral_binning` — first: binning changes the readout
    geometry every later value is validated against (p.46).
 2. `pixel_format`.
-3. MROI — an index register: `MROI_Index` → `MROI_Y` → `MROI_H` per region,
-   then `MROI_Enable`. Needs 1×1 binning; with AIE on, add 3 margin rows at the
-   start and 3 at the end of every region and discard them offline (p.26).
-4. `status_line`.
-5. `image_enhancement` — only when it is being turned OFF.
-6. `exposure_mode` → `exposure_time` (skipped under pulse-width exposure, where
+3. `exposure_mode` → `exposure_time` (skipped under pulse-width exposure, where
    the node is unavailable, p.29).
-7. `acquisition_mode = Continuous`.
-8. Trigger group: `trigger_selector` first, then (external) `trigger_source`,
+4. `acquisition_mode = Continuous`.
+5. Trigger group: `trigger_selector` first, then (external) `trigger_source`,
    `trigger_activation`, `trigger_delay`, `trigger_mode=On`,
    `frame_rate_enable=false`, then the Counter1 binding and reset; or (freerun)
    `trigger_mode=Off`, `frame_rate_enable=true`, `frame_rate` — the only write
    clamped to the node's live range, because the FX10e REJECTS an out-of-range
    rate instead of clamping it.
-9. `features.raw`, last, so an operator can override anything above.
+6. `features.raw`, last, so an operator can override anything above.
 
 ## Discovering node names
 
@@ -337,8 +354,8 @@ accepted by the current GUI reader.
   selected. Compare device node-map exports before and after a bring-up
   performed by the operator; the manual alone does not establish the reset scope.
 * **The AIE GenICam node name.** The manual gives only the Lumo name
-  (`Camera.Image.AberrationCorrection.Enabled`, p.39), so the config accepts
-  only `image_enhancement: true` (the factory value, nothing is written); to turn
+  (`Camera.Image.AberrationCorrection.Enabled`, p.39). AIE is not a YAML key: the
+  Specim `.pvcfg` sets `AberCorrection_Enable 1` (likely this node); to turn
   AIE off, first confirm the node and supported values in the actual device's
   node map before configuring a write through `features.raw`.
 * **`Counter1_EventSource` and its `MissedTrigger` entry.** The counter is
@@ -354,7 +371,7 @@ accepted by the current GUI reader.
   an explicit preceding selector write. Every configured enum write is read back.
   Neither the template nor a unit test proves routing to `ISO_STROBE` pin 2.
 * **Mechanical-shutter completion timing.** The operator supplied the numeric
-  `MotorShutter_PulseRev` / `MotorShutter_PulseFwd` actions (255 opens/closes),
+  `MotorShutter_PulseRev` / `MotorShutter_PulseFwd` actions (1 then 200 opens, 1 then 204 closes),
   but their stored values cannot confirm position. Actual motion-completion
   feedback and any required settling interval remain unspecified; the driver
   records only acknowledgement of the explicit open/close writes.

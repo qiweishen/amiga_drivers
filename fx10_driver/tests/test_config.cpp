@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <string>
+#include <utility>
 
 #include "app_config.h"
 
@@ -27,7 +28,6 @@ TEST_CASE("config: an empty document yields the defaults") {
     CHECK(c.acquisition.pixel_format == "Mono12Packed");
     CHECK(c.acquisition.spectral_binning == 2); // factory (manual p.44)
     CHECK(c.acquisition.spatial_binning == 1);
-    CHECK(c.acquisition.image_enhancement);
     CHECK(c.acquisition.trigger.mode == TriggerMode::kExternal);
     CHECK(c.acquisition.trigger.source_entry == "Line0");
     CHECK(c.device.mac.empty());
@@ -62,7 +62,6 @@ acquisition:
   spectral_binning: 4
   exposure_ms: 2.5
   frame_rate_hz: 100
-  status_line: true
   trigger: { mode: freerun, activation: falling, delay_ms: 1.5, exposure_control: pulse_width }
 sensor_trigger:
   enabled: true
@@ -93,7 +92,6 @@ logging:
     CHECK(c.acquisition.pixel_format == "Mono8");
     CHECK(c.acquisition.spectral_binning == 4);
     CHECK(c.acquisition.spatial_binning == 2);
-    CHECK(c.acquisition.status_line);
     CHECK(c.acquisition.trigger.mode == TriggerMode::kFreerun);
     CHECK(c.acquisition.trigger.activation == TriggerActivation::kFalling);
     CHECK(c.acquisition.trigger.delay_ms == doctest::Approx(1.5));
@@ -135,8 +133,7 @@ TEST_CASE("config: the shipped templates parse and stay in sync") {
         CHECK(c->acquisition.spectral_binning == 2); // factory value (manual p.44)
         CHECK(c->acquisition.ExpectedBands() == 224);
         CHECK(c->acquisition.spatial_binning == 1);
-        CHECK(c->acquisition.image_enhancement);
-        CHECK_FALSE(c->acquisition.status_line);
+        CHECK(c->device.ebus_config == "fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg");
         CHECK(c->recording.flush_interval_mb > 0u);
         // The template cannot prove whether this firmware exposes LineSelector.
         // When both writes are configured, retain their order. CameraControl
@@ -202,8 +199,10 @@ TEST_CASE("config: acquisition invariants") {
     const AppConfig t = LoadAppConfigText("acquisition: { trigger: { selector_entry: LineStart, source_entry: Line1 } }");
     CHECK(t.acquisition.trigger.selector_entry == "LineStart");
     CHECK(t.acquisition.trigger.source_entry == "Line1");
-    // AIE off needs a node name the manual never prints
-    CHECK(Contains(ErrorOf("acquisition: { image_enhancement: false }"), "acquisition.image_enhancement: only true is supported"));
+    // Owned by the Specim .pvcfg (EnStatusLine, AberCorrection_Enable): no longer YAML keys
+    CHECK_FALSE(ErrorOf("acquisition: { status_line: false }").empty());
+    CHECK_FALSE(ErrorOf("acquisition: { image_enhancement: true }").empty());
+    CHECK_FALSE(ErrorOf("acquisition: { mroi: { enabled: false } }").empty());
 }
 
 TEST_CASE("config: network values that reach unsigned SDK parameters") {
@@ -292,39 +291,11 @@ TEST_CASE("config: device selection") {
     CHECK(LoadAppConfigText("device: { mac: \"000cdf123456\" }").device.mac == "000cdf123456");
     CHECK(Contains(ErrorOf("device: { mac: \"00:0c:df:12:34\" }"), "device.mac: is not a valid MAC address"));
     CHECK_THROWS_AS(LoadAppConfig("/nonexistent/path.yaml"), ConfigError);
-}
-
-TEST_CASE("config: MROI requires 1 x 1 binning on both axes") {
-    CHECK(Contains(ErrorOf("acquisition: { spectral_binning: 2, mroi: { enabled: true, multiband_string: \"0 10\" } }"),
-                   "acquisition.mroi: requires 1 x 1 binning"));
-    CHECK(Contains(ErrorOf("acquisition: { spatial_binning: 2, spectral_binning: 1, mroi: { enabled: true, "
-                           "multiband_string: \"0 10\" } }"),
-                   "spatial_binning"));
-    CHECK(LoadAppConfigText("acquisition: { spatial_binning: 1, spectral_binning: 1, mroi: { enabled: true, "
-                            "multiband_string: \"0 10\" } }").acquisition.mroi.enabled);
-}
-
-TEST_CASE("mroi: region string parsing") {
-    const auto regions = ParseMroiRegions("0 10;20 30; 100 5 ;");
-    REQUIRE(regions.size() == 3u);
-    CHECK(regions[0] == std::make_pair(0, 10));
-    CHECK(regions[1] == std::make_pair(20, 30));
-    CHECK(regions[2] == std::make_pair(100, 5));
-
-    CHECK_THROWS_AS(ParseMroiRegions(""), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("10"), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("10 20 30"), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("0 0"), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("-1 10"), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("1082 1"), ConfigError);
-    CHECK_THROWS_AS(ParseMroiRegions("1000 200"), ConfigError);
-
-    // Start row is a native sensor index; height and total are bounded by the 448-row window (p.26)
-    CHECK(ParseMroiRegions("600 100").size() == 1u);
-    CHECK(ParseMroiRegions("500 448").at(0).second == 448);
-    CHECK_THROWS_WITH_AS(ParseMroiRegions("100 449"), doctest::Contains("[1, 448]"), ConfigError);
-    CHECK_THROWS_WITH_AS(ParseMroiRegions("0 300;400 200"), doctest::Contains("448 rows"), ConfigError);
-    CHECK_NOTHROW(ParseMroiRegions("0 300;400 148"));
+    CHECK(LoadAppConfigText("").device.ebus_config.empty()); // default: nothing restored
+    CHECK(LoadAppConfigText("device: { ebus_config: \"cfg/077000060381/a.pvcfg\" }").device.ebus_config ==
+        "cfg/077000060381/a.pvcfg");
+    CHECK(Contains(ErrorOf("device: { ebus_config: \"a.pvcfg\" }"), "device.ebus_config"));
+    CHECK(Contains(ErrorOf("device: { ebus_config: \"cfg/077000060381/a.xml\" }"), "device.ebus_config"));
 }
 
 TEST_CASE("config: expected band count") {
@@ -335,8 +306,46 @@ TEST_CASE("config: expected band count") {
     CHECK(acq.ExpectedBands() == 224);
     acq.spectral_binning = 8;
     CHECK(acq.ExpectedBands() == 56);
+}
+
+TEST_CASE("config: frame-rate ceiling depends on binning; exposure <= 419 ms and <= 90 % of the period") {
+    CHECK(MaxFrameRateHz(1, 1) == doctest::Approx(163.02));
+    for (const auto &[spatial, spectral]: {std::pair{1, 2}, {2, 1}, {2, 2}, {8, 8}}) {
+        CHECK(MaxFrameRateHz(spatial, spectral) == doctest::Approx(324.373));
+    }
+    CHECK(kMaxExposureMs == doctest::Approx(419.0));
+
+    // At the ceiling passes, just above it fails, in every trigger mode
+    CHECK_NOTHROW(LoadAppConfigText("acquisition: { spatial_binning: 1, spectral_binning: 1, exposure_ms: 5, "
+                                    "frame_rate_hz: 163.02, trigger: { mode: freerun } }"));
+    CHECK(Contains(ErrorOf("acquisition: { spatial_binning: 1, spectral_binning: 1, exposure_ms: 1, "
+                           "frame_rate_hz: 163.03, trigger: { mode: freerun } }"),
+                   "acquisition.frame_rate_hz: must be <= 163.020 Hz"));
+    CHECK_NOTHROW(LoadAppConfigText("acquisition: { spatial_binning: 1, spectral_binning: 2, exposure_ms: 1, "
+                                    "frame_rate_hz: 324.373, trigger: { mode: freerun } }"));
+    CHECK(Contains(ErrorOf("acquisition: { spatial_binning: 1, spectral_binning: 2, exposure_ms: 1, "
+                           "frame_rate_hz: 324.374, trigger: { mode: freerun } }"),
+                   "acquisition.frame_rate_hz: must be <= 324.373 Hz"));
+
+    CHECK_NOTHROW(LoadAppConfigText("acquisition: { exposure_ms: 419, frame_rate_hz: 2, trigger: { mode: freerun } }"));
+    CHECK(Contains(ErrorOf("acquisition: { exposure_ms: 419.001, frame_rate_hz: 1, trigger: { mode: freerun } }"),
+                   "acquisition.exposure_ms: must be <= 419.000 ms"));
+
+    // Exactly 90 % of the period is allowed (inclusive), anything above is not
+    CHECK_NOTHROW(LoadAppConfigText("acquisition: { exposure_ms: 18, frame_rate_hz: 50, trigger: { mode: freerun } }"));
+    CHECK(Contains(ErrorOf("acquisition: { exposure_ms: 18.001, frame_rate_hz: 50, trigger: { mode: freerun } }"),
+                   "90 % of the frame period"));
+    CHECK(ExposureFitsPeriod(18.0, 50.0));
+    CHECK_FALSE(ExposureFitsPeriod(18.001, 50.0));
+
+    // Tools re-run the same check after CLI overrides
+    AcquisitionConfig acq;
+    acq.spatial_binning = 2;
+    acq.spectral_binning = 2;
+    acq.exposure_ms = 1.0;
+    acq.frame_rate_hz = 300.0;
+    CHECK_NOTHROW(CheckAcquisitionTiming(acq));
+    acq.spatial_binning = 1;
     acq.spectral_binning = 1;
-    acq.mroi.enabled = true;
-    acq.mroi.multiband_string = "0 10;20 30";
-    CHECK(acq.ExpectedBands() == 40);
+    CHECK_THROWS_AS(CheckAcquisitionTiming(acq), ConfigError);
 }

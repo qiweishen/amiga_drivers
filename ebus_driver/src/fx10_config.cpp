@@ -5,6 +5,7 @@
 #include "../../fx10_driver/include/wavelengths.h"
 #include "logger.h"
 #include "time_util.h"
+#include "utility.h"
 
 #include <PvDeviceGEV.h>
 #include <memory>
@@ -82,6 +83,16 @@ namespace ebus_driver {
                 throw std::runtime_error("FX10 factory preparation interrupted");
             }
             state->control = std::make_unique<fx10::CameraControl>(device);
+            // Before the stream open: the file also carries packet-size nodes,
+            // which OpenStream then negotiates or writes; the write plan follows it.
+            if (!state->config.device.ebus_config.empty()) {
+                const std::filesystem::path configured(state->config.device.ebus_config);
+                const auto pvcfg = common::GetAbsolutePath(
+                    configured.is_relative() ? common::GetExecutableDir() / "../.." / configured : configured);
+                state->control->RestoreEbusConfiguration(pvcfg, stop);
+            } else {
+                log.Info("device.ebus_config is empty; no eBUS configuration file restored");
+            }
         };
         hooks.configure = [state](PvDeviceGEV &, const StopPredicate &stop) {
             CheckStop(stop);
@@ -97,7 +108,7 @@ namespace ebus_driver {
                                     : control.GetString("DeviceSerialNumber");
             state->wavelengths = fx10::ResolveForGeometry(state->config.recording.wavelengths, serial,
                                                           geometry.width, geometry.height, geometry.offset_x,
-                                                          geometry.offset_y, state->config.acquisition.status_line);
+                                                          geometry.offset_y, geometry.status_line);
             const auto source = control.ReadNodeMetadata(fx10::node::kMissedTriggerSource);
             state->counter_bound = source["status"] == "ok" && source["value"] == "MissedTrigger";
             CheckStop(stop);
@@ -141,11 +152,7 @@ namespace ebus_driver {
                 {"wavelengths_nm", state->wavelengths.nm}, {"fwhm_nm", state->wavelengths.fwhm},
                 {"wavelength_source", state->wavelengths.source_tag},
                 {"frame_axes", "SDK width=spatial samples; SDK height=spectral rows; one SDK image is one scan line"},
-                {"status_line", state->config.acquisition.status_line},
-                {
-                    "image_enhancement",
-                    {{"requested", state->config.acquisition.image_enhancement}, {"readback", nullptr}}
-                },
+                {"status_line", geometry.status_line}, // EnStatusLine readback (set by the .pvcfg)
                 {
                     "calibration", {
                         {"reference", cal.reference}, {"device_serial", cal.device_serial},

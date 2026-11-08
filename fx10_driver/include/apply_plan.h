@@ -7,11 +7,11 @@
 #include "app_config.h"
 
 
-// The ordered camera writes that turn a freshly connected FX10e into the
-// configured camera. Pure and SDK-free: CameraControl just walks the plan.
-// Ordering (manual pages): binning before PixelFormat and everything else
-// (p.46); MROI after binning, as an index register (p.26); ExposureMode before
-// ExposureTime (p.29); TriggerSelector before TriggerMode; EnAcquisitionFrameRate
+// The ordered camera writes that turn the camera, after the Specim .pvcfg
+// restore, into the configured camera. Pure and SDK-free: CameraControl just
+// walks the plan. Ordering (manual pages): binning before PixelFormat and
+// everything else (p.46); ExposureMode before ExposureTime (p.29);
+// TriggerSelector before TriggerMode; EnAcquisitionFrameRate
 // written in both trigger branches (p.28); AcquisitionFrameRate clamped to the
 // live node range (the FX10e rejects out-of-range writes); the missed-trigger
 // counter after the trigger is armed (p.27); features.raw last.
@@ -26,16 +26,13 @@ namespace fx10 {
         inline constexpr const char *kExposureMode = "ExposureMode"; // Timed | TriggerControlled
         inline constexpr const char *kFrameRate = "AcquisitionFrameRate";
         inline constexpr const char *kFrameRateEnable = "EnAcquisitionFrameRate";
-        inline constexpr const char *kStatusLine = "EnStatusLine";
+        inline constexpr const char *kStatusLine = "EnStatusLine"; // read back only; set by the .pvcfg
         inline constexpr const char *kTriggerSelector = "TriggerSelector";
         inline constexpr const char *kTriggerMode = "TriggerMode";
         inline constexpr const char *kTriggerActivation = "TriggerActivation";
         inline constexpr const char *kTriggerDelay = "TriggerDelay"; // us
         inline constexpr const char *kTriggerSource = "TriggerSource";
-        inline constexpr const char *kMroiEnable = "MROI_Enable";
-        inline constexpr const char *kMroiIndex = "MROI_Index";
-        inline constexpr const char *kMroiY = "MROI_Y";
-        inline constexpr const char *kMroiH = "MROI_H";
+        inline constexpr const char *kMroiEnable = "MROI_Enable"; // read back only; set by the .pvcfg
         // Counter1 is bound to MissedTrigger and reset by the driver (p.27)
         inline constexpr const char *kMissedTriggerCount = "Counter1_Value";
         inline constexpr const char *kMissedTriggerReset = "Counter1_Reset";

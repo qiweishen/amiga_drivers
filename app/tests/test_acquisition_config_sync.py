@@ -51,7 +51,7 @@ def gox_document(*, reverse=False, mode="external", rate=5.0, mac=TARGET_MAC):
             "output:\n  segment_size_mb: 1024\n")
 
 
-def fx10_document(*, mode="external", mroi=False, rate=50.0):
+def fx10_document(*, mode="external", rate=50.0):
     rate_line = f"  frame_rate_hz: {rate}\n" if rate is not None else ""
     return f"""# FX10 timing and output must survive Apply
 device:
@@ -63,9 +63,6 @@ acquisition:
   pixel_format: Mono12Packed
 {rate_line}  trigger:
     mode: {mode}
-  mroi:
-    enabled: {str(mroi).lower()}
-    multiband_string: ''
 sensor_trigger:
   enabled: true
 reference:
@@ -150,6 +147,40 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
                 selected["acquisition"]["exposure_ms"] = 25.0
                 self.assertEqual(yaml.safe_load(path.read_text(encoding="utf-8")), expected)
 
+    def test_gox_frame_rate_is_written_to_both_profiles(self):
+        summary = config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, 176.4, None, 5.102)
+        self.assertIn("frame_rate_hz=5.102", summary)
+        for path in self.paths["gox"]:
+            with self.subTest(path=path.name):
+                expected = yaml.safe_load(self.before[path])
+                selected = next(camera for camera in expected["cameras"] if camera["id"] == "selected")
+                selected["acquisition"].update(exposure_ms=176.4, frame_rate_hz=5.102)
+                self.assertEqual(yaml.safe_load(path.read_text(encoding="utf-8")), expected)
+
+    def test_gox_new_frame_rate_is_checked_against_the_exposure_before_any_write(self):
+        # 180 ms is exactly 90 % of the 5 Hz period (allowed); 180.01 ms is not.
+        config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, 180.0, None, 5.0)
+        self.write_pair("gox", gox_document(), gox_document(reverse=True, mode="freerun"))
+        for exposure_ms, rate in ((180.01, 5.0), (150.0, 6.055), (150.0, 0.1), (399.406, 2.0)):
+            with self.subTest(exposure_ms=exposure_ms, rate=rate):
+                with self.assertRaises(config_store.ApplyError):
+                    config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, exposure_ms, None, rate)
+                self.assert_unchanged("gox", no_backups=False)  # the first Apply left backups
+
+    def test_gox_sensorsync_pulse_rate_stays_at_or_above_one_hz(self):
+        with self.assertRaises(config_store.ApplyError):
+            config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, 100.0, None, 0.5)
+        self.assert_unchanged("gox")
+
+    def test_gox_exposure_limit_includes_the_exposure_time_maximum(self):
+        self.write_pair("gox", gox_document(rate=1.0), gox_document(reverse=True, mode="freerun", rate=1.0))
+        limit, notes = config_store.gox_exposure_limit_ms(TARGET_IP, TARGET_MAC)
+        self.assertEqual(limit, 399.405)
+        self.assertEqual(len(notes), 3)
+        self.write_pair("gox", gox_document(rate=5.0), gox_document(reverse=True, mode="freerun", rate=2.5))
+        limit, _notes = config_store.gox_exposure_limit_ms(TARGET_IP, TARGET_MAC)
+        self.assertAlmostEqual(limit, 180.0)
+
     def test_fx10_updates_both_profiles_and_keeps_timing_comments_and_other_fields(self):
         config_store.apply_fx10_acquisition(8.0, 2, 4)
         for path in self.paths["fx10"]:
@@ -178,8 +209,44 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
         limit, notes = config_store.fx10_exposure_limit_ms()
         rates = [float(yaml.safe_load(self.before[path])["acquisition"].get("frame_rate_hz", 50.0))
                  for path in self.paths["fx10"]]
-        self.assertAlmostEqual(limit, min(900.0 / rate for rate in rates))
-        self.assertEqual(len(notes), 2)
+        self.assertAlmostEqual(limit, min([419.0] + [900.0 / rate for rate in rates]))
+        self.assertEqual(len(notes), 3)  # ExposureTime maximum + one per config
+
+    def test_fx10_frame_rate_is_written_to_both_profiles(self):
+        summary = config_store.apply_fx10_acquisition(2.0, 2, 4, 300.0)
+        self.assertIn("frame_rate_hz=300", summary)
+        for path in self.paths["fx10"]:
+            with self.subTest(path=path.name):
+                expected = yaml.safe_load(self.before[path])
+                expected["acquisition"].update(exposure_ms=2.0, spatial_binning=2, spectral_binning=4,
+                                               frame_rate_hz=300.0)
+                self.assertEqual(yaml.safe_load(path.read_text(encoding="utf-8")), expected)
+
+    def test_fx10_frame_rate_ceiling_depends_on_binning(self):
+        # 163.02 Hz only at 1 x 1 binning, 324.373 Hz for every other combination
+        for exposure_ms, spatial, spectral, rate in ((1.0, 1, 1, 163.03), (1.0, 1, 2, 324.374), (1.0, 2, 2, 400.0)):
+            with self.subTest(spatial=spatial, spectral=spectral, rate=rate):
+                with self.assertRaises(config_store.ApplyError):
+                    config_store.apply_fx10_acquisition(exposure_ms, spatial, spectral, rate)
+                self.assert_unchanged("fx10")
+        config_store.apply_fx10_acquisition(1.0, 1, 1, 163.02)
+        config_store.apply_fx10_acquisition(1.0, 1, 2, 324.373)
+
+    def test_fx10_binning_change_rechecks_the_configured_rate(self):
+        self.write_pair("fx10", fx10_document(rate=300.0), fx10_document(mode="freerun", rate=300.0))
+        with self.assertRaises(config_store.ApplyError):
+            config_store.apply_fx10_acquisition(1.0, 1, 1)  # 300 Hz is above the 1 x 1 ceiling
+        self.assert_unchanged("fx10")
+
+    def test_fx10_exposure_above_the_camera_maximum_is_rejected(self):
+        with self.assertRaises(config_store.ApplyError):
+            config_store.apply_fx10_acquisition(419.001, 1, 1, 1.0)
+        self.assert_unchanged("fx10")
+
+    def test_fx10_sensor_sync_pulse_range_is_checked_for_the_recording_profile(self):
+        with self.assertRaises(config_store.ApplyError):
+            config_store.apply_fx10_acquisition(50.0, 1, 1, 18.0)  # FX group needs >= 20 Hz
+        self.assert_unchanged("fx10")
 
     def test_gox_snapshot_enforces_freerun_margin_before_either_config_is_written(self):
         # 95 ms fits 1000/10 but violates the driver's required 900/10 margin.
@@ -203,27 +270,21 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
             self.apply("gox")
         self.assert_unchanged("gox")
 
-    def test_fx10_mroi_is_checked_in_each_profile_before_any_write(self):
-        for formal_mroi, snapshot_mroi in ((True, False), (False, True)):
-            with self.subTest(formal_mroi=formal_mroi, snapshot_mroi=snapshot_mroi):
-                self.write_pair("fx10", fx10_document(mroi=formal_mroi),
-                                fx10_document(mode="freerun", mroi=snapshot_mroi))
-                with self.assertRaises(config_store.ApplyError):
-                    self.apply("fx10")
-                self.assert_unchanged("fx10")
-
     def test_fx10_exposure_margin_is_checked_in_both_profiles_including_default_rate(self):
-        cases = ((100.0, 50.0, 10.0), (50.0, 100.0, 10.0), (10.0, None, 18.0))
+        cases = ((100.0, 50.0, 10.0), (50.0, 100.0, 10.0), (20.0, None, 18.001))
         for formal_rate, snapshot_rate, exposure_ms in cases:
             with self.subTest(formal_rate=formal_rate, snapshot_rate=snapshot_rate,
                               exposure_ms=exposure_ms):
-                # The C++ acquisition loader requires exposure < 900 / rate for
+                # The C++ acquisition loader requires exposure <= 900 / rate for
                 # every trigger mode; an omitted rate defaults to 50 Hz.
                 self.write_pair("fx10", fx10_document(mode="external", rate=formal_rate),
                                 fx10_document(mode="external", rate=snapshot_rate))
                 with self.assertRaises(config_store.ApplyError):
                     config_store.apply_fx10_acquisition(exposure_ms, 1, 1)
                 self.assert_unchanged("fx10")
+        # Exactly 90 % of the period is allowed (inclusive, as in the driver)
+        self.write_pair("fx10", fx10_document(rate=20.0), fx10_document(mode="external", rate=None))
+        config_store.apply_fx10_acquisition(18.0, 1, 1)
 
     def test_failed_second_replace_restores_first_config(self):
         original_replace = Path.replace

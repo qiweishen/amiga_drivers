@@ -1,6 +1,7 @@
 #include "app_config.h"
 
 #include <cctype>
+#include <cstdio>
 #include <optional>
 #include <set>
 
@@ -14,6 +15,13 @@ namespace gox {
         using namespace common::ConfigUtil;
 
         common::DriverLog g_log{"GoX"};
+
+        // Fixed 3-decimal limit text ("6.054", "399.405") for error messages
+        std::string FmtLimit(double value) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.3f", value);
+            return text;
+        }
 
         // 0 = keep the device value (manual p.133-134)
         void CheckRoiAxis(uint32_t value, uint32_t min_value, uint32_t step, const std::string &path) {
@@ -80,15 +88,27 @@ namespace gox {
                                                  "blemish_correction", "trigger", "roi"
                                              });
             const std::string p = path + ".acquisition";
-            if (Read(a, p, "exposure_ms", acq.exposure_ms) && *acq.exposure_ms <= 0.0) {
-                Fail(p + ".exposure_ms", "must be > 0");
+            if (Read(a, p, "exposure_ms", acq.exposure_ms)) {
+                if (*acq.exposure_ms <= 0.0) {
+                    Fail(p + ".exposure_ms", "must be > 0");
+                }
+                if (*acq.exposure_ms > kMaxExposureMs) {
+                    Fail(p + ".exposure_ms", "must be <= " + FmtLimit(kMaxExposureMs) +
+                                             " ms (GOX ExposureTime maximum 399405 us)");
+                }
             }
             if (Read(a, p, "gain", acq.gain) && (*acq.gain < 1.0 || *acq.gain > 126.0)) {
                 Fail(p + ".gain", "must be in [1.0, 126.0] (magnification, not dB)");
             }
             // The longest frame period is 8 s (manual p.36/p.141)
-            if (Read(a, p, "frame_rate_hz", acq.frame_rate_hz) && *acq.frame_rate_hz < 0.125) {
-                Fail(p + ".frame_rate_hz", "must be >= 0.125");
+            if (Read(a, p, "frame_rate_hz", acq.frame_rate_hz)) {
+                if (*acq.frame_rate_hz < 0.125) {
+                    Fail(p + ".frame_rate_hz", "must be >= 0.125");
+                }
+                if (*acq.frame_rate_hz > kMaxFrameRateHz) {
+                    Fail(p + ".frame_rate_hz", "must be <= " + FmtLimit(kMaxFrameRateHz) +
+                                               " Hz (GOX full-frame BayerRG12Packed AcquisitionFrameRate maximum)");
+                }
             }
             Read(a, p, "pixel_format", acq.pixel_format);
             if (!acq.pixel_format || *acq.pixel_format != kNativePixelFormat) {
@@ -207,16 +227,15 @@ namespace gox {
             ParseNetwork(n, path, c.network);
 
             const auto &acq = c.acquisition;
-            // Preserve the driver's 10% freerun timing margin. In external
-            // mode frame_rate_hz does not program AcquisitionFrameRate, so it
-            // cannot impose a limit on the external pulse train's exposure.
+            // The exposure may use at most 90 % of the freerun frame period. In
+            // external mode frame_rate_hz does not program AcquisitionFrameRate, so
+            // it cannot impose a limit on the external pulse train's exposure.
             if (acq.trigger.mode == TriggerMode::kFreerun && acq.exposure_ms && acq.frame_rate_hz) {
-                const double exposure_limit_ms = 900.0 / *acq.frame_rate_hz;
-                if (*acq.exposure_ms >= exposure_limit_ms) {
+                if (!ExposureFitsPeriod(*acq.exposure_ms, *acq.frame_rate_hz)) {
                     Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*acq.exposure_ms) +
-                                                ") must be below the freerun exposure limit 900/frame_rate_hz (" +
-                                                std::to_string(exposure_limit_ms) +
-                                                " ms; 10% frame-period margin); lower the exposure or the frame rate");
+                                                ") must not exceed the freerun exposure limit 900/frame_rate_hz (" +
+                                                std::to_string(ExposureLimitMs(*acq.frame_rate_hz)) +
+                                                " ms; 90% of the frame period); lower the exposure or the frame rate");
                 }
             }
             g_log.Trace("Loaded camera instance [{}] ({})", c.id, c.device.mac.empty() ? c.device.ip : c.device.mac);
@@ -224,7 +243,7 @@ namespace gox {
         }
 
         // With the pulses commanded by this process, the exposure must fit the pulse
-        // period the same way it must fit the freerun period (10 % margin)
+        // period the same way it must fit the freerun period (at most 90 % of it)
         void CheckSensorTriggerRig(AppConfig &cfg) {
             if (!cfg.sensor_trigger.enabled) {
                 return;
@@ -264,15 +283,12 @@ namespace gox {
                 }
                 pair_rate = hz;
                 pair_owner = cam.id;
-                if (cam.acquisition.exposure_ms) {
-                    const double exposure_limit_ms = 900.0 / hz;
-                    if (*cam.acquisition.exposure_ms >= exposure_limit_ms) {
-                        Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*cam.acquisition.exposure_ms) +
-                                                    ") must be below 900/frame_rate_hz (" +
-                                                    std::to_string(exposure_limit_ms) +
-                                                    " ms; 10% pulse-period margin): this process commands the "
-                                                    "SensorSync pulse period; lower the exposure or the rate");
-                    }
+                if (cam.acquisition.exposure_ms && !ExposureFitsPeriod(*cam.acquisition.exposure_ms, hz)) {
+                    Fail(path + ".acquisition", "exposure_ms (" + std::to_string(*cam.acquisition.exposure_ms) +
+                                                ") must not exceed 900/frame_rate_hz (" +
+                                                std::to_string(ExposureLimitMs(hz)) +
+                                                " ms; 90% of the pulse period): this process commands the "
+                                                "SensorSync pulse period; lower the exposure or the rate");
                 }
             }
         }

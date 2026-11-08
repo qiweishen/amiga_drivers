@@ -29,13 +29,14 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
     REQUIRE(cam.acquisition.pixel_format.has_value());
     CHECK(*cam.acquisition.pixel_format == "BayerRG12Packed");
     CHECK_FALSE(cam.acquisition.blemish_correction);
+    // Exposure and frame rate are written by the GUI's Apply to config: check the invariants.
     REQUIRE(cam.acquisition.frame_rate_hz.has_value());
-    CHECK(*cam.acquisition.frame_rate_hz == doctest::Approx(5.0));
+    CHECK(*cam.acquisition.frame_rate_hz <= gox::kMaxFrameRateHz);
     REQUIRE(cam.acquisition.exposure_ms.has_value());
-    CHECK(*cam.acquisition.exposure_ms == doctest::Approx(150.0));
+    CHECK(*cam.acquisition.exposure_ms <= gox::kMaxExposureMs);
     REQUIRE(cam.acquisition.gain.has_value());
     CHECK(*cam.acquisition.gain == doctest::Approx(1.0));
-    CHECK(*cam.acquisition.exposure_ms < 900.0 / *cam.acquisition.frame_rate_hz);
+    CHECK(gox::ExposureFitsPeriod(*cam.acquisition.exposure_ms, *cam.acquisition.frame_rate_hz));
 
     // The rig triggers the Go-X from the SensorSync board: Line5 Opt In takes the
     // pulses, Line2 Opt Out returns ExposureActive, and the board is the FX10's.
@@ -90,9 +91,10 @@ TEST_CASE("templates: config-gox-snapshot.yaml keeps the single-shot invariants"
 
     // Without a frame rate the camera stays at its factory 8 fps and clamps the GUI's exposure range
     REQUIRE(cam.acquisition.frame_rate_hz.has_value());
-    CHECK(*cam.acquisition.frame_rate_hz == doctest::Approx(3.0));
+    CHECK(*cam.acquisition.frame_rate_hz <= gox::kMaxFrameRateHz);
     REQUIRE(cam.acquisition.exposure_ms.has_value());
-    CHECK(*cam.acquisition.exposure_ms < 900.0 / *cam.acquisition.frame_rate_hz);
+    CHECK(*cam.acquisition.exposure_ms <= gox::kMaxExposureMs);
+    CHECK(gox::ExposureFitsPeriod(*cam.acquisition.exposure_ms, *cam.acquisition.frame_rate_hz));
 
     // jai_snapshot forces max_frames / max_duration_s / ptp / trigger itself; the template stays silent
     CHECK(cfg.output.max_frames == 0u);

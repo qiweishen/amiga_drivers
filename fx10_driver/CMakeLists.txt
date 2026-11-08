@@ -1,8 +1,10 @@
 # FX10-specific configuration; transport and storage live in ebus_driver.
 find_package(eBUS REQUIRED)
-add_library(fx10_config_core STATIC src/app_config.cpp src/apply_plan.cpp src/wavelengths.cpp)
+find_package(OpenSSL REQUIRED) # libcrypto: SHA-256 of device.ebus_config (libssl-dev in the image)
+add_library(fx10_config_core STATIC src/app_config.cpp src/apply_plan.cpp src/wavelengths.cpp
+    src/ebus_config_file.cpp)
 target_include_directories(fx10_config_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(fx10_config_core PUBLIC amiga_common)
+target_link_libraries(fx10_config_core PUBLIC amiga_common PRIVATE OpenSSL::Crypto)
 target_compile_options(fx10_config_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(fx10_device_config STATIC src/ebus/camera_control.cpp ../ebus_driver/src/fx10_config.cpp)

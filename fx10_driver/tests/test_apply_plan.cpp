@@ -63,43 +63,12 @@ TEST_CASE("plan: binning values come from the config") {
     CHECK(WriteFor(plan, node::kSpectralBinning).int_value == 4);
 }
 
-TEST_CASE("plan: MROI is programmed as an index register, then enabled") {
-    AcquisitionConfig acq;
-    acq.spatial_binning = 1;
-    acq.spectral_binning = 1;
-    acq.mroi.enabled = true;
-    acq.mroi.multiband_string = "100 40;200 60";
-    const auto plan = BuildApplyPlan(acq, kNoRaw);
-
-    const int i0 = IndexOf(plan, node::kMroiIndex);
-    REQUIRE(i0 >= 0);
-    CHECK(plan.at(i0 + 0).int_value == 0);
-    CHECK(plan.at(i0 + 1).node == node::kMroiY);
-    CHECK(plan.at(i0 + 1).int_value == 100);
-    CHECK(plan.at(i0 + 2).node == node::kMroiH);
-    CHECK(plan.at(i0 + 2).int_value == 40);
-    CHECK(plan.at(i0 + 3).node == node::kMroiIndex);
-    CHECK(plan.at(i0 + 3).int_value == 1);
-    CHECK(plan.at(i0 + 4).int_value == 200);
-    CHECK(plan.at(i0 + 5).int_value == 60);
-    CHECK(plan.at(i0 + 6).node == node::kMroiEnable);
-    CHECK(plan.at(i0 + 6).bool_value);
-    ExpectOrder(plan, node::kSpatialBinning, node::kMroiIndex);
+TEST_CASE("plan: MROI is left to the .pvcfg") {
+    CHECK(IndexOf(BuildApplyPlan(AcquisitionConfig{}, kNoRaw), node::kMroiEnable) == -1);
 }
 
-TEST_CASE("plan: MROI off is written explicitly (it survives a power cycle)") {
-    const auto plan = BuildApplyPlan(AcquisitionConfig{}, kNoRaw);
-    REQUIRE(CountOf(plan, node::kMroiEnable) == 1);
-    CHECK_FALSE(WriteFor(plan, node::kMroiEnable).bool_value);
-    CHECK(IndexOf(plan, node::kMroiIndex) == -1);
-}
-
-TEST_CASE("plan: status line is always written (it replaces the last image row)") {
-    AcquisitionConfig acq;
-    acq.status_line = false;
-    CHECK_FALSE(WriteFor(BuildApplyPlan(acq, kNoRaw), node::kStatusLine).bool_value);
-    acq.status_line = true;
-    CHECK(WriteFor(BuildApplyPlan(acq, kNoRaw), node::kStatusLine).bool_value);
+TEST_CASE("plan: EnStatusLine is left to the .pvcfg") {
+    CHECK(IndexOf(BuildApplyPlan(AcquisitionConfig{}, kNoRaw), node::kStatusLine) == -1);
 }
 
 TEST_CASE("plan: ExposureMode precedes ExposureTime and the unit is microseconds") {

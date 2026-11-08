@@ -27,7 +27,7 @@ from nicegui import app, ui
 from . import fx10_plot, layout
 from ..constants import TOOL_TICK_S
 from ..decoder.gox.preview import DISPLAY_LONG_EDGE
-from ..services import config_actions, ebus_tools, fx10_tools, gox_tools, preview_images
+from ..services import config_actions, ebus_tools, fx10_timing, fx10_tools, gox_timing, gox_tools, preview_images
 from ..state import STATE, ProcState
 
 _COLUMNS = [
@@ -117,20 +117,53 @@ def camera_page() -> None:
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("photo_camera").classes("muted")
                         ui.label("GoX · Exposure workbench").classes("section-title")
-                ui.label("Preview with temporary settings. Apply to config saves exposure and gain to both "
-                         "the recording and snapshot configs for the next recording and reference capture.").classes(
-                    "section-copy")
+                ui.label("Preview with temporary settings. Apply to config saves exposure, frame rate and gain "
+                         "to both the recording and snapshot configs for the next recording and reference "
+                         "capture.").classes("section-copy")
                 gox_target_label = ui.label().classes("text-sm mono break-all")
                 gox_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Exposure (ms)").classes("font-medium")
-                        ui.label("GOX-12405C-PGE · 0.001–332.738 ms").classes("text-xs muted")
-                        # Camera limit: ExposureTime is 1..332738 µs (0.001..332.738 ms) on the GOX-12405C-PGE
-                        gox_exposure = ui.slider(min=0.001, max=332.738, step=0.001,
-                                                 value=min(332.738, app.storage.general.get("gox_exposure_ms", 50.000)))
-                        ui.number(min=0.001, max=332.738, step=0.001, suffix="ms").bind_value(gox_exposure).classes(
-                            "w-full")
+                        ui.label(f"GOX-12405C-PGE · {gox_timing.MIN_EXPOSURE_MS:g}–{gox_timing.MAX_EXPOSURE_MS:g} ms"
+                                 ).classes("text-xs muted")
+                        # Camera limit: ExposureTime maximum 399405 µs read back from the GOX-12405C-PGE
+                        gox_exposure = ui.slider(min=gox_timing.MIN_EXPOSURE_MS, max=gox_timing.MAX_EXPOSURE_MS,
+                                                 step=0.001,
+                                                 value=min(gox_timing.MAX_EXPOSURE_MS,
+                                                           app.storage.general.get("gox_exposure_ms", 50.000)))
+                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                            ui.number("Exposure", min=gox_timing.MIN_EXPOSURE_MS, max=gox_timing.MAX_EXPOSURE_MS,
+                                      step=0.001, suffix="ms").bind_value(gox_exposure).classes("flex-1 min-w-0")
+                            # AcquisitionFrameRate: starts at the highest rate at which the exposure
+                            # uses <= 90 % of the frame period (and <= 6.054 Hz); may only be lowered.
+                            gox_rate = ui.number("Frame rate", min=gox_timing.MIN_FRAME_RATE_HZ,
+                                                 max=gox_timing.MAX_FRAME_RATE_HZ, step=gox_timing.RATE_STEP_HZ,
+                                                 precision=3, suffix="Hz").classes("flex-1 min-w-0")
+                        gox_rate_hint = ui.label("").classes("text-xs muted")
+                        gox_rate_auto: list[float | None] = [None]  # the last auto (maximum) rate
+
+                        def _sync_gox_rate(*, restore: float | None = None) -> None:
+                            """Follow the exposure: the field's maximum is the auto rate; a value the
+                            operator lowered is kept while it is still below the new maximum."""
+                            try:
+                                auto = gox_timing.max_frame_rate_hz(float(gox_exposure.value))
+                            except (TypeError, ValueError):
+                                return
+                            previous, current = gox_rate_auto[0], gox_rate.value
+                            gox_rate_auto[0] = auto
+                            gox_rate.max = auto
+                            if restore is not None and gox_timing.MIN_FRAME_RATE_HZ <= restore <= auto:
+                                gox_rate.set_value(restore)
+                            elif (current is None or previous is None or current > auto
+                                  or abs(float(current) - previous) < 1e-9):
+                                gox_rate.set_value(auto)
+                            gox_rate_hint.set_text(
+                                f"Max {auto:.3f} Hz: exposure ≤ 90% of the frame period, ≤ "
+                                f"{gox_timing.MAX_FRAME_RATE_HZ:g} Hz. Lower it if needed.")
+
+                        _sync_gox_rate(restore=app.storage.general.get("gox_frame_rate_hz"))
+                        gox_exposure.on_value_change(lambda _event: _sync_gox_rate())
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Gain (magnification)").classes("font-medium")
                         # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
@@ -185,21 +218,32 @@ def camera_page() -> None:
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("ssid_chart").classes("muted")
                         ui.label("FX10 · Spectral workbench").classes("section-title")
-                ui.label("Preview with temporary settings. Apply to config saves exposure and both binning values "
-                         "to the recording and snapshot configs for the next recording and reference capture.").classes(
-                    "section-copy")
+                ui.label("Preview with temporary settings. Apply to config saves exposure, frame rate and both "
+                         "binning values to the recording and snapshot configs for the next recording and "
+                         "reference capture.").classes("section-copy")
                 fx10_target_label = ui.label().classes("text-sm mono break-all")
                 fx10_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Exposure (ms)").classes("font-medium")
-                        ui.label("FX10e · 0.010–419.000 ms").classes("text-xs muted")
+                        ui.label(f"FX10e · {fx10_timing.MIN_EXPOSURE_MS:.3f}–{fx10_timing.MAX_EXPOSURE_MS:.3f} ms"
+                                 ).classes("text-xs muted")
                         # Camera limit: ExposureTime is 10..419000 µs (0.01..419 ms) on the FX10e
-                        fx10_exposure = ui.slider(min=0.010, max=419.000, step=0.001,
-                                                  value=min(419.000,
+                        fx10_exposure = ui.slider(min=fx10_timing.MIN_EXPOSURE_MS, max=fx10_timing.MAX_EXPOSURE_MS,
+                                                  step=0.001,
+                                                  value=min(fx10_timing.MAX_EXPOSURE_MS,
                                                             app.storage.general.get("fx10_exposure_ms", 50.000)))
-                        ui.number(min=0.010, max=419.000, step=0.001, suffix="ms").bind_value(fx10_exposure).classes(
-                            "w-full")
+                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                            ui.number("Exposure", min=fx10_timing.MIN_EXPOSURE_MS, max=fx10_timing.MAX_EXPOSURE_MS,
+                                      step=0.001, suffix="ms").bind_value(fx10_exposure).classes("flex-1 min-w-0")
+                            # AcquisitionFrameRate: starts at the highest rate at which the exposure uses
+                            # <= 90 % of the frame period (and <= 163.02 Hz at 1 x 1 binning, else
+                            # <= 324.373 Hz); may only be lowered.
+                            fx10_rate = ui.number("Frame rate", min=fx10_timing.MIN_FRAME_RATE_HZ,
+                                                  max=fx10_timing.MAX_FRAME_RATE_HZ_BINNED,
+                                                  step=fx10_timing.RATE_STEP_HZ,
+                                                  precision=3, suffix="Hz").classes("flex-1 min-w-0")
+                        fx10_rate_hint = ui.label("").classes("text-xs muted")
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Spatial binning").classes("font-medium")
                         ui.label("1024 / 512 / 256 / 128 px wide").classes("text-xs muted")
@@ -214,6 +258,32 @@ def camera_page() -> None:
                         fx10_spectral = ui.select(_BINNING,
                                                   value=app.storage.general.get("fx10_spectral_binning", 2)).props(
                             "outlined dense").classes("w-full")
+                fx10_rate_auto: list[float | None] = [None]  # the last auto (maximum) rate
+
+                def _sync_fx10_rate(*, restore: float | None = None) -> None:
+                    """Follow exposure and binning: the field's maximum is the auto rate; a value the
+                    operator lowered is kept while it is still below the new maximum."""
+                    try:
+                        spatial, spectral = int(fx10_spatial.value), int(fx10_spectral.value)
+                        auto = fx10_timing.max_frame_rate_hz(float(fx10_exposure.value), spatial, spectral)
+                    except (TypeError, ValueError):
+                        return
+                    previous, current = fx10_rate_auto[0], fx10_rate.value
+                    fx10_rate_auto[0] = auto
+                    fx10_rate.max = auto
+                    if restore is not None and fx10_timing.MIN_FRAME_RATE_HZ <= restore <= auto:
+                        fx10_rate.set_value(restore)
+                    elif (current is None or previous is None or current > auto
+                          or abs(float(current) - previous) < 1e-9):
+                        fx10_rate.set_value(auto)
+                    fx10_rate_hint.set_text(
+                        f"Max {auto:.3f} Hz: exposure ≤ 90% of the frame period, ≤ "
+                        f"{fx10_timing.max_rate_for_binning(spatial, spectral):g} Hz at {spatial}×{spectral} "
+                        "binning. Lower it if needed.")
+
+                _sync_fx10_rate(restore=app.storage.general.get("fx10_frame_rate_hz"))
+                for control in (fx10_exposure, fx10_spatial, fx10_spectral):
+                    control.on_value_change(lambda _event: _sync_fx10_rate())
                 with ui.row().classes("console-toolbar"):
                     fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
                     fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props(
@@ -441,6 +511,20 @@ def camera_page() -> None:
             await _scan()
 
         # ------------------------------------------------------------ GoX glue
+        def _gox_timing_values() -> tuple[float, float]:
+            """(exposure ms, frame rate Hz) after the same checks the driver applies."""
+            exposure_ms = float(gox_exposure.value)
+            if not gox_timing.MIN_EXPOSURE_MS <= exposure_ms <= gox_timing.MAX_EXPOSURE_MS:
+                raise ValueError(f"Exposure must be within {gox_timing.MIN_EXPOSURE_MS:g}–"
+                                 f"{gox_timing.MAX_EXPOSURE_MS:g} ms")
+            if gox_rate.value is None:
+                raise ValueError("Enter a frame rate")
+            rate = gox_timing.check_frame_rate(gox_rate.value)
+            if not gox_timing.exposure_fits(exposure_ms, rate):
+                raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz; "
+                                 f"use at most {gox_timing.max_frame_rate_hz(exposure_ms):.3f} Hz")
+            return exposure_ms, rate
+
         async def _gox_snap() -> None:
             if STATE.snapshot_busy:
                 return
@@ -449,12 +533,18 @@ def camera_page() -> None:
             if reason or not ip:
                 ui.notify(reason or "Select a target GoX camera first", type="warning")
                 return
+            try:
+                exposure_ms, rate = _gox_timing_values()
+            except (TypeError, ValueError) as e:
+                ui.notify(str(e), type="warning")
+                return
             gox_busy.classes(remove="hidden")
             refresh_guard()
             try:
                 app.storage.general["gox_exposure_ms"] = gox_exposure.value
                 app.storage.general["gox_gain"] = gox_gain.value
-                result = await gox_tools.snapshot(ip, float(gox_exposure.value), float(gox_gain.value))
+                app.storage.general["gox_frame_rate_hz"] = rate
+                result = await gox_tools.snapshot(ip, exposure_ms, float(gox_gain.value), rate)
                 _gox_show(result)
             except Exception as e:
                 ui.notify(f"Snapshot was not completed: {e}", type="negative", multi_line=True)
@@ -478,7 +568,8 @@ def camera_page() -> None:
             gox_chart.update()
             request = result.request
             requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
-                         f"gain x{request.gain:g} · " if request else "request metadata unavailable · ")
+                         + (f"{request.frame_rate_hz:g} Hz · " if request.frame_rate_hz is not None else "")
+                         + f"gain x{request.gain:g} · " if request else "request metadata unavailable · ")
             gox_meta.set_text(
                 f"{result.decode_name} · {requested}"
                 f"mean {result.mean_dn:.1f} DN · clipped {result.clipped_pct:.2f}% · "
@@ -492,14 +583,28 @@ def camera_page() -> None:
                 ui.notify("Select a target GoX camera first", type="warning")
                 return
             try:
+                exposure_ms, rate = _gox_timing_values()
                 summary = await config_actions.change("apply_gox_acquisition",
-                                                      ip, mac, float(gox_exposure.value), float(gox_gain.value))
+                                                      ip, mac, exposure_ms, float(gox_gain.value), rate)
+                app.storage.general["gox_frame_rate_hz"] = rate
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return
             _after_apply(summary)
 
         # ----------------------------------------------------------- FX10 glue
+        def _fx10_timing_values() -> tuple[float, int, int, float]:
+            """(exposure ms, spatial, spectral binning, frame rate Hz) after the driver's checks."""
+            exposure_ms = fx10_timing.check_exposure(fx10_exposure.value)
+            spatial, spectral = int(fx10_spatial.value), int(fx10_spectral.value)
+            if fx10_rate.value is None:
+                raise ValueError("Enter a frame rate")
+            rate = fx10_timing.check_frame_rate(fx10_rate.value, spatial, spectral)
+            if not fx10_timing.exposure_fits(exposure_ms, rate):
+                raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz; use at most "
+                                 f"{fx10_timing.max_frame_rate_hz(exposure_ms, spatial, spectral):.3f} Hz")
+            return exposure_ms, spatial, spectral, rate
+
         async def _fx10_snap() -> None:
             if STATE.snapshot_busy:
                 return
@@ -508,15 +613,19 @@ def camera_page() -> None:
             if reason or not ip:
                 ui.notify(reason or "Select a target FX10 camera first", type="warning")
                 return
+            try:
+                exposure_ms, spatial, spectral, rate = _fx10_timing_values()
+            except (TypeError, ValueError) as e:
+                ui.notify(str(e), type="warning")
+                return
             fx10_busy.classes(remove="hidden")
             refresh_guard()
             try:
                 app.storage.general["fx10_exposure_ms"] = fx10_exposure.value
                 app.storage.general["fx10_spatial_binning"] = fx10_spatial.value
                 app.storage.general["fx10_spectral_binning"] = fx10_spectral.value
-                result = await fx10_tools.snapshot(
-                    ip, float(fx10_exposure.value),
-                    int(fx10_spatial.value), int(fx10_spectral.value))
+                app.storage.general["fx10_frame_rate_hz"] = rate
+                result = await fx10_tools.snapshot(ip, exposure_ms, spatial, spectral, rate)
                 _fx10_show(result)
             except Exception as e:
                 ui.notify(f"Snapshot was not completed: {e}", type="negative", multi_line=True)
@@ -542,7 +651,8 @@ def camera_page() -> None:
             )
             request = result.request
             requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
-                         f"binning {request.spatial_binning}×{request.spectral_binning} · "
+                         + (f"{request.frame_rate_hz:g} Hz · " if request.frame_rate_hz is not None else "")
+                         + f"binning {request.spatial_binning}×{request.spectral_binning} · "
                          if request else "request metadata unavailable · ")
             fx10_meta.set_text(
                 f"{result.lines} frames (~1s) · {result.bands} bands · {result.samples} px/line · "
@@ -553,9 +663,9 @@ def camera_page() -> None:
 
         async def _fx10_apply() -> None:
             try:
-                summary = await config_actions.change("apply_fx10_acquisition",
-                                                      float(fx10_exposure.value), int(fx10_spatial.value),
-                                                      int(fx10_spectral.value))
+                exposure_ms, spatial, spectral, rate = _fx10_timing_values()
+                summary = await config_actions.change("apply_fx10_acquisition", exposure_ms, spatial, spectral, rate)
+                app.storage.general["fx10_frame_rate_hz"] = rate
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
                 return

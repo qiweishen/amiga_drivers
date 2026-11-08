@@ -251,29 +251,47 @@ TEST_CASE("config: the trigger source is checked against the GO-X's own list") {
 }
 
 TEST_CASE("config: freerun exposure keeps the timing margin without limiting external triggers") {
-    // At 3 Hz, 900/rate = 300 ms: the limit is stricter than the 333.3 ms period.
-    for (const char *exposure : {"300", "333.4", "400"}) {
+    // At 3 Hz, 900/rate = 300 ms (90 % of the 333.3 ms period), inclusive.
+    for (const char *exposure : {"300.001", "333.4", "399"}) {
         const auto error = ErrorOf(DocWithCamera(
             std::string("    acquisition: {exposure_ms: ") + exposure + ", frame_rate_hz: 3.0}"));
         CAPTURE(exposure);
         CAPTURE(error);
         CHECK(Contains(error, "cameras[0].acquisition"));
-        CHECK(Contains(error, "must be below the freerun exposure limit 900/frame_rate_hz"));
+        CHECK(Contains(error, "must not exceed the freerun exposure limit 900/frame_rate_hz"));
     }
     CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 150, frame_rate_hz: 3.0}")).empty());
-    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 299.9, frame_rate_hz: 3.0}")).empty());
-    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 179.9, frame_rate_hz: 5.0}")).empty());
-    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 180, frame_rate_hz: 5.0}")),
-                   "must be below the freerun exposure limit 900/frame_rate_hz"));
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 300, frame_rate_hz: 3.0}")).empty());
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 180, frame_rate_hz: 5.0}")).empty());
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 180.01, frame_rate_hz: 5.0}")),
+                   "must not exceed the freerun exposure limit 900/frame_rate_hz"));
+    // The auto rate the GUI derives from an exposure (floor to 0.001 Hz) always fits.
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 176.4, frame_rate_hz: 5.102}")).empty());
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 148.66, frame_rate_hz: 6.054}")).empty());
     // The external pulse train sets its own period; the configured freerun
     // rate is not applied in this mode (covered by the apply-plan tests too).
     CHECK(ErrorOf(DocWithCamera(
         "    acquisition:\n"
-        "      exposure_ms: 400\n"
+        "      exposure_ms: 399\n"
         "      frame_rate_hz: 3.0\n"
         "      trigger: {mode: external}")).empty());
-    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 4000}")).empty());
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 399.405}")).empty());
     CHECK(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 3.0}")).empty());
+}
+
+TEST_CASE("config: GOX full-frame ceilings hold in every trigger mode") {
+    CHECK(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 6.054}")).empty());
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 6.055}")),
+                   "frame_rate_hz: must be <= 6.054 Hz"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 7, trigger: {mode: external}}")),
+                   "frame_rate_hz: must be <= 6.054 Hz"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 399.406}")),
+                   "exposure_ms: must be <= 399.405 ms"));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {exposure_ms: 4000, trigger: {mode: external}}")),
+                   "exposure_ms: must be <= 399.405 ms"));
+    CHECK(gox::ExposureLimitMs(5.0) == doctest::Approx(180.0));
+    CHECK(gox::ExposureFitsPeriod(180.0, 5.0));
+    CHECK_FALSE(gox::ExposureFitsPeriod(180.001, 5.0));
 }
 
 TEST_CASE("config: trigger extras follow the manual's ranges") {
@@ -306,13 +324,13 @@ TEST_CASE("config: sensor trigger ties the rig's pulse rate to the cameras") {
     CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {trigger: {mode: external}}")),
                    "frame_rate_hz: is required under an external trigger with sensor_trigger.enabled"));
     CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 12, trigger: {mode: external}}")),
-                   "must be within [1, 10] Hz"));
+                   "must be <= 6.054 Hz"));
     CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 0.5, trigger: {mode: external}}")),
                    "must be within [1, 10] Hz"));
-    // ...and the exposure must fit the pulse period with the same 10 % margin as freerun
+    // ...and the exposure may use at most 90 % of the pulse period, as in freerun
     CHECK(Contains(ErrorOf(board + DocWithCamera(
-                       "    acquisition: {frame_rate_hz: 5, exposure_ms: 180, trigger: {mode: external}}")),
-                   "must be below 900/frame_rate_hz"));
+                       "    acquisition: {frame_rate_hz: 5, exposure_ms: 180.01, trigger: {mode: external}}")),
+                   "must not exceed 900/frame_rate_hz"));
     const AppConfig ok = ParseOk(board + DocWithCamera(
         "    acquisition: {frame_rate_hz: 5, exposure_ms: 150, trigger: {mode: external}}"));
     CHECK(ok.sensor_trigger.enabled);

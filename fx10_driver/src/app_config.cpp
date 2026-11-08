@@ -2,7 +2,7 @@
 #include "trigger_groups.h"
 
 #include <cmath>
-#include <sstream>
+#include <cstdio>
 
 #include "string_util.h"
 
@@ -15,7 +15,7 @@ namespace fx10 {
             const YAML::Node n = OptionalMap(root, "", "acquisition",
                                              {
                                                  "spatial_binning", "spectral_binning", "pixel_format", "exposure_ms",
-                                                 "frame_rate_hz", "status_line", "image_enhancement", "trigger", "mroi"
+                                                 "frame_rate_hz", "trigger"
                                              });
             const std::string p = "acquisition";
             Read(n, p, "spatial_binning", acq.spatial_binning);
@@ -27,19 +27,6 @@ namespace fx10 {
             }
             if (Read(n, p, "frame_rate_hz", acq.frame_rate_hz) && !(acq.frame_rate_hz > 0.0)) {
                 Fail(p + ".frame_rate_hz", "must be > 0");
-            }
-            const double period_ms = 900.0 / acq.frame_rate_hz;
-            if (acq.exposure_ms >= period_ms) {
-                Fail(p + ".exposure_ms/.frame_rate_hz", "exposure_ms (" + std::to_string(acq.exposure_ms) +
-                                                        ") must be below the frame period 900/frame_rate_hz (" +
-                                                        std::to_string(period_ms) +
-                                                        " ms); lower the exposure or the frame rate");
-            }
-            Read(n, p, "status_line", acq.status_line);
-            if (Read(n, p, "image_enhancement", acq.image_enhancement) && !acq.image_enhancement) {
-                // The manual never prints the GenICam node for AIE (only the Lumo name, p.39)
-                Fail(p + ".image_enhancement", "only true is supported (the AIE node name is unknown; "
-                     "use features.raw to switch it off)");
             }
 
             const YAML::Node t = OptionalMap(n, p, "trigger",
@@ -67,10 +54,6 @@ namespace fx10 {
             ReadText(t, tp, "selector_entry", acq.trigger.selector_entry);
             ReadText(t, tp, "source_entry", acq.trigger.source_entry);
 
-            const YAML::Node m = OptionalMap(n, p, "mroi", {"enabled", "multiband_string"});
-            Read(m, p + ".mroi", "enabled", acq.mroi.enabled);
-            Read(m, p + ".mroi", "multiband_string", acq.mroi.multiband_string);
-
             const auto is_binning = [](int v) { return v == 1 || v == 2 || v == 4 || v == 8; };
             if (!is_binning(acq.spectral_binning)) {
                 Fail(p + ".spectral_binning", "must be 1, 2, 4, or 8");
@@ -78,14 +61,7 @@ namespace fx10 {
             if (!is_binning(acq.spatial_binning)) {
                 Fail(p + ".spatial_binning", "must be 1, 2, 4, or 8");
             }
-            if (acq.mroi.enabled) {
-                // Manual p.9, p.26: MROI requires 1 x 1 binning on BOTH axes
-                if (acq.spectral_binning != 1 || acq.spatial_binning != 1) {
-                    Fail(p + ".mroi", "requires 1 x 1 binning: spatial_binning and spectral_binning must both be 1 "
-                         "(manual p.9, p.26)");
-                }
-                ParseMroiRegions(acq.mroi.multiband_string);
-            }
+            CheckAcquisitionTiming(acq);
         }
 
         void ParseSensorTrigger(const YAML::Node &root, SensorTriggerConfig &st, const AcquisitionConfig &acq) {
@@ -221,9 +197,17 @@ namespace fx10 {
                       });
             AppConfig c;
 
-            const YAML::Node d = OptionalMap(root, "", "device", {"mac", "ip"});
+            const YAML::Node d = OptionalMap(root, "", "device", {"mac", "ip", "ebus_config"});
             Read(d, "device", "mac", c.device.mac);
             Read(d, "device", "ip", c.device.ip);
+            Read(d, "device", "ebus_config", c.device.ebus_config);
+            if (!c.device.ebus_config.empty()) {
+                const std::filesystem::path pvcfg(c.device.ebus_config);
+                if (pvcfg.extension() != ".pvcfg" || pvcfg.parent_path().filename().empty()) {
+                    Fail("device.ebus_config", "must be '<DeviceSerialNumber>/<name>.pvcfg' (got '" +
+                                               c.device.ebus_config + "')");
+                }
+            }
             if (!c.device.mac.empty() && common::StringUtil::NormalizeMac(c.device.mac).empty()) {
                 Fail("device.mac", "is not a valid MAC address");
             }
@@ -244,63 +228,40 @@ namespace fx10 {
         }
     } // namespace
 
-    std::vector<std::pair<int, int> > ParseMroiRegions(const std::string &multiband_string) {
-        constexpr int kMaxRegions = 512; // manual p.26
-        constexpr int kSensorRows = 1082; // physical sensor (p.7); the start row is a native row index
-        constexpr int kMaxWindowHeight = 448; // readable window; caps each region and the total (p.26)
-
-        std::vector<std::pair<int, int> > regions;
-        std::istringstream stream(multiband_string);
-        std::string token;
-        while (std::getline(stream, token, ';')) {
-            if (token.find_first_not_of(" \t") == std::string::npos) {
-                continue; // trailing ';'
-            }
-            std::istringstream pair_stream(token);
-            int y = -1;
-            int h = -1;
-            std::string extra;
-            if (!(pair_stream >> y >> h) || (pair_stream >> extra)) {
-                throw ConfigError("MROI region '" + token + "': expected '<start_row> <height>'");
-            }
-            if (y < 0 || y > kSensorRows - 1) {
-                throw ConfigError("MROI region '" + token + "': start row must be in [0, 1081] (native sensor row; "
-                                  "the usable range is Window.Y .. Window.Y+447, manual p.26)");
-            }
-            if (h < 1 || h > kMaxWindowHeight) {
-                throw ConfigError("MROI region '" + token + "': height must be in [1, 448] (manual p.26)");
-            }
-            if (y + h > kSensorRows) {
-                throw ConfigError("MROI region '" + token + "': start_row + height must not exceed 1082");
-            }
-            regions.emplace_back(y, h);
+    void CheckAcquisitionTiming(const AcquisitionConfig &acq) {
+        using common::ConfigUtil::Fail;
+        const auto fmt = [](double value) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.3f", value);
+            return std::string(text);
+        };
+        if (!std::isfinite(acq.exposure_ms) || !(acq.exposure_ms > 0.0)) {
+            Fail("acquisition.exposure_ms", "must be finite and > 0");
         }
-        if (regions.empty()) {
-            throw ConfigError("MROI multiband string contains no regions");
+        if (acq.exposure_ms > kMaxExposureMs) {
+            Fail("acquisition.exposure_ms", "must be <= " + fmt(kMaxExposureMs) + " ms (FX10e ExposureTime maximum)");
         }
-        if (static_cast<int>(regions.size()) > kMaxRegions) {
-            throw ConfigError("MROI supports at most 512 regions, got " + std::to_string(regions.size()));
+        const double max_rate = MaxFrameRateHz(acq.spatial_binning, acq.spectral_binning);
+        if (!std::isfinite(acq.frame_rate_hz) || !(acq.frame_rate_hz > 0.0)) {
+            Fail("acquisition.frame_rate_hz", "must be finite and > 0");
         }
-        int total = 0;
-        for (const auto &[y, h]: regions) {
-            total += h;
+        if (acq.frame_rate_hz > max_rate) {
+            Fail("acquisition.frame_rate_hz", "must be <= " + fmt(max_rate) + " Hz at " +
+                                              std::to_string(acq.spatial_binning) + " x " +
+                                              std::to_string(acq.spectral_binning) + " binning (" +
+                                              fmt(kMaxFrameRateHzUnbinned) + " Hz at 1 x 1, " +
+                                              fmt(kMaxFrameRateHzBinned) + " Hz otherwise)");
         }
-        if (total > kMaxWindowHeight) {
-            throw ConfigError("MROI total height " + std::to_string(total) +
-                              " exceeds the FX10 readable window of 448 rows (manual p.26)");
+        if (!ExposureFitsPeriod(acq.exposure_ms, acq.frame_rate_hz)) {
+            Fail("acquisition.exposure_ms/.frame_rate_hz",
+                 "exposure_ms (" + fmt(acq.exposure_ms) + ") must not exceed 90 % of the frame period (" +
+                 fmt(ExposureLimitMs(acq.frame_rate_hz)) + " ms at " + fmt(acq.frame_rate_hz) +
+                 " Hz); lower the exposure or the frame rate");
         }
-        return regions;
     }
 
 
     int AcquisitionConfig::ExpectedBands() const {
-        if (mroi.enabled) {
-            int total = 0;
-            for (const auto &[y, h]: ParseMroiRegions(mroi.multiband_string)) {
-                total += h;
-            }
-            return total;
-        }
         return 448 / spectral_binning;
     }
 

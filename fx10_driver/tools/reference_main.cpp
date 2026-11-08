@@ -90,9 +90,13 @@ Json PhaseSignature(const Json &device) {
         imaging[fx10::node::kTriggerMode] != "Off" || imaging[fx10::node::kFrameRateEnable] != true ||
         imaging[fx10::node::kExposureMode] != "Timed")
         throw std::runtime_error("reference requires verified freerun timing after all camera overrides");
-    // Ordered applied entries preserve selector-scoped MROI and operator writes
+    // Ordered applied entries preserve selector-scoped operator writes
     // that cannot be recovered from a single final selector position.
     signature["applied"] = device.at("applied");
+    // Both phases must start from the same verified eBUS configuration file.
+    const auto &ebus_config = device.at("ebus_config");
+    signature["ebus_config"] = {{"status", ebus_config.at("status")},
+                                {"sha256", ebus_config.contains("sha256") ? ebus_config.at("sha256") : Json(nullptr)}};
     signature["wavelengths_nm"] = device.at("profile").at("wavelengths_nm");
     signature["fwhm_nm"] = device.at("profile").at("fwhm_nm");
     signature["calibration"] = device.at("profile").at("calibration");

@@ -21,11 +21,11 @@ class SnapshotPlanningTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(fx10_tools.config_store, "checked_snapshot_path",
                                               side_effect=lambda path: path))
 
-    def test_config_rate_and_exposure_cap_determine_frame_count_and_deadline(self):
+    def test_config_rate_lowered_to_fit_the_exposure_determines_frame_count_and_deadline(self):
         for yaml_rate, exposure_ms, expected_rate, expected_frames, expected_timeout in (
             ("frame_rate_hz: 0.1", 10, 0.1, 1, 40),
             ("frame_rate_hz: 5", 10, 5, 5, 13),
-            ("frame_rate_hz: 100", 200, 100, 5, 13),
+            ("frame_rate_hz: 100", 200, 4.5, 4, 4 / 4.5 * 3 + 10),  # 90 % of the period: 4.5 Hz
             ("{}", 10, 50, 50, 13),
         ):
             with self.subTest(rate=yaml_rate, exposure_ms=exposure_ms):
@@ -58,3 +58,16 @@ class SnapshotPlanningTests(unittest.IsolatedAsyncioTestCase):
                               ("--exposure-ms", "10"), ("--spatial-binning", "2"), ("--spectral-binning", "4")):
             self.assertEqual(arguments[arguments.index(option) + 1], value)
         self.assertEqual(communicate.await_args.args[1], 40)
+
+    def test_workbench_rate_is_used_as_given_and_checked_against_binning_and_exposure(self):
+        self.config.write_text("acquisition:\n  frame_rate_hz: 50\n  spatial_binning: 1\n  spectral_binning: 2\n",
+                               encoding="utf-8")
+        _config, rate, frames, _timeout = fx10_tools._capture_plan(2.0, frame_rate_hz=300.0)
+        self.assertEqual((rate, frames), (300.0, 300))
+        for kwargs in ({"frame_rate_hz": 324.374},  # above the binned ceiling
+                       {"frame_rate_hz": 200.0, "spatial_binning": 1, "spectral_binning": 1},  # > 163.02 Hz
+                       {"frame_rate_hz": 460.0, "spatial_binning": 2}):  # 2 ms > 90 % of the period
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                fx10_tools._capture_plan(2.0, **kwargs)
+        with self.assertRaises(ValueError):
+            fx10_tools._capture_plan(419.001)  # ExposureTime maximum

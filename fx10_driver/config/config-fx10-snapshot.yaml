@@ -14,22 +14,18 @@
 device:
     mac: ""                             # --mac
     ip: "10.95.0.100"                  # --ip
+    ebus_config: "fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg"   # same file and checks as config-fx10.yaml
 
 
 # --- Acquisition ---
 acquisition:
     spatial_binning: 1                  # 1 | 2 | 4 | 8
-    spectral_binning: 2                 # 1 | 2 | 4 | 8; mroi needs 1
+    spectral_binning: 2                 # 1 | 2 | 4 | 8
     pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
-    exposure_ms: 5.0                    # > 0
-    frame_rate_hz: 50.0                 # used unchanged unless workbench passes --fps
-    status_line: false
-    image_enhancement: true
+    exposure_ms: 5.0                    # 0.01..419 ms; <= 90 % of the frame period
+    frame_rate_hz: 50.0                 # <= 163.02 Hz at 1 x 1 binning, else <= 324.373 Hz; workbench passes --fps
     trigger:
         mode: freerun                  # both GUI capture tools enforce freerun
-    mroi:
-        enabled: false
-        multiband_string: ""
 
 
 # --- Sensor Trigger ---
@@ -43,9 +39,9 @@ reference:
 
 
 # Mechanical shutter is a mandatory driver step, with no YAML override:
-# after applying config, write MotorShutter_PulseRev = 255 before AcquisitionStart.
-# Each write opens the shutter; the stored value does not report shutter state.
-# MotorShutter_PulseFwd = 255 closes it and is not issued during normal startup.
+# after applying config, write MotorShutter_PulseRev = 1, then 200, before AcquisitionStart.
+# Each write sequence opens the shutter; the stored value does not report shutter state.
+# MotorShutter_PulseFwd = 1, then 204, closes it (dark reference only).
 
 # =============================================================
 # ADVANCED: do not change without a reason

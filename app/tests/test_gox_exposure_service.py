@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from app.decoder.gox import exposure
-from app.services import gox_exposure, gox_reference, gox_tools
+from app.services import gox_exposure, gox_reference, gox_timing, gox_tools
 
 OFFSET_US = 2.45
 BLACK, SLOPE = 145.0, 0.0081  # DN, DN/µs at gain x1
@@ -46,14 +46,19 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
                                                            return_value=(None, [])))
         self.undetectable = set()
         self.config_gain = 1.0
+        self.rates = []
 
     async def reserve(self, sensor, operation, *, kind):
         self.assertEqual((sensor, kind), ("gox", "gox-exposure-series"))
         return await operation()
 
-    async def capture_raw(self, request, output, *, config, exposure_ms=None, gain=None):
+    async def capture_raw(self, request, output, *, config, exposure_ms=None, gain=None, frame_rate_hz=None):
         self.assertIsNone(request)
         self.assertIsNone(gain)  # the series never overrides the configured gain
+        # Each one-frame capture runs at the fastest rate its exposure allows (<= 90 % of the period).
+        self.assertEqual(frame_rate_hz, gox_timing.max_frame_rate_hz(exposure_ms))
+        self.assertTrue(gox_timing.exposure_fits(exposure_ms, frame_rate_hz))
+        self.rates.append(frame_rate_hz)
         self.assertEqual(config.read_bytes(), b"cameras: []\n")
         camera = output / "cam0"
         camera.mkdir(parents=True)
@@ -83,6 +88,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         series = await gox_exposure.run("MCC24", 50.0)
         self.assertTrue(series.ok, series.reason)
         self.assertEqual(self.captured, [25.0, 50.0, 100.0])
+        self.assertEqual(self.rates, [6.054, 6.054, 6.054])
         self.assertEqual(series.patch, 19)
         self.assertAlmostEqual(series.fit.offset_dn, BLACK, places=3)
         expected = ((0.8 * 4095 - BLACK) / SLOPE - OFFSET_US) / 1000
@@ -126,13 +132,15 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first.point)
 
     async def test_saturated_high_step_is_excluded(self):
-        series = await gox_exposure.run("MCC24", 450.0)  # 400/450/500 ms; 500 ms clips
+        self.config_gain = 1.4  # brighter scene within the 399.405 ms ExposureTime maximum
+        series = await gox_exposure.run("MCC24", 300.0)  # 250/300/350 ms; 350 ms clips
         self.assertTrue(series.ok, series.reason)
         self.assertEqual(series.points[2].point.status, "clipped")
         self.assertEqual((series.fit.points_used, series.fit.points_excluded), (2, 1))
 
     async def test_invalid_inputs_never_touch_the_camera(self):
-        for chart, center in (("mcc24", 50), ("MCC24", 0), ("MCC24", -5)):
+        # 360 ms brackets up to 410 ms, above the GOX ExposureTime maximum 399.405 ms.
+        for chart, center in (("mcc24", 50), ("MCC24", 0), ("MCC24", -5), ("MCC24", 360)):
             with self.subTest(chart=chart, center=center), self.assertRaises(ValueError):
                 await gox_exposure.run(chart, center)
         self.assertEqual(self.captured, [])

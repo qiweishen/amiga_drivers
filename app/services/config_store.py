@@ -16,7 +16,7 @@ from pathlib import Path
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken
 
-from . import control_owner
+from . import control_owner, fx10_timing, gox_timing
 from ..constants import CONFIG_FILES, ENABLE_KEYS, FX10_SNAPSHOT_CONFIG, REPO_ROOT, SNAPSHOT_CONFIG, ConfigFile
 from ..state import STATE
 
@@ -506,42 +506,54 @@ def _sub_block_bounds(lines: list[str], key: str, start: int, end: int) -> tuple
     raise ApplyError(f"no '{key}:' block in the expected section")
 
 
-def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float | None) -> str:
-    """Write the selected camera's exposure (and gain, unless None) to recording and snapshot YAML.
+def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, gain: float | None,
+                          frame_rate_hz: float | None = None) -> str:
+    """Write the selected camera's exposure (and gain / frame rate, unless None) to recording and snapshot YAML.
 
-    ``gain=None`` writes the exposure only and leaves each config's gain as it is.
+    ``gain=None`` writes the exposure only and leaves each config's gain as it is;
+    ``frame_rate_hz=None`` leaves each config's ``frame_rate_hz`` as it is.
     """
     exposure_ms = float(exposure_ms)
     if not math.isfinite(exposure_ms) or exposure_ms <= 0:
         raise ApplyError("exposure_ms must be finite and positive")
+    if exposure_ms > gox_timing.MAX_EXPOSURE_MS:
+        raise ApplyError(f"exposure_ms must be <= {gox_timing.MAX_EXPOSURE_MS:g} ms (GOX ExposureTime maximum)")
     if gain is not None:
         gain = float(gain)
         if not math.isfinite(gain) or not 1 <= gain <= 126:
             raise ApplyError("gain must be finite and within [1, 126]")
+    if frame_rate_hz is not None:
+        try:
+            frame_rate_hz = gox_timing.check_frame_rate(frame_rate_hz)
+        except (TypeError, ValueError) as error:
+            raise ApplyError(str(error)) from error
     edits = []
     descriptions = []
     for config_id in ("gox", "gox_snapshot"):
         loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
         try:
             text, camera_id = _gox_acquisition_text(loaded, target_ip, target_mac, exposure_ms, gain,
-                                                   freerun=config_id == "gox_snapshot")
+                                                   frame_rate_hz, freerun=config_id == "gox_snapshot")
         except ApplyError as error:
             raise ApplyError(f"{loaded.file.path}: {error}") from error
         edits.append((loaded, text))
         descriptions.append(f"{loaded.file.path} · {camera_id} ({target_ip})")
     _save_acquisition_pair(edits)
     return ("\n".join(descriptions) + f"\nexposure_ms={_fmt(exposure_ms)}"
-            + (f", gain={_fmt(gain)}" if gain is not None else " (gain unchanged)"))
+            + (f", gain={_fmt(gain)}" if gain is not None else " (gain unchanged)")
+            + (f", frame_rate_hz={_fmt(frame_rate_hz)}" if frame_rate_hz is not None
+               else " (frame_rate_hz unchanged)"))
 
 
 def gox_exposure_limit_ms(target_ip: str, target_mac: str = "") -> tuple[float | None, list[str]]:
     """The exposure ceiling apply_gox_acquisition enforces for this camera (read-only).
 
-    Returns the strictest 900 / frame_rate_hz over the recording and snapshot
-    configs that apply the period check, or None when neither does, plus a
+    Returns the strictest of the GOX ExposureTime maximum and 900 / frame_rate_hz
+    over the recording and snapshot configs that apply the period check, plus a
     description of each binding constraint.
     """
-    limits, notes = [], []
+    limits = [gox_timing.MAX_EXPOSURE_MS]
+    notes = [f"GOX ExposureTime maximum: exposure <= {gox_timing.MAX_EXPOSURE_MS:g} ms"]
     for config_id in ("gox", "gox_snapshot"):
         loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
         lines = loaded.text.splitlines()
@@ -561,12 +573,13 @@ def gox_exposure_limit_ms(target_ip: str, target_mac: str = "") -> tuple[float |
         except (TypeError, ValueError):
             continue
         if math.isfinite(rate) and rate > 0:
-            limits.append(900.0 / rate)
-            notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure < {900.0 / rate:g} ms")
-    return (min(limits) if limits else None), notes
+            limits.append(gox_timing.exposure_limit_ms(rate))
+            notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {gox_timing.exposure_limit_ms(rate):g} ms")
+    return min(limits), notes
 
 
-def _check_exposure_period(exposure_ms: float, frame_rate: object) -> None:
+def _check_gox_exposure_period(exposure_ms: float, frame_rate: object) -> None:
+    """GOX rule, as in gox_driver: the exposure uses at most 90 % of the frame period."""
     try:
         if isinstance(frame_rate, bool):
             raise ValueError
@@ -575,38 +588,42 @@ def _check_exposure_period(exposure_ms: float, frame_rate: object) -> None:
         raise ApplyError("acquisition.frame_rate_hz must be finite and positive") from error
     if not math.isfinite(rate) or rate <= 0:
         raise ApplyError("acquisition.frame_rate_hz must be finite and positive")
-    limit_ms = 900.0 / rate
-    if exposure_ms >= limit_ms:
+    if not gox_timing.exposure_fits(exposure_ms, rate):
         raise ApplyError(
-            f"exposure {exposure_ms:g} ms must be below {limit_ms:g} ms "
-            f"at {rate:g} Hz (10% timing margin). Lower the exposure, "
-            "or lower acquisition.frame_rate_hz in this config first."
+            f"exposure {exposure_ms:g} ms must not exceed {gox_timing.exposure_limit_ms(rate):g} ms "
+            f"at {rate:g} Hz (90% of the frame period). Lower the exposure or the frame rate."
         )
 
 
 def _gox_acquisition_text(loaded: LoadedConfig, target_ip: str, target_mac: str,
-                         exposure_ms: float, gain: float | None, *, freerun: bool) -> tuple[str, str]:
+                         exposure_ms: float, gain: float | None, frame_rate_hz: float | None = None,
+                         *, freerun: bool) -> tuple[str, str]:
     lines = loaded.text.splitlines()
     index, start, end, camera = _gox_camera_entry(lines, target_ip, target_mac)
     if freerun and index != 0:
         raise ApplyError("The selected camera must be the first cameras: entry in the snapshot config; "
                          "jai_snapshot and ColorChecker reference capture use cameras[0]")
 
-    # Match the driver's 10% timing margin. Snapshot tools force freerun even
-    # when their source YAML still names an external trigger mode.
+    # Match the driver's rule (exposure <= 90 % of the period). Snapshot tools
+    # force freerun even when their source YAML still names an external trigger mode.
     acquisition = camera.get("acquisition") or {}
     trigger = acquisition.get("trigger") or {}
-    frame_rate = acquisition.get("frame_rate_hz")
+    frame_rate = acquisition.get("frame_rate_hz") if frame_rate_hz is None else frame_rate_hz
     document = yaml.safe_load(loaded.text) or {}
     sensor_trigger = document.get("sensor_trigger") or {}
     controlled_trigger = (sensor_trigger.get("enabled", False) and camera.get("enabled", True)
                           and trigger.get("mode") == "external")
+    if frame_rate_hz is not None and controlled_trigger and not freerun and frame_rate_hz < 1.0:
+        raise ApplyError(f"frame_rate_hz {frame_rate_hz:g} Hz is below the SensorSync JAI pulse range (>= 1 Hz)")
     if frame_rate is not None and (freerun or controlled_trigger or trigger.get("mode", "freerun") == "freerun"):
-        _check_exposure_period(exposure_ms, frame_rate)
+        _check_gox_exposure_period(exposure_ms, frame_rate)
 
     start, end = _sub_block_bounds(lines, "acquisition", start, end)
     _replace_scalar(lines, "exposure_ms", _fmt(exposure_ms), start=start, end=end)
     checks = [(["cameras", index, "acquisition", "exposure_ms"], exposure_ms)]
+    if frame_rate_hz is not None:
+        _replace_scalar(lines, "frame_rate_hz", _fmt(frame_rate_hz), start=start, end=end)
+        checks.append((["cameras", index, "acquisition", "frame_rate_hz"], frame_rate_hz))
     if gain is not None:
         _replace_scalar(lines, "gain", _fmt(gain), start=start, end=end)
         checks.append((["cameras", index, "acquisition", "gain"], gain))
@@ -689,50 +706,96 @@ def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> 
     raise ApplyError(f"no driver config for a {kind} device")
 
 
-def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spectral_binning: int | None) -> str:
-    """Write exposure/binning to both recording and snapshot acquisition blocks.
+def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spectral_binning: int | None,
+                           frame_rate_hz: float | None = None) -> str:
+    """Write exposure/binning (and the frame rate, unless None) to both recording and snapshot
+    acquisition blocks.
 
-    Both binnings None writes the exposure only and leaves each config's binning as it is.
+    Both binnings None writes the exposure only and leaves each config's binning as it is;
+    ``frame_rate_hz=None`` leaves each config's ``frame_rate_hz`` as it is.
     """
-    exposure_ms = float(exposure_ms)
-    if not math.isfinite(exposure_ms) or exposure_ms <= 0:
-        raise ApplyError("exposure_ms must be finite and positive")
+    try:
+        exposure_ms = fx10_timing.check_exposure(exposure_ms)
+    except (TypeError, ValueError) as error:
+        raise ApplyError(str(error)) from error
     if (spatial_binning is None) != (spectral_binning is None):
         raise ApplyError("spatial_binning and spectral_binning are applied together or not at all")
     for value, name in ((spatial_binning, "spatial_binning"), (spectral_binning, "spectral_binning")):
         if value is not None and (type(value) is not int or value not in (1, 2, 4, 8)):
             raise ApplyError(f"{name} must be 1, 2, 4, or 8")
+    if frame_rate_hz is not None:
+        try:
+            if isinstance(frame_rate_hz, bool):
+                raise ValueError("frame_rate_hz must be a number")
+            frame_rate_hz = float(frame_rate_hz)
+        except (TypeError, ValueError) as error:
+            raise ApplyError(str(error)) from error
     edits = []
     for config_id in ("fx10", "fx10_snapshot"):
         loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
         try:
-            text = _fx10_acquisition_text(loaded, exposure_ms, spatial_binning, spectral_binning)
+            text = _fx10_acquisition_text(loaded, exposure_ms, spatial_binning, spectral_binning, frame_rate_hz)
         except ApplyError as error:
             raise ApplyError(f"{loaded.file.path}: {error}") from error
         edits.append((loaded, text))
     _save_acquisition_pair(edits)
     return ("\n".join(str(loaded.file.path) for loaded, _ in edits) + f"\nexposure_ms={_fmt(exposure_ms)}"
             + (f", spatial_binning={spatial_binning}, spectral_binning={spectral_binning}"
-               if spatial_binning is not None else " (binning unchanged)"))
+               if spatial_binning is not None else " (binning unchanged)")
+            + (f", frame_rate_hz={_fmt(frame_rate_hz)}" if frame_rate_hz is not None
+               else " (frame_rate_hz unchanged)"))
+
+
+def _number(value: object, name: str) -> float:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ApplyError(f"{name} must be finite and positive") from error
+    if not math.isfinite(number) or number <= 0:
+        raise ApplyError(f"{name} must be finite and positive")
+    return number
+
+
+def _check_fx10_timing(document: dict, exposure_ms: float, spatial: object, spectral: object,
+                       frame_rate: object) -> None:
+    """The fx10_driver loader's rules (CheckAcquisitionTiming + SensorSync pulse range)."""
+    rate = _number(frame_rate, "acquisition.frame_rate_hz")
+    try:
+        fx10_timing.check_frame_rate(rate, int(spatial), int(spectral))
+    except (TypeError, ValueError) as error:
+        raise ApplyError(str(error)) from error
+    if not fx10_timing.exposure_fits(exposure_ms, rate):
+        raise ApplyError(
+            f"exposure {exposure_ms:g} ms must not exceed {fx10_timing.exposure_limit_ms(rate):g} ms "
+            f"at {rate:g} Hz (90% of the frame period). Lower the exposure or the frame rate."
+        )
+    acquisition = document.get("acquisition") or {}
+    trigger = acquisition.get("trigger") or {}
+    sensor_trigger = document.get("sensor_trigger") or {}
+    if sensor_trigger.get("enabled", False) and trigger.get("mode", "external") == "external":
+        channel = sensor_trigger.get("trigger_channel", 0)
+        if channel in (0, 1) and rate < 20.0:
+            raise ApplyError(f"frame_rate_hz {rate:g} Hz is below the SensorSync FX pulse range (>= 20 Hz)")
+        if channel in (2, 3) and not 1.0 <= rate <= 10.0:
+            raise ApplyError(f"frame_rate_hz {rate:g} Hz is outside the SensorSync JAI pulse range (1..10 Hz)")
 
 
 def _fx10_acquisition_text(loaded: LoadedConfig, exposure_ms: float,
-                          spatial_binning: int | None, spectral_binning: int | None) -> str:
+                          spatial_binning: int | None, spectral_binning: int | None,
+                          frame_rate_hz: float | None = None) -> str:
     lines = loaded.text.splitlines()
     doc = yaml.safe_load("\n".join(lines)) or {}
     acquisition = doc.get("acquisition")
     if not isinstance(acquisition, dict):
         raise ApplyError("config has no 'acquisition:' block")
-    # ParseAcquisition enforces this before CLI overrides, in both trigger modes.
-    # 50 Hz is fx10::AcquisitionConfig's default when the field is omitted.
-    _check_exposure_period(exposure_ms, acquisition.get("frame_rate_hz", 50.0))
-    # The camera cannot do both; the C++ loader rejects the combination, which
-    # would leave a config that no longer starts. MROI needs 1 x 1 binning on
-    # BOTH axes (FX10 manual p.9, p.26), not just the spectral one.
-    if spatial_binning is not None and (acquisition.get("mroi") or {}).get("enabled") \
-            and (spectral_binning != 1 or spatial_binning != 1):
-        raise ApplyError("acquisition.mroi is enabled, which requires 1 x 1 binning: spatial_binning and "
-                         "spectral_binning must both be 1 (FX10 constraint)")
+    # Values the file will hold after the edit; omitted keys use fx10::AcquisitionConfig's
+    # defaults (1 x 2 binning, 50 Hz). Checked in both trigger modes, like the C++ loader.
+    spatial = acquisition.get("spatial_binning", 1) if spatial_binning is None else spatial_binning
+    spectral = acquisition.get("spectral_binning", 2) if spectral_binning is None else spectral_binning
+    rate = acquisition.get("frame_rate_hz", 50.0) if frame_rate_hz is None else frame_rate_hz
+    _check_fx10_timing(doc, exposure_ms, spatial, spectral, rate)
 
     start, end = _block_bounds(lines, "acquisition")
     _replace_scalar(lines, "exposure_ms", _fmt(exposure_ms), start=start, end=end)
@@ -742,29 +805,28 @@ def _fx10_acquisition_text(loaded: LoadedConfig, exposure_ms: float,
         _replace_scalar(lines, "spectral_binning", str(spectral_binning), start=start, end=end)
         checks += [(["acquisition", "spatial_binning"], spatial_binning),
                    (["acquisition", "spectral_binning"], spectral_binning)]
+    if frame_rate_hz is not None:
+        _replace_scalar(lines, "frame_rate_hz", _fmt(frame_rate_hz), start=start, end=end)
+        checks.append((["acquisition", "frame_rate_hz"], frame_rate_hz))
     return _verified_text(lines, checks)
 
 
 def fx10_exposure_limit_ms() -> tuple[float, list[str]]:
-    """The exposure ceiling apply_fx10_acquisition enforces (read-only): the
-    strictest 900 / frame_rate_hz over the recording and snapshot configs."""
-    limits, notes = [], []
+    """The exposure ceiling apply_fx10_acquisition enforces (read-only): the FX10e
+    ExposureTime maximum and 90 % of the frame period over the recording and snapshot configs."""
+    limits = [fx10_timing.MAX_EXPOSURE_MS]
+    notes = [f"FX10e ExposureTime maximum: exposure <= {fx10_timing.MAX_EXPOSURE_MS:g} ms"]
     for config_id in ("fx10", "fx10_snapshot"):
         loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
         acquisition = (yaml.safe_load(loaded.text) or {}).get("acquisition")
         if not isinstance(acquisition, dict):
             raise ApplyError(f"{loaded.file.path}: config has no 'acquisition:' block")
-        frame_rate = acquisition.get("frame_rate_hz", 50.0)
         try:
-            if isinstance(frame_rate, bool):
-                raise ValueError
-            rate = float(frame_rate)
-        except (TypeError, ValueError, OverflowError) as error:
-            raise ApplyError(f"{loaded.file.path}: acquisition.frame_rate_hz must be finite and positive") from error
-        if not math.isfinite(rate) or rate <= 0:
-            raise ApplyError(f"{loaded.file.path}: acquisition.frame_rate_hz must be finite and positive")
-        limits.append(900.0 / rate)
-        notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure < {900.0 / rate:g} ms")
+            rate = _number(acquisition.get("frame_rate_hz", 50.0), "acquisition.frame_rate_hz")
+        except ApplyError as error:
+            raise ApplyError(f"{loaded.file.path}: {error}") from error
+        limits.append(fx10_timing.exposure_limit_ms(rate))
+        notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {fx10_timing.exposure_limit_ms(rate):g} ms")
     return min(limits), notes
 
 

@@ -68,8 +68,29 @@ GOX 色卡参考也保留 RAW；色彩校正预览只在内存中生成，拟合
 ## Camera Tools 参数保存
 
 工作台滑块和 **Take snapshot** 只临时覆盖预览参数。**Apply to config** 将 GOX
-的曝光、增益，或 FX10 的曝光、空间及光谱 binning，同时保存到对应的正式录制配置
-和 snapshot 配置，供下一次录制与参考采集使用。snapshot 配置仍不在 Configuration
+的曝光、帧率、增益，或 FX10 的曝光、帧率、空间及光谱 binning，同时保存到对应的
+正式录制配置和 snapshot 配置，供下一次录制与参考采集使用。
+
+FX10 时序限制与 `fx10_driver` 一致（`services/fx10_timing.py` 对应
+`fx10_driver/include/app_config.h` 的 `CheckAcquisitionTiming`）：`frame_rate_hz`
+在空间与光谱 binning 均为 1 时不超过 163.02 Hz，其余 binning 组合不超过
+324.373 Hz；`exposure_ms` 为 0.01–419 ms，且不超过帧周期的 90%（含等号）。
+工作台 Exposure 旁的 **Frame rate** 随曝光和 binning 自动取最大值（向下取到
+0.001 Hz），操作者只能下调；Take snapshot 以 `--fps` 传给 `fx10_snapshot`
+（工具在命令行覆盖后重新校验，不再静默降帧率），Apply 时写入两个配置的
+`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，FX 组须
+≥ 20 Hz。ETTR 曝光序列的每个点取配置帧率与该曝光可用最大帧率中的较小值；ETTR
+建议的 Apply 只改曝光，帧率不变。
+
+GOX 时序限制与 `gox_driver` 一致（`services/gox_timing.py` 对应
+`gox_driver/include/app_config.h`）：`frame_rate_hz` 为 0.125–6.054 Hz（全幅
+`BayerRG12Packed` 的 AcquisitionFrameRate 上限），`exposure_ms` 不超过 399.405 ms
+（相机回读的 ExposureTime 上限 399405 µs），且曝光不超过帧周期的 90%
+（`exposure_ms <= 900 / frame_rate_hz`，含等号）。工作台 Exposure 旁的
+**Frame rate** 自动取满足上述条件的最大值（向下取到 0.001 Hz），操作者只能下调；
+Take snapshot 以 `--frame-rate-hz` 传给 `jai_snapshot`，Apply 时写入两个配置的
+`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，须 ≥ 1 Hz。
+ETTR 建议的 Apply 只改曝光，帧率不变。snapshot 配置仍不在 Configuration
 页中展示；Reference capture 继续从各自的 snapshot 配置读取采集参数。
 
 ## Reference capture

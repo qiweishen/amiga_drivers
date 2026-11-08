@@ -28,7 +28,7 @@ import numpy as np
 from ..decoder.ebus import recording as raw_recording
 from ..decoder.gox import color_checker, exposure
 from ..decoder.gox.color import frame_exposure_from_device
-from . import atomic_json, camera_operations, config_store, gox_reference, gox_tools
+from . import atomic_json, camera_operations, config_store, gox_reference, gox_timing, gox_tools
 
 MAX_SERIES_BYTES = 4 * 1024 * 1024
 
@@ -192,6 +192,9 @@ async def run(chart_key: str, center_ms: float) -> ExposureSeries:
     """Bracket the exposure only; the gain stays whatever the snapshot config sets (x1 in the field)."""
     gox_reference._validate_chart(chart_key)
     exposures = exposure.bracket(center_ms)
+    if max(exposures) > gox_timing.MAX_EXPOSURE_MS:
+        raise ValueError(f"The bracket reaches {max(exposures):g} ms, above the GOX ExposureTime maximum "
+                         f"{gox_timing.MAX_EXPOSURE_MS:g} ms; lower the initial exposure")
     if reason := gox_reference.capability_reason():
         raise ValueError(reason)
     return await camera_operations.run(
@@ -220,7 +223,9 @@ async def _run(chart_key: str, center_ms: float, exposures: list[float]) -> Expo
         for index, exposure_ms in enumerate(exposures, 1):
             _status = f"Capturing exposure {index}/{len(exposures)}: {exposure_ms:g} ms…"
             output = directory / f"exposure_{index}_{exposure_ms:g}ms" / "raw" / "gox"
-            captured = await gox_tools.capture_raw(None, output, config=config, exposure_ms=exposure_ms)
+            # One freerun frame: run each point at the fastest rate its exposure allows (90 % rule).
+            captured = await gox_tools.capture_raw(None, output, config=config, exposure_ms=exposure_ms,
+                                                   frame_rate_hz=gox_timing.max_frame_rate_hz(exposure_ms))
             raw_outputs.append(f"--- {exposure_ms:g} ms ---\n{captured.raw_output}")
             if not captured.ok or captured.camera_dir is None:
                 pending.append(_Analysis(output, exposure_ms, error=captured.reason or "capture failed"))

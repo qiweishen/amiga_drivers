@@ -25,16 +25,13 @@ services:
         cap_add:
             - NET_ADMIN
             - NET_RAW
-            # Required file/effective capabilities must be provisioned separately;
-            # starting the GUI or using GUI Start does not run setcap.
             - SYS_NICE
 
         environment:
             PYTHONUNBUFFERED: 1
             PYTHONDONTWRITEBYTECODE: 1
             # Xorg on Ubuntu 22.04, or XWayland on a Wayland desktop (22.04/26.04).
-            # Inherit the active host session; do not invent :0 for headless sessions.
-            DISPLAY: ${DISPLAY:-}
+            DISPLAY: ${DISPLAY}
             XAUTHORITY: /tmp/.host.xauth
             QT_QPA_PLATFORM: xcb
             GDK_BACKEND: x11
@@ -54,13 +51,15 @@ services:
             AMIGA_RUNTIME_DIR: /workspace/app/_runtime
             AMIGA_CONTROL_LOCK: /workspace/app/_runtime/controller.lock
 
-#        devices:
-#            # Teensy trigger board
-#            - /dev/ttyACM0:/dev/ttyACM0
-
+        # No `devices:` entries: Compose refuses to start when a listed node is
+        # missing (test machines have no Teensy). /dev is bind-mounted below, so
+        # nodes that exist (or are plugged in later) are visible; these rules only
+        # grant access to them, and match nothing on a machine without the device.
         device_cgroup_rules:
             # KEYLOK hiddev minor numbers can change after replug or reboot.
             - "c 180:* rw"
+            # Teensy trigger board (USB CDC ACM, /dev/ttyACM*; config uses /dev/serial/by-id/...).
+            - "c 166:* rw"
 
         group_add:
             - "20"      # dialout
@@ -70,26 +69,14 @@ services:
             - ..:/workspace
             # Mount our dataset directory
             - /mnt/SharedData/Post_Processing_Data:/workspace/dataset
-            # Teensy trigger board
-            - /dev/serial/by-id:/dev/serial/by-id:ro
-            # Share new device nodes and the host udev alias /dev/usb/hid/hiddev0.
-            # Do not bind an individual KEYLOK node: it becomes stale after replug.
+            # Share new device nodes and the host udev aliases (/dev/usb/hid/hiddev0,
+            # /dev/serial/by-id/... for the Teensy, present only when plugged in).
+            # Do not bind individual nodes: they fail when absent and go stale after replug.
             - /dev:/dev
-            # Use the existing host desktop authorization file directly; no setup hook.
-            # Missing sources must fail instead of becoming empty directories.
-            -   type: bind
-                source: /tmp/.X11-unix
-                target: /tmp/.X11-unix
-                read_only: true
-                bind:
-                    create_host_path: false
-            -   type: bind
-                source: "${XAUTHORITY:-${HOME}/.Xauthority}"
-                target: /tmp/.host.xauth
-                read_only: true
-                bind:
-                    create_host_path: false
-            # User runtime (audio, D-Bus, etc.)
+            # Host X authorization at the user-independent XAUTHORITY path; the image
+            # links ~/.Xauthority of its user (any USERNAME) to the same file.
+            - ${HOME}/.Xauthority:/tmp/.host.xauth:ro
+            # User runtime (audio, D-Bus, etc.).
             - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
 
         working_dir: /workspace

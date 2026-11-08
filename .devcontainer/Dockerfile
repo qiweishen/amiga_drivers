@@ -103,6 +103,7 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     # Grant passwordless sudo \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME}
+RUN ln -sf /tmp/.host.xauth /home/${USERNAME}/.Xauthority
 
 # =============================================================
 # Workspace setup

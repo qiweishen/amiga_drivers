@@ -8,6 +8,7 @@
 
 #include "app_config.h"
 #include "apply_plan.h"
+#include "ebus_config_file.h"
 #include <nlohmann/json.hpp>
 
 
@@ -58,13 +59,23 @@ namespace fx10 {
 
         void VerifyControlReady() const;
 
+        // After PrepareFactoryDefaults, before the stream open and ApplyAcquisitionConfig.
+        // Requires DeviceSerialNumber == the file's directory name and the checksums.txt
+        // SHA-256, then loads the whole file with PvConfigurationReader::Load + Restore(0,
+        // device), unfiltered, and re-verifies control readiness. Throws ControlError /
+        // ConfigError; nothing is restored when a check fails. Result: EbusConfigRestore().
+        void RestoreEbusConfiguration(const std::filesystem::path &pvcfg, const std::function<bool()> &stop = {});
+
+        [[nodiscard]] const nlohmann::json &EbusConfigRestore() const noexcept { return ebus_config_; }
+
         // After all config writes, before StreamEnable/AcquisitionStart. Every
-        // call writes MotorShutter_PulseRev = 255 once; its stored value is NOT
-        // shutter position. Checks SDK write acknowledgement, not motion completion.
-        // Throws on missing/unwritable/wrong-type node, invalid range, SDK failure
-        // or cancellation. No automatic retry or conditional skip based on readback.
+        // call writes MotorShutter_PulseRev = 1, then, once that write is acknowledged,
+        // 200; its stored value is NOT shutter position. Checks SDK write
+        // acknowledgement, not motion completion. Throws on missing/unwritable/wrong-type
+        // node, invalid range, SDK failure or cancellation. No automatic retry or
+        // conditional skip based on readback.
         void OpenShutter(const std::function<bool()> &stop = {});
-        // Reference capture only: same pulse semantics, MotorShutter_PulseFwd = 255.
+        // Reference capture only: same pulse semantics, MotorShutter_PulseFwd = 1, then 204.
         void CloseShutter(const std::function<bool()> &stop = {});
         // Cached outcome of the latest pulse; no SDK reads and no state verification.
         [[nodiscard]] const nlohmann::json &ShutterPreparation() const noexcept { return shutter_preparation_; }
@@ -99,6 +110,7 @@ namespace fx10 {
             std::int64_t offset_y = -1;
             std::uint32_t payload_size = 0;
             std::string pixel_format;
+            bool status_line = false; // EnStatusLine readback: on = last band row is camera status (p.34)
         };
 
         Geometry ReadGeometry();
@@ -113,5 +125,6 @@ namespace fx10 {
         PvDevice &device_;
         nlohmann::json applied_ = nlohmann::json::array();
         nlohmann::json shutter_preparation_ = {{"status", "not-attempted"}};
+        nlohmann::json ebus_config_ = {{"status", "not-configured"}};
     };
 } // namespace fx10

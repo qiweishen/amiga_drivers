@@ -16,6 +16,27 @@ namespace gox {
 
     inline constexpr const char *kNativePixelFormat = "BayerRG12Packed";
 
+    // Timing limits of the GOX-12405C-PGE at full frame (4128 x 3008, BayerRG12Packed).
+    // kMaxFrameRateHz: AcquisitionFrameRate ceiling set by the operator (2026-11-08).
+    // kMaxExposureMs: ExposureTime maximum 399405 us read back from the camera (device.json
+    // transport.exposure_time_max_us). Both apply in every trigger mode.
+    inline constexpr double kMaxFrameRateHz = 6.054;
+    inline constexpr double kMaxExposureMs = 399.405;
+    // The exposure may use at most 90 % of the frame (or pulse) period.
+    inline constexpr double kExposurePeriodFraction = 0.9;
+
+    // Longest exposure that fits a frame rate, ms: 0.9 * 1000 / frame_rate_hz
+    inline double ExposureLimitMs(double frame_rate_hz) {
+        return kExposurePeriodFraction * 1000.0 / frame_rate_hz;
+    }
+
+    // Inclusive check with a relative 1e-9 allowance, so an exposure computed as
+    // exactly 90 % of a period is not rejected by floating-point rounding.
+    inline bool ExposureFitsPeriod(double exposure_ms, double frame_rate_hz) {
+        const double limit = ExposureLimitMs(frame_rate_hz);
+        return exposure_ms <= limit * (1.0 + 1e-9);
+    }
+
     // The driver never writes network settings; re-addressing is the GUI's ebus_set_ip.
     struct DeviceConfig {
         std::string mac; // discovery match; wins over ip

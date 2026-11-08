@@ -12,17 +12,16 @@
 device:
     mac: ""                             # discovery match; wins over ip
     ip: "10.95.0.100"                   # direct connect; used when mac is empty
+    ebus_config: "fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg"   # relative to the project root
 
 
 # --- Acquisition ---
 acquisition:
     spatial_binning: 1                  # 1 | 2 | 4 | 8 -> 1024 | 512 | 256 | 128 samples
-    spectral_binning: 2                 # 1 | 2 | 4 | 8 -> 448 | 224 | 112 | 56 bands; 2 = factory (p.44); mroi needs 1
+    spectral_binning: 2                 # 1 | 2 | 4 | 8 -> 448 | 224 | 112 | 56 bands; 2 = factory (p.44)
     pixel_format: Mono12Packed          # Mono12Packed | Mono12 | Mono10Packed | Mono10 | Mono8
-    exposure_ms: 10.0                   # > 0 (camera range 0.01..419)
-    frame_rate_hz: 51.0                 # > 0; freerun rate, or the expected pulse rate under external trigger
-    status_line: false                  # true replaces the last image row with camera status (p.34)
-    image_enhancement: true             # AIE (p.32); only true is supported (node name unknown, use features.raw)
+    exposure_ms: 10.0                   # 0.01..419 ms; <= 90 % of the frame period (0.9 * 1000 / frame_rate_hz)
+    frame_rate_hz: 51.0                 # <= 163.02 Hz at 1 x 1 binning, else <= 324.373 Hz; freerun rate, or the expected pulse rate under external trigger
     trigger:
         mode: external                  # freerun | external
         activation: rising              # rising | falling
@@ -30,9 +29,6 @@ acquisition:
         exposure_control: camera        # camera | pulse_width
         selector_entry: FrameStart
         source_entry: Line0             # Line0 = ISO_TRIGGER pin 8
-    mroi:
-        enabled: false                  # requires 1 x 1 binning (p.9, p.26)
-        multiband_string: ""            # "start_row height;..." e.g. "10 20;100 20"; rows 0..1081, height 1..448, total <= 448
 
 
 # --- Sensor Trigger (Teensy SensorSync, 3rd_party/External/sensor_trigger) ---

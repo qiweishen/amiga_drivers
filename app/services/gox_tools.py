@@ -29,6 +29,7 @@ class SnapshotRequest:
     target_ip: str
     exposure_ms: float
     gain: float
+    frame_rate_hz: float | None = None  # None keeps the snapshot config's frame_rate_hz
 
 
 @dataclass
@@ -69,18 +70,18 @@ def guard_reason() -> str | None:
     return camera_operations.guard_reason("gox")
 
 
-async def snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
-    request = SnapshotRequest(ip, exposure_ms, gain)
+async def snapshot(ip: str, exposure_ms: float, gain: float, frame_rate_hz: float | None = None) -> SnapshotResult:
+    request = SnapshotRequest(ip, exposure_ms, gain, frame_rate_hz)
 
     async def capture() -> SnapshotResult:
-        result = await _snapshot(request.target_ip, request.exposure_ms, request.gain)
+        result = await _snapshot(request)
         result.request = request
         return result
 
     return await camera_operations.run("gox", capture, kind="gox-snapshot")
 
 
-async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
+async def _snapshot(request: SnapshotRequest) -> SnapshotResult:
     """One full preview shot while the service owns the camera reservation."""
     t0 = time.monotonic()
     sid = time.strftime("%Y%m%d_%H%M%S")
@@ -88,7 +89,7 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
     if out_host.exists():  # same-second collision on rapid consecutive shots
         sid = f"{sid}_{int((time.time() % 1) * 1000):03d}"
         out_host = SNAPSHOT_DIR / sid
-    captured = await capture_raw(SnapshotRequest(ip, exposure_ms, gain), out_host)
+    captured = await capture_raw(request, out_host)
     if not captured.ok:
         return SnapshotResult(False, reason=captured.reason, raw_output=captured.raw_output,
                               elapsed_s=captured.elapsed_s)
@@ -102,7 +103,8 @@ async def _snapshot(ip: str, exposure_ms: float, gain: float) -> SnapshotResult:
 
 
 async def capture_raw(request: SnapshotRequest | None, output: Path, *, config: Path = SNAPSHOT_CONFIG,
-                      exposure_ms: float | None = None, gain: float | None = None) -> RawCapture:
+                      exposure_ms: float | None = None, gain: float | None = None,
+                      frame_rate_hz: float | None = None) -> RawCapture:
     """Capture one RAW frame inside the caller's camera_operations reservation.
 
     The exposure workbench and colour-reference service share this process path;
@@ -110,7 +112,7 @@ async def capture_raw(request: SnapshotRequest | None, output: Path, *, config: 
     A reference passes None to use the saved snapshot config's camera; an
     exposure series adds ``exposure_ms``/``gain`` overrides to that camera.
     """
-    if request is not None and (exposure_ms is not None or gain is not None):
+    if request is not None and (exposure_ms is not None or gain is not None or frame_rate_hz is not None):
         raise ValueError("Exposure overrides come from the request when one is given")
     t0 = time.monotonic()
     # References use a saved copy under the output directory; the caller checked
@@ -125,10 +127,13 @@ async def capture_raw(request: SnapshotRequest | None, output: Path, *, config: 
     if request is not None:
         argv += ["--ip", request.target_ip, "--exposure-ms", str(request.exposure_ms),
                  "--gain", str(request.gain)]
+        frame_rate_hz = request.frame_rate_hz
     if exposure_ms is not None:
         argv += ["--exposure-ms", str(float(exposure_ms))]
     if gain is not None:
         argv += ["--gain", str(float(gain))]
+    if frame_rate_hz is not None:
+        argv += ["--frame-rate-hz", str(float(frame_rate_hz))]
     proc = await tool_jobs.spawn(argv)
     try:
         out_b, err_b = await tool_jobs.communicate(proc, SNAPSHOT_TIMEOUT_S)
