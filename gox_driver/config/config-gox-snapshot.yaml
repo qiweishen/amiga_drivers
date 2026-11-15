@@ -16,10 +16,10 @@ cameras:
             mac: ""                         # --mac
             ip: "10.95.1.101"               # --ip
         acquisition:
-            exposure_ms: 399.405            # 0 < x <= 399.405; <= 900 / frame_rate_hz (90% of the period)
+            exposure_ms: 150.0              # 0 < x <= 399.405; <= 900 / frame_rate_hz (90% of the period)
             gain: 1.0                       # 1.0..126.0
             pixel_format: BayerRG12Packed   # only accepted value: native 12-bit DN, 2 px / 3 B, also used by GUI previews
-            frame_rate_hz: 2.253            # 0.125..6.054; sets the exposure ceiling; written by GUI Apply (factory 8 fps clamps > ~114 ms)
+            frame_rate_hz: 2.0              # 0.125..6.054; sets the exposure ceiling; written by GUI Apply (factory 8 fps clamps > ~114 ms)
             trigger:
                 mode: freerun
                 exposure_active_output: false

@@ -114,6 +114,14 @@ TEST_CASE("device_json: the expectation tables are complete and free of duplicat
 
     CHECK(gox::IdentityFeatures().size() >= 17u);
     CHECK(gox::TransportFeatures().size() >= 5u);
+    // Chunk mode is written by the apply plan, so it is recorded with the transport, not audited
+    CHECK(find_expected("ChunkModeActive") == "<not in table>");
+    const auto &transport = gox::TransportFeatures();
+    for (const char *name: {"GevSCCFGExtendedChunkData", "ChunkModeActive"}) {
+        CAPTURE(name);
+        CHECK(std::find_if(transport.begin(), transport.end(),
+                           [&](const char *t) { return std::string(t) == name; }) != transport.end());
+    }
 }
 
 TEST_CASE("device_json: counter0_bound reads the applied plan, not the config") {

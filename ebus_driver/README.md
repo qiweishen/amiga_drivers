@@ -72,6 +72,14 @@ bytes/records 是记录数，valid_frames 是有效图像数，不能混用。
 外触发且由共享 SensorSync 控制时核对帧数与曝光边沿；freerun 的采集窗口与
 观察日志窗口不同，只检查日志完整性，帧/边沿数量对应关系明确记为 unknown。
 
+GOX 每次 bring-up 都在 PixelFormat 之后、帧率之前写入 `GevSCCFGExtendedChunkData=1`
+和 `ChunkModeActive=1`，配置完成后回读，不是 On 就拒绝启动；这两项不设 YAML 开关。
+每帧因此带有 ChunkFrameTriggerCounter（FrameStart 时的 Counter0）、ChunkExposureTime、
+ChunkGain、宽高、偏移、LineStatusAll 和 SequencerSetActive（手册 p.120、p.164），
+供离线逐帧核对帧与触发的对应；这只是软件设置，不需要额外接线。扩展 chunk 模式保留图像
+leader，SDK 交付的仍是带 chunk 的 image buffer。ChunkModeActive 是最短帧周期的输入（p.36），
+6.054 Hz 上限需在真机启用 chunk 后重新读取 AcquisitionFrameRate 最大值确认。
+
 新记录无需 idx 文件才能恢复布局。接收时不解包、不去 padding/Chunk、不 debayer、
 不删除 FX10 status line、不做反射率校正，也不插入丢行补零。
 相机端 PixelFormat、ROI、binning、AIE 等配置仍决定实际输出的信息量。
@@ -134,8 +142,12 @@ CRC 使用 CRC32C/Castagnoli。每段按完整记录轮转，单条超过容量�
 | 44 | u32 | reserved=0 |
 
 JSON 含 block_id、device_timestamp_raw、host_realtime_ns、host_monotonic_ns、
-acquired_size、payload_type、operation_result/name/ok、chunk_count、
+acquired_size、payload_type、operation_result/name/ok、chunk_count、chunks、
 valid_frame、block_id_anomaly、gap_before 和 image。
+chunks 是 SDK 在 requeue 前解析出的 chunk 列表，每项为 `{"id": <ChunkID>, "data": [<字节>...]}`，
+字节不作解释，同样的字节仍保留在 payload 尾部；范围不安全、SDK 报告操作错误或无法取出某个
+chunk 时为 null。
+此前写入的记录没有该键，读取端应视为缺失而不是错误。
 image 为 null 或包含 PixelFormat 数值、宽高、ROI offset、padding、
 image_size/effective_image_size、相对整个 payload 的 payload_offset 及缺行/overrun 标志。
 payload_offset 无法证明时为 null，读取端不得猜测。
@@ -161,5 +173,7 @@ Python 项目脚本或硬件操作。增加了 RAW 布局/轮转/CRC/失败锁�
 需要在另行允许的环境执行构建及测试，再用实际设备验证：两种相机快照及长时吞吐；
 双相机共同 Arm/任一路失败；SIGINT、AcquisitionStop 失败与断链；满队列和磁盘错误；
 packed 像素、padding、Chunk、错误 buffer、16/64 位 ID；白/暗独立阶段匹配；
-GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示。
+GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示；GOX 启用 chunk 后 payload_type 仍为
+Image(1)、chunk_count 与 chunks 内容、ChunkWidth/Height 与 image 一致、PayloadSize 增量、
+AcquisitionFrameRate 最大值是否仍 ≥ 6.054 Hz，以及 GUI 预览正常。
 静态核对不能证明硬件行为或无丢帧。

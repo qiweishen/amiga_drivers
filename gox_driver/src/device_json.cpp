@@ -160,8 +160,8 @@ namespace gox {
             {"ExposureMode", "Timed"},
             {"ExposureModeOption", "Off"},
             {"AcquisitionMode", "Continuous"},
-            // Chunk stays off: jai-raw-seg v1 has no chunk tail (p.164)
-            {"ChunkModeActive", "Off|false|0"},
+            // ChunkModeActive is written by the apply plan (and recorded under transport): the
+            // chunks trail the image in the payload and never change pixel values.
             // Operator/plan state, recorded here so one file answers "how raw is
             // this dataset" without cross-referencing applied[].
             {"PixelFormat", ""},
@@ -238,6 +238,9 @@ namespace gox {
             "GevSCPSPacketSize",
             "GevSCPD",
             "GevGVSPExtendedIDMode",
+            // Chunk mode enlarges PayloadSize (p.126) and enters the frame-period limit (p.36)
+            "GevSCCFGExtendedChunkData",
+            "ChunkModeActive",
             "NetworkThroughputSafetyMargin",
             "AcquisitionFrameRate",
         };

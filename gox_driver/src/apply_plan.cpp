@@ -115,6 +115,18 @@ namespace gox {
             add(plan, "BlemishEnable", "0", false);
         }
 
+        // 4c. Chunk data (p.120, p.164): every frame carries its own ChunkFrameTriggerCounter
+        // (CounterValue[Counter0] latched at FrameStart), ChunkExposureTime, gain and geometry, so
+        // each frame can be tied to its trigger offline. No wiring: the values travel in the same
+        // GVSP block. Extended chunk mode first: it keeps the image leader (pixel format, size,
+        // padding) and appends the chunks, so the SDK still hands over an image buffer with chunks
+        // (PvBuffer.h); the plain chunk payload type is "not currently supported" (PvPayloadType.h).
+        // ChunkModeActive is an input to the shortest frame period (p.36) and to PayloadSize
+        // (p.126), and cannot change during acquisition (p.120): both precede the bandwidth margin,
+        // the frame rate and the buffer sizing.
+        add(plan, "GevSCCFGExtendedChunkData", "1", false);
+        add(plan, "ChunkModeActive", "1", false);
+
         // 5. Bandwidth share before the frame rate: the margin is one of the
         // inputs to AcquisitionFrameRate's maximum (manual p.128, p.141).
         if (cfg.network.throughput_safety_margin_pct != 0) {

@@ -146,6 +146,15 @@ namespace ebus_driver {
                     != "On")
                     throw std::runtime_error(
                         "GOX requires verified GevGVSPExtendedIDMode=On; remove a conflicting raw override");
+                // Per-frame chunk data (ChunkFrameTriggerCounter) ties each frame to its trigger offline;
+                // the extended chunk payload keeps the image leader the receive path requires.
+                for (const char *name: {"GevSCCFGExtendedChunkData", "ChunkModeActive"}) {
+                    std::string value;
+                    if (!gox::ebus::ReadFeatureAsString(state->control->Params(), name, value) ||
+                        !gox::RawAuditMatches(value, "On|true|1"))
+                        throw std::runtime_error(std::string("GOX requires verified ") + name +
+                                                 "=On; remove a conflicting raw override");
+                }
                 // The raw escape hatch can change these nodes or reload a user set.
                 // Verify the final device state before the engine sizes buffers or starts capture.
                 std::string pixel_format;

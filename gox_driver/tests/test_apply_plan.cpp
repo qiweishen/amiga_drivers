@@ -42,9 +42,9 @@ namespace {
     }
 } // namespace
 
-TEST_CASE("apply_plan: a bare camera forces native BayerRG12Packed, 64-bit block IDs, raw blemish state and strobe") {
+TEST_CASE("apply_plan: a bare camera forces native BayerRG12Packed, 64-bit block IDs, raw blemish state, chunks and strobe") {
     const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(BaseCamera());
-    REQUIRE(plan.size() == 7u);
+    REQUIRE(plan.size() == 9u);
     CHECK(plan[0].name == "GevGVSPExtendedIDMode");
     CHECK(plan[0].value == "On");
     CHECK(plan[0].value_is_string);
@@ -60,11 +60,14 @@ TEST_CASE("apply_plan: a bare camera forces native BayerRG12Packed, 64-bit block
     // the factory value, so even a config that asks for nothing else writes it.
     CHECK(plan[3].name == "BlemishEnable");
     CHECK(plan[3].value == "0");
+    // Per-frame chunk data, extended chunk mode first (image leader kept)
+    CHECK(plan[4].name == "GevSCCFGExtendedChunkData");
+    CHECK(plan[5].name == "ChunkModeActive");
     // The Line2 ExposureActive strobe is the rig's default too: the factory
     // LineSource for Line2 copies the Line5 input, useless for timing.
-    CHECK(plan[4].name == "LineSelector");
-    CHECK(plan[5].name == "LineSource");
-    CHECK(plan[6].name == "LineInverter");
+    CHECK(plan[6].name == "LineSelector");
+    CHECK(plan[7].name == "LineSource");
+    CHECK(plan[8].name == "LineInverter");
     // freerun needs no trigger write at all: the factory TriggerMode is Off.
     CHECK(IndexOf(plan, "TriggerMode") == -1);
 }
@@ -203,6 +206,37 @@ TEST_CASE("apply_plan: GevGVSPExtendedIDMode is always written first") {
     CHECK(plan.front().name == "GevGVSPExtendedIDMode");
     // ... and the escape hatch is always last, so it can override everything.
     CHECK(plan.back().name == "BlackLevel");
+}
+
+TEST_CASE("apply_plan: chunk data is always on, extended mode first, before the frame-period inputs") {
+    for (const gox::TriggerMode mode: {gox::TriggerMode::kFreerun, gox::TriggerMode::kExternal}) {
+        gox::CameraConfig c = BaseCamera();
+        c.acquisition.trigger.mode = mode;
+        c.acquisition.frame_rate_hz = 3.0;
+        c.network.throughput_safety_margin_pct = 46;
+        c.features.raw.push_back(gox::RawFeature{"BlackLevel", "0", false});
+        const std::vector<gox::FeatureWrite> plan = gox::BuildApplyPlan(c);
+        const int extended = IndexOf(plan, "GevSCCFGExtendedChunkData");
+        const int active = IndexOf(plan, "ChunkModeActive");
+        REQUIRE(extended >= 0);
+        REQUIRE(active >= 0);
+        CHECK(extended < active);
+        // ChunkModeActive is an input to the shortest frame period (p.36)
+        CHECK(active < IndexOf(plan, "NetworkThroughputSafetyMargin"));
+        if (mode == gox::TriggerMode::kFreerun) {
+            CHECK(active < IndexOf(plan, "AcquisitionFrameRate"));
+        } else {
+            CHECK(active < IndexOf(plan, "TriggerMode"));
+        }
+        CHECK(active < IndexOf(plan, "BlackLevel")); // still ahead of the escape hatch
+        for (const char *n: {"GevSCCFGExtendedChunkData", "ChunkModeActive"}) {
+            CAPTURE(n);
+            CHECK(Find(plan, n)->value == "1"); // boolean or the manual's integer entry
+            CHECK_FALSE(Find(plan, n)->value_is_string);
+            CHECK(Find(plan, n)->strict);
+            CHECK(Find(plan, n)->required);
+        }
+    }
 }
 
 TEST_CASE("apply_plan: SensorDigitizationBits follows the pixel format's depth") {

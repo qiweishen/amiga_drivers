@@ -23,6 +23,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "bounded_queue.h"
 #include "ebus/discovery.h"
@@ -363,6 +364,11 @@ namespace ebus_driver {
             };
             metadata["recording_contract"] = {
                 {"payload", "unchanged GetAcquiredSize bytes copied from PvBuffer::GetDataPointer before requeue"},
+                {
+                    "chunks",
+                    "PvBuffer::GetChunkIDByIndex/GetChunkRawDataByIndex before requeue; uninterpreted bytes, "
+                    "also present at the payload tail; null when unsafe or unresolved"
+                },
                 {"device_timestamp", "unscaled PvBuffer::GetTimestamp"},
                 {"device_timestamp_unit", "unverified"}, {"device_timestamp_epoch", "unverified"},
                 {"host_timestamp_semantics", "sampled immediately after RetrieveBuffer; reception, not exposure time"},
@@ -584,6 +590,24 @@ namespace ebus_driver {
                 ++unknown_payloads;
             }
             const bool valid = operation.IsOK() && safe && image_complete && !observation.anomaly;
+            // Chunk blocks exactly as the SDK parsed them, read before requeue: ID plus raw bytes,
+            // uninterpreted (the same bytes also stay at the tail of the copied payload). null when
+            // the extent is unsafe, the operation failed, or the SDK cannot resolve a listed chunk.
+            Json chunks = nullptr;
+            if (safe && operation.IsOK()) {
+                chunks = Json::array();
+                const std::uint32_t count = buffer->GetChunkCount();
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    std::uint32_t id = 0;
+                    const std::uint32_t size = buffer->GetChunkSizeByIndex(i);
+                    const std::uint8_t *data = buffer->GetChunkRawDataByIndex(i);
+                    if (!buffer->GetChunkIDByIndex(i, id).IsOK() || (size != 0 && data == nullptr)) {
+                        chunks = nullptr;
+                        break;
+                    }
+                    chunks.push_back(Json{{"id", id}, {"data", std::vector<std::uint8_t>(data, data + size)}});
+                }
+            }
             Json metadata = {
                 {"record_kind", "buffer"}, {"block_id", buffer->GetBlockID()},
                 {"device_timestamp_raw", buffer->GetTimestamp()}, {"host_realtime_ns", host_rt},
@@ -592,6 +616,7 @@ namespace ebus_driver {
                 {"operation_result", static_cast<std::uint32_t>(operation.GetCode())},
                 {"operation_ok", operation.IsOK()},
                 {"operation_name", ToStd(operation.GetCodeString())}, {"chunk_count", buffer->GetChunkCount()},
+                {"chunks", std::move(chunks)},
                 {"valid_frame", valid}, {"block_id_anomaly", observation.anomaly}, {"gap_before", observation.gap},
                 {"image", std::move(image_metadata)}
             };
