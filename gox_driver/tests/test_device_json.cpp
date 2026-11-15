@@ -114,7 +114,8 @@ TEST_CASE("device_json: the expectation tables are complete and free of duplicat
 
     CHECK(gox::IdentityFeatures().size() >= 17u);
     CHECK(gox::TransportFeatures().size() >= 5u);
-    // Chunk mode is written by the apply plan, so it is recorded with the transport, not audited
+    // Chunk mode is not written (read-only on the GO-X); its state is read back with the
+    // transport as evidence, not audited
     CHECK(find_expected("ChunkModeActive") == "<not in table>");
     const auto &transport = gox::TransportFeatures();
     for (const char *name: {"GevSCCFGExtendedChunkData", "ChunkModeActive"}) {

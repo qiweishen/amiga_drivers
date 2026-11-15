@@ -72,13 +72,11 @@ bytes/records 是记录数，valid_frames 是有效图像数，不能混用。
 外触发且由共享 SensorSync 控制时核对帧数与曝光边沿；freerun 的采集窗口与
 观察日志窗口不同，只检查日志完整性，帧/边沿数量对应关系明确记为 unknown。
 
-GOX 每次 bring-up 都在 PixelFormat 之后、帧率之前写入 `GevSCCFGExtendedChunkData=1`
-和 `ChunkModeActive=1`，配置完成后回读，不是 On 就拒绝启动；这两项不设 YAML 开关。
-每帧因此带有 ChunkFrameTriggerCounter（FrameStart 时的 Counter0）、ChunkExposureTime、
-ChunkGain、宽高、偏移、LineStatusAll 和 SequencerSetActive（手册 p.120、p.164），
-供离线逐帧核对帧与触发的对应；这只是软件设置，不需要额外接线。扩展 chunk 模式保留图像
-leader，SDK 交付的仍是带 chunk 的 image buffer。ChunkModeActive 是最短帧周期的输入（p.36），
-6.054 Hz 上限需在真机启用 chunk 后重新读取 AcquisitionFrameRate 最大值确认。
+GOX 不启用 chunk 数据：真机 bring-up 写 `GevSCCFGExtendedChunkData=1` 报
+"parameter not writable"，eBUS Player 也显示该节点不可改；而不开扩展模式时，chunk
+payload 类型 SDK 不支持（PvPayloadType.h）。写入计划因此不写 `GevSCCFGExtendedChunkData`
+和 `ChunkModeActive`，保持 UserSetLoad Default 之后的出厂状态；device.json 的 transport
+仍回读这两项作为证据。帧与触发的对应靠 SensorSync 日志（触发与曝光边沿）和 Counter0。
 
 新记录无需 idx 文件才能恢复布局。接收时不解包、不去 padding/Chunk、不 debayer、
 不删除 FX10 status line、不做反射率校正，也不插入丢行补零。
@@ -173,7 +171,6 @@ Python 项目脚本或硬件操作。增加了 RAW 布局/轮转/CRC/失败锁�
 需要在另行允许的环境执行构建及测试，再用实际设备验证：两种相机快照及长时吞吐；
 双相机共同 Arm/任一路失败；SIGINT、AcquisitionStop 失败与断链；满队列和磁盘错误；
 packed 像素、padding、Chunk、错误 buffer、16/64 位 ID；白/暗独立阶段匹配；
-GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示；GOX 启用 chunk 后 payload_type 仍为
-Image(1)、chunk_count 与 chunks 内容、ChunkWidth/Height 与 image 一致、PayloadSize 增量、
-AcquisitionFrameRate 最大值是否仍 ≥ 6.054 Hz，以及 GUI 预览正常。
+GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示；GOX 的 transport 回读
+ChunkModeActive 为关闭、每帧 chunk_count 为 0，以及 GUI 预览正常。
 静态核对不能证明硬件行为或无丢帧。
