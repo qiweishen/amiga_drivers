@@ -25,10 +25,12 @@ target_include_directories(amiga_common PUBLIC
         $<INSTALL_INTERFACE:include>
 )
 
-# SensorSync-Logger host client (session_client.cpp is header-included by
-# sensor_sync_log.cpp; trigger_groups.h / session_rates.h are shared with the
-# firmware). PUBLIC: the camera drivers validate pulse rates with trigger_groups.h
-target_include_directories(amiga_common SYSTEM PUBLIC "${sensor_trigger_SOURCE_DIR}")
+# SensorSync-Logger host client: session_client.cpp is header-included by
+# sensor_sync_log.cpp only. PRIVATE: every other upstream header is firmware
+# (config.h, events.h, ... include <Arduino.h>) and must not shadow project
+# headers. The pair-rate rule lives in include/sensor_sync_rates.h and the log
+# format 3 checks in include/sensor_sync_quality.h.
+target_include_directories(amiga_common SYSTEM PRIVATE "${sensor_trigger_SOURCE_DIR}")
 
 target_link_libraries(amiga_common PUBLIC
         spdlog::spdlog

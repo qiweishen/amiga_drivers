@@ -16,7 +16,7 @@ from pathlib import Path
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken
 
-from . import control_owner, fx10_timing, gox_timing
+from . import control_owner, fx10_timing, gox_timing, sensor_sync_rates
 from ..constants import CONFIG_FILES, ENABLE_KEYS, FX10_SNAPSHOT_CONFIG, REPO_ROOT, SNAPSHOT_CONFIG, ConfigFile
 from ..state import STATE
 
@@ -613,8 +613,10 @@ def _gox_acquisition_text(loaded: LoadedConfig, target_ip: str, target_mac: str,
     sensor_trigger = document.get("sensor_trigger") or {}
     controlled_trigger = (sensor_trigger.get("enabled", False) and camera.get("enabled", True)
                           and trigger.get("mode") == "external")
-    if frame_rate_hz is not None and controlled_trigger and not freerun and frame_rate_hz < 1.0:
-        raise ApplyError(f"frame_rate_hz {frame_rate_hz:g} Hz is below the SensorSync JAI pulse range (>= 1 Hz)")
+    if (frame_rate_hz is not None and controlled_trigger and not freerun
+            and (frame_rate_hz <= 0 or not sensor_sync_rates.rate_accepted(sensor_sync_rates.JAI, frame_rate_hz))):
+        raise ApplyError(f"frame_rate_hz {frame_rate_hz:g} Hz is outside the SensorSync JAI pulse range "
+                         f"({sensor_sync_rates.range_text(sensor_sync_rates.JAI)})")
     if frame_rate is not None and (freerun or controlled_trigger or trigger.get("mode", "freerun") == "freerun"):
         _check_gox_exposure_period(exposure_ms, frame_rate)
 
@@ -776,10 +778,11 @@ def _check_fx10_timing(document: dict, exposure_ms: float, spatial: object, spec
     sensor_trigger = document.get("sensor_trigger") or {}
     if sensor_trigger.get("enabled", False) and trigger.get("mode", "external") == "external":
         channel = sensor_trigger.get("trigger_channel", 0)
-        if channel in (0, 1) and rate < 20.0:
-            raise ApplyError(f"frame_rate_hz {rate:g} Hz is below the SensorSync FX pulse range (>= 20 Hz)")
-        if channel in (2, 3) and not 1.0 <= rate <= 10.0:
-            raise ApplyError(f"frame_rate_hz {rate:g} Hz is outside the SensorSync JAI pulse range (1..10 Hz)")
+        if channel in (0, 1, 2, 3):  # the C++ loader rejects any other channel
+            group = sensor_sync_rates.group_of(channel)
+            if not sensor_sync_rates.rate_accepted(group, rate):
+                raise ApplyError(f"frame_rate_hz {rate:g} Hz is outside the SensorSync {group} pulse range "
+                                 f"({sensor_sync_rates.range_text(group)})")
 
 
 def _fx10_acquisition_text(loaded: LoadedConfig, exposure_ms: float,

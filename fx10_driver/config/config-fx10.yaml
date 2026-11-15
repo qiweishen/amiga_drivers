@@ -36,10 +36,11 @@ acquisition:
 # config/config-main.yaml ("Sensor Trigger: Port"); this block only declares participation
 # and the channel. One session per rig (common::SensorSyncHub), one timing log at
 # raw/sensor_trigger.log with every channel's events. Pulses start once every registered
-# camera has armed and stop before the first camera stops.
+# camera has armed and stop before the first camera stops. The board firmware's config.h
+# decides which trigger outputs exist (TRIG_CFG enabled; the shipped one drives 0 and 2 only).
 sensor_trigger:
     enabled: true
-    trigger_channel: 0                  # 0..3 physical ID; v2 drives 0/1 together (FX, >=20 Hz), 2/3 together (JAI, 1..10 Hz)
+    trigger_channel: 0                  # 0..3 physical ID; one rate per pair: 0/1 FX (17.882..9847.689 Hz), 2/3 JAI (0.140..9847.689 Hz)
 
 
 # --- Reference collection (Collect Reference page only) ---

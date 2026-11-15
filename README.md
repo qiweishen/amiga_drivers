@@ -206,7 +206,14 @@ During configuration, FetchContent obtains the SensorSync source under
 `3rd_party/External/sensor_trigger`. This upstream repository is not a CMake
 project: only its source is populated, and `amiga_common` compiles the host-side
 `session_client.cpp`. The firmware is not built. The dependency follows `main`
-without fixed-version or file-hash checks.
+without fixed-version or file-hash checks. Upstream keeps the trigger pair-rate
+rule and the session log format (format 3) in firmware only, so the host carries
+copies: `common/include/sensor_sync_rates.h` (with the GUI's
+`app/services/sensor_sync_rates.py`) mirrors `triggers.cpp` `calculate()` —
+FX pair 17.882–9847.689 Hz, JAI pair 0.140–9847.689 Hz, 0 = off — and
+`common/include/sensor_sync_quality.h` checks the log framing. The board stays
+the authority: a rate it cannot produce is answered with `#ERR,bad_freq`, and a
+log of another format fails the end-of-run accounting.
 
 ## Quick start
 

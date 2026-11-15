@@ -1,9 +1,9 @@
 #include "app_config.h"
-#include "trigger_groups.h"
 
 #include <cmath>
 #include <cstdio>
 
+#include "sensor_sync_rates.h"
 #include "string_util.h"
 
 
@@ -69,13 +69,14 @@ namespace fx10 {
             const YAML::Node n = OptionalMap(root, "", "sensor_trigger", {"enabled", "trigger_channel"});
             Read(n, "sensor_trigger", "enabled", st.enabled);
             ReadRange<int>(n, "sensor_trigger", "trigger_channel", 0, 3, st.trigger_channel);
-            // Protocol v2 drives paired outputs: 0/1 = FX, 2/3 = JAI.
-            const auto group = static_cast<trigger::Group>(st.trigger_channel / 2);
+            // The board drives paired outputs (0/1 = FX, 2/3 = JAI) at one rate per pair and
+            // answers a rate its PWM cannot produce with #ERR,bad_freq (sensor_sync_rates.h)
+            namespace ss = common::sensor_sync;
+            const ss::Group group = ss::GroupOf(st.trigger_channel);
             if (st.enabled && acq.trigger.mode == TriggerMode::kExternal &&
-                !trigger::validRate(group, acq.frame_rate_hz)) {
-                Fail("acquisition.frame_rate_hz", group == trigger::Group::FX
-                                                      ? "must be >= 20 Hz for the SensorSync FX group (outputs 0/1)"
-                                                      : "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
+                !ss::RateAccepted(group, acq.frame_rate_hz)) {
+                Fail("acquisition.frame_rate_hz", "must be within " + ss::RangeText(group) + " for the SensorSync " +
+                                                  ss::Name(group) + " group (outputs " + ss::Channels(group) + ")");
             }
         }
 

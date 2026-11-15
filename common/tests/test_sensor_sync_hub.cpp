@@ -1,11 +1,13 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "sensor_sync_hub.h"
+#include "sensor_sync_rates.h"
 
 using common::SensorSyncBackend;
 using common::SensorSyncError;
@@ -156,8 +158,10 @@ TEST_CASE("SensorSyncHub: registrations the hardware cannot honour are refused b
     rig.hub.Register("fx10", 0, 50.0);
     // Channel range, pair rate limits, conflicting pair rates, duplicate names/channels
     CHECK_THROWS_AS(rig.hub.Register("x", 4, 1.0), SensorSyncError);
-    CHECK_THROWS_AS(rig.hub.Register("x", 1, 10.0), SensorSyncError); // FX pair needs >= 20 Hz
-    CHECK_THROWS_AS(rig.hub.Register("x", 2, 11.0), SensorSyncError); // JAI pair 1..10 Hz
+    CHECK_THROWS_AS(rig.hub.Register("x", 1, 17.5), SensorSyncError); // FX pair: 16-bit period floor 17.88 Hz
+    CHECK_THROWS_AS(rig.hub.Register("x", 2, 0.1), SensorSyncError); // JAI pair: floor 0.1397 Hz
+    CHECK_THROWS_AS(rig.hub.Register("x", 2, 9848.0), SensorSyncError); // period below 2 pulse widths
+    CHECK_THROWS_AS(rig.hub.Register("x", 2, -1.0), SensorSyncError);
     CHECK_THROWS_AS(rig.hub.Register("x", 1, 25.0), SensorSyncError); // conflicts with 50 Hz
     CHECK_THROWS_AS(rig.hub.Register("fx10", 2, 5.0), SensorSyncError); // duplicate owner
     CHECK_THROWS_AS(rig.hub.Register("x", 0, 50.0), SensorSyncError); // duplicate channel
@@ -233,4 +237,33 @@ TEST_CASE("SensorSyncHub: integrity and stall are the board's verdicts, shared b
     rig.hub.Disarm("fx10");
     CHECK_FALSE(rig.hub.Ok());
     CHECK_FALSE(rig.hub.LastError().empty());
+}
+
+
+TEST_CASE("SensorSync pair rates: the host copy of the firmware rule (triggers.cpp calculate())") {
+    using common::sensor_sync::Group;
+    using common::sensor_sync::RangeText;
+    using common::sensor_sync::RateAccepted;
+    // 0 turns a pair off; anything not finite or negative is refused
+    CHECK(RateAccepted(Group::kFx, 0.0));
+    CHECK(RateAccepted(Group::kJai, 0.0));
+    CHECK_FALSE(RateAccepted(Group::kFx, -1.0));
+    CHECK_FALSE(RateAccepted(Group::kJai, std::nan("")));
+    CHECK_FALSE(RateAccepted(Group::kJai, INFINITY));
+    // FX: 150 MHz / 128 = 1171875 Hz, fixed prescale; 16-bit period -> >= 17.8817 Hz
+    CHECK_FALSE(RateAccepted(Group::kFx, 17.881));
+    CHECK(RateAccepted(Group::kFx, 17.882));
+    CHECK(RateAccepted(Group::kFx, 50.0));
+    // JAI: SM3 divides by up to 2^7 more -> >= 0.1397 Hz
+    CHECK_FALSE(RateAccepted(Group::kJai, 0.1396));
+    CHECK(RateAccepted(Group::kJai, 0.1398));
+    CHECK(RateAccepted(Group::kJai, 6.054));
+    CHECK(RateAccepted(Group::kJai, 25.0)); // no 10 Hz ceiling in log format 3
+    // Both: the period must exceed 2 x 59 counts (50 us pulse) + 1 -> < 9847.689 Hz
+    CHECK(RateAccepted(Group::kFx, 9847.689));
+    CHECK_FALSE(RateAccepted(Group::kFx, 9847.69));
+    CHECK_FALSE(RateAccepted(Group::kJai, 9847.69));
+    // The printed bounds are rounded inwards and accepted themselves
+    CHECK(RangeText(Group::kFx) == "[17.882, 9847.689] Hz");
+    CHECK(RangeText(Group::kJai) == "[0.140, 9847.689] Hz");
 }

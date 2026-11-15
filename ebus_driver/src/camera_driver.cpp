@@ -1067,8 +1067,8 @@ namespace ebus_driver {
                             // capture interval cannot equal the edge-log interval;
                             // a boundary may legitimately bisect one exposure.
                             const bool healthy = quality.readable && quality.protocol_complete &&
-                                                 quality.polarity_supported && quality.exposure.seen && quality.exposure
-                                                 .valid && sync->Ok();
+                                                 quality.health_counts_match && quality.polarity_supported &&
+                                                 quality.exposure.seen && quality.exposure.valid && sync->Ok();
                             timing["ok"] = healthy;
                             timing["status"] = "observation_window_only";
                             timing["counts_reconciled"] = nullptr;

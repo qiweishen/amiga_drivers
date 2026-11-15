@@ -78,8 +78,9 @@ FX10 时序限制与 `fx10_driver` 一致（`services/fx10_timing.py` 对应
 工作台 Exposure 旁的 **Frame rate** 随曝光和 binning 自动取最大值（向下取到
 0.001 Hz），操作者只能下调；Take snapshot 以 `--fps` 传给 `fx10_snapshot`
 （工具在命令行覆盖后重新校验，不再静默降帧率），Apply 时写入两个配置的
-`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，FX 组须
-≥ 20 Hz。ETTR 曝光序列的每个点取配置帧率与该曝光可用最大帧率中的较小值；ETTR
+`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，须为该组
+PWM 能产生的频率（FX 组 17.882–9847.689 Hz，JAI 组 0.140–9847.689 Hz；
+`services/sensor_sync_rates.py` 对应 `common/include/sensor_sync_rates.h`）。ETTR 曝光序列的每个点取配置帧率与该曝光可用最大帧率中的较小值；ETTR
 建议的 Apply 只改曝光，帧率不变。
 
 GOX 时序限制与 `gox_driver` 一致（`services/gox_timing.py` 对应
@@ -89,7 +90,8 @@ GOX 时序限制与 `gox_driver` 一致（`services/gox_timing.py` 对应
 （`exposure_ms <= 900 / frame_rate_hz`，含等号）。工作台 Exposure 旁的
 **Frame rate** 自动取满足上述条件的最大值（向下取到 0.001 Hz），操作者只能下调；
 Take snapshot 以 `--frame-rate-hz` 传给 `jai_snapshot`，Apply 时写入两个配置的
-`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，须 ≥ 1 Hz。
+`frame_rate_hz`。外触发且启用 SensorSync 的录制配置中，该值即脉冲频率，须 ≥ 0.140 Hz
+（SensorSync JAI 组 PWM 下限）。
 ETTR 建议的 Apply 只改曝光，帧率不变。snapshot 配置仍不在 Configuration
 页中展示；Reference capture 继续从各自的 snapshot 配置读取采集参数。
 

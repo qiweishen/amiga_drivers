@@ -19,7 +19,7 @@ cameras:
             exposure_ms: 150.0              # 0 < x <= 399.405; <= 900 / frame_rate_hz (90% of the period, freerun and SensorSync pulses alike)
             gain: 1.0                       # 1.0..126.0 (magnification, not dB, p.148)
             pixel_format: BayerRG12Packed   # only accepted value: native 12-bit DN, 2 px / 3 B; SensorDigitizationBits=12 is required
-            frame_rate_hz: 2.0              # 0.125..6.054 freerun; external + sensor_trigger: pulse rate, 1..6.054 Hz; written by GUI Apply
+            frame_rate_hz: 2.0              # 0.125..6.054 freerun; external + sensor_trigger: pulse rate, 0.140..6.054 Hz; written by GUI Apply
             blemish_correction: false       # false = BlemishEnable off, raw sensor pixels (p.156, p.82)
             trigger:
                 mode: external          # freerun | external
@@ -29,7 +29,7 @@ cameras:
                 delay_ms: 0.0           # 0..500; TriggerDelay, exposure start after the trigger edge (p.142)
                 input_filter_ns: 0      # 0..40000000 step 100; OptInFilter debounce on Line5 (p.145); keep << the 50 us pulse
                 exposure_active_output: true    # Line2 Opt Out (pins 4/5) = ExposureActive: LineSelector 21, LineSource 4 (p.143-144)
-                sensor_channel: 2       # 2 | 3: SensorSync JAI trigger output / strobe input pair wired to this camera
+                sensor_channel: 2       # 2 | 3: SensorSync JAI trigger output / strobe input pair wired to this camera (the shipped firmware config.h drives trigger output 2 only)
             roi:
                 width: 0                # 0 = keep | >= 96, step 8
                 height: 0               # 0 = keep | >= 8, step 2

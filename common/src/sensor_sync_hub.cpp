@@ -3,12 +3,14 @@
 #include <algorithm>
 
 #include "logger.h"
-#include "trigger_groups.h"
+#include "sensor_sync_rates.h"
 
 
 namespace common {
     namespace {
         DriverLog g_log{"SensorSync"};
+
+        using sensor_sync::Group;
 
         constexpr int kChannelCount = 4;
 
@@ -82,11 +84,12 @@ namespace common {
             throw SensorSyncError("[TriggerLog] '" + owner + "': SensorSync channel " + std::to_string(channel) +
                                   " is outside 0..3 (0/1 = FX pair, 2/3 = JAI pair)");
         }
-        const auto group = static_cast<trigger::Group>(channel / 2);
-        if (!trigger::validRate(group, pulse_hz)) {
+        const Group group = sensor_sync::GroupOf(channel);
+        if (!sensor_sync::RateAccepted(group, pulse_hz)) {
             throw SensorSyncError("[TriggerLog] '" + owner + "': pulse rate " + std::to_string(pulse_hz) +
-                                  " Hz is not valid for the SensorSync " + trigger::name(group) + " group (" +
-                                  (group == trigger::Group::FX ? "0 or >= 20 Hz" : "0 or 1..10 Hz") + ")");
+                                  " Hz is not valid for the SensorSync " + sensor_sync::Name(group) +
+                                  " group (0 = off, or " + sensor_sync::RangeText(group) +
+                                  "; the board answers other rates with #ERR,bad_freq)");
         }
         if (participants_.size() >= static_cast<std::size_t>(kChannelCount)) {
             throw SensorSyncError("[TriggerLog] '" + owner + "': the board has only 4 channels");
@@ -100,8 +103,9 @@ namespace common {
                                       "' both claim SensorSync channel " + std::to_string(channel));
             }
             if (p.channel / 2 == channel / 2 && p.pulse_hz != pulse_hz) {
-                // One hardware PWM rate per pair (session_rates.h rejects it on the wire too)
-                throw SensorSyncError("[TriggerLog] '" + owner + "' asks the SensorSync " + trigger::name(group) +
+                // One hardware PWM rate per pair; START carries one rate per pair, and
+                // session_client.cpp rateSpec() refuses conflicting rates as well
+                throw SensorSyncError("[TriggerLog] '" + owner + "' asks the SensorSync " + sensor_sync::Name(group) +
                                       " pair for " + std::to_string(pulse_hz) + " Hz but '" + p.owner +
                                       "' already asked for " + std::to_string(p.pulse_hz) +
                                       " Hz; both outputs of a pair share one rate");
@@ -118,7 +122,7 @@ namespace common {
             opened_ = true;
         }
         participants_.push_back({owner, channel, pulse_hz, false});
-        g_log.Info("[TriggerLog] '{}' registered: channel {} ({} pair), {}", owner, channel, trigger::name(group),
+        g_log.Info("[TriggerLog] '{}' registered: channel {} ({} pair), {}", owner, channel, sensor_sync::Name(group),
                    pulse_hz > 0.0 ? fmt::format("{:g} Hz pulses", pulse_hz) : "strobe logging only (no pulses)");
     }
 
@@ -258,7 +262,7 @@ namespace common {
             return "no participant; the board is not used";
         }
         std::string out = "port " + port_;
-        for (unsigned g = 0; g < trigger::GROUP_COUNT; ++g) {
+        for (unsigned g = 0; g < sensor_sync::kGroupCount; ++g) {
             std::string members;
             double hz = 0.0;
             for (const Participant &p: participants_) {
@@ -267,7 +271,7 @@ namespace common {
                     hz = p.pulse_hz;
                 }
             }
-            out += std::string("; ") + trigger::name(static_cast<trigger::Group>(g)) + " pair ";
+            out += std::string("; ") + sensor_sync::Name(static_cast<Group>(g)) + " pair ";
             if (members.empty()) {
                 out += "off (no participant)";
             } else {
@@ -289,7 +293,7 @@ namespace common {
 
     std::vector<std::pair<int, double> > SensorSyncHub::PlannedRatesLocked() const {
         std::vector<std::pair<int, double> > rates;
-        for (unsigned g = 0; g < trigger::GROUP_COUNT; ++g) {
+        for (unsigned g = 0; g < sensor_sync::kGroupCount; ++g) {
             double hz = 0.0;
             for (const Participant &p: participants_) {
                 if (static_cast<unsigned>(p.channel / 2) == g) {

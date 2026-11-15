@@ -6,8 +6,8 @@
 #include <set>
 
 #include "logger.h"
+#include "sensor_sync_rates.h" // host copy of the SensorSync firmware's pair-rate rule
 #include "string_util.h"
-#include "trigger_groups.h" // SensorSync firmware/host rate rules (3rd_party/External/sensor_trigger)
 
 
 namespace gox {
@@ -160,7 +160,7 @@ namespace gox {
                 Fail(tp + ".input_filter_ns", "must be a multiple of 100 ns (OptInFilter step, manual p.145)");
             }
             Read(t, tp, "exposure_active_output", acq.trigger.exposure_active_output);
-            // The JAI pair of the SensorSync board (channels 2/3); 0/1 are the FX pair (>= 20 Hz)
+            // The JAI pair of the SensorSync board (channels 2/3); 0/1 are the FX pair
             ReadRange<int>(t, tp, "sensor_channel", 2, 3, acq.trigger.sensor_channel);
         }
 
@@ -269,12 +269,14 @@ namespace gox {
                 if (!cam.acquisition.frame_rate_hz) {
                     Fail(path + ".acquisition.frame_rate_hz",
                          "is required under an external trigger with sensor_trigger.enabled: it is the SensorSync "
-                         "pulse rate this driver commands on the JAI pair (1..10 Hz)");
+                         "pulse rate this driver commands on the JAI pair");
                 }
+                namespace ss = common::sensor_sync;
                 const double hz = *cam.acquisition.frame_rate_hz;
-                if (hz == 0.0 || !trigger::validRate(trigger::Group::JAI, hz)) {
+                if (hz == 0.0 || !ss::RateAccepted(ss::Group::kJai, hz)) {
                     Fail(path + ".acquisition.frame_rate_hz",
-                         "must be within [1, 10] Hz for the SensorSync JAI group (outputs 2/3)");
+                         "must be within " + ss::RangeText(ss::Group::kJai) +
+                         " for the SensorSync JAI group (outputs 2/3)");
                 }
                 if (pair_rate && *pair_rate != hz) {
                     Fail(path + ".acquisition.frame_rate_hz",

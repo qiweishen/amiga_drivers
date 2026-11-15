@@ -72,7 +72,7 @@ namespace fx10 {
     // The board's serial port is the rig's (config-main.yaml "Sensor Trigger: Port")
     struct SensorTriggerConfig {
         bool enabled = false;
-        int trigger_channel = 0; // physical log ID; v2 pairs 0/1 = FX, 2/3 = JAI
+        int trigger_channel = 0; // physical log ID; pairs 0/1 = FX, 2/3 = JAI (one rate per pair)
     };
 
     struct AcquisitionConfig {

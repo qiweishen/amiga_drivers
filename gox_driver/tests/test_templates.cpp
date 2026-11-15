@@ -6,6 +6,8 @@
 
 #include <string>
 
+#include "sensor_sync_rates.h"
+
 #ifndef GOX_CONFIG_DIR
 #error "GOX_CONFIG_DIR must be defined by the build (see gox_driver/CMakeLists.txt)"
 #endif
@@ -47,8 +49,8 @@ TEST_CASE("templates: config-gox.yaml parses and keeps its documented values") {
     CHECK(cam.acquisition.trigger.exposure_active_output);
     CHECK(cam.acquisition.trigger.sensor_channel == 2);
     CHECK(cfg.sensor_trigger.enabled); // the board's port lives in config-main.yaml
-    CHECK(*cam.acquisition.frame_rate_hz >= 1.0); // the SensorSync JAI pair runs 1..10 Hz
-    CHECK(*cam.acquisition.frame_rate_hz <= 10.0);
+    CHECK(*cam.acquisition.frame_rate_hz > 0.0); // a rate the SensorSync JAI pair can produce
+    CHECK(common::sensor_sync::RateAccepted(common::sensor_sync::Group::kJai, *cam.acquisition.frame_rate_hz));
 
     REQUIRE(cam.acquisition.roi.has_value());
     CHECK(cam.acquisition.roi->width == 0u);

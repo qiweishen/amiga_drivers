@@ -167,9 +167,10 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
                     config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, exposure_ms, None, rate)
                 self.assert_unchanged("gox", no_backups=False)  # the first Apply left backups
 
-    def test_gox_sensorsync_pulse_rate_stays_at_or_above_one_hz(self):
+    def test_gox_sensorsync_pulse_rate_must_be_a_jai_pair_rate(self):
+        # 0.13 Hz passes the camera's 0.125 Hz floor but not the JAI pair's PWM floor (0.1397 Hz)
         with self.assertRaises(config_store.ApplyError):
-            config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, 100.0, None, 0.5)
+            config_store.apply_gox_acquisition(TARGET_IP, TARGET_MAC, 100.0, None, 0.13)
         self.assert_unchanged("gox")
 
     def test_gox_exposure_limit_includes_the_exposure_time_maximum(self):
@@ -245,7 +246,7 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
 
     def test_fx10_sensor_sync_pulse_range_is_checked_for_the_recording_profile(self):
         with self.assertRaises(config_store.ApplyError):
-            config_store.apply_fx10_acquisition(50.0, 1, 1, 18.0)  # FX group needs >= 20 Hz
+            config_store.apply_fx10_acquisition(50.0, 1, 1, 17.5)  # FX pair floor: 17.882 Hz
         self.assert_unchanged("fx10")
 
     def test_gox_snapshot_enforces_freerun_margin_before_either_config_is_written(self):

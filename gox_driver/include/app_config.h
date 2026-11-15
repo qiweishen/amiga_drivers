@@ -79,7 +79,8 @@ namespace gox {
         std::optional<double> exposure_ms; // ExposureTime is in us (x1000)
         std::optional<double> gain; // Gain[AnalogAll] magnification x1.0..126.0 (manual p.148), not dB
         // Freerun rate; under an external trigger with sensor_trigger.enabled it is the pulse
-        // rate this driver commands on the SensorSync JAI pair (1..10 Hz) and is required
+        // rate this driver commands on the SensorSync JAI pair (0.140..9847.689 Hz, see
+        // common/include/sensor_sync_rates.h; the camera caps it at kMaxFrameRateHz) and is required
         std::optional<double> frame_rate_hz;
         // Native 12-bit DN in the camera's GVSP 12Packed Bayer layout: 2 px in 3 bytes, 12 bits/px
         // (manual "Pixel Format", PixelSize table: BayerRG12Packed = 12). The only accepted format.

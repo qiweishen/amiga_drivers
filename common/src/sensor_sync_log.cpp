@@ -16,6 +16,11 @@ namespace common {
         // No log growth for this long at Stop() time = the STOP command very likely never reached the board
         constexpr double kStopStallWarnS = 15.0;
 
+        // A line of `text` starting with `prefix` (the board ends lines with \n or \r\n)
+        bool HasLine(const std::string &text, const std::string &prefix) {
+            return text.rfind(prefix, 0) == 0 || text.find("\n" + prefix) != std::string::npos;
+        }
+
         // errno of the failed port open -> field-actionable hint
         const char *OpenErrnoHint(int err) {
             switch (err) {
@@ -60,6 +65,15 @@ namespace common {
             const int err = impl_->session.lastErrno();
             throw SensorSyncError(fmt::format("[TriggerLog] Cannot prepare sensor trigger port '{}': {} (errno {}){}",
                                               port_, impl_->session.lastError(), err, OpenErrnoHint(err)));
+        }
+        // session_client open() sends STOP and only collects 500 ms of replies. The board
+        // answers "#IDLE,up=<ms>" when idle and closes a leftover session with
+        // "#SESSION,STOP,<path>"; neither = not this firmware, or nothing listening.
+        const std::string &reply = impl_->session.startupLog();
+        if (!HasLine(reply, "#IDLE,") && !HasLine(reply, "#SESSION,STOP,")) {
+            throw SensorSyncError(fmt::format("[TriggerLog] No SensorSync reply to STOP on '{}' within 500 ms: "
+                                              "wrong port, or the board does not run the SensorSync-Logger "
+                                              "firmware", port_));
         }
         g_log.Info("[TriggerLog] Sensor trigger port '{}' open; startup synchronization confirmed idle", port_);
     }

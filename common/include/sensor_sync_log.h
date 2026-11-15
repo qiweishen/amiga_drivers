@@ -24,35 +24,40 @@ namespace common {
 
         SensorSyncLog &operator=(const SensorSyncLog &) = delete;
 
-        // Open + configure raw 115200 8N1, resynchronize command framing, send
-        // STOP and confirm idle. Call before arming any camera, with exclusive
-        // control of the board. Throws SensorSyncError; logs startup diagnostics.
+        // Open + configure raw 115200 8N1, send STOP (ends a leftover session) and
+        // confirm the board's #IDLE / #SESSION,STOP reply. Call before arming any
+        // camera, with exclusive control of the board. Throws SensorSyncError;
+        // logs startup diagnostics.
         void Open();
 
-        // Begin a board session: counters restart from 0 and the event stream is
-        // captured into `log_path`. `channel_freqs_hz` retunes trigger channels
-        // for this run. Protocol v2 pairs 0/1 = FX (>=20 Hz), 2/3 = JAI (1..10 Hz).
-        // {ch, 0} disables its pair; omitted groups retain their previous rates.
-        // Conflicting rates within a pair fail. #GROUP/#TRIG record effective
-        // rates and #READY confirms hardware start. The rates ride inside the
-        // START command. A failure ends the session; no automatic restart.
-        // Throws SensorSyncError.
+        // Begin a board session: sequence counters restart from 1 and the event
+        // stream is captured into `log_path` (log format 3). `channel_freqs_hz`
+        // retunes the trigger pairs for this run: 0/1 = FX, 2/3 = JAI, one rate
+        // per pair, within sensor_sync_rates.h (the board answers other rates
+        // with #ERR,bad_freq). {ch, 0} turns its pair off; an omitted pair keeps
+        // its previous rate. Conflicting rates within a pair fail. #GROUP/#TRIG
+        // record effective rates and #READY confirms hardware start. The rates
+        // ride inside the START command. A failure ends the session; no
+        // automatic restart. Throws SensorSyncError.
         void Start(const std::filesystem::path &log_path,
                    const std::vector<std::pair<int, double> > &channel_freqs_hz = {});
 
         // End the session (drains the tail, board -> idle). Idempotent, never throws.
         void Stop();
 
-        // False = the log file write failed (e.g. disk full) or the protocol
-        // reported loss/restart; the session data is incomplete and the run must
-        // be treated as failed.
+        // False = the port or the log file write failed (e.g. disk full), the
+        // board sent #ERR, a #H health line reported drops != 0, or STOP was not
+        // acknowledged; the session data is incomplete and the run must be
+        // treated as failed.
         bool Ok() const;
 
-        // Seconds since the timing log last grew. A healthy session appends
-        // continuously (the board emits a #H health line at least every 5 s and
-        // the client flushes every read), so a large value means the USB link is
-        // down and events are being lost while Ok() still reads true. -1 before
-        // Start() and after Stop().
+        // Seconds since the timing log file last grew. The board emits a #H
+        // health line at least every 5 s, but session_client.cpp writes through
+        // an unflushed stdio buffer (typically 4 KiB), so the file grows in
+        // buffer-sized steps: at low event rates (one Go-X at 1-2 Hz without the
+        // FX10) a step can take longer than a stall threshold. A large value
+        // otherwise means the USB link is down and events are being lost while
+        // Ok() still reads true. -1 before Start() and after Stop().
         double StalledSeconds() const;
 
         const std::filesystem::path &LogPath() const { return log_path_; }

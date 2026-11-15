@@ -249,20 +249,21 @@ TEST_CASE("config: sensor trigger") {
     CHECK_FALSE(LoadAppConfigText("sensor_trigger: { enabled: false }").sensor_trigger.enabled);
     CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, trigger_channel: -1 }"),
                    "sensor_trigger.trigger_channel"));
-    // Group-specific v2 limits apply only when the board drives external pulses.
-    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 0.5 }\nsensor_trigger: { enabled: true }"),
-                   "acquisition.frame_rate_hz: must be >= 20"));
+    // Pair rate limits (the firmware's PWM rule, sensor_sync_rates.h) apply only when the
+    // board drives external pulses.
+    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 17.5 }\nsensor_trigger: { enabled: true }"),
+                   "acquisition.frame_rate_hz: must be within [17.882, 9847.689] Hz for the SensorSync FX group"));
     CHECK(Contains(ErrorOf("sensor_trigger: { enabled: true, trigger_channel: 4 }"),
                    "sensor_trigger.trigger_channel"));
-    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 50 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 2 }"),
-                   "must be within [1, 10]"));
-    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 20 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 1 }")
-          .acquisition.frame_rate_hz == doctest::Approx(20));
-    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 5 }\nsensor_trigger: { enabled: true, port: /dev/ttyACM0, trigger_channel: 3 }")
-          .acquisition.frame_rate_hz == doctest::Approx(5));
+    CHECK(Contains(ErrorOf("acquisition: { frame_rate_hz: 0.1 }\nsensor_trigger: { enabled: true, trigger_channel: 2 }"),
+                   "must be within [0.140, 9847.689] Hz for the SensorSync JAI group"));
+    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 18 }\nsensor_trigger: { enabled: true, trigger_channel: 1 }")
+          .acquisition.frame_rate_hz == doctest::Approx(18));
+    CHECK(LoadAppConfigText("acquisition: { frame_rate_hz: 50 }\nsensor_trigger: { enabled: true, trigger_channel: 3 }")
+          .acquisition.frame_rate_hz == doctest::Approx(50));
     const AppConfig freerun = LoadAppConfigText(
         "acquisition: { frame_rate_hz: 0.5, trigger: { mode: freerun } }\n"
-        "sensor_trigger: { enabled: true, port: /dev/ttyACM0 }");
+        "sensor_trigger: { enabled: true }");
     CHECK(freerun.acquisition.frame_rate_hz == doctest::Approx(0.5));
 }
 

@@ -320,13 +320,14 @@ TEST_CASE("config: sensor trigger ties the rig's pulse rate to the cameras") {
     CHECK(ErrorOf(DocWithCamera("    acquisition: {trigger: {mode: external}}")).empty());
 
     const std::string board = "sensor_trigger: {enabled: true}\n";
-    // External + SensorSync: frame_rate_hz is the commanded JAI pulse rate, 1..10 Hz
+    // External + SensorSync: frame_rate_hz is the commanded JAI pulse rate (board floor 0.1397 Hz)
     CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {trigger: {mode: external}}")),
                    "frame_rate_hz: is required under an external trigger with sensor_trigger.enabled"));
     CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 12, trigger: {mode: external}}")),
                    "must be <= 6.054 Hz"));
-    CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 0.5, trigger: {mode: external}}")),
-                   "must be within [1, 10] Hz"));
+    CHECK(Contains(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 0.13, trigger: {mode: external}}")),
+                   "must be within [0.140, 9847.689] Hz for the SensorSync JAI group"));
+    CHECK(ErrorOf(board + DocWithCamera("    acquisition: {frame_rate_hz: 0.5, trigger: {mode: external}}")).empty());
     // ...and the exposure may use at most 90 % of the pulse period, as in freerun
     CHECK(Contains(ErrorOf(board + DocWithCamera(
                        "    acquisition: {frame_rate_hz: 5, exposure_ms: 180.01, trigger: {mode: external}}")),
