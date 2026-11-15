@@ -103,7 +103,8 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     # Grant passwordless sudo \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME}
-RUN ln -sf /tmp/.host.xauth /home/${USERNAME}/.Xauthority
+# X cookie copied in by .devcontainer/x11-exec.sh (same path as XAUTHORITY in compose).
+RUN ln -sf /tmp/.x11.xauth /home/${USERNAME}/.Xauthority
 
 # =============================================================
 # Workspace setup

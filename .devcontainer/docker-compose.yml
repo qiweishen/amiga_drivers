@@ -30,9 +30,12 @@ services:
         environment:
             PYTHONUNBUFFERED: 1
             PYTHONDONTWRITEBYTECODE: 1
-            # Xorg on Ubuntu 22.04, or XWayland on a Wayland desktop (22.04/26.04).
-            DISPLAY: ${DISPLAY}
-            XAUTHORITY: /tmp/.host.xauth
+            # X11 programs (eBUS Player) start through .devcontainer/x11-exec.sh, which
+            # passes the caller's DISPLAY (an `ssh -Y` session on a headless host, or a
+            # local desktop) and copies that session's X cookie to XAUTHORITY.
+            # Empty on a headless host; the web GUI and the drivers need no display.
+            DISPLAY: ${DISPLAY:-}
+            XAUTHORITY: /tmp/.x11.xauth
             QT_QPA_PLATFORM: xcb
             GDK_BACKEND: x11
             # Host user runtime for audio; GUI forwarding uses the X11 socket below.
@@ -73,9 +76,10 @@ services:
             # /dev/serial/by-id/... for the Teensy, present only when plugged in).
             # Do not bind individual nodes: they fail when absent and go stale after replug.
             - /dev:/dev
-            # Host X authorization at the user-independent XAUTHORITY path; the image
-            # links ~/.Xauthority of its user (any USERNAME) to the same file.
-            - ${HOME}/.Xauthority:/tmp/.host.xauth:ro
+            # No ~/.Xauthority mount: Docker creates a missing source as a directory
+            # (which then breaks SSH X11 forwarding on the host), and xauth replaces
+            # the file at every SSH login, so a file mount keeps a stale cookie.
+            # x11-exec.sh copies the current cookie into the container instead.
             # User runtime (audio, D-Bus, etc.).
             - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
 

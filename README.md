@@ -803,6 +803,25 @@ the shared disk is mounted and writable before recording. The control terminal
 is accessed through a web browser; no X11/Wayland forwarding, desktop session or
 host user runtime mount is required.
 
+### X11 programs on the headless host (eBUS Player)
+
+The edge computer has no X server, so X11 windows go to the SSH client: log in
+with `ssh -Y <host>` (the client needs a running X server, and the host needs
+`xauth` and sshd `X11Forwarding yes`), then start the program in the running
+container from the project root:
+
+```bash
+.devcontainer/x11-exec.sh bash -c '"$EBUS_SDK_ROOT"/bin/eBUSPlayer'
+```
+
+The helper passes the session's `DISPLAY` (for example `localhost:10.0`, which the
+container reaches through host networking), copies the session's X cookie into
+the container as a host-independent entry, and for a remote display sets
+`QT_X11_NO_MITSHM=1` and `LIBGL_ALWAYS_SOFTWARE=1`. Run it again after each SSH
+login, because the display number and cookie change. Live images over X11
+forwarding are slow; this suits configuration rather than monitoring. The eBUS
+Player path is the SDK package layout and has not been checked here.
+
 `build/bin/` acquisition/tool binaries must be prepared separately. Startup does
 not start recording, and the GUI can report missing binaries before acquisition
 is available. IDE integration starts only `amiga-drivers-dev` and preserves the
