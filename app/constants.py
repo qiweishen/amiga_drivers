@@ -64,6 +64,7 @@ RUNTIME_DIR = Path(os.environ.get("AMIGA_RUNTIME_DIR", str(REPO_ROOT / "app" / "
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs
+FOCUS_DIR = RUNTIME_DIR / "focus"  # GoX focus-assist stream; replaced by the next stream
 
 SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 

@@ -95,6 +95,45 @@ Take snapshot 以 `--frame-rate-hz` 传给 `jai_snapshot`，Apply 时写入两�
 ETTR 建议的 Apply 只改曝光，帧率不变。snapshot 配置仍不在 Configuration
 页中展示；Reference capture 继续从各自的 snapshot 配置读取采集参数。
 
+## GoX focus assist
+
+**Camera Tools → GoX · Focus assist** 用于对焦。它以 GoX 工作台当前的目标相机、曝光和
+增益持续采集，实时给出 ROI 清晰度相对本次峰值的百分比。对焦更看重帧率而非位深，所以
+这条流固定使用 8-bit `BayerRG8`，并始终以最高帧率运行：
+`floor(min(9.079, 900 / exposure_ms), 0.001)` Hz。9.079 Hz 是全幅 BayerRG8 的
+AcquisitionFrameRate 上限，曝光仍须 ≤ 帧周期的 90%（`gox_timing.MAX_FOCUS_FRAME_RATE_HZ`
+对应 C++ 的 `gox::kMaxFocusFrameRateHz`）。工作台的 Frame rate 框不参与对焦流。
+流运行中修改曝光或增益不会生效，需停止后重新开始。
+
+- 采集：`jai_snapshot --stream-s 1800`，使用 snapshot 配置的 freerun 档（PTP 和
+  SensorSync 关闭）。与快照的区别有三点：不限帧数；`PixelFormat` 改为 `BayerRG8`；每个
+  RAW 段只写一条记录。只有这条流可以使用 BayerRG8（代码内的
+  `AcquisitionConfig::focus_preview` 标志，YAML 无法设置）。录制、快照和参考仍只接受
+  `BayerRG12Packed`。A/D 深度保持出厂值，回读须为 10 或 12 位；8 位会使灵敏度变为 4 倍
+  （手册 p.45），工作台曝光就不再对应录制。对焦流的队列按约 2 s 写盘停顿设置。
+  `services/gox_focus.py` 跟随最新一条已提交记录进行分析，并删除其后已关闭的段，因此
+  磁盘上只保留约 3 帧。流目录位于 `app/_runtime/focus/`，下一次开流时整体替换；结束后
+  只保留 `device.json` 和 `events.jsonl` 供诊断。对焦流不写任何配置。
+- 指标（`decoder/gox/focus.py`）：只取 BayerRG 的 Gr 感光点（2×2 的第 0 行第 1 列），
+  直接读取 8-bit 载荷，不去马赛克。
+  `score = var(Laplacian(G)) / (mean(G) − 8)²`。8 DN 是手册 p.172 的标称黑电平
+  “8LSB@8bit”，与 12 位下的 128 DN 相同。Laplacian 不受常数黑电平影响，扣除黑电平后再
+  归一化，可使分数不随光照和曝光变化。ROI 平均信号低于黑电平以上 4 DN 时不给分。
+  显示值为最近 3 帧的中位数；峰值在移动或缩放 ROI、Reset peak 和重新开流时清零。
+  ROI 内满量程（255）感光点超过 0.5% 时会提示，因为饱和边缘会抬高分数。
+- 交互：点击概览图放置 ROI，点击放大镜微调中心。放大镜按“一个图像像素对应一个 Gr
+  感光点”输出，浏览器放大时不做平滑，所以 ROI 越小，放大倍数越高；ROI 大于 512 px 时
+  只显示中心 256×256 个感光点。概览与放大镜直接显示 8-bit 感光点值（线性 DN/255），
+  不做拉伸。
+- 占用：流运行期间持有相机预留。录制、快照、参考采集和配置保存均被锁定，直到
+  Stop、页头 Stop tool、30 分钟上限或工具失败结束。所有 Camera Tools 页面关闭
+  15 秒后，流自动停止。
+- 操作：先调曝光，使 ROI 不饱和。缓慢转动对焦环，越过峰值直到百分比明显下降，再回调
+  到 ≥ 95%，锁紧后确认仍 ≥ 95%。改变目标高度、光圈或光照后，先按 Reset peak。
+
+本功能尚未经过真机运行验证，包括 9.079 Hz 在 BayerRG8 与出厂 A/D 深度下能否写入和
+维持。
+
 ## Reference capture
 
 **Device Setup → Reference capture** 同时提供 FX10 白/暗参考和 GOX 色卡参考。

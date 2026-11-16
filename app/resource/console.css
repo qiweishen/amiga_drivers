@@ -652,6 +652,30 @@ body {
     letter-spacing: 0;
 }
 
+.focus-percent {
+    color: #2f3e49;
+    font: 600 30px/1.15 var(--console-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.focus-percent.focus-good {
+    color: #35754a;
+}
+
+.focus-percent.focus-near {
+    color: #aa721d;
+}
+
+.focus-percent.focus-far {
+    color: #ad3e36;
+}
+
+/* Magnifier: one image pixel per photosite, enlarged without smoothing. */
+.focus-loupe img {
+    image-rendering: pixelated;
+}
+
 .overview-workspace {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 344px;

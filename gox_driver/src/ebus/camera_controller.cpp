@@ -710,12 +710,16 @@ namespace gox::ebus {
         if (ReadFeatureAsString(p, "BlackLevel", black_level)) {
             r.black_level_register = black_level;
         }
-        // The A/D depth the driver decided on from the pixel format; the
-        // register's own text is in the audit block.
+        // The A/D depth the driver decided on from the pixel format (12 for the 12-bit
+        // recording format); the register's own text is in the audit block. An 8-bit
+        // focus preview keeps the factory depth, so its depth is the register's value.
         if (cfg.acquisition.pixel_format) {
             const int bits = PixelFormatBitDepth(*cfg.acquisition.pixel_format);
-            if (bits != 0) {
+            int64_t readback = 0;
+            if (bits == 12) {
                 r.sensor_digitization_bits = bits;
+            } else if (ReadEnumIntFeature(p, "SensorDigitizationBits", readback)) {
+                r.sensor_digitization_bits = readback;
             }
         }
         return r;

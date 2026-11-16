@@ -346,6 +346,28 @@ def first_preview_frame(directory: Path, *, verify_crc: bool = False):
     return selected, read_payload(selected, verify_crc=verify_crc), skipped
 
 
+def newest_valid_record(directory: Path, *, segments: int = 3) -> Record | None:
+    """Newest committed valid image in a stream that rolls over to a new segment per record.
+
+    Only the newest ``segments`` files are scanned, newest first. A segment that
+    the writer has just created (header not yet complete, or no complete record
+    yet) is skipped instead of failing, and a torn trailing record is ignored.
+    """
+    for path in reversed(segment_paths(directory)[-max(1, segments):]):
+        try:
+            if path.stat().st_size <= FILE_HEADER_SIZE:
+                continue
+        except FileNotFoundError:
+            continue
+        newest = None
+        for record in iter_records(path, live=True):
+            if record.valid_frame:
+                newest = record
+        if newest is not None:
+            return newest
+    return None
+
+
 def latest_records(directory: Path, limit: int) -> list[Record]:
     """Bounded payload selection; scan only the newest segment and its predecessor."""
     from collections import deque

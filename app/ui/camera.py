@@ -24,10 +24,11 @@ from __future__ import annotations
 import ipaddress
 from nicegui import app, ui
 
-from . import fx10_plot, layout
+from . import fx10_plot, gox_focus as gox_focus_ui, layout
 from ..constants import TOOL_TICK_S
 from ..decoder.gox.preview import DISPLAY_LONG_EDGE
-from ..services import config_actions, ebus_tools, fx10_timing, fx10_tools, gox_timing, gox_tools, preview_images
+from ..services import (config_actions, ebus_tools, fx10_timing, fx10_tools, gox_focus, gox_timing, gox_tools,
+                        preview_images)
 from ..state import STATE, ProcState
 
 _COLUMNS = [
@@ -301,6 +302,10 @@ def camera_page() -> None:
                 fx10_meta = ui.label("").classes("text-sm muted mono break-all")
                 ui.link("Collect white and dark references →", "/reference").classes("text-sm")
 
+        # ============================================== GoX focus assist
+        gox_focus_ui.focus_panel(request=lambda remember: _gox_focus_request(remember),
+                                 target_ip=lambda: _gox_target()[0], show_raw=lambda text: _show_raw(text))
+
         with ui.expansion("Raw output of the last command", icon="terminal").classes("w-full"):
             raw_pre = ui.element("pre").classes("terminal-surface w-full text-xs font-mono whitespace-pre-wrap")
 
@@ -524,6 +529,18 @@ def camera_page() -> None:
                 raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz; "
                                  f"use at most {gox_timing.max_frame_rate_hz(exposure_ms):.3f} Hz")
             return exposure_ms, rate
+
+        def _gox_focus_request(remember: bool) -> gox_focus.FocusRequest:
+            """Workbench camera, exposure and gain; the frame rate is always the focus maximum
+            (BayerRG8, ≤ 9.079 Hz), independent of the workbench Frame rate field."""
+            ip, _mac = _gox_target()
+            if not ip:
+                raise ValueError("Select a target GoX camera first")
+            request = gox_focus.request_for(ip, gox_exposure.value, gox_gain.value)
+            if remember:
+                app.storage.general["gox_exposure_ms"] = gox_exposure.value
+                app.storage.general["gox_gain"] = gox_gain.value
+            return request
 
         async def _gox_snap() -> None:
             if STATE.snapshot_busy:

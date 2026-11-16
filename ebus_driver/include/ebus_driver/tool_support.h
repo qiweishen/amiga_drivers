@@ -68,7 +68,9 @@ namespace ebus_driver::tool {
         return 0;
     }
 
-    inline int RunSnapshot(CameraDefinition definition, std::uint64_t requested_frames) {
+    // Shared by RunSnapshot and RunStream. stream: no frame target; SIGINT/SIGTERM
+    // once the camera is acquiring, or max_duration_s, is the normal end of a stream.
+    inline int RunCapture(CameraDefinition definition, std::uint64_t requested_frames, bool stream) {
         InstallSignals();
         EbusCameraDriver driver(std::move(definition));
         bool starved = false;
@@ -96,7 +98,7 @@ namespace ebus_driver::tool {
         const auto statistics = driver.FinalStatistics();
         const auto written = Count(statistics, "frames_written");
         const auto error = exception.empty() ? statistics.value("error", std::string()) : exception;
-        if (signal != 0) {
+        if (signal != 0 && !(stream && started)) {
             return SnapshotFail(130, "interrupted");
         }
         if (!started) {
@@ -106,10 +108,20 @@ namespace ebus_driver::tool {
             return SnapshotFail(7, starved ? "no-frame (no data for 10 s)" : "no-frame; " + error);
         }
         if (starved || driver.HasFailed() || !exception.empty() || written < requested_frames) {
-            return SnapshotFail(5, "incomplete snapshot; " + error);
+            return SnapshotFail(5, std::string(stream ? "stream failed; " : "incomplete snapshot; ") + error);
         }
         std::printf("SNAPSHOT: OK %s\n", driver.Directory().string().c_str());
         std::fflush(stdout);
         return 0;
+    }
+
+    inline int RunSnapshot(CameraDefinition definition, std::uint64_t requested_frames) {
+        return RunCapture(std::move(definition), requested_frames, false);
+    }
+
+    // Live preview stream: records until SIGINT/SIGTERM or the definition's
+    // max_duration_s. A failure while streaming still ends in SNAPSHOT: FAIL.
+    inline int RunStream(CameraDefinition definition) {
+        return RunCapture(std::move(definition), 0, true);
     }
 } // namespace ebus_driver::tool

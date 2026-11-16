@@ -82,12 +82,11 @@ def decode(pf_code, width, height, payload):
     return arr.reshape(height, width), name, pattern
 
 
-def decode_record(record, payload):
-    """Derive a tight image from SDK-described bytes, retaining the raw buffer.
+def _image_layout(record, payload):
+    """Validate the SDK-described image slice: (pf, width, height, offset, row_bytes, stride).
 
     X padding is bytes per row; Y padding is trailing bytes. Pixel/ROI offsets
-    are metadata, not byte offsets. Chunk and other leading/trailing bytes stay
-    in the original payload; only the declared image slice is decoded here.
+    are metadata, not byte offsets.
     """
     if not record.valid_frame:
         raise ValueError("Recorded buffer is not a valid image frame")
@@ -109,6 +108,30 @@ def decode_record(record, payload):
         raise ValueError("SDK image layout disagrees with the recorded payload")
     if row_bytes * height > 128 * 1024 * 1024:
         raise ValueError("Decoded image exceeds the memory budget")
+    return pf, width, height, offset, row_bytes, stride
+
+
+def image_rows(record, payload):
+    """The declared image's packed rows as a read-only (height, row_bytes) uint8 view.
+
+    Same layout checks as ``decode_record``; X padding, chunks and other bytes
+    outside the image are excluded. Nothing is copied or decoded, so a caller can
+    unpack only the rows and columns it needs.
+    """
+    _, _, height, offset, row_bytes, stride = _image_layout(record, payload)
+    rows = np.frombuffer(payload, np.uint8, count=stride * height, offset=offset).reshape(height, stride)
+    return rows[:, :row_bytes]
+
+
+def decode_record(record, payload):
+    """Derive a tight image from SDK-described bytes, retaining the raw buffer.
+
+    X padding is bytes per row; Y padding is trailing bytes. Pixel/ROI offsets
+    are metadata, not byte offsets. Chunk and other leading/trailing bytes stay
+    in the original payload; only the declared image slice is decoded here.
+    """
+    pf, width, height, offset, row_bytes, stride = _image_layout(record, payload)
+    image = record.metadata["image"]
     if image["padding_x"] == 0:
         tight = memoryview(payload)[offset:offset + row_bytes * height]
     else:

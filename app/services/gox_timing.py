@@ -10,6 +10,8 @@ import math
 
 # GOX-12405C-PGE, full frame 4128 x 3008, BayerRG12Packed.
 MAX_FRAME_RATE_HZ = 6.054  # AcquisitionFrameRate ceiling set by the operator (2026-11-08)
+# Focus-assist preview stream only (BayerRG8, kMaxFocusFrameRateHz; operator, 2026-11-16).
+MAX_FOCUS_FRAME_RATE_HZ = 9.079
 MIN_FRAME_RATE_HZ = 0.125  # longest frame period 8 s (manual p.36/p.141)
 MAX_EXPOSURE_MS = 399.405  # ExposureTime maximum 399405 us read back from the camera
 MIN_EXPOSURE_MS = 0.001
@@ -27,12 +29,13 @@ def exposure_fits(exposure_ms: float, frame_rate_hz: float) -> bool:
     return exposure_ms <= exposure_limit_ms(frame_rate_hz) * (1.0 + 1e-9)
 
 
-def max_frame_rate_hz(exposure_ms: float) -> float:
-    """Highest frame rate, floored to 0.001 Hz, at which ``exposure_ms`` uses <= 90 % of the period."""
+def max_frame_rate_hz(exposure_ms: float, ceiling_hz: float = MAX_FRAME_RATE_HZ) -> float:
+    """Highest frame rate, floored to 0.001 Hz and at most ``ceiling_hz``, at which ``exposure_ms``
+    uses <= 90 % of the period. The focus-assist stream passes MAX_FOCUS_FRAME_RATE_HZ."""
     exposure_ms = float(exposure_ms)
     if not math.isfinite(exposure_ms) or exposure_ms <= 0:
         raise ValueError("exposure_ms must be finite and positive")
-    rate = min(MAX_FRAME_RATE_HZ, PERIOD_FRACTION * 1000.0 / exposure_ms)
+    rate = min(ceiling_hz, PERIOD_FRACTION * 1000.0 / exposure_ms)
     rate = math.floor(rate / RATE_STEP_HZ + 1e-9) * RATE_STEP_HZ
     # Flooring only lowers the rate, so the exposure still fits; guard float edges anyway.
     while rate > MIN_FRAME_RATE_HZ and not exposure_fits(exposure_ms, rate):

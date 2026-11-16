@@ -22,6 +22,13 @@ namespace gox {
     // transport.exposure_time_max_us). Both apply in every trigger mode.
     inline constexpr double kMaxFrameRateHz = 6.054;
     inline constexpr double kMaxExposureMs = 399.405;
+
+    // Camera Tools focus assist only (jai_snapshot --stream-s), never a recording or snapshot:
+    // frame rate matters more than depth there, so the preview stream uses 8-bit Bayer at
+    // the full frame, whose AcquisitionFrameRate ceiling is 9.079 Hz (set by the operator,
+    // 2026-11-16). The exposure limit and the 90 % period rule are unchanged.
+    inline constexpr const char *kFocusPixelFormat = "BayerRG8";
+    inline constexpr double kMaxFocusFrameRateHz = 9.079;
     // The exposure may use at most 90 % of the frame (or pulse) period.
     inline constexpr double kExposurePeriodFraction = 0.9;
 
@@ -35,6 +42,11 @@ namespace gox {
     inline bool ExposureFitsPeriod(double exposure_ms, double frame_rate_hz) {
         const double limit = ExposureLimitMs(frame_rate_hz);
         return exposure_ms <= limit * (1.0 + 1e-9);
+    }
+
+    // The one PixelFormat a camera definition accepts (see AcquisitionConfig::focus_preview).
+    inline const char *RequiredPixelFormat(bool focus_preview) {
+        return focus_preview ? kFocusPixelFormat : kNativePixelFormat;
     }
 
     // The driver never writes network settings; re-addressing is the GUI's ebus_set_ip.
@@ -86,6 +98,9 @@ namespace gox {
         // (manual "Pixel Format", PixelSize table: BayerRG12Packed = 12). The only accepted format.
         // Omission must not leave the camera at its BayerRG8 factory default.
         std::optional<std::string> pixel_format = kNativePixelFormat;
+        // Set only by jai_snapshot --stream-s, never read from YAML: the focus-assist preview
+        // stream requires kFocusPixelFormat instead of kNativePixelFormat.
+        bool focus_preview = false;
         std::optional<RoiConfig> roi;
         // BlemishEnable (manual p.156): false = "Disable all", the sensor's own pixels, hot pixels included.
         // Only written when false; true is the factory value.

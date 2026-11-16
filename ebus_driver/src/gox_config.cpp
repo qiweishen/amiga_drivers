@@ -64,9 +64,9 @@ namespace ebus_driver {
             if (!camera.enabled) {
                 continue;
             }
-            if (!camera.acquisition.pixel_format ||
-                *camera.acquisition.pixel_format != gox::kNativePixelFormat) {
-                throw std::invalid_argument("GOX acquisition requires PixelFormat=BayerRG12Packed");
+            const std::string required = gox::RequiredPixelFormat(camera.acquisition.focus_preview);
+            if (!camera.acquisition.pixel_format || *camera.acquisition.pixel_format != required) {
+                throw std::invalid_argument("GOX acquisition requires PixelFormat=" + required);
             }
             auto state = std::make_shared<GoxState>();
             state->camera = camera;
@@ -150,13 +150,21 @@ namespace ebus_driver {
                 // Verify the final device state before the engine sizes buffers or starts capture.
                 std::string pixel_format;
                 std::int64_t digitization_bits = 0;
+                const bool focus = state->camera.acquisition.focus_preview;
+                const std::string required = gox::RequiredPixelFormat(focus);
+                // The focus preview keeps the factory A/D depth (BuildApplyPlan writes 12 only for
+                // 12-bit formats); 8 bits would quadruple the sensitivity (manual p.45), so the
+                // workbench exposure would no longer match the recording.
                 if (!gox::ebus::ReadEnumFeature(state->control->Params(), "PixelFormat", pixel_format) ||
-                    pixel_format != gox::kNativePixelFormat ||
+                    pixel_format != required ||
                     !gox::ebus::ReadEnumIntFeature(state->control->Params(), "SensorDigitizationBits",
-                                                 digitization_bits) || digitization_bits != 12) {
+                                                 digitization_bits) ||
+                    (focus ? digitization_bits != 10 && digitization_bits != 12 : digitization_bits != 12)) {
                     throw std::runtime_error(
-                        "GOX requires verified PixelFormat=BayerRG12Packed and SensorDigitizationBits=12; "
-                        "remove a conflicting raw override");
+                        focus ? "GOX focus preview requires verified PixelFormat=" + required +
+                                    " and SensorDigitizationBits=10 or 12; remove a conflicting raw override"
+                              : "GOX requires verified PixelFormat=" + required +
+                                    " and SensorDigitizationBits=12; remove a conflicting raw override");
                 }
                 state->counter_bound = state->control->TriggerCounterBound();
                 CheckStop(stop);

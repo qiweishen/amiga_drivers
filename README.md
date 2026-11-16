@@ -170,7 +170,7 @@ deployment is the single container shown above. See [Web GUI](#web-gui) for reco
 |--------|-------------|
 | `AmigaDrivers` | The unified executable for multi-sensor recording |
 | `ebus_discover` / `ebus_set_ip` | GigE Vision enumeration for both camera drivers / camera re-addressing (FORCEIP + persistent IP); both live in `common/` and are used by the web GUI |
-| `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
+| `jai_snapshot` / `fx10_snapshot` | One-shot Go-X frame grab (or, with `--stream-s`, the GUI focus-assist stream: BayerRG8 up to 9.079 Hz, ended by SIGTERM) / FX10 waterfall preview grab (web GUI). GenICam node names for `features.raw` are looked up with eBUS Player on real hardware (see `fx10_driver/docs/DEVICE_CONFIG.md`, "Discovering node names") |
 | `fx10_reference` | Collect Reference page: white then dark, each for the snapshot configuration's `reference.duration_s` (default 5 s), in freerun without PTP or SensorSync, with separate spectral plots and a persistent `reference_<UTC>` session using the unified RAW recorder. See [reference workflow](fx10_driver/docs/DEVICE_CONFIG.md#collect-reference-page). |
 | `asterx_lib`, `lms4xxx_lib`, `ebus_camera` | Sensor adapters; both cameras share `ebus_camera` |
 | `ebus_raw`, `gox_device_config`, `fx10_device_config` | Shared SDK-free recorder and isolated device configuration profiles |
