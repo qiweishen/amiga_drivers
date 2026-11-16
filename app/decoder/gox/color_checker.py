@@ -8,6 +8,12 @@ on the chart capture's exposure; ``render`` only clips the linear result to
 [0, 1] and applies the sRGB transfer (no exposure adjustment). The GUI receives
 small 8-bit screen previews;
 ``full_resolution_png`` regenerates lossless 16-bit PNGs from the saved RAW.
+
+OpenCV's acceptance test for a chart candidate is loose (mean RGB direction plus
+patch spread), so regular textures such as a perforated plate also pass and can
+outrank the real chart. ``detect`` therefore chooses nothing: it returns every
+complete candidate with a thumbnail, the operator selects the chart in the GUI,
+and ``measure`` samples the selected geometry.
 """
 
 from __future__ import annotations
@@ -68,6 +74,11 @@ _REFERENCE_CONSTANTS = {
     "VINYL18": "COLORCHECKER_VINYL",
 }
 _DETECTION_EDGE = 1600
+# OpenCV returns at most this many candidates, lowest cost first, after merging near-duplicates
+# (corners within ~100 px). A regular texture can supply several and outrank the chart, so the
+# operator sees each as a thumbnail and selects the chart.
+_MAX_CANDIDATES = 6
+_THUMBNAIL_EDGE = 640  # long edge of a candidate thumbnail, px
 _MIN_PATCH_PIXELS = 16
 _SATURATION_LIMIT = 0.98
 
@@ -115,7 +126,7 @@ def capability_reason() -> str | None:
                "LINEARIZATION_IDENTITY", "DISTANCE_CIE2000")),
         (getattr(mcc, "CCheckerDetector", None),
          ("create", "setColorChartType", "process", "getListColorChecker")),
-        (getattr(mcc, "CChecker", None), ("getColorCharts", "getBox", "getTarget")),
+        (getattr(mcc, "CChecker", None), ("getColorCharts", "getBox", "getTarget", "getCost")),
         (getattr(ccm, "ColorCorrectionModel", None),
          ("setColorSpace", "setCcmType", "setLinearization", "setDistance",
           "setSaturatedThreshold", "compute", "getColorCorrectionMatrix", "getLoss", "getMask")),
@@ -166,32 +177,95 @@ def _bgr8(rgb: np.ndarray) -> np.ndarray:
     return cv.cvtColor(value, cv.COLOR_RGB2BGR)
 
 
-def _detect(display_rgb: np.ndarray, chart: ChartSpec) -> tuple[np.ndarray, str]:
+@dataclass(frozen=True)
+class _Candidate:
+    """One OpenCV chart candidate, in detection-image pixels."""
+
+    polygons: np.ndarray  # (patch_count, 4, 2) patch outlines
+    cost: float  # OpenCV's color/uniformity cost; lower ranks first
+
+
+def _detect(display_rgb: np.ndarray, chart: ChartSpec) -> tuple[list[_Candidate], str]:
+    """OpenCV's complete chart candidates, lowest cost first; the operator decides which is the chart.
+
+    ``nc`` is only an upper bound on the candidates OpenCV returns, not a count of charts.
+    """
     detector = cv.mcc.CCheckerDetector.create()
     detector.setColorChartType(getattr(cv.mcc, chart.key))
     transfer = "sRGB-like OETF on resized camera RGB; temporary BGR8 for geometry only"
-    detected = detector.process(_bgr8(_srgb_encode(display_rgb)), 2)
+    detected = detector.process(_bgr8(_srgb_encode(display_rgb)), _MAX_CANDIDATES)
     if not detected:
         # Detection-only gray-world retry; neither image supplies fitted colors.
         channel_means = display_rgb.mean(axis=(0, 1), dtype=np.float64)
         if np.all(channel_means > 0):
             balanced = display_rgb * (channel_means.mean() / channel_means)
-            detected = detector.process(_bgr8(_srgb_encode(balanced)), 2)
+            detected = detector.process(_bgr8(_srgb_encode(balanced)), _MAX_CANDIDATES)
             transfer = "gray-world gains then sRGB-like OETF; temporary BGR8 for geometry only"
     if not detected:
         raise ValueError(f"No {chart.key} chart detected. Show the full chart clearly and recapture.")
-    checkers = detector.getListColorChecker()
-    if not checkers:
-        raise ValueError(f"No complete {chart.key} chart was returned by the detector.")
-    if len(checkers) > 1:
-        raise ValueError("More than one selected ColorChecker is visible. Keep one chart in view.")
-    checker = checkers[0]
-    if checker.getTarget() != getattr(cv.mcc, chart.key):
-        raise ValueError("The detected chart does not match the selected ColorChecker format.")
-    points = np.asarray(checker.getColorCharts(), dtype=np.float64)
-    if points.size != chart.patch_count * 4 * 2 or not np.isfinite(points).all():
-        raise ValueError("The detected ColorChecker has an invalid patch count or geometry.")
-    return points.reshape(chart.patch_count, 4, 2), transfer
+    candidates = []
+    for checker in detector.getListColorChecker() or ():
+        if checker.getTarget() != getattr(cv.mcc, chart.key):
+            raise ValueError("The detected chart does not match the selected ColorChecker format.")
+        points = np.asarray(checker.getColorCharts(), dtype=np.float64)
+        if points.size != chart.patch_count * 4 * 2 or not np.isfinite(points).all():
+            continue  # incomplete geometry cannot be offered as a chart
+        candidates.append(_Candidate(points.reshape(chart.patch_count, 4, 2), float(checker.getCost())))
+    if not candidates:
+        raise ValueError(f"The detector returned no complete {chart.key} chart geometry.")
+    return candidates, transfer
+
+
+@dataclass(frozen=True)
+class ChartCandidate:
+    """One detector candidate offered to the operator, in native pixels."""
+
+    number: int  # 1-based, in OpenCV's order (lowest cost first)
+    cost: float  # OpenCV's color/uniformity cost; a ranking hint, not a verdict
+    polygons: np.ndarray = field(repr=False)  # (patch_count, 4, 2) patch outlines
+    thumbnail_png: bytes = field(repr=False)  # whole frame, 8-bit, this candidate outlined
+
+    def to_dict(self) -> dict:
+        return {"candidate": self.number, "opencv_cost": self.cost,
+                "patch_polygons_native_pixels": self.polygons.tolist()}
+
+
+@dataclass(frozen=True)
+class Detection:
+    """Every complete candidate of one capture; the operator selects the chart among them."""
+
+    chart_key: str
+    candidates: tuple[ChartCandidate, ...]
+    transfer: str  # how the temporary detection image was made
+
+
+def _thumbnail_png(rgb: np.ndarray, polygons: np.ndarray) -> bytes:
+    """The whole frame (linear DN, 8-bit, small) with one candidate's patches and outline drawn."""
+    small = native_display_rgb8(rgb, _THUMBNAIL_EDGE)
+    points = display_points(polygons, rgb.shape, small.shape)
+    _outline(small, points, (0, 255, 0), thickness=1)
+    hull = cv.convexHull(np.rint(points.reshape(-1, 2)).astype(np.int32))
+    cv.polylines(small, [hull], True, (255, 0, 255), 2, cv.LINE_8)
+    return png8_bytes(small)
+
+
+def detect(directory: Path, chart_key: str) -> Detection:
+    """Offer every complete detector candidate of one capture, each with a thumbnail.
+
+    OpenCV accepts regular textures (e.g. a perforated plate) as charts and may rank them above
+    the real one, so nothing is chosen here: the operator selects the chart, and ``measure``
+    samples the selected geometry.
+    """
+    chart, frame, rgb, full_scale, _, _ = _load(directory, chart_key)
+    display = _display_rgb(rgb, full_scale)
+    found, transfer = _detect(display, chart)
+    ratios = np.array([rgb.shape[1] / display.shape[1], rgb.shape[0] / display.shape[0]])
+    candidates = []
+    for number, candidate in enumerate(found, 1):
+        # cv.resize maps pixel centers, including the half-pixel origin offset.
+        polygons = (candidate.polygons + 0.5) * ratios - 0.5
+        candidates.append(ChartCandidate(number, candidate.cost, polygons, _thumbnail_png(rgb, polygons)))
+    return Detection(chart.key, tuple(candidates), transfer)
 
 
 PATCH_CLIPPED = "clipped"  # a native photosite inside the patch is at full scale
@@ -330,9 +404,10 @@ def _exposure_diagnostics(raw_means: np.ndarray, fit_means: np.ndarray, matrix: 
 _OUTLINE_THICKNESS = 2
 
 
-def _outline(image: np.ndarray, polygons: np.ndarray, value: tuple) -> np.ndarray:
+def _outline(image: np.ndarray, polygons: np.ndarray, value: tuple,
+             thickness: int = _OUTLINE_THICKNESS) -> np.ndarray:
     cv.polylines(image, [np.rint(poly).astype(np.int32) for poly in polygons],
-                 True, value, _OUTLINE_THICKNESS, cv.LINE_8)
+                 True, value, thickness, cv.LINE_8)
     return image
 
 
@@ -393,8 +468,9 @@ def _color_calibration(directory: Path, chart: ChartSpec, frame: recording.Image
     )
 
 
-GEOMETRY_DETECTED = "detected"
-GEOMETRY_SUPPLIED = "supplied"
+GEOMETRY_SELECTED = "selected"  # a detector candidate of this capture, chosen by the operator
+GEOMETRY_SUPPLIED = "supplied"  # the operator's choice on another capture of the same static scene
+SUPPLIED_TRANSFER = "not run; operator-selected geometry from another capture of the same scene"
 
 
 @dataclass(frozen=True)
@@ -412,19 +488,16 @@ class ChartMeasurement:
     bits: int
     evidence: dict
     polygons: np.ndarray = field(repr=False)
-    geometry: str  # GEOMETRY_DETECTED, or GEOMETRY_SUPPLIED from another capture of the same scene
+    geometry: str  # GEOMETRY_SELECTED on this capture, or GEOMETRY_SUPPLIED from another one
     detection_transfer: str
     means: np.ndarray  # normalized camera RGB, float64 (patch_count, 3)
     counts: list[int]
     status: list[str | None]  # per patch: None, PATCH_CLIPPED or PATCH_NEAR_SATURATION
+    selection: dict | None = None  # the operator's choice: candidate number, source capture, candidates
 
 
-def measure(directory: Path, chart_key: str, *, polygons: np.ndarray | None = None) -> ChartMeasurement:
-    """Detect (or reuse) chart geometry and sample native patch means; saturation is reported.
-
-    ``polygons`` (native pixels) skips detection, e.g. for an exposure bracket of a
-    static scene where one exposure is too dark or bright for the detector.
-    """
+def _load(directory: Path, chart_key: str):
+    """(chart, frame, native RGB, full scale, bits, linear-audit evidence) of one capture."""
     if not isinstance(chart_key, str) or chart_key not in CHARTS:
         raise ValueError("Select MCC24, SG140, or VINYL18 before capturing the ColorChecker.")
     reason = capability_reason()
@@ -436,30 +509,28 @@ def measure(directory: Path, chart_key: str, *, polygons: np.ndarray | None = No
     if frame.skipped_invalid:
         raise ValueError("The reference contains an invalid received buffer; recapture the ColorChecker.")
     rgb, full_scale, bits = _native_rgb(frame)
-    chart = CHARTS[chart_key]
-    if polygons is None:
-        display = _display_rgb(rgb, full_scale)
-        preview_polygons, detection_transfer = _detect(display, chart)
-        ratios = np.array([rgb.shape[1] / display.shape[1], rgb.shape[0] / display.shape[0]])
-        # cv.resize maps pixel centers, including the half-pixel origin offset.
-        polygons = (preview_polygons + 0.5) * ratios - 0.5
-        geometry = GEOMETRY_DETECTED
-    else:
-        polygons = np.asarray(polygons, dtype=np.float64)
-        if polygons.shape != (chart.patch_count, 4, 2) or not np.isfinite(polygons).all():
-            raise ValueError("Supplied chart geometry does not match the selected chart")
-        detection_transfer = "not run; geometry supplied from another capture of the same scene"
-        geometry = GEOMETRY_SUPPLIED
+    return CHARTS[chart_key], frame, rgb, full_scale, bits, evidence
+
+
+def measure(directory: Path, chart_key: str, polygons: np.ndarray, *, geometry: str = GEOMETRY_SUPPLIED,
+            detection_transfer: str = SUPPLIED_TRANSFER, selection: dict | None = None) -> ChartMeasurement:
+    """Sample native patch means inside operator-selected chart geometry; saturation is reported.
+
+    ``polygons`` are native pixels: a ``detect`` candidate of this capture (GEOMETRY_SELECTED), or
+    one chosen on another capture of the same static scene (GEOMETRY_SUPPLIED).
+    """
+    chart, frame, rgb, full_scale, bits, evidence = _load(directory, chart_key)
+    polygons = np.asarray(polygons, dtype=np.float64)
+    if polygons.shape != (chart.patch_count, 4, 2) or not np.isfinite(polygons).all():
+        raise ValueError("The selected chart geometry does not match the selected chart format")
     means, counts, status = _sample_patches(rgb, frame.image, polygons, full_scale)
-    return ChartMeasurement(directory, chart, frame, rgb, full_scale, bits, evidence, polygons,
-                            geometry, detection_transfer, means, counts, status)
+    return ChartMeasurement(Path(directory), chart, frame, rgb, full_scale, bits, evidence, polygons,
+                            geometry, detection_transfer, means, counts, status, selection)
 
 
-def calibrate(directory: Path, chart_key: str, *, measurement: ChartMeasurement | None = None) -> CalibrationPreview:
-    """Read one fresh reference capture and return only in-memory GUI products."""
-    if measurement is None:
-        measurement = measure(directory, chart_key)
-    elif measurement.chart.key != chart_key or measurement.directory != Path(directory):
+def calibrate(directory: Path, chart_key: str, *, measurement: ChartMeasurement) -> CalibrationPreview:
+    """Fit one measured reference capture (see ``measure``); return only in-memory GUI products."""
+    if measurement.chart.key != chart_key or measurement.directory != Path(directory):
         raise ValueError("The supplied measurement belongs to another capture or chart")
     directory = measurement.directory
     chart, frame, rgb = measurement.chart, measurement.frame, measurement.rgb
@@ -528,6 +599,8 @@ def calibrate(directory: Path, chart_key: str, *, measurement: ChartMeasurement 
         "demosaic": "BayerRG12Packed unpacked to 12-bit DN in uint16, OpenCV bilinear to uint16 BGR, then RGB",
         "detection_transfer": detection_transfer,
         "chart_geometry": measurement.geometry,
+        # Which detector candidate the operator selected (OpenCV's ranking is not trusted alone).
+        "chart_selection": measurement.selection,
         "detection_image_used_for_calibration": False,
         "patch_rgb_normalized": means.tolist(),
         "patch_rgb_matrix_input": fit_means.tolist(),

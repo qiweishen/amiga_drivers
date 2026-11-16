@@ -10,10 +10,21 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
+
+import numpy as np
 
 from app.decoder.gox import color_checker
 from app.services import gox_reference, gox_tools
+
+
+def detection(chart_key="MCC24", count=1):
+    """Detector candidates as color_checker.detect returns them; thumbnails are stand-in bytes."""
+    patches = color_checker.CHARTS[chart_key].patch_count
+    return color_checker.Detection(chart_key, tuple(
+        color_checker.ChartCandidate(number, 0.01 * number, np.full((patches, 4, 2), float(number)),
+                                     f"thumbnail {number}".encode())
+        for number in range(1, count + 1)), "test transfer")
 
 
 def calibration(chart_key="MCC24"):
@@ -89,6 +100,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(gox_reference, "_last_result", None))
+        self.stack.enter_context(patch.object(gox_reference, "_pending", None))
         self.stack.enter_context(patch.object(gox_reference, "_status", ""))
         self.stack.enter_context(patch.object(gox_reference, "SNAPSHOT_CONFIG", self.config))
         self.stack.enter_context(patch.object(gox_reference.config_store, "checked_snapshot_path",
@@ -102,8 +114,15 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(gox_reference.camera_operations, "run", side_effect=self.reserve))
         self.capture = self.stack.enter_context(patch.object(
             gox_tools, "capture_raw", side_effect=self.capture_raw))
+        self.detect = self.stack.enter_context(patch.object(
+            color_checker, "detect", side_effect=lambda _directory, chart_key: detection(chart_key, self.offered)))
+        self.offered = 1
+        self.measure = self.stack.enter_context(patch.object(
+            color_checker, "measure", side_effect=lambda directory, chart_key, polygons, **_: SimpleNamespace(
+                directory=directory, full_scale=4095, status=[None], means=None)))
         self.analyse = self.stack.enter_context(patch.object(
-            color_checker, "calibrate", side_effect=lambda _directory, chart_key: calibration(chart_key)))
+            color_checker, "calibrate",
+            side_effect=lambda _directory, chart_key, *, measurement: calibration(chart_key)))
         self.cleanup = self.stack.enter_context(patch.object(gox_tools, "_cleanup_old"))
         self.snapshot = self.stack.enter_context(patch.object(gox_tools, "_snapshot", new_callable=AsyncMock))
         self.spawn = self.stack.enter_context(patch.object(gox_tools.tool_jobs, "spawn", new_callable=AsyncMock))
@@ -126,9 +145,23 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         return gox_tools.RawCapture(True, camera_dir=camera, raw_output="captured one frame")
 
     async def test_reference_keeps_raw_config_and_relative_calibration_metadata(self):
-        result = await gox_reference.capture("SG140")
+        pending = await gox_reference.capture("SG140")
+        # Nothing is measured or fitted before the operator selects the chart.
+        self.assertTrue(pending.awaiting_selection)
+        self.assertFalse(pending.ok)
+        self.assertEqual([(item.number, item.label) for item in pending.candidates],
+                         [(1, "Candidate 1 · OpenCV cost 0.01")])
+        waiting = json.loads((Path(pending.session_dir) / "reference.json").read_text(encoding="utf-8"))
+        self.assertEqual(waiting["status"], "awaiting_chart_selection")
+        self.assertEqual(waiting["detection_transfer"], "test transfer")
+        self.assertEqual([item["candidate"] for item in waiting["chart_candidates"]], [1])
+        self.measure.assert_not_called()
+        self.analyse.assert_not_called()
+        result = await gox_reference.choose(1)
         self.assertTrue(result.ok, result.reason)
+        self.assertFalse(result.awaiting_selection)
         session = Path(result.session_dir)
+        self.assertEqual(session, Path(pending.session_dir))
         self.assertEqual(session.parent, self.output / "tmp")
         self.assertTrue(session.name.startswith("reference_gox_"))
         document = json.loads((session / "reference.json").read_text(encoding="utf-8"))
@@ -150,7 +183,13 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config.read_bytes(), self.config_bytes)
         self.assertEqual(self.raw_files[0].read_bytes(), self.raw_bytes)
         self.assertIs(gox_reference.last_result(), result)
-        self.analyse.assert_called_once_with(session / "raw/gox/camera0", "SG140")
+        self.assertEqual(document["chart_selection"],
+                         {"candidate": 1, "opencv_cost": 0.01, "candidate_count": 1, "selected_by": "operator"})
+        self.detect.assert_called_once_with(session / "raw/gox/camera0", "SG140")
+        self.measure.assert_called_once_with(
+            session / "raw/gox/camera0", "SG140", ANY, geometry=color_checker.GEOMETRY_SELECTED,
+            detection_transfer="test transfer", selection=document["chart_selection"])
+        self.analyse.assert_called_once_with(session / "raw/gox/camera0", "SG140", measurement=ANY)
         self.cleanup.assert_not_called()
         self.snapshot.assert_not_awaited()
         self.spawn.assert_not_awaited()
@@ -158,7 +197,10 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
                          [".json", ".json", ".raw", ".yaml"])
 
     async def test_saving_moves_the_reference_from_tmp_into_the_output_directory(self):
-        result = await gox_reference.capture("MCC24")
+        await gox_reference.capture("MCC24")
+        with self.assertRaisesRegex(ValueError, "no completed reference"):
+            await gox_reference.save_to_data()  # not before the chart is selected and fitted
+        result = await gox_reference.choose(1)
         self.assertTrue(result.ok, result.reason)
         self.assertFalse(result.saved)
         tmp_session = Path(result.session_dir)
@@ -177,20 +219,70 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
             await gox_reference.save_to_data()
 
     async def test_failed_reference_cannot_be_saved(self):
-        self.analyse.side_effect = ValueError("No MCC24 chart detected")
+        self.detect.side_effect = ValueError("No MCC24 chart detected")
         await gox_reference.capture("MCC24")
         with self.assertRaisesRegex(ValueError, "no completed reference"):
             await gox_reference.save_to_data()
 
-    async def test_detection_or_fit_failure_is_failed_and_preserves_raw(self):
+    async def test_every_candidate_is_offered_and_only_the_chosen_one_is_measured(self):
+        self.offered = 3
+        pending = await gox_reference.capture("MCC24")
+        self.assertEqual([item.number for item in pending.candidates], [1, 2, 3])
+        self.assertEqual(len({item.image for item in pending.candidates}), 3)
+        with self.assertRaisesRegex(ValueError, "Candidate 4 was not offered"):
+            await gox_reference.choose(4)
+        result = await gox_reference.choose(2)  # the selection still waits after an invalid number
+        self.assertTrue(result.ok, result.reason)
+        np.testing.assert_array_equal(self.measure.call_args.args[2], np.full((24, 4, 2), 2.0))
+        with self.assertRaisesRegex(ValueError, "No reference capture is waiting"):
+            await gox_reference.choose(2)  # one decision per capture
+
+    async def test_rejecting_every_candidate_fails_the_reference_and_keeps_the_raw(self):
+        pending = await gox_reference.capture("MCC24")
+        result = await gox_reference.reject()
+        self.assertFalse(result.ok)
+        self.assertFalse(result.awaiting_selection)
+        self.assertEqual(result.reason, gox_reference.NO_CHART_SELECTED)
+        document = json.loads((Path(pending.session_dir) / "reference.json").read_text(encoding="utf-8"))
+        self.assertEqual((document["status"], document["error"]), ("failed", gox_reference.NO_CHART_SELECTED))
+        self.assertEqual(self.raw_files[0].read_bytes(), self.raw_bytes)
+        self.measure.assert_not_called()
+        self.analyse.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "No reference capture is waiting"):
+            await gox_reference.reject()
+
+    async def test_a_new_capture_fails_a_reference_still_waiting_for_selection(self):
+        first = await gox_reference.capture("MCC24")
+        second = await gox_reference.capture("MCC24")
+        document = json.loads((Path(first.session_dir) / "reference.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["status"], "failed")
+        self.assertIn("Replaced by a new reference capture", document["error"])
+        self.assertTrue(second.awaiting_selection)
+        self.assertNotEqual(first.session_dir, second.session_dir)
+
+    async def test_fit_failure_after_selection_is_failed_and_records_the_selection(self):
+        self.analyse.side_effect = ValueError("Color correction fit is not finite")
+        await gox_reference.capture("MCC24")
+        result = await gox_reference.choose(1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "Color correction fit is not finite")
+        self.assertIsNone(result.analysis)
+        document = json.loads((Path(result.session_dir) / "reference.json").read_text(encoding="utf-8"))
+        self.assertEqual((document["status"], document["error"]), ("failed", "Color correction fit is not finite"))
+        self.assertEqual(document["chart_selection"]["candidate"], 1)
+        self.assertNotIn("calibration", document)
+        self.assertEqual(self.raw_files[0].read_bytes(), self.raw_bytes)
+
+    async def test_detection_failure_is_failed_and_preserves_raw(self):
         failures = (
             (ValueError("No MCC24 chart detected"), "No MCC24 chart detected"),
-            (ValueError("Color correction fit is not finite"), "Color correction fit is not finite"),
+            (ValueError("The detector returned no complete MCC24 chart geometry."),
+             "The detector returned no complete MCC24 chart geometry."),
             (ValueError(), "ValueError"),
         )
         for error, message in failures:
             with self.subTest(failure=message):
-                self.analyse.side_effect = error
+                self.detect.side_effect = error
                 result = await gox_reference.capture("MCC24")
                 self.assertFalse(result.ok)
                 self.assertEqual(result.reason, message)
@@ -219,7 +311,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("calibration", document)
         self.assertNotIn("completed_utc", document)
         self.capture.assert_not_awaited()
-        self.analyse.assert_not_called()
+        self.detect.assert_not_called()
         self.cleanup.assert_not_called()
         self.spawn.assert_not_awaited()
 
@@ -233,7 +325,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.output.iterdir()), [])
         config_bytes.assert_not_called()
         self.capture.assert_not_awaited()
-        self.analyse.assert_not_called()
+        self.detect.assert_not_called()
 
     async def test_config_size_limit_prevents_creating_reference_output(self):
         with patch.object(gox_reference, "MAX_CONFIG_BYTES", len(self.config_bytes) - 1):
@@ -256,7 +348,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(document["status"], "failed")
         self.assertNotIn("calibration", document)
         self.assertEqual(self.raw_files[0].read_bytes(), self.raw_bytes)
-        self.analyse.assert_not_called()
+        self.detect.assert_not_called()
         self.cleanup.assert_not_called()
 
 

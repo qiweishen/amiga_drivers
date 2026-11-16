@@ -38,16 +38,30 @@ def _ccm_stub(count, *, matrix=None, loss=1.25, mask=None):
     return api, model
 
 
+def _checker(target, polygons, cost=0.05):
+    checker = Mock()
+    checker.getTarget.return_value = target
+    checker.getColorCharts.return_value = polygons.reshape(-1, 2)
+    checker.getCost.return_value = cost
+    return checker
+
+
 def _mcc_stub(key, polygons):
     constants = {"MCC24": 11, "SG140": 22, "VINYL18": 33}
-    checker = Mock()
-    checker.getTarget.return_value = constants[key]
-    checker.getColorCharts.return_value = polygons.reshape(-1, 2)
+    checker = _checker(constants[key], polygons)
     detector = Mock()
     detector.process.return_value = True
     detector.getListColorChecker.return_value = [checker]
     api = SimpleNamespace(**constants, CCheckerDetector=SimpleNamespace(create=Mock(return_value=detector)))
     return api, detector, checker
+
+
+def _reference_frame(raw):
+    return SimpleNamespace(
+        image=raw, pixel_format="BayerRG12Packed", skipped_invalid=False,
+        record=SimpleNamespace(path=Path("reference/seg_00001.raw"), offset=64,
+                               sequence=0, bid=1, hrt=1800000000000000001),
+    )
 
 
 def _valid_audit():
@@ -69,15 +83,18 @@ class GoxColorCheckerTests(unittest.TestCase):
                 display_before = display.copy()
                 mcc, detector, _ = _mcc_stub(key, polygons)
                 with patch.object(cc.cv, "mcc", mcc, create=True):
-                    detected, transfer = cc._detect(display, chart)
+                    candidates, transfer = cc._detect(display, chart)
                 detector.setColorChartType.assert_called_once_with(getattr(mcc, key))
-                detection_image, max_charts = detector.process.call_args.args
+                detection_image, max_candidates = detector.process.call_args.args
                 self.assertEqual(detection_image.dtype, np.dtype("uint8"))
                 self.assertEqual(detection_image.shape, native.shape)
-                self.assertEqual(max_charts, 2)
+                # An upper bound on OpenCV's candidates, not a count of charts.
+                self.assertEqual(max_candidates, cc._MAX_CANDIDATES)
                 expected_rgb8 = np.rint(cc._srgb_encode(display) * 255).astype(np.uint8)
                 np.testing.assert_array_equal(detection_image, expected_rgb8[..., ::-1])
-                np.testing.assert_array_equal(detected, polygons)
+                self.assertEqual(len(candidates), 1)
+                np.testing.assert_array_equal(candidates[0].polygons, polygons)
+                self.assertEqual(candidates[0].cost, 0.05)
                 np.testing.assert_array_equal(display, display_before)
                 np.testing.assert_array_equal(native, original)
                 self.assertIn("geometry only", transfer)
@@ -177,10 +194,10 @@ class GoxColorCheckerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "close to saturation"):
             cc._sample(almost_full, almost_full, polygon, 4095)
 
-    def test_detection_rejects_wrong_patch_count_nonfinite_geometry_and_ambiguous_chart(self):
+    def test_detection_rejects_wrong_patch_count_nonfinite_geometry_and_wrong_chart_type(self):
         chart = cc.CHARTS["MCC24"]
         polygons = np.tile([[2, 2], [8, 2], [8, 8], [2, 8]], (24, 1, 1)).astype(np.float64)
-        for case in ("short", "nonfinite", "multiple", "wrong_type", "missing"):
+        for case in ("short", "nonfinite", "wrong_type", "missing"):
             with self.subTest(case=case):
                 mcc, detector, checker = _mcc_stub("MCC24", polygons)
                 if case == "short":
@@ -189,14 +206,82 @@ class GoxColorCheckerTests(unittest.TestCase):
                     bad = polygons.copy()
                     bad[0, 0, 0] = np.nan
                     checker.getColorCharts.return_value = bad
-                elif case == "multiple":
-                    detector.getListColorChecker.return_value = [checker, checker]
                 elif case == "wrong_type":
                     checker.getTarget.return_value = mcc.VINYL18
                 else:
                     detector.process.return_value = False
                 with patch.object(cc.cv, "mcc", mcc, create=True), self.assertRaises(ValueError):
                     cc._detect(np.full((12, 12, 3), 0.25, dtype=np.float32), chart)
+
+    def test_detection_returns_every_complete_candidate_in_opencv_order(self):
+        chart = cc.CHARTS["MCC24"]
+        polygons = np.tile([[2, 2], [8, 2], [8, 8], [2, 8]], (24, 1, 1)).astype(np.float64)
+        mcc, detector, _ = _mcc_stub("MCC24", polygons)
+        incomplete = _checker(mcc.MCC24, polygons[:-1], cost=0.01)
+        detector.getListColorChecker.return_value = [
+            incomplete, _checker(mcc.MCC24, polygons, cost=0.02), _checker(mcc.MCC24, polygons + 20, cost=0.03)]
+        with patch.object(cc.cv, "mcc", mcc, create=True):
+            candidates, _ = cc._detect(np.full((12, 12, 3), 0.25, dtype=np.float32), chart)
+        # Two returned checkers are not two charts: _select_chart decides on native measurements.
+        self.assertEqual([candidate.cost for candidate in candidates], [0.02, 0.03])
+        np.testing.assert_array_equal(candidates[1].polygons, polygons + 20)
+
+    def test_detect_offers_every_candidate_in_native_pixels_with_its_own_thumbnail(self):
+        raw = np.full((12, 12), 1001, dtype=np.uint16)
+        rgb = np.broadcast_to(np.array([1001, 2002, 3003], dtype=np.uint16), (12, 12, 3)).copy()
+        original_rgb = rgb.copy()
+        first = np.tile([[2, 2], [8, 2], [8, 8], [2, 8]], (24, 1, 1)).astype(np.float64)
+        second = np.tile([[1, 1], [4, 1], [4, 4], [1, 4]], (24, 1, 1)).astype(np.float64)
+        # Halving detector resolution moves its pixel centers by half a pixel.
+        found = [cc._Candidate((polygons + 0.5) / 2 - 0.5, cost) for polygons, cost in ((first, 0.02), (second, 0.03))]
+        with patch.object(cc, "capability_reason", return_value=None), \
+                patch.object(cc, "_linear_audit", return_value=_valid_audit()), \
+                patch.object(cc.recording, "snapshot_frame", return_value=_reference_frame(raw)) as reader, \
+                patch.object(cc, "native_rgb", return_value=rgb), \
+                patch.object(cc, "_DETECTION_EDGE", 6), \
+                patch.object(cc, "_detect", return_value=(found, "test transfer")) as detect:
+            detection = cc.detect(Path("reference"), "MCC24")
+        reader.assert_called_once_with(Path("reference"), verify_crc=True)
+        supplied_display, supplied_chart = detect.call_args.args
+        self.assertEqual((supplied_display.dtype, supplied_display.shape), (np.dtype("float32"), (6, 6, 3)))
+        self.assertEqual(supplied_chart.key, "MCC24")
+        self.assertEqual((detection.chart_key, detection.transfer), ("MCC24", "test transfer"))
+        # Every candidate is offered, numbered in OpenCV's order; nothing is chosen here.
+        self.assertEqual([(item.number, item.cost) for item in detection.candidates], [(1, 0.02), (2, 0.03)])
+        np.testing.assert_allclose(detection.candidates[0].polygons, first, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(detection.candidates[1].polygons, second, rtol=0, atol=1e-12)
+        thumbnails = []
+        for candidate in detection.candidates:
+            self.assertEqual(candidate.thumbnail_png[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(candidate.thumbnail_png[24], 8)  # an 8-bit screen product
+            thumbnails.append(cc.cv.imdecode(np.frombuffer(candidate.thumbnail_png, np.uint8),
+                                             cc.cv.IMREAD_UNCHANGED))
+        self.assertEqual(thumbnails[0].shape, rgb.shape)  # 12 px is below the thumbnail limit
+        # A magenta outline (B, G, R = 255, 0, 255) marks where each candidate lies.
+        np.testing.assert_array_equal(thumbnails[0][2, 5], [255, 0, 255])
+        self.assertFalse(np.array_equal(thumbnails[0], thumbnails[1]))
+        self.assertEqual(detection.candidates[0].to_dict()["candidate"], 1)
+        np.testing.assert_array_equal(rgb, original_rgb)
+
+    def test_measure_samples_only_the_selected_geometry(self):
+        raw = np.zeros((12, 12), dtype=np.uint16)
+        rgb = np.broadcast_to(np.array([1001, 2002, 3003], dtype=np.uint16), (12, 12, 3)).copy()
+        polygons = np.tile([[2, 2], [8, 2], [8, 8], [2, 8]], (24, 1, 1)).astype(np.float64)
+        selection = {"candidate": 2, "selected_by": "operator"}
+        with patch.object(cc, "capability_reason", return_value=None), \
+                patch.object(cc, "_linear_audit", return_value=_valid_audit()), \
+                patch.object(cc.recording, "snapshot_frame", return_value=_reference_frame(raw)), \
+                patch.object(cc, "native_rgb", return_value=rgb), \
+                patch.object(cc, "_detect") as detect:
+            measurement = cc.measure(Path("reference"), "MCC24", polygons, selection=selection)
+            with self.assertRaisesRegex(ValueError, "does not match the selected chart format"):
+                cc.measure(Path("reference"), "MCC24", polygons[:-1])
+        detect.assert_not_called()  # measuring never re-detects
+        self.assertEqual((measurement.geometry, measurement.detection_transfer, measurement.selection),
+                         (cc.GEOMETRY_SUPPLIED, cc.SUPPLIED_TRANSFER, selection))
+        np.testing.assert_allclose(measurement.means * 4095, np.tile([1001, 2002, 3003], (24, 1)),
+                                   rtol=0, atol=1e-9)
+        self.assertEqual(measurement.counts, [49] * 24)
 
     def test_rank_deficient_or_nonfinite_measurements_never_start_model_fitting(self):
         cases = [np.ones((24, 3)) * 0.2, np.full((24, 3), np.nan)]
@@ -240,41 +325,40 @@ class GoxColorCheckerTests(unittest.TestCase):
             self.assertEqual(cc._linear_audit(Path("reference")), audit)
 
     def test_chart_selection_is_required_before_reading_a_capture(self):
+        polygons = np.zeros((24, 4, 2))
         for key in (None, "", "mcc24", "AUTO", 0):
             with self.subTest(key=key), patch.object(cc.recording, "snapshot_frame") as reader:
                 with self.assertRaisesRegex(ValueError, "Select"):
-                    cc.calibrate(Path("reference"), key)
+                    cc.detect(Path("reference"), key)
+                with self.assertRaisesRegex(ValueError, "Select"):
+                    cc.measure(Path("reference"), key, polygons)
                 reader.assert_not_called()
 
-    def test_detection_resize_does_not_reduce_native_sampling_or_full_resolution_png_previews(self):
+    def test_selected_geometry_is_sampled_natively_and_full_resolution_png_previews_are_lossless(self):
         raw = np.full((12, 12), 1001, dtype=np.uint16)
         original_raw = raw.copy()
         rgb = np.broadcast_to(np.array([1001, 2002, 3003], dtype=np.uint16), (12, 12, 3)).copy()
         original_rgb = rgb.copy()
         polygons = np.tile([[2, 2], [8, 2], [8, 8], [2, 8]], (24, 1, 1)).astype(np.float64)
-        # Halving detector resolution moves its pixel centers by half a pixel.
-        detection_polygons = (polygons + 0.5) / 2 - 0.5
-        frame = SimpleNamespace(
-            image=raw, pixel_format="BayerRG12Packed", skipped_invalid=False,
-            record=SimpleNamespace(path=Path("reference/seg_00001.raw"), offset=64,
-                                   sequence=0, bid=1, hrt=1800000000000000001),
-        )
+        frame = _reference_frame(raw)
         detection_transfer = "sRGB-like OETF; used for geometry only"
+        selection = {"candidate": 1, "opencv_cost": 0.05, "candidate_count": 1, "selected_by": "operator"}
         exposure = cc.FrameExposure("SN-1", "synthetic-model", 10002.45, 2.0)
         with patch.object(cc, "capability_reason", return_value=None), \
                 patch.object(cc, "_linear_audit", return_value=_valid_audit()), \
                 patch.object(cc.recording, "snapshot_frame", return_value=frame) as reader, \
                 patch.object(cc, "native_rgb", return_value=rgb), \
-                patch.object(cc, "_DETECTION_EDGE", 6), \
-                patch.object(cc, "_detect", return_value=(detection_polygons, detection_transfer)) as detect, \
                 patch.object(cc, "_fit", return_value=(np.eye(3), 0.5, 24, np.full((24, 3), 0.2))) as fit, \
                 patch.object(cc, "_reference_exposure", return_value=(exposure, "")):
-            result = cc.calibrate(Path("reference"), "MCC24")
+            measurement = cc.measure(Path("reference"), "MCC24", polygons, geometry=cc.GEOMETRY_SELECTED,
+                                     detection_transfer=detection_transfer, selection=selection)
+            result = cc.calibrate(Path("reference"), "MCC24", measurement=measurement)
+            with self.assertRaisesRegex(ValueError, "another capture or chart"):
+                cc.calibrate(Path("reference"), "SG140", measurement=measurement)
+        np.testing.assert_allclose(result.provenance["patch_polygons_native_pixels"], polygons, rtol=0, atol=1e-12)
+        self.assertEqual(result.provenance["chart_geometry"], cc.GEOMETRY_SELECTED)
+        self.assertEqual(result.provenance["chart_selection"], selection)
         reader.assert_called_once_with(Path("reference"), verify_crc=True)
-        supplied_display, supplied_chart = detect.call_args.args
-        self.assertEqual(supplied_display.dtype, np.dtype("float32"))
-        self.assertEqual(supplied_display.shape, (6, 6, 3))
-        self.assertEqual(supplied_chart.key, "MCC24")
         measured, chart = fit.call_args.args
         self.assertEqual(chart.key, "MCC24")
         self.assertEqual(measured.dtype, np.dtype("float64"))
@@ -343,7 +427,7 @@ class GoxColorCheckerTests(unittest.TestCase):
         np.testing.assert_array_equal(raw, original_raw)
         np.testing.assert_array_equal(rgb, original_rgb)
 
-    def test_corrupt_reference_payload_is_rejected_before_color_fitting(self):
+    def test_corrupt_reference_payload_is_rejected_before_detection_or_measurement(self):
         with tempfile.TemporaryDirectory() as temporary:
             camera = Path(temporary) / "camera"
             write_gox_fixture(camera)
@@ -354,10 +438,14 @@ class GoxColorCheckerTests(unittest.TestCase):
             segment.write_bytes(damaged)
             with patch.object(cc, "capability_reason", return_value=None), \
                     patch.object(cc, "_linear_audit", return_value=_valid_audit()), \
-                    patch.object(cc, "_fit") as fit:
+                    patch.object(cc, "_detect") as detect, \
+                    patch.object(cc, "_sample_patches") as sample:
                 with self.assertRaisesRegex(ValueError, "payload CRC-32C mismatch"):
-                    cc.calibrate(camera, "MCC24")
-                fit.assert_not_called()
+                    cc.detect(camera, "MCC24")
+                with self.assertRaisesRegex(ValueError, "payload CRC-32C mismatch"):
+                    cc.measure(camera, "MCC24", np.zeros((24, 4, 2)))
+                detect.assert_not_called()
+                sample.assert_not_called()
             self.assertEqual(segment.read_bytes(), damaged)
 
 

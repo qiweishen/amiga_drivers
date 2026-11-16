@@ -1,11 +1,12 @@
-"""GOX ETTR exposure series: bracket captures, parallel chart analysis and the exposure fit.
+"""GOX ETTR exposure series: bracket captures, the operator's chart selection and the exposure fit.
 
 The camera is exclusive, so bracket exposures are captured one after another;
-each capture's chart detection, sampling and color calibration run in a worker
-thread while the next exposure is captured. A capture whose chart could not be
-detected reuses the geometry detected in another capture of the same static,
-downward-looking scene. Series sessions stay under the output directory's
-``tmp`` folder; nothing here edits a configuration.
+each capture's chart detection runs in a worker thread while the next exposure
+is captured. The detector's candidates from every capture are then offered to
+the operator as thumbnails (``choose`` / ``reject``); the selected geometry
+measures all captures of the same static, downward-looking scene. Series
+sessions stay under the output directory's ``tmp`` folder; nothing here edits
+a configuration.
 
 Only the exposure is varied or suggested. The gain is whatever the snapshot
 configuration sets (x1 in the field); it is read back from each capture for the
@@ -34,6 +35,7 @@ MAX_SERIES_BYTES = 4 * 1024 * 1024
 
 _status = ""
 _series: ExposureSeries | None = None
+_pending: _PendingSeries | None = None
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,7 @@ class BracketPoint:
     session: str  # camera directory relative to the series directory
     point: exposure.ExposurePoint | None
     loss: float | None  # RMS CIEDE2000 when the chart could also be color-fitted
-    geometry: str
+    geometry: str  # color_checker.GEOMETRY_SELECTED on the chosen capture, GEOMETRY_SUPPLIED elsewhere
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -89,6 +91,13 @@ class ExposureSeries:
     initial_suggestion: exposure.Suggestion | None = None
     elapsed_s: float = 0.0
     raw_output: str = ""
+    # Detector candidates waiting for the operator (choose / reject); empty otherwise.
+    candidates: tuple[gox_reference.CandidateView, ...] = ()
+    selection: dict | None = None  # the chart the operator selected for every bracket capture
+
+    @property
+    def awaiting_selection(self) -> bool:
+        return bool(self.candidates)
 
     @property
     def suggestion(self) -> exposure.Suggestion | None:
@@ -115,6 +124,7 @@ class ExposureSeries:
             "initial_suggestion": self.initial_suggestion.to_dict() if self.initial_suggestion else None,
             "suggestion": self.suggestion.to_dict() if self.suggestion else None,
             "target_fraction": exposure.TARGET_FRACTION, "tolerance": exposure.TOLERANCE,
+            "chart_selection": self.selection,
             "scope": "exposure estimation only; configs are changed only by an explicit Apply",
         }
 
@@ -145,9 +155,12 @@ class _Analysis:
     error: str = ""
 
 
-def _analyze(camera_dir: Path, requested_ms: float, chart_key: str,
-             polygons: np.ndarray | None = None) -> _Analysis:
-    """Measure one bracket capture; color-fit it when no patch saturates. Runs in a worker thread."""
+def _analyze(camera_dir: Path, requested_ms: float, chart_key: str, polygons: np.ndarray, *,
+             geometry: str, detection_transfer: str, selection: dict) -> _Analysis:
+    """Measure one bracket capture inside the selected chart; color-fit it when no patch saturates.
+
+    Runs in a worker thread.
+    """
     result = _Analysis(camera_dir, requested_ms)
     try:
         device = raw_recording.device_metadata(camera_dir)
@@ -156,7 +169,8 @@ def _analyze(camera_dir: Path, requested_ms: float, chart_key: str,
         result.device_id = frame_exposure.device_id
         result.camera_ip = str(device.get("ip") or "")
         result.exposure_offset_us = float((device.get("derived") or {}).get("exposure_offset_us") or 0.0)
-        measurement = color_checker.measure(camera_dir, chart_key, polygons=polygons)
+        measurement = color_checker.measure(camera_dir, chart_key, polygons, geometry=geometry,
+                                            detection_transfer=detection_transfer, selection=selection)
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         result.error = str(error) or type(error).__name__
         return result
@@ -209,17 +223,75 @@ def _point(analysis: _Analysis, patch: int, directory: Path) -> exposure.Exposur
         source=analysis.camera_dir.relative_to(directory).as_posix())
 
 
+@dataclass
+class _Capture:
+    """One bracket capture and the chart candidates detected in it."""
+
+    camera_dir: Path
+    requested_exposure_ms: float
+    captured: bool = True
+    candidates: tuple[color_checker.ChartCandidate, ...] = ()
+    transfer: str = ""
+    error: str = ""
+
+
+def _detect_capture(camera_dir: Path, requested_ms: float, chart_key: str) -> _Capture:
+    """Chart candidates of one bracket capture. Runs in a worker thread."""
+    try:
+        detection = color_checker.detect(camera_dir, chart_key)
+    except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
+        return _Capture(camera_dir, requested_ms, error=str(error) or type(error).__name__)
+    return _Capture(camera_dir, requested_ms, candidates=detection.candidates, transfer=detection.transfer)
+
+
+@dataclass
+class _PendingSeries:
+    """Bracket captures waiting for the operator's chart selection."""
+
+    chart_key: str
+    center_ms: float
+    directory: Path
+    captures: list[_Capture]
+    offered: list[tuple[_Capture, color_checker.ChartCandidate]]  # numbered from 1, as shown
+    raw_output: str
+    started: float
+
+
+def _failed(pending: _PendingSeries, reason: str, selection: dict | None = None) -> ExposureSeries:
+    return ExposureSeries(ok=False, reason=reason, chart_key=pending.chart_key, directory=str(pending.directory),
+                          center_ms=pending.center_ms, elapsed_s=time.monotonic() - pending.started,
+                          raw_output=pending.raw_output, selection=selection)
+
+
+def _take_pending() -> _PendingSeries:
+    global _pending
+    pending, _pending = _pending, None  # one decision per series, whichever client makes it
+    if pending is None:
+        raise ValueError("No exposure series is waiting for a chart selection")
+    if _series is not None:
+        gox_reference.release_candidates(_series.candidates)
+    return pending
+
+
+async def _abandon_pending(reason: str) -> None:
+    """A series still waiting for a chart selection fails when a new one replaces it."""
+    if _pending is not None:
+        await _save(_failed(_take_pending(), reason))
+
+
 async def _run(chart_key: str, center_ms: float, exposures: list[float]) -> ExposureSeries:
-    global _status, _series
+    """Capture the bracket and detect; the result waits for the operator's chart selection."""
+    global _status, _series, _pending
     started = time.monotonic()
+    await _abandon_pending("Replaced by a new exposure series before a chart was selected")
     _series = None
     directory = None
-    gain = None
     raw_outputs = []
+    extra = None
     try:
         _status = "Preparing the exposure series…"
         directory, config = await asyncio.to_thread(_prepare_series, chart_key, exposures)
-        pending: list[asyncio.Task | _Analysis] = []
+        tasks: list[asyncio.Task | _Capture] = []
         for index, exposure_ms in enumerate(exposures, 1):
             _status = f"Capturing exposure {index}/{len(exposures)}: {exposure_ms:g} ms…"
             output = directory / f"exposure_{index}_{exposure_ms:g}ms" / "raw" / "gox"
@@ -228,71 +300,135 @@ async def _run(chart_key: str, center_ms: float, exposures: list[float]) -> Expo
                                                    frame_rate_hz=gox_timing.max_frame_rate_hz(exposure_ms))
             raw_outputs.append(f"--- {exposure_ms:g} ms ---\n{captured.raw_output}")
             if not captured.ok or captured.camera_dir is None:
-                pending.append(_Analysis(output, exposure_ms, error=captured.reason or "capture failed"))
+                tasks.append(_Capture(output, exposure_ms, captured=False,
+                                      error=captured.reason or "capture failed"))
                 continue
-            # Analysis overlaps the next capture; the camera itself is never shared.
-            pending.append(asyncio.create_task(
-                asyncio.to_thread(_analyze, captured.camera_dir, exposure_ms, chart_key)))
-        _status = "Analyzing the exposure series…"
-        analyses = [item if isinstance(item, _Analysis) else await item for item in pending]
-        geometry = next((item.polygons for item in analyses if item.polygons is not None), None)
-        if geometry is not None:
-            for index, item in enumerate(analyses):
-                if item.means is None and item.camera_dir.is_dir() and (item.camera_dir / "device.json").exists():
-                    analyses[index] = await asyncio.to_thread(
-                        _analyze, item.camera_dir, item.requested_exposure_ms, chart_key, geometry)
-        measured = [item for item in analyses if item.means is not None]
-        if not measured:
-            reasons = "; ".join(f"{item.requested_exposure_ms:g} ms: {item.error}" for item in analyses)
-            raise ValueError(f"No exposure produced a usable chart measurement ({reasons})")
-        gains = {item.gain for item in measured}
-        if len(gains) != 1:
-            raise ValueError(f"The bracket captures report different gains {sorted(gains)}; "
-                             "the series varies the exposure only")
-        gain = gains.pop()
-        lowest = min(measured, key=lambda item: item.exposure_time_us)
-        patch = exposure.brightest_patch(lowest.means)
-        points = tuple(BracketPoint(
-            item.requested_exposure_ms, item.camera_dir.relative_to(directory).as_posix(),
-            _point(item, patch, directory) if item.means is not None else None,
-            item.loss, item.geometry, item.error) for item in analyses)
-        fit, fit_error = None, ""
-        try:
-            fit = exposure.fit([point.point for point in points if point.point is not None],
-                               gain=gain, exposure_offset_us=lowest.exposure_offset_us,
-                               full_scale=lowest.full_scale)
-        except ValueError as error:
-            fit_error = str(error)
-        limit_ms, limit_notes = await asyncio.to_thread(_exposure_limit, lowest.camera_ip)
-        suggestion = None
-        if fit is not None:
-            try:
-                suggestion = exposure.suggest(fit.target_signal, gain=gain,
-                                              exposure_offset_us=lowest.exposure_offset_us, limit_ms=limit_ms,
-                                              fit=fit)
-            except ValueError as error:
-                fit_error = str(error)
-        series = ExposureSeries(
-            ok=suggestion is not None, reason=fit_error, chart_key=chart_key, directory=str(directory),
-            center_ms=center_ms, gain=gain, camera_ip=lowest.camera_ip, device_id=lowest.device_id,
-            exposure_offset_us=lowest.exposure_offset_us, patch=patch, points=points, fit=fit,
-            fit_error=fit_error, limit_ms=limit_ms, limit_notes=tuple(limit_notes),
-            initial_suggestion=suggestion, elapsed_s=time.monotonic() - started,
-            raw_output="\n".join(raw_outputs))
+            # Detection overlaps the next capture; the camera itself is never shared.
+            tasks.append(asyncio.create_task(
+                asyncio.to_thread(_detect_capture, captured.camera_dir, exposure_ms, chart_key)))
+        _status = "Detecting the chart in the bracket captures…"
+        captures = [item if isinstance(item, _Capture) else await item for item in tasks]
+        offered = [(capture, candidate) for capture in captures for candidate in capture.candidates]
+        if not offered:
+            reasons = "; ".join(f"{item.requested_exposure_ms:g} ms: {item.error}" for item in captures)
+            raise ValueError(f"No exposure produced a chart candidate ({reasons})")
+        raw_output = "\n".join(raw_outputs)
+        views = gox_reference.register_candidates(directory.name, [
+            (f"{capture.requested_exposure_ms:g} ms · candidate {candidate.number}", candidate)
+            for capture, candidate in offered])
+        _pending = _PendingSeries(chart_key, center_ms, directory, captures, offered, raw_output, started)
+        series = ExposureSeries(ok=False, chart_key=chart_key, directory=str(directory), center_ms=center_ms,
+                                elapsed_s=time.monotonic() - started, raw_output=raw_output, candidates=views)
+        extra = {"chart_candidates": [
+            {"number": number, "exposure_ms": capture.requested_exposure_ms,
+             "capture": capture.camera_dir.relative_to(directory).as_posix(), **candidate.to_dict()}
+            for number, (capture, candidate) in enumerate(offered, 1)]}
+        _status = f"{len(views)} chart candidate(s) detected in the bracket; select the chart"
     except asyncio.CancelledError:
         _status = "Exposure series interrupted; captured RAW is retained"
         raise
     except Exception as error:
         series = ExposureSeries(ok=False, reason=str(error) or type(error).__name__, chart_key=chart_key,
                                 directory=str(directory) if directory else "", center_ms=center_ms,
-                                gain=gain if gain is not None else 1.0,
                                 elapsed_s=time.monotonic() - started, raw_output="\n".join(raw_outputs))
+        _status = f"Exposure series failed: {series.reason}"
+    await _save(series, extra)
+    _series = series
+    return series
+
+
+async def choose(number: int) -> ExposureSeries:
+    """Measure every bracket capture with the chart the operator selected, then fit the exposure."""
+    global _status, _series
+    pending = _pending
+    if pending is None:
+        raise ValueError("No exposure series is waiting for a chart selection")
+    if not isinstance(number, int) or not 1 <= number <= len(pending.offered):
+        raise ValueError(f"Candidate {number} was not offered")
+    pending = _take_pending()
+    source, candidate = pending.offered[number - 1]
+    selection = {"candidate": number, "exposure_ms": source.requested_exposure_ms,
+                 "capture": source.camera_dir.relative_to(pending.directory).as_posix(),
+                 "capture_candidate": candidate.number, "opencv_cost": candidate.cost,
+                 "candidate_count": len(pending.offered), "selected_by": "operator"}
+    try:
+        analyses = []
+        for index, capture in enumerate(pending.captures, 1):
+            _status = f"Measuring exposure {index}/{len(pending.captures)} with the selected chart…"
+            if not capture.captured:
+                analyses.append(_Analysis(capture.camera_dir, capture.requested_exposure_ms, error=capture.error))
+                continue
+            selected = capture is source
+            # One capture at a time: each holds a full-resolution native RGB image.
+            analyses.append(await asyncio.to_thread(
+                _analyze, capture.camera_dir, capture.requested_exposure_ms, pending.chart_key, candidate.polygons,
+                geometry=color_checker.GEOMETRY_SELECTED if selected else color_checker.GEOMETRY_SUPPLIED,
+                detection_transfer=source.transfer if selected else color_checker.SUPPLIED_TRANSFER,
+                selection=selection))
+        series = await _finish(pending, analyses, selection)
+    except asyncio.CancelledError:
+        _status = "Exposure series interrupted; captured RAW is retained"
+        raise
+    except Exception as error:
+        series = _failed(pending, str(error) or type(error).__name__, selection)
     await _save(series)
     _series = series
-    _status = (f"Suggested exposure {series.suggestion.exposure_ms:g} ms (ETTR)"
-               if series.ok
+    _status = (f"Suggested exposure {series.suggestion.exposure_ms:g} ms (ETTR)" if series.ok
                else f"Exposure series failed: {series.reason}")
     return series
+
+
+async def reject() -> ExposureSeries:
+    """None of the candidates is the chart: the series fails and its RAW is kept."""
+    global _status, _series
+    series = _failed(_take_pending(), gox_reference.NO_CHART_SELECTED)
+    await _save(series)
+    _series = series
+    _status = f"Exposure series failed: {series.reason}"
+    return series
+
+
+async def _finish(pending: _PendingSeries, analyses: list[_Analysis], selection: dict) -> ExposureSeries:
+    """The ETTR fit of the measured bracket."""
+    directory = pending.directory
+    measured = [item for item in analyses if item.means is not None]
+    if not measured:
+        reasons = "; ".join(f"{item.requested_exposure_ms:g} ms: {item.error}" for item in analyses)
+        raise ValueError(f"No exposure produced a usable chart measurement ({reasons})")
+    gains = {item.gain for item in measured}
+    if len(gains) != 1:
+        raise ValueError(f"The bracket captures report different gains {sorted(gains)}; "
+                         "the series varies the exposure only")
+    gain = gains.pop()
+    lowest = min(measured, key=lambda item: item.exposure_time_us)
+    patch = exposure.brightest_patch(lowest.means)
+    points = tuple(BracketPoint(
+        item.requested_exposure_ms, item.camera_dir.relative_to(directory).as_posix(),
+        _point(item, patch, directory) if item.means is not None else None,
+        item.loss, item.geometry, item.error) for item in analyses)
+    fit, fit_error = None, ""
+    try:
+        fit = exposure.fit([point.point for point in points if point.point is not None],
+                           gain=gain, exposure_offset_us=lowest.exposure_offset_us,
+                           full_scale=lowest.full_scale)
+    except ValueError as error:
+        fit_error = str(error)
+    limit_ms, limit_notes = await asyncio.to_thread(_exposure_limit, lowest.camera_ip)
+    suggestion = None
+    if fit is not None:
+        try:
+            suggestion = exposure.suggest(fit.target_signal, gain=gain,
+                                          exposure_offset_us=lowest.exposure_offset_us, limit_ms=limit_ms,
+                                          fit=fit)
+        except ValueError as error:
+            fit_error = str(error)
+    return ExposureSeries(
+        ok=suggestion is not None, reason=fit_error, chart_key=pending.chart_key, directory=str(directory),
+        center_ms=pending.center_ms, gain=gain, camera_ip=lowest.camera_ip, device_id=lowest.device_id,
+        exposure_offset_us=lowest.exposure_offset_us, patch=patch, points=points, fit=fit,
+        fit_error=fit_error, limit_ms=limit_ms, limit_notes=tuple(limit_notes),
+        initial_suggestion=suggestion, elapsed_s=time.monotonic() - pending.started,
+        raw_output=pending.raw_output, selection=selection)
 
 
 def _exposure_limit(camera_ip: str) -> tuple[float | None, list[str]]:
@@ -304,10 +440,12 @@ def _exposure_limit(camera_ip: str) -> tuple[float | None, list[str]]:
         return None, [f"frame-period limit unavailable ({error}); it is checked on Apply"]
 
 
-async def _save(series: ExposureSeries) -> None:
+async def _save(series: ExposureSeries, extra: dict | None = None) -> None:
     if series.directory:
         document = series.to_dict()
-        document["status"] = "completed" if series.ok else "failed"
+        document["status"] = ("completed" if series.ok
+                              else "awaiting_chart_selection" if series.awaiting_selection else "failed")
+        document.update(extra or {})
         try:
             await asyncio.to_thread(atomic_json.write, Path(series.directory) / "series.json", document,
                                     limit=MAX_SERIES_BYTES)
@@ -376,16 +514,15 @@ def check_reference(chart_key: str, provenance: dict, source: str,
     return check
 
 
-def check_failed_capture(chart_key: str, camera_dir: Path, source: str) -> ExposureCheck | None:
-    """A reference whose calibration failed: measure saturation for the exposure check."""
+def check_failed_capture(chart_key: str, measurement: color_checker.ChartMeasurement,
+                         source: str) -> ExposureCheck | None:
+    """A reference whose calibration failed (e.g. saturated): its measured saturation still counts."""
     series = _series
     if series is None or not series.ok:
         return None
     try:
-        device = raw_recording.device_metadata(camera_dir)
-        frame_exposure = frame_exposure_from_device(device)
-        measurement = color_checker.measure(camera_dir, chart_key)
-    except (OSError, ValueError, KeyError, TypeError, cv2.error):
+        frame_exposure = frame_exposure_from_device(raw_recording.device_metadata(measurement.directory))
+    except (OSError, ValueError, KeyError, TypeError):
         return None
     provenance = {"reference_exposure": frame_exposure.to_dict(), "source_full_scale_dn": measurement.full_scale}
     return check_reference(chart_key, provenance, source, measurement.status, measurement.means)

@@ -8,7 +8,7 @@ from nicegui import app, ui
 
 from ..constants import SNAPSHOT_CONFIG, TOOL_TICK_S
 from ..decoder.gox import exposure
-from ..decoder.gox.color_checker import CHARTS, DOCUMENTED_PEDESTAL_DN, PEDESTAL_SOURCE
+from ..decoder.gox.color_checker import CHARTS, DOCUMENTED_PEDESTAL_DN, GEOMETRY_SUPPLIED, PEDESTAL_SOURCE
 from ..decoder.gox.preview import DISPLAY_LONG_EDGE
 from ..services import config_actions, gox_exposure, gox_reference, preview_images
 from ..state import STATE
@@ -70,7 +70,7 @@ def _series_rows(series: gox_exposure.ExposureSeries) -> list[dict]:
     rows = []
     for index, item in enumerate(series.points):
         point = item.point
-        note = item.error or ("geometry from another capture" if item.geometry == "supplied" else "")
+        note = item.error or ("chart selected on another capture" if item.geometry == GEOMETRY_SUPPLIED else "")
         rows.append({
             "key": index, "exposure": f"{item.requested_exposure_ms:g}",
             "integration": f"{point.exposure_time_us:.0f}" if point else "—",
@@ -91,6 +91,8 @@ def _series_rows(series: gox_exposure.ExposureSeries) -> list[dict]:
 
 
 def _series_text(series: gox_exposure.ExposureSeries) -> str:
+    if series.awaiting_selection:
+        return "Select the chart among the detected candidates."
     if not series.ok or series.fit is None:
         return f"No exposure suggestion: {series.reason or series.fit_error}"
     fit = series.fit
@@ -128,7 +130,9 @@ def panel() -> None:
     page = {"alive": True, "pending": False, "shown": None,
             "attempt_error": "", "hidden_result": None, "chart_key": None,
             "analysis": None,
-            "series_shown": False, "notified": None}
+            "series_shown": False, "notified": None,
+            # The reference result or exposure series whose candidates the chooser shows, and which.
+            "offered": None, "chooser": None}
 
     def dispose() -> None:
         page["alive"] = False
@@ -168,8 +172,9 @@ def panel() -> None:
                  f"exposure as the low step when it is {exposure.BRACKET_STEP_MS:g} ms or less), fits the "
                  "brightest patch's DN against exposure, and suggests the exposure that puts it at "
                  f"{exposure.TARGET_FRACTION:.0%} of full scale. Only the exposure changes: the gain stays as "
-                 "the snapshot configuration sets it. Captures run one after another; each capture's chart "
-                 "analysis runs alongside the next capture.").classes("section-copy")
+                 "the snapshot configuration sets it. Captures run one after another, chart detection "
+                 "alongside the next capture; you then select the chart once for all captures.").classes(
+            "section-copy")
         with ui.row().classes("console-toolbar w-full items-end"):
             center_input = ui.number("Initial exposure (ms)", min=0.001, step=1.0, format="%.3f",
                                      value=float(app.storage.general.get("gox_exposure_ms", 10.0))).classes("w-48")
@@ -194,7 +199,9 @@ def panel() -> None:
         apply_row.set_visibility(False)
         ui.label("3. Capture using the GOX snapshot configuration").classes("font-medium text-sm")
         ui.label("The camera, exposure, gain and image settings come from the GOX snapshot configuration. "
-                 "Capture uses freerun with PTP and hardware trigger disabled.").classes("section-copy")
+                 "Capture uses freerun with PTP and hardware trigger disabled. After the capture, select the "
+                 "chart among the detected candidates; calibration uses only your selection.").classes(
+            "section-copy")
         ui.label(f"Configuration: {SNAPSHOT_CONFIG}").classes("text-xs mono muted break-all")
         ui.label(f"Black level: calibration subtracts a {DOCUMENTED_PEDESTAL_DN:g} DN pedestal from every "
                  f"channel, (DN − {DOCUMENTED_PEDESTAL_DN:g}) / (4095 − {DOCUMENTED_PEDESTAL_DN:g}), before "
@@ -263,6 +270,17 @@ def panel() -> None:
     with ui.expansion("Raw output of the last GOX reference capture", icon="terminal").classes("w-full"):
         raw_output = ui.label("").classes("terminal-surface w-full text-xs mono whitespace-pre-wrap break-all p-4")
 
+    # Chart selection: the detector also accepts regular textures as charts, so the operator
+    # picks the chart among its candidates, even when there is only one.
+    with ui.dialog().props("persistent") as chooser, ui.card().classes("w-full max-w-5xl gap-3"):
+        chooser_title = ui.label("").classes("section-title")
+        ui.label("Each thumbnail shows one detector candidate: a magenta outline around a green patch grid. "
+                 "Select the one that lies on the chart, with every patch inside its square. If none does, "
+                 "choose None of these and recapture.").classes("section-copy")
+        chooser_grid = ui.element("div").classes("control-grid w-full")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("None of these", icon="close", on_click=lambda: decide(None)).props("flat no-caps")
+
     def input_reason() -> str | None:
         if page["chart_key"] not in CHARTS:
             return "Select MCC24, SG140 or VINYL18 before capture."
@@ -280,9 +298,95 @@ def panel() -> None:
         for image in previews.values():
             image.set_source("")
 
+    def show_chooser(kind: str, offered) -> None:
+        """Offer the candidates of a reference capture or an exposure series for selection."""
+        page["offered"], page["chooser"] = offered, kind
+        chooser_title.set_text(
+            f"Select the {offered.chart_key} chart · {len(offered.candidates)} candidate(s)"
+            + (" from the exposure bracket" if kind == "series" else ""))
+        chooser_grid.clear()
+        with chooser_grid:
+            for candidate in offered.candidates:
+                with ui.card().classes("console-panel w-full min-w-0").props("flat"):
+                    ui.image(candidate.image).props(f'fit=contain alt="{candidate.label}"').classes("w-full")
+                    ui.label(candidate.label).classes("text-xs mono muted")
+                    ui.button("Use this chart", icon="check",
+                              on_click=lambda _, number=candidate.number: decide(number)).props("no-caps")
+        chooser.open()
+
+    def sync_chooser() -> None:
+        """Open the chooser for a new pending selection; close it once anyone has decided."""
+        current = (gox_reference.last_result(), gox_exposure.last_series())
+        if page["chooser"] is not None and not any(page["offered"] is item for item in current):
+            chooser.close()
+            page["offered"] = page["chooser"] = None
+        if page["pending"] or page["chooser"] is not None:
+            return
+        result, series = current
+        if result is not None and result.awaiting_selection and page["offered"] is not result:
+            show_chooser("reference", result)
+        elif series is not None and series.awaiting_selection and page["offered"] is not series:
+            show_chooser("series", series)
+
+    def notify_reference(result) -> None:
+        if result.awaiting_selection:
+            ui.notify(f"{len(result.candidates)} candidate(s) detected: select the chart.", type="info")
+            return
+        ui.notify(f"{CHARTS[result.chart_key].label} reference captured and calibrated" if result.ok
+                  else result.reason, type="positive" if result.ok else "negative", multi_line=True)
+        check = result.exposure_check
+        if check is not None and check.within and result.ok:
+            ui.notify("Exposure is within ±5% of the ETTR target. Save this reference to the output "
+                      "directory with the button below the result.", type="positive", multi_line=True,
+                      timeout=15000)
+        elif check is not None:
+            ui.notify(f"Exposure check: {check.message}", type="warning", multi_line=True, timeout=15000)
+
+    def notify_series(series) -> None:
+        if series.awaiting_selection:
+            ui.notify(f"{len(series.candidates)} chart candidate(s) detected in the bracket: select the chart.",
+                      type="info")
+        else:
+            ui.notify(f"Suggested ETTR exposure: {series.suggestion.exposure_ms:g} ms" if series.ok
+                      else f"Exposure series failed: {series.reason}",
+                      type="positive" if series.ok else "negative", multi_line=True)
+
+    async def decide(number: int | None) -> None:
+        """Calibrate (or fit the bracket) with the chosen candidate; None rejects them all."""
+        kind = page["chooser"]
+        chooser.close()
+        page["chooser"] = None  # page["offered"] stays, so the same offer is not reopened
+        if kind is None or page["pending"] or not page["alive"]:
+            return
+        page["pending"] = True
+        page["series_running"] = kind == "series"
+        (series_spinner if kind == "series" else spinner).classes(remove="hidden")
+        refresh()
+        try:
+            if kind == "reference":
+                result = await (gox_reference.choose(number) if number is not None else gox_reference.reject())
+                if page["alive"]:
+                    notify_reference(result)
+            else:
+                series = await (gox_exposure.choose(number) if number is not None else gox_exposure.reject())
+                if page["alive"]:
+                    notify_series(series)
+        except Exception as error:
+            if page["alive"]:
+                ui.notify(f"Chart selection was not applied: {error}", type="negative", multi_line=True)
+        finally:
+            page["pending"] = False
+            page["series_running"] = False
+            if page["alive"]:
+                spinner.classes(add="hidden")
+                series_spinner.classes(add="hidden")
+                page["series_shown"] = False  # force a redraw with the final status
+                refresh()
+
     def refresh() -> None:
         if not page["alive"]:
             return
+        sync_chooser()
         busy = page["pending"] or STATE.snapshot_busy
         reason = capability or gox_reference.guard_reason()
         invalid = input_reason()
@@ -317,7 +421,7 @@ def panel() -> None:
         session_label.set_text(f"Raw session: {result.session_dir}" if result and result.session_dir else "")
         analysis = result.analysis if result else None
         result_panel.set_visibility(analysis is not None)
-        if result and not result.ok:
+        if result and not result.ok and not result.awaiting_selection:
             status_label.set_text(f"Reference was not completed: {result.reason}")
         if analysis is None:
             page["analysis"] = None
@@ -369,16 +473,7 @@ def panel() -> None:
         try:
             result = await gox_reference.capture(selected)
             if page["alive"]:
-                ui.notify(f"{CHARTS[result.chart_key].label} reference captured and calibrated" if result.ok
-                          else result.reason, type="positive" if result.ok else "negative", multi_line=True)
-                check = result.exposure_check
-                if check is not None and check.within and result.ok:
-                    ui.notify("Exposure is within ±5% of the ETTR target. Save this reference to the output "
-                              "directory with the button below the result.", type="positive", multi_line=True,
-                              timeout=15000)
-                elif check is not None:
-                    ui.notify(f"Exposure check: {check.message}", type="warning", multi_line=True,
-                              timeout=15000)
+                notify_reference(result)
         except Exception as error:
             if page["alive"]:
                 # Preflight failures may happen before the shared service
@@ -433,9 +528,7 @@ def panel() -> None:
         try:
             series = await gox_exposure.run(page["chart_key"], center)
             if page["alive"]:
-                ui.notify(f"Suggested ETTR exposure: {series.suggestion.exposure_ms:g} ms" if series.ok
-                          else f"Exposure series failed: {series.reason}",
-                          type="positive" if series.ok else "negative", multi_line=True)
+                notify_series(series)
         except Exception as error:
             if page["alive"]:
                 ui.notify(f"Exposure series was not completed: {error}", type="negative", multi_line=True)

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.decoder.gox import exposure
+from app.decoder.gox import color_checker, exposure
 from app.services import gox_exposure, gox_reference, gox_timing, gox_tools
 
 OFFSET_US = 2.45
@@ -36,15 +36,19 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(gox_exposure, "_series", None))
+        self.stack.enter_context(patch.object(gox_exposure, "_pending", None))
         self.stack.enter_context(patch.object(gox_reference, "reference_tmp_root", return_value=self.root))
         self.stack.enter_context(patch.object(gox_reference, "_config_bytes", return_value=b"cameras: []\n"))
         self.stack.enter_context(patch.object(gox_reference, "capability_reason", return_value=None))
         self.stack.enter_context(patch.object(gox_exposure.camera_operations, "run", side_effect=self.reserve))
         self.stack.enter_context(patch.object(gox_tools, "capture_raw", side_effect=self.capture_raw))
+        self.detect = self.stack.enter_context(patch.object(gox_exposure, "_detect_capture",
+                                                            side_effect=self.fake_detect))
         self.analyze = self.stack.enter_context(patch.object(gox_exposure, "_analyze", side_effect=self.fake_analyze))
         self.limit = self.stack.enter_context(patch.object(gox_exposure, "_exposure_limit",
                                                            return_value=(None, [])))
         self.undetectable = set()
+        self.analysed = []  # (requested ms, polygons, geometry) per measured capture
         self.config_gain = 1.0
         self.rates = []
 
@@ -66,26 +70,37 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.captured.append(exposure_ms)
         return gox_tools.RawCapture(True, camera_dir=camera, raw_output=f"captured {exposure_ms} ms")
 
-    def fake_analyze(self, camera_dir, requested_ms, chart_key, polygons=None):
+    def fake_detect(self, camera_dir, requested_ms, chart_key):
+        if requested_ms in self.undetectable:
+            return gox_exposure._Capture(camera_dir, requested_ms, error="No MCC24 chart detected")
+        # Each capture offers one candidate whose polygons carry its exposure, to tell them apart.
+        candidate = color_checker.ChartCandidate(1, 0.05, np.full((24, 4, 2), requested_ms), b"thumbnail")
+        return gox_exposure._Capture(camera_dir, requested_ms, candidates=(candidate,), transfer="test transfer")
+
+    async def run_and_choose(self, chart_key="MCC24", center_ms=50.0, number=1):
+        series = await gox_exposure.run(chart_key, center_ms)
+        self.assertTrue(series.awaiting_selection, series.reason)
+        self.analyze.assert_not_called()  # nothing is measured before the operator selects the chart
+        return await gox_exposure.choose(number)
+
+    def fake_analyze(self, camera_dir, requested_ms, chart_key, polygons, *, geometry, detection_transfer,
+                     selection):
+        self.analysed.append((requested_ms, polygons, geometry))
         result = gox_exposure._Analysis(camera_dir, requested_ms)
-        if requested_ms in self.undetectable and polygons is None:
-            result.error = "No MCC24 chart detected"
-            return result
         gain = self.config_gain
         peak = _peak(requested_ms, gain)
         result.means = _means(min(peak, 4095.0))
         result.patch_status = [None] * 24
         if peak >= 4095:
             result.patch_status[18] = "clipped"
-        result.polygons = np.zeros((24, 4, 2)) if polygons is None else polygons
-        result.geometry = "detected" if polygons is None else "supplied"
+        result.polygons, result.geometry = polygons, geometry
         result.exposure_time_us, result.gain = requested_ms * 1000 + OFFSET_US, gain
         result.device_id, result.camera_ip, result.exposure_offset_us = DEVICE, "192.0.2.10", OFFSET_US
         result.loss = 1.5 if result.patch_status[18] is None else None
         return result
 
     async def test_bracket_captures_sequentially_and_suggests_the_ettr_exposure(self):
-        series = await gox_exposure.run("MCC24", 50.0)
+        series = await self.run_and_choose()
         self.assertTrue(series.ok, series.reason)
         self.assertEqual(self.captured, [25.0, 50.0, 100.0])
         self.assertEqual(self.rates, [6.054, 6.054, 6.054])
@@ -103,7 +118,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_frame_period_limit_caps_the_exposure_and_keeps_the_gain(self):
         self.limit.return_value = (180.0, ["config-gox.yaml: 5 Hz → exposure < 180 ms"])
-        series = await gox_exposure.run("MCC24", 50.0)
+        series = await self.run_and_choose()
         self.assertTrue(series.ok, series.reason)
         suggestion = series.suggestion
         self.assertEqual((suggestion.exposure_ms, suggestion.gain, suggestion.capped), (176.4, 1.0, True))
@@ -117,23 +132,57 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_configured_gain_is_read_back_not_replaced(self):
         self.config_gain = 2.0
-        series = await gox_exposure.run("MCC24", 50.0)
+        series = await self.run_and_choose()
         self.assertTrue(series.ok, series.reason)
         self.assertEqual((series.gain, series.suggestion.gain), (2.0, 2.0))
         expected = ((0.8 * 4095 - BLACK) / SLOPE / 2.0 - OFFSET_US) / 1000
         self.assertAlmostEqual(series.suggested_exposure_ms, round(expected, 1))
 
-    async def test_undetected_capture_reuses_geometry_from_the_same_scene(self):
-        self.undetectable = {25.0}
-        series = await gox_exposure.run("MCC24", 50.0)
+    async def test_candidates_of_every_capture_are_offered_and_one_choice_measures_all(self):
+        self.undetectable = {25.0}  # no candidate there, but still measured with the chosen chart
+        pending = await gox_exposure.run("MCC24", 50.0)
+        self.assertEqual([(item.number, item.label) for item in pending.candidates],
+                         [(1, "50 ms · candidate 1 · OpenCV cost 0.05"), (2, "100 ms · candidate 1 · OpenCV cost 0.05")])
+        waiting = json.loads((Path(pending.directory) / "series.json").read_text(encoding="utf-8"))
+        self.assertEqual(waiting["status"], "awaiting_chart_selection")
+        self.assertEqual([(item["number"], item["exposure_ms"]) for item in waiting["chart_candidates"]],
+                         [(1, 50.0), (2, 100.0)])
+        with self.assertRaisesRegex(ValueError, "Candidate 3 was not offered"):
+            await gox_exposure.choose(3)
+        series = await gox_exposure.choose(2)  # the 100 ms capture's candidate
         self.assertTrue(series.ok, series.reason)
-        first = series.points[0]
-        self.assertEqual(first.geometry, "supplied")
-        self.assertIsNotNone(first.point)
+        self.assertEqual([requested for requested, _, _ in self.analysed], [25.0, 50.0, 100.0])
+        for _, polygons, _ in self.analysed:
+            np.testing.assert_array_equal(polygons, np.full((24, 4, 2), 100.0))
+        self.assertEqual([point.geometry for point in series.points], [
+            color_checker.GEOMETRY_SUPPLIED, color_checker.GEOMETRY_SUPPLIED, color_checker.GEOMETRY_SELECTED])
+        self.assertEqual((series.selection["exposure_ms"], series.selection["selected_by"]), (100.0, "operator"))
+        document = json.loads((Path(series.directory) / "series.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["chart_selection"]["candidate"], 2)
+        with self.assertRaisesRegex(ValueError, "No exposure series is waiting"):
+            await gox_exposure.choose(1)
+
+    async def test_rejecting_every_candidate_fails_the_series(self):
+        pending = await gox_exposure.run("MCC24", 50.0)
+        series = await gox_exposure.reject()
+        self.assertFalse(series.ok)
+        self.assertFalse(series.awaiting_selection)
+        self.assertEqual(series.reason, gox_reference.NO_CHART_SELECTED)
+        document = json.loads((Path(pending.directory) / "series.json").read_text(encoding="utf-8"))
+        self.assertEqual((document["status"], document["reason"]), ("failed", gox_reference.NO_CHART_SELECTED))
+        self.analyze.assert_not_called()
+
+    async def test_no_candidate_in_any_capture_fails_before_selection(self):
+        self.undetectable = {25.0, 50.0, 100.0}
+        series = await gox_exposure.run("MCC24", 50.0)
+        self.assertFalse(series.ok)
+        self.assertFalse(series.awaiting_selection)
+        self.assertIn("No exposure produced a chart candidate", series.reason)
+        self.analyze.assert_not_called()
 
     async def test_saturated_high_step_is_excluded(self):
         self.config_gain = 1.4  # brighter scene within the 399.405 ms ExposureTime maximum
-        series = await gox_exposure.run("MCC24", 300.0)  # 250/300/350 ms; 350 ms clips
+        series = await self.run_and_choose(center_ms=300.0)  # 250/300/350 ms; 350 ms clips
         self.assertTrue(series.ok, series.reason)
         self.assertEqual(series.points[2].point.status, "clipped")
         self.assertEqual((series.fit.points_used, series.fit.points_excluded), (2, 1))
@@ -152,7 +201,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
                                        "exposure_time_us": exposure_ms * 1000 + OFFSET_US, "gain": gain}}
 
     async def test_verification_within_tolerance_and_refit_outside(self):
-        series = await gox_exposure.run("MCC24", 50.0)
+        series = await self.run_and_choose()
         suggested = series.suggested_exposure_ms
         good = gox_exposure.check_reference("MCC24", self._provenance(suggested), "reference_a")
         self.assertTrue(good.within)
@@ -167,7 +216,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gox_exposure.last_series().suggestion, bad.suggestion)
 
     async def test_saturated_verification_gives_a_lower_exposure_bound(self):
-        await gox_exposure.run("MCC24", 50.0)
+        await self.run_and_choose()
         status = [None] * 24
         status[18] = "clipped"
         provenance = self._provenance(600.0)
@@ -178,7 +227,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(check.suggestion.exposure_ms, 600.0)
 
     async def test_verification_is_skipped_for_another_device_or_chart(self):
-        await gox_exposure.run("MCC24", 50.0)
+        await self.run_and_choose()
         self.assertIsNone(gox_exposure.check_reference("SG140", self._provenance(380), "x"))
         self.assertIsNone(gox_exposure.check_reference("MCC24", self._provenance(380, device="other"), "x"))
         self.assertIsNone(gox_exposure.check_reference("MCC24", {"reference_exposure": None}, "x"))

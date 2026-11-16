@@ -18,8 +18,45 @@ from . import atomic_json, camera_operations, config_store, gox_tools, preview_i
 
 _status = ""
 _last_result: ReferenceResult | None = None
+_pending: _Pending | None = None
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_REFERENCE_BYTES = 4 * 1024 * 1024
+NO_CHART_SELECTED = "The operator found no chart among the detected candidates"
+
+
+@dataclass(frozen=True)
+class CandidateView:
+    """One detector candidate as the GUI offers it: a thumbnail with the candidate outlined."""
+
+    number: int  # what choose() takes
+    label: str
+    image: str  # preview_images URL
+
+
+def register_candidates(stem: str, offered: list[tuple[str, color_checker.ChartCandidate]]
+                        ) -> tuple[CandidateView, ...]:
+    """Publish (label, candidate) thumbnails, numbered from 1 in the given order."""
+    return tuple(CandidateView(number, f"{label} · OpenCV cost {candidate.cost:.3g}",
+                               preview_images.put(candidate.thumbnail_png, f"{stem}_candidate{number}.png"))
+                 for number, (label, candidate) in enumerate(offered, 1))
+
+
+def release_candidates(candidates: tuple[CandidateView, ...]) -> None:
+    preview_images.release(*(candidate.image for candidate in candidates))
+
+
+@dataclass
+class _Pending:
+    """A captured reference waiting for the operator to select the chart."""
+
+    session: Path
+    config: Path
+    document: dict
+    camera_dir: Path
+    chart_key: str
+    detection: color_checker.Detection
+    raw_output: str
+    started: float
 
 
 @dataclass(frozen=True)
@@ -39,6 +76,12 @@ class ReferenceResult:
     # gox_exposure.ExposureCheck against the active ETTR series, when applicable.
     exposure_check: object | None = None
     saved: bool = False  # moved from the output directory's tmp folder into the output directory
+    # Detector candidates waiting for the operator (choose / reject); empty otherwise.
+    candidates: tuple[CandidateView, ...] = ()
+
+    @property
+    def awaiting_selection(self) -> bool:
+        return bool(self.candidates)
 
 
 def capability_reason() -> str | None:
@@ -78,6 +121,7 @@ def _register_images(analysis: color_checker.CalibrationPreview) -> dict[str, st
 def _release(result: ReferenceResult | None) -> None:
     if result is not None:
         preview_images.release(*result.images.values())
+        release_candidates(result.candidates)
 
 
 def _validate_chart(chart_key: str) -> None:
@@ -151,9 +195,35 @@ async def capture(chart_key: str) -> ReferenceResult:
         "gox", lambda: _capture(chart_key), kind="gox-color-reference")
 
 
+async def _write_failed(session: Path | None, document: dict | None, failure: str, check=None) -> str:
+    """Record a failed reference; returns the failure, extended if the record cannot be written."""
+    if session is None or document is None:
+        return failure
+    if check is not None:
+        document["exposure_check"] = check.to_dict()
+    document.update(status="failed", error=failure, ended_utc=datetime.now(timezone.utc).isoformat())
+    document.pop("calibration", None)
+    document.pop("completed_utc", None)
+    try:
+        await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+    except (OSError, ValueError) as save_error:
+        failure += f"; failure metadata could not be saved: {save_error}"
+    return failure
+
+
+async def _abandon_pending(reason: str) -> None:
+    """A capture still waiting for a chart selection is failed when a new one replaces it."""
+    global _pending
+    pending, _pending = _pending, None
+    if pending is not None:
+        await _write_failed(pending.session, pending.document, reason)
+
+
 async def _capture(chart_key: str) -> ReferenceResult:
-    global _status, _last_result
+    """Capture and detect; the result waits for the operator's chart selection (choose / reject)."""
+    global _status, _last_result, _pending
     started = time.monotonic()
+    await _abandon_pending("Replaced by a new reference capture before a chart was selected")
     _release(_last_result)
     _last_result = None
     _status = f"Preparing {chart_key} reference capture…"
@@ -161,11 +231,9 @@ async def _capture(chart_key: str) -> ReferenceResult:
     config = None
     document = None
     raw_output = ""
-    analysis = None
+    detection = None
     failure = ""
-    check = None
     camera_dir = None
-    from . import gox_exposure  # imports this module; resolved at call time
     try:
         session, config, document, raw_config = await asyncio.to_thread(_prepare, chart_key)
         await asyncio.to_thread(_initialize, session, config, document, raw_config)
@@ -177,14 +245,69 @@ async def _capture(chart_key: str) -> ReferenceResult:
         document["camera_directory"] = captured.camera_dir.relative_to(session).as_posix()
         document["device_metadata"] = (captured.camera_dir / "device.json").relative_to(session).as_posix()
         camera_dir = captured.camera_dir
-        _status = f"Detecting {chart_key} and fitting native camera RGB to sRGB (D65)…"
-        analysis = await asyncio.to_thread(color_checker.calibrate, captured.camera_dir, chart_key)
+        _status = f"Detecting {chart_key} candidates…"
+        detection = await asyncio.to_thread(color_checker.detect, camera_dir, chart_key)
+        document.update(status="awaiting_chart_selection", detection_transfer=detection.transfer,
+                        chart_candidates=[candidate.to_dict() for candidate in detection.candidates])
+        await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+    except asyncio.CancelledError:
+        _status = "GOX reference capture interrupted; any acquired RAW is retained"
+        raise
+    except Exception as error:
+        failure = await _write_failed(session, document, str(error) or type(error).__name__)
+    common = {"chart_key": chart_key, "session_dir": str(session) if session else "",
+              "elapsed_s": time.monotonic() - started, "raw_output": raw_output,
+              "config_snapshot": str(config) if config else ""}
+    if failure:
+        _last_result = ReferenceResult(ok=False, reason=failure, **common)
+        _status = f"GOX reference failed: {failure}"
+        return _last_result
+    _pending = _Pending(session, config, document, camera_dir, chart_key, detection, raw_output, started)
+    offered = [(f"Candidate {candidate.number}", candidate) for candidate in detection.candidates]
+    _last_result = ReferenceResult(ok=False, candidates=register_candidates(session.name, offered), **common)
+    _status = (f"{len(offered)} {chart_key} candidate(s) detected; select the chart "
+               "(only you can tell the chart from a regular texture)")
+    return _last_result
+
+
+def _take_pending() -> _Pending:
+    global _pending
+    pending, _pending = _pending, None  # one decision per capture, whichever client makes it
+    if pending is None:
+        raise ValueError("No reference capture is waiting for a chart selection")
+    return pending
+
+
+async def choose(number: int) -> ReferenceResult:
+    """Calibrate the waiting capture with the candidate the operator selected."""
+    global _status, _last_result
+    pending = _pending
+    if pending is None:
+        raise ValueError("No reference capture is waiting for a chart selection")
+    candidate = next((item for item in pending.detection.candidates if item.number == number), None)
+    if candidate is None:
+        raise ValueError(f"Candidate {number} was not offered")
+    pending = _take_pending()
+    from . import gox_exposure  # imports this module; resolved at call time
+    session, document, chart_key = pending.session, pending.document, pending.chart_key
+    selection = {"candidate": candidate.number, "opencv_cost": candidate.cost,
+                 "candidate_count": len(pending.detection.candidates), "selected_by": "operator"}
+    _status = f"Fitting candidate {candidate.number} of the {chart_key} reference to sRGB (D65)…"
+    measurement = analysis = check = None
+    failure = ""
+    try:
+        measurement = await asyncio.to_thread(
+            color_checker.measure, pending.camera_dir, chart_key, candidate.polygons,
+            geometry=color_checker.GEOMETRY_SELECTED, detection_transfer=pending.detection.transfer,
+            selection=selection)
+        analysis = await asyncio.to_thread(color_checker.calibrate, pending.camera_dir, chart_key,
+                                           measurement=measurement)
         check = gox_exposure.check_reference(chart_key, analysis.provenance, session.name)
         if check is not None:
             document["exposure_check"] = check.to_dict()
             await gox_exposure.save_current()
         document.update(
-            status="completed", completed_utc=datetime.now(timezone.utc).isoformat(),
+            status="completed", completed_utc=datetime.now(timezone.utc).isoformat(), chart_selection=selection,
             calibration={"matrix": analysis.matrix, "loss": analysis.loss,
                          "patch_count": analysis.patch_count, "used_patches": analysis.used_patches,
                          "pixel_format": analysis.pixel_format, "full_scale": analysis.full_scale,
@@ -195,37 +318,42 @@ async def _capture(chart_key: str) -> ReferenceResult:
         )
         await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
     except asyncio.CancelledError:
-        _status = "GOX reference capture interrupted; any acquired RAW is retained"
-        # A manifest is successful only after the completed calibration was written.
+        _status = "GOX reference calibration interrupted; the RAW is retained"
         raise
     except Exception as error:
         failure = str(error) or type(error).__name__
-        if camera_dir is not None and analysis is None:
+        analysis = None
+        if measurement is not None:
             # e.g. an over-exposed verification capture: report its saturation to the series.
-            check = await asyncio.to_thread(gox_exposure.check_failed_capture, chart_key, camera_dir,
-                                            session.name)
+            check = gox_exposure.check_failed_capture(chart_key, measurement, session.name)
             if check is not None:
                 await gox_exposure.save_current()
-        if session is not None and document is not None:
-            if check is not None:
-                document["exposure_check"] = check.to_dict()
-            document.update(status="failed", error=failure, ended_utc=datetime.now(timezone.utc).isoformat())
-            document.pop("calibration", None)
-            document.pop("completed_utc", None)
-            try:
-                await asyncio.to_thread(atomic_json.write, session / "reference.json", document,
-                                        limit=MAX_REFERENCE_BYTES)
-            except (OSError, ValueError) as save_error:
-                failure += f"; failure metadata could not be saved: {save_error}"
+        document["chart_selection"] = selection
+        failure = await _write_failed(session, document, failure, check)
+    del measurement  # full-resolution native RGB
+    _release(_last_result)
     _last_result = ReferenceResult(
-        ok=not failure, reason=failure, chart_key=chart_key, session_dir=str(session) if session else "",
-        elapsed_s=time.monotonic() - started, raw_output=raw_output,
-        analysis=analysis if not failure else None, config_snapshot=str(config) if config else "",
-        images=_register_images(analysis) if analysis is not None and not failure else {},
+        ok=not failure, reason=failure, chart_key=chart_key, session_dir=str(session),
+        elapsed_s=time.monotonic() - pending.started, raw_output=pending.raw_output, analysis=analysis,
+        config_snapshot=str(pending.config), images=_register_images(analysis) if analysis is not None else {},
         exposure_check=check,
     )
     _status = (f"GOX reference captured in {session} (not yet saved to the output directory)" if not failure
                else f"GOX reference failed: {failure}")
+    return _last_result
+
+
+async def reject() -> ReferenceResult:
+    """None of the candidates is the chart: the reference fails and its RAW is kept."""
+    global _status, _last_result
+    pending = _take_pending()
+    failure = await _write_failed(pending.session, pending.document, NO_CHART_SELECTED)
+    _release(_last_result)
+    _last_result = ReferenceResult(
+        ok=False, reason=failure, chart_key=pending.chart_key, session_dir=str(pending.session),
+        elapsed_s=time.monotonic() - pending.started, raw_output=pending.raw_output,
+        config_snapshot=str(pending.config))
+    _status = f"GOX reference failed: {failure}"
     return _last_result
 
 
