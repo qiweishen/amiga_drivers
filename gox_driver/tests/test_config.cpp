@@ -149,11 +149,11 @@ TEST_CASE("config: invariants are rejected with the dotted key") {
 TEST_CASE("config: the 8-bit focus preview is reachable only from code, not from YAML") {
     CHECK(std::string(RequiredPixelFormat(false)) == "BayerRG12Packed");
     CHECK(std::string(RequiredPixelFormat(true)) == "BayerRG8");
-    CHECK(kMaxFocusFrameRateHz == doctest::Approx(9.079));
+    CHECK(kMaxFocusFrameRateHz == doctest::Approx(9.078));
     CHECK_FALSE(ParseOk(kMinimalCameras).cameras.at(0).acquisition.focus_preview);
     CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {focus_preview: true}")),
                    "unknown key 'cameras[0].acquisition.focus_preview'"));
-    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 9.079}")), "frame_rate_hz: must be <="));
+    CHECK(Contains(ErrorOf(DocWithCamera("    acquisition: {frame_rate_hz: 9.078}")), "frame_rate_hz: must be <="));
 }
 
 TEST_CASE("config: camera list validation") {

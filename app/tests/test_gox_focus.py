@@ -146,8 +146,8 @@ class AnalyzeTests(unittest.TestCase):
 
 class StreamRateTests(unittest.TestCase):
     def test_focus_rate_is_the_maximum_under_the_8_bit_ceiling(self):
-        self.assertEqual(timing.GOX_MAX_FOCUS_FRAME_RATE_HZ, 9.079)
-        for exposure_ms, expected in ((10.0, 9.079), (99.12, 9.079), (99.13, 9.078), (100.0, 9.0),
+        self.assertEqual(timing.GOX_MAX_FOCUS_FRAME_RATE_HZ, 9.078)
+        for exposure_ms, expected in ((10.0, 9.078), (99.14, 9.078), (99.15, 9.077), (100.0, 9.0),
                                       (150.0, 6.0), (399.405, 2.253)):
             with self.subTest(exposure_ms=exposure_ms):
                 rate = timing.gox_max_frame_rate_hz(exposure_ms, timing.GOX_MAX_FOCUS_FRAME_RATE_HZ)

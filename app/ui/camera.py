@@ -466,7 +466,7 @@ def camera_page() -> None:
 
         def _gox_focus_request(remember: bool) -> gox_focus.FocusRequest:
             """Workbench camera, exposure and gain; the frame rate is always the focus maximum
-            (BayerRG8, ≤ 9.079 Hz), independent of the workbench Frame rate field."""
+            (BayerRG8, ≤ 9.078 Hz), independent of the workbench Frame rate field."""
             ip, _mac = _gox_target()
             if not ip:
                 raise ValueError("Select a target GoX camera first")

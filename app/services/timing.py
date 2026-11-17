@@ -15,7 +15,7 @@ RATE_STEP_HZ = 0.001
 
 # GOX-12405C-PGE, full frame 4128 x 3008, BayerRG12Packed.
 GOX_MAX_FRAME_RATE_HZ = 6.054  # AcquisitionFrameRate ceiling set by the operator (2026-11-08)
-GOX_MAX_FOCUS_FRAME_RATE_HZ = 9.079  # focus-assist BayerRG8 stream only (2026-11-16)
+GOX_MAX_FOCUS_FRAME_RATE_HZ = 9.078  # focus-assist BayerRG8 stream only; displayed max 9.079 is not writable
 GOX_MIN_FRAME_RATE_HZ = 0.125  # longest frame period 8 s (manual p.36/p.141)
 GOX_MAX_EXPOSURE_MS = 399.405  # ExposureTime maximum 399405 us read back from the camera
 GOX_MIN_EXPOSURE_MS = 0.001

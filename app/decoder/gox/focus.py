@@ -1,7 +1,7 @@
 """Focus sharpness on GOX Bayer photosites (Camera Tools focus assist).
 
 The focus-assist stream trades depth for frame rate: ``jai_snapshot --stream-s``
-records 8-bit BayerRG8, at the camera's factory A/D depth, which reaches 9.079 Hz
+records 8-bit BayerRG8, at the camera's factory A/D depth, which reaches 9.078 Hz
 at the full frame instead of 6.054 Hz for BayerRG12Packed. This module therefore
 reads BayerRG8 only. Recordings, snapshots and references stay BayerRG12Packed.
 

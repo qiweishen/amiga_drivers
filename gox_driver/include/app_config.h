@@ -25,10 +25,12 @@ namespace gox {
 
     // Camera Tools focus assist only (jai_snapshot --stream-s), never a recording or snapshot:
     // frame rate matters more than depth there, so the preview stream uses 8-bit Bayer at
-    // the full frame, whose AcquisitionFrameRate ceiling is 9.079 Hz (set by the operator,
-    // 2026-11-16). The exposure limit and the 90 % period rule are unchanged.
+    // the full frame. Its AcquisitionFrameRate maximum displays as 9.079 Hz, but the camera's
+    // value is a double just below that: writing 9.079 failed on 2026-11-17 ("Value 9.079000
+    // must be smaller than or equal 9.079000"), so the ceiling is one 0.001 Hz step lower
+    // (operator decision, 2026-11-17). The exposure limit and the 90 % period rule are unchanged.
     inline constexpr const char *kFocusPixelFormat = "BayerRG8";
-    inline constexpr double kMaxFocusFrameRateHz = 9.079;
+    inline constexpr double kMaxFocusFrameRateHz = 9.078;
     // The exposure may use at most 90 % of the frame (or pulse) period.
     inline constexpr double kExposurePeriodFraction = 0.9;
 

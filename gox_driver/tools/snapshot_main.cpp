@@ -18,7 +18,7 @@ void Usage(const char *program) {
         "           --frame-rate-hz <value>\n"
         "Live stream: --stream-s <1..3600> keeps acquiring for up to that many seconds instead of\n"
         "           one frame, one record per RAW segment; SIGINT/SIGTERM is the normal end.\n"
-        "           The focus-assist stream is BayerRG8 (--frame-rate-hz up to 9.079)\n"
+        "           The focus-assist stream is BayerRG8 (--frame-rate-hz up to 9.078)\n"
         "Last stdout line: SNAPSHOT: OK <camera_dir> or SNAPSHOT: FAIL <code> <reason>\n", program);
 }
 }

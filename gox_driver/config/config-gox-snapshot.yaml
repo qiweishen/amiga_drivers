@@ -4,7 +4,7 @@
 # Shared camera profile for jai_snapshot (Camera workbench and ColorChecker reference).
 # The tool forces: max_frames 1, max_duration_s 15, ptp off, trigger freerun,
 # SensorSync off, cameras[0] enabled, output under --out.
-# Focus assist (--stream-s N): BayerRG8 (code-only exception, frame_rate_hz up to 9.079), max_frames 0,
+# Focus assist (--stream-s N): BayerRG8 (code-only exception, frame_rate_hz up to 9.078), max_frames 0,
 # max_duration_s N, one record per segment; SIGTERM ends the stream.
 # Workbench overrides: device.ip (--ip), exposure_ms (--exposure-ms), gain (--gain), frame_rate_hz (--frame-rate-hz).
 # ColorChecker reference uses this profile's camera parameters without workbench overrides.

@@ -3,7 +3,7 @@
 ``jai_snapshot --stream-s`` uses the freerun snapshot profile (PTP and SensorSync
 off; the workbench camera, exposure and gain as command-line overrides) but in
 8-bit BayerRG8 and always at the highest frame rate the exposure allows under
-the 9.079 Hz focus ceiling (timing.GOX_MAX_FOCUS_FRAME_RATE_HZ). It keeps
+the 9.078 Hz focus ceiling (timing.GOX_MAX_FOCUS_FRAME_RATE_HZ). It keeps
 acquiring, one RAW record per segment, until it receives SIGTERM. This service
 follows the newest committed record, scores it
 with decoder.gox.focus, and deletes the closed segments behind it, so a stream

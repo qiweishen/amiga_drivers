@@ -145,8 +145,10 @@ ETTR 建议的 Apply 只改曝光，帧率不变。snapshot 配置仍不在 Conf
 **Camera Tools → GoX · Focus assist** 用于对焦。它以 GoX 工作台当前的目标相机、曝光和
 增益持续采集，实时给出 ROI 清晰度相对本次峰值的百分比。对焦更看重帧率而非位深，所以
 这条流固定使用 8-bit `BayerRG8`，并始终以最高帧率运行：
-`floor(min(9.079, 900 / exposure_ms), 0.001)` Hz。9.079 Hz 是全幅 BayerRG8 的
-AcquisitionFrameRate 上限，曝光仍须 ≤ 帧周期的 90%（`timing.GOX_MAX_FOCUS_FRAME_RATE_HZ`
+`floor(min(9.078, 900 / exposure_ms), 0.001)` Hz。全幅 BayerRG8 的
+AcquisitionFrameRate 上限显示为 9.079 Hz，但相机内部是略小于它的浮点数，写入 9.079 会被
+GenApi 拒绝（2026-11-17 真机报错“9.079000 must be smaller than or equal 9.079000”），所以
+上限取低一档 9.078 Hz。曝光仍须 ≤ 帧周期的 90%（`timing.GOX_MAX_FOCUS_FRAME_RATE_HZ`
 对应 C++ 的 `gox::kMaxFocusFrameRateHz`）。工作台的 Frame rate 框不参与对焦流。
 流运行中修改曝光或增益不会生效，需停止后重新开始。
 
@@ -176,7 +178,7 @@ AcquisitionFrameRate 上限，曝光仍须 ≤ 帧周期的 90%（`timing.GOX_MA
 - 操作：先调曝光，使 ROI 不饱和。缓慢转动对焦环，越过峰值直到百分比明显下降，再回调
   到 ≥ 95%，锁紧后确认仍 ≥ 95%。改变目标高度、光圈或光照后，先按 Reset peak。
 
-本功能尚未经过真机运行验证，包括 9.079 Hz 在 BayerRG8 与出厂 A/D 深度下能否写入和
+本功能尚未经过完整的真机验证，包括 9.078 Hz 在 BayerRG8 与出厂 A/D 深度下能否写入和
 维持。
 
 ## Reference capture
