@@ -9,7 +9,7 @@
 
 # --- Device ---
 device:
-    ip: "10.95.2.102"
+    ip: "10.95.76.110"
     port: 28784                         # 1..65535
     user: "admin"                       # 1..16 chars, not RxAdmin (p.87)
     password: "septentrio"              # 1..16 chars
@@ -22,10 +22,10 @@ receiver:
         require_finetime: false         # ReceiverStatus FINETIME bit (p.374)
 
     ntrip:
-        enabled: false
+        enabled: true
         caster: www.smartnetaus.com     # <= 40 chars, no whitespace
         port: 15101                     # 1..65535
-        username: "<?>"                 # <= 128 chars
+        username: "tpa_field"           # <= 128 chars
         password: "<?>"                 # <= 32 chars; " ' $ & , are escaped by the driver
         mount_point: MSM_VRS            # <= 32 chars
         version: v2                     # v1 | v2
@@ -36,7 +36,7 @@ receiver:
         main_antenna_type: Unknown      # exact lstAntennaInfo name or Unknown (p.66)
         aux_antenna_type: Unknown
         attitude_offset_deg:            # Main->Aux1 baseline vs vehicle axis
-            heading: 90.0                # -360..360
+            heading: 0.0                # -360..360
             pitch: 0.0                  # -90..90
         antenna_lever_arm_m:            # IMU reference -> main ARP; X fwd, Y right, Z down (p.113)
             x: 0.0                      # -100..100
