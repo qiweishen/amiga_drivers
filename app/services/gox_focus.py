@@ -3,17 +3,11 @@
 ``jai_snapshot --stream-s`` uses the freerun snapshot profile (PTP and SensorSync
 off; the workbench camera, exposure and gain as command-line overrides) but in
 8-bit BayerRG8 and always at the highest frame rate the exposure allows under
-the 9.078 Hz focus ceiling (timing.GOX_MAX_FOCUS_FRAME_RATE_HZ). It keeps
-acquiring, one RAW record per segment, until it receives SIGTERM. This service
-follows the newest committed record, scores it
-with decoder.gox.focus, and deletes the closed segments behind it, so a stream
-keeps a few frames on disk however long the focus ring is turned. The stream is
-a preview: the next stream replaces its directory and no configuration is written.
-
-The stream holds the camera reservation for its whole life, so recording and the
-other camera tools stay locked until it ends: on Stop, the header's Stop tool,
-the tool's duration limit or failure, or when no Camera Tools page has polled
-for HEARTBEAT_TIMEOUT_S (a closed tab cannot keep the camera).
+the 9.078 Hz focus ceiling (timing.GOX_MAX_FOCUS_FRAME_RATE_HZ). It writes one
+RAW record per segment. This service follows the newest committed record and
+scores it with decoder.gox.focus; services.focus_stream runs the tool, prunes
+the segments behind the newest frames and ends the stream (Stop, the header's
+Stop tool, the duration limit, a failure, or no Camera Tools page polling).
 
 The state below belongs to the event loop. Worker threads receive immutable
 arguments and return a FocusSample; pages read a FocusView copy.
@@ -23,33 +17,22 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import contextlib
-import shutil
 import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
-
 from ..constants import BIN_SNAPSHOT, FOCUS_DIR, SNAPSHOT_CONFIG
 from ..decoder.ebus import recording as raw_recording
 from ..decoder.gox import focus
 from ..state import STATE
-from . import camera_operations, config_store, preview_images, snapshot_tool, timing, tool_jobs
+from . import camera_operations, config_store, focus_stream, timing
+from .focus_stream import MAX_STREAM_S, StreamResult
 
-MAX_STREAM_S = 1800.0  # jai_snapshot --stream-s: bounds a stream whose GUI went away
-HEARTBEAT_TIMEOUT_S = 15.0
-POLL_S = 0.05
 OVERVIEW_INTERVAL_S = 1.0
 MEDIAN_FRAMES = 3
 HISTORY_POINTS = 600
-KEEP_SEGMENTS = 3  # one frame each
-MAX_READ_ERRORS = 20  # consecutive unreadable newest frames end the stream
 DEFAULT_HALF_PX = 200
-OUTPUT_TAIL_BYTES = 256 * 1024
-_RETIRED_URLS = 6  # replaced images stay servable briefly for a browser still loading them
-_READ_ERRORS = (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, cv2.error)
 
 
 @dataclass(frozen=True)
@@ -65,13 +48,6 @@ def request_for(target_ip: str, exposure_ms: float, gain: float) -> FocusRequest
     exposure_ms = timing.gox_check_exposure(exposure_ms)
     rate = timing.gox_max_frame_rate_hz(exposure_ms, timing.GOX_MAX_FOCUS_FRAME_RATE_HZ)
     return FocusRequest(target_ip, exposure_ms, float(gain), rate)
-
-
-@dataclass(frozen=True)
-class StreamResult:
-    ok: bool
-    reason: str = ""
-    raw_output: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,7 +94,7 @@ class _State:
         self.last_touch = 0.0
         self.roi_center: tuple[float, float] | None = None  # None: frame centre
         self.roi_half = DEFAULT_HALF_PX
-        self.retired: collections.deque[str] = collections.deque()
+        self.images = focus_stream.Images()
         self.overview_url = self.loupe_url = ""
         self.reset_stream()
 
@@ -234,7 +210,7 @@ async def _supervise(request: FocusRequest) -> None:
 
 async def _stream(request: FocusRequest) -> StreamResult:
     """Run inside the camera reservation: launch, follow, then stop the tool."""
-    output = await asyncio.to_thread(_fresh_output)
+    output = await asyncio.to_thread(focus_stream.fresh_output, FOCUS_DIR)
     config = config_store.checked_snapshot_path(SNAPSHOT_CONFIG)
     argv = [
         str(BIN_SNAPSHOT), "--config", str(config),
@@ -242,53 +218,22 @@ async def _stream(request: FocusRequest) -> StreamResult:
         "--exposure-ms", str(request.exposure_ms), "--gain", str(request.gain),
         "--frame-rate-hz", str(request.frame_rate_hz), "--stream-s", f"{MAX_STREAM_S:g}",
     ]
-    if _s.stop_requested:
-        return StreamResult(True, "Stopped before the camera was opened")
-    proc = await tool_jobs.spawn(argv)
-    stdout, stderr = _Tail(), _Tail()
-    readers = asyncio.gather(stdout.drain(proc.stdout), stderr.drain(proc.stderr))
-    exited = asyncio.create_task(proc.wait())
-    ended_by, failure = "", ""
-    try:
-        while not exited.done():
-            if _s.stop_requested:
-                ended_by = "Stopped"
-                break
-            if time.monotonic() - _s.last_touch > HEARTBEAT_TIMEOUT_S:
-                ended_by = "Stopped because no Camera Tools page is open"
-                break
-            failure = await _poll(output)
-            if failure:
-                break
-            await asyncio.wait({exited}, timeout=POLL_S)
-    finally:
-        if not exited.done():
-            _s.phase = "stopping"
-            _changed()
-            await tool_jobs.terminate(proc)  # SIGTERM: the tool stops acquisition and closes its RAW
-        try:
-            await asyncio.wait_for(readers, 10)
-        except (asyncio.TimeoutError, OSError):
-            readers.cancel()
-        await asyncio.to_thread(_drop_segments, output)
-    if STATE.tool_operation.get("stop_requested"):
-        ended_by = ended_by or "Stopped from the header's Stop tool"
-    run = snapshot_tool.interpret(stdout.text(), stderr.text(), proc.returncode)
-    if failure:
-        return StreamResult(False, failure, run.raw_output)
-    if run.ok:
-        return StreamResult(True, ended_by or f"Stream reached its {MAX_STREAM_S / 60:g}-minute limit; "
-                                              "start it again to continue", run.raw_output)
-    # A stop during camera bring-up ends the tool with "no frame" (7) or "interrupted" (130).
-    if ended_by and run.reason.startswith(("7 ", "130 ")):
-        return StreamResult(True, f"{ended_by} before the first frame", run.raw_output)
-    return StreamResult(False, f"Stream failed: {run.reason}", run.raw_output)
+    return await focus_stream.run(argv, output, poll=_poll, stop_reason=_stop_reason, on_stopping=_on_stopping)
+
+
+def _stop_reason() -> str:
+    return "Stopped" if _s.stop_requested else focus_stream.no_page_reason(_s.last_touch)
+
+
+def _on_stopping() -> None:
+    _s.phase = "stopping"
+    _changed()
 
 
 async def _poll(output: Path) -> str:
     """Analyse the newest frame if there is one; return a reason to end the stream, else ""."""
     if _s.camera_dir is None:
-        _s.camera_dir = await asyncio.to_thread(_camera_directory, output)
+        _s.camera_dir = await asyncio.to_thread(focus_stream.camera_directory, output)
         if _s.camera_dir is None:
             return ""
     now = time.monotonic()
@@ -296,11 +241,11 @@ async def _poll(output: Path) -> str:
     overview = not _s.overview_url or now - _s.overview_at >= OVERVIEW_INTERVAL_S
     try:
         sample = await asyncio.to_thread(_read_newest, _s.camera_dir, _s.last_seq, center, half, overview)
-    except _READ_ERRORS as error:
+    except focus_stream.READ_ERRORS as error:
         _s.read_errors += 1
         _s.message, _s.message_is_error = f"Cannot analyse the newest frame: {error}", True
         _changed()
-        return _s.message if _s.read_errors >= MAX_READ_ERRORS else ""
+        return _s.message if _s.read_errors >= focus_stream.MAX_READ_ERRORS else ""
     if sample is not None:
         _publish(sample, center, half, time.monotonic())
     return ""
@@ -319,11 +264,11 @@ def _publish(sample: focus.FocusSample, center, half: int, now: float) -> None:
     if _s.phase == "starting":
         _s.phase = "live"
     if sample.overview_png is not None:
-        _s.overview_url = _replace(_s.overview_url, preview_images.put(
-            sample.overview_png, f"gox_focus_overview_{sample.seq}.png"))
+        _s.overview_url = _s.images.replace(_s.overview_url, sample.overview_png,
+                                            f"gox_focus_overview_{sample.seq}.png")
         _s.overview_scale, _s.overview_at = sample.overview_scale, now
     if (center, half) == (_s.roi_center, _s.roi_half):  # else the ROI moved during the analysis
-        _s.loupe_url = _replace(_s.loupe_url, preview_images.put(sample.loupe_png, f"gox_focus_roi_{sample.seq}.png"))
+        _s.loupe_url = _s.images.replace(_s.loupe_url, sample.loupe_png, f"gox_focus_roi_{sample.seq}.png")
         _s.loupe_origin = sample.loupe_origin
         _s.score, _s.signal_dn, _s.clipped_pct = sample.score, sample.signal_dn, sample.clipped_pct
         if sample.score is None:
@@ -338,76 +283,18 @@ def _publish(sample: focus.FocusSample, center, half: int, now: float) -> None:
     _changed()
 
 
-def _replace(old: str, new: str) -> str:
-    if old:
-        _s.retired.append(old)
-    while len(_s.retired) > _RETIRED_URLS:
-        preview_images.release(_s.retired.popleft())
-    return new
-
-
 def _release_images() -> None:
-    preview_images.release(_s.overview_url, _s.loupe_url, *_s.retired)
-    _s.retired.clear()
+    _s.images.release(_s.overview_url, _s.loupe_url)
     _s.overview_url = _s.loupe_url = ""
-
-
-# --- worker-thread helpers (no shared state) ---------------------------------
-
-def _fresh_output() -> Path:
-    FOCUS_DIR.mkdir(parents=True, exist_ok=True)
-    for stale in FOCUS_DIR.iterdir():
-        if stale.is_dir():
-            shutil.rmtree(stale, ignore_errors=True)
-    return FOCUS_DIR / time.strftime("%Y%m%d_%H%M%S")
-
-
-def _camera_directory(output: Path) -> Path | None:
-    """The tool writes <output>/<camera_id>/; it exists once the recorder opened."""
-    if not output.is_dir():
-        return None
-    return next((path for path in sorted(output.iterdir()) if path.is_dir() and raw_recording.segment_paths(path)),
-                None)
 
 
 def _read_newest(camera_dir: Path, last_seq: int | None, center, half: int,
                  overview: bool) -> focus.FocusSample | None:
+    """Worker thread: score the newest committed frame unless it was seen already."""
     try:
-        record = raw_recording.newest_valid_record(camera_dir, segments=KEEP_SEGMENTS)
+        record = raw_recording.newest_valid_record(camera_dir, segments=focus_stream.KEEP_SEGMENTS)
         if record is None or record.sequence == last_seq:
             return None
         return focus.analyze(record, raw_recording.read_payload(record), center, half, overview=overview)
     finally:
-        # Only the writer's newest segment is open; older ones are closed for good.
-        for path in raw_recording.segment_paths(camera_dir)[:-KEEP_SEGMENTS]:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-
-
-def _drop_segments(output: Path) -> None:
-    """Keep device.json and events.jsonl of the last stream for diagnostics, not its frames."""
-    if output.is_dir():
-        for path in output.glob("*/seg_*.raw"):
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-
-
-class _Tail:
-    """The last OUTPUT_TAIL_BYTES of a pipe, drained continuously so the tool never blocks on it."""
-
-    def __init__(self) -> None:
-        self._chunks: collections.deque[bytes] = collections.deque()
-        self._size = 0
-        self._truncated = False
-
-    async def drain(self, stream: asyncio.StreamReader) -> None:
-        while chunk := await stream.read(65536):
-            self._chunks.append(chunk)
-            self._size += len(chunk)
-            while self._size > OUTPUT_TAIL_BYTES and len(self._chunks) > 1:
-                self._size -= len(self._chunks.popleft())
-                self._truncated = True
-
-    def text(self) -> str:
-        prefix = "[earlier output omitted]\n" if self._truncated else ""
-        return prefix + b"".join(self._chunks).decode(errors="replace")
+        focus_stream.prune_segments(camera_dir)

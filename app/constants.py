@@ -65,6 +65,7 @@ SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs
 FOCUS_DIR = RUNTIME_DIR / "focus"  # GoX focus-assist stream; replaced by the next stream
+FX10_FOCUS_DIR = RUNTIME_DIR / "focus_fx10"  # FX10 focus-assist stream; likewise
 
 SESSION_DIR_RE = r"^\d{8}_\d{6}$"  # <Output Directory>/<YYYYMMDD_HHMMSS>/
 

@@ -278,6 +278,14 @@ def first_preview_frame(directory: Path, *, verify_crc: bool = False):
     return records[first], read_payload(records[first], verify_crc=verify_crc), first > 0
 
 
+def _has_records(path: Path) -> bool:
+    """False for a segment the writer has just created (header not yet complete) or that is gone."""
+    try:
+        return path.stat().st_size > FILE_HEADER_SIZE
+    except FileNotFoundError:
+        return False
+
+
 def newest_valid_record(directory: Path, *, segments: int = 3) -> Record | None:
     """Newest committed valid image in a stream that rolls over to a new segment per record.
 
@@ -286,10 +294,7 @@ def newest_valid_record(directory: Path, *, segments: int = 3) -> Record | None:
     yet) is skipped instead of failing, and a torn trailing record is ignored.
     """
     for path in reversed(segment_paths(directory)[-max(1, segments):]):
-        try:
-            if path.stat().st_size <= FILE_HEADER_SIZE:
-                continue
-        except FileNotFoundError:
+        if not _has_records(path):
             continue
         newest = None
         for record in iter_records(path, live=True):
@@ -301,8 +306,11 @@ def newest_valid_record(directory: Path, *, segments: int = 3) -> Record | None:
 
 
 def latest_records(directory: Path, limit: int) -> list[Record]:
-    """The newest ``limit`` valid records of the newest segment and its predecessor."""
+    """The newest ``limit`` valid records of the newest segment and its predecessor.
+
+    A segment the writer has just created (header not yet complete) does not count.
+    """
     selected = deque(maxlen=max(1, limit))
-    for path in segment_paths(directory)[-2:]:
+    for path in [path for path in segment_paths(directory)[-3:] if _has_records(path)][-2:]:
         selected.extend(record for record in iter_records(path, live=True) if record.valid_frame)
     return list(selected)

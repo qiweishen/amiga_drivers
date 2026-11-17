@@ -74,8 +74,9 @@ def load_capture(directory: Path) -> Capture:
                    _axis(doc.get("wavelengths_nm", []), bands), float(rate))
 
 
-def _decode_raw(record, capture: Capture):
-    image, name, _ = raw_pixels.decode_record(record, raw_recording.read_payload(record))
+def decode_frame(record, capture: Capture) -> np.ndarray:
+    """One valid record as (bands, samples) native DN, checked against the capture profile."""
+    image, name, _ =raw_pixels.decode_record(record, raw_recording.read_payload(record))
     if name != capture.pixel_format or image.shape != (capture.bands, capture.samples):
         raise ValueError("Recorded image disagrees with the FX10 profile")
     # Detach views from acquired buffers so statistics do not retain chunk tails.
@@ -87,7 +88,7 @@ def raw_frame_batches(directory: Path, capture: Capture, *, batch_bytes=8 * 1024
     for record in raw_recording.session_records(directory):
         if not record.valid_frame:
             continue
-        batch.append(_decode_raw(record, capture))
+        batch.append(decode_frame(record, capture))
         if len(batch) * capture.line_bytes >= batch_bytes:
             yield np.stack(batch)
             batch.clear()
@@ -106,7 +107,7 @@ def raw_tail_cube(directory: Path, capture: Capture, limit: int):
     records = raw_recording.latest_records(directory, limit)
     if not records:
         raise ValueError("No complete valid raw image yet")
-    return np.stack([_decode_raw(record, capture) for record in records]), records[-1].hrt
+    return np.stack([decode_frame(record, capture) for record in records]), records[-1].hrt
 
 
 def snapshot_cube(directory: Path) -> tuple[Capture, np.ndarray]:

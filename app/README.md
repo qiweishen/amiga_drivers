@@ -158,8 +158,9 @@ GenApi 拒绝（2026-11-17 真机报错“9.079000 must be smaller than or equal
   `AcquisitionConfig::focus_preview` 标志，YAML 无法设置）。录制、快照和参考仍只接受
   `BayerRG12Packed`。A/D 深度保持出厂值，回读须为 10 或 12 位；8 位会使灵敏度变为 4 倍
   （手册 p.45），工作台曝光就不再对应录制。对焦流的队列按约 2 s 写盘停顿设置。
-  `services/gox_focus.py` 跟随最新一条已提交记录进行分析，并删除其后已关闭的段，因此
-  磁盘上只保留约 3 帧。流目录位于 `app/_runtime/focus/`，下一次开流时整体替换；结束后
+  `services/gox_focus.py` 跟随最新一条已提交记录进行分析；开流、心跳、SIGTERM 停流和
+  删段由 GoX 与 FX10 共用的 `services/focus_stream.py` 完成，它删除最新 3 段之前已关闭
+  的段，因此磁盘上只保留约 3 帧。流目录位于 `app/_runtime/focus/`，下一次开流时整体替换；结束后
   只保留 `device.json` 和 `events.jsonl` 供诊断。对焦流不写任何配置。
 - 指标（`decoder/gox/focus.py`）：只取 BayerRG 的 Gr 感光点（2×2 的第 0 行第 1 列），
   直接读取 8-bit 载荷，不去马赛克。
@@ -180,6 +181,36 @@ GenApi 拒绝（2026-11-17 真机报错“9.079000 must be smaller than or equal
 
 本功能尚未经过完整的真机验证，包括 9.078 Hz 在 BayerRG8 与出厂 A/D 深度下能否写入和
 维持。
+
+## FX10 focus assist
+
+**Camera Tools → FX10 · Focus assist** 用于 FX10e 对焦，测量逻辑移植自
+`resource/fx10e_focus_monitor.py`，但不设空间 ROI：FX10 只成像一条线，整条线上的边缘
+都参与计算。流使用 FX10 工作台当前的目标相机、曝光、两个 binning 和帧率（与 Take
+snapshot 的检查相同），流运行中修改需停止后重新开始。
+
+- 采集：`fx10_snapshot --stream-s 1800`，使用 snapshot 配置的 freerun 档（SensorSync
+  关闭），像素格式和 binning 不变。与快照的区别：不限帧数；每个 RAW 段约 0.25 s 的线
+  （`max(1, ceil(帧率 × 0.25))` 条记录），各帧率下都约每秒 4 段。`--frames` 与
+  `--stream-s` 互斥。`services/fx10_focus.py` 至多每 0.25 s 取最新约 0.2 s 的帧（至多
+  16 帧）求平均后测量，删段和停流同 GoX（`services/focus_stream.py`）。流目录位于
+  `app/_runtime/focus_fx10/`，结束后只保留 `device.json` 和 `events.jsonl`。不写任何配置。
+- 指标（`decoder/fx10/focus.py`）：波段平均成 28 组（出厂 2× 光谱 binning 时每组 8 个
+  波段）；在 450–900 nm 各组的平均剖面上找边缘，只保留两侧都有平台的孤立边缘，所以条码
+  阶梯和 V 形定位缝自动被排除；每组内逐个边缘以 50% 过零点重新定中、用各自平台归一化到
+  0..1，叠成一条过采样 ESF，拟合高斯 ESF 得 LSF FWHM（px，越小越清晰；含像素采样，约
+  1.0–1.3 px 为下限）。对焦值为 450–900 nm 内所有组、所有边缘的联合拟合；L · C · R 为
+  整条线三等分各自的拟合。没有记录波长时，按界面统一的 400–1000 nm 均匀映射选组（非标定）。
+  显示值为最近 3 次测量的中位数，“% of session best” = 100 × 本次最佳 / 当前；Reset
+  best 和重新开流时清零。像素满量程占比超过 0.5% 或边缘少于 4 个时会提示。
+- 画面：与 eBUS Player 相同的方向（横轴空间像素、纵轴波段），一个图像像素对应一个帧像素，
+  显示的是参与测量的平均帧（线性 DN/满量程，8 bit，不拉伸），条码目标呈竖条纹；橙色刻度
+  标出被测边缘。点击画面移动放大镜，点击放大镜微调中心。放大镜固定 128 × 64 帧像素、
+  不平滑放大，只影响显示，不影响 FWHM。右侧图表为各波段组的 FWHM（当前与本次最佳）。
+- 占用与操作同 GoX：流运行期间持有相机预留；先调曝光避免饱和，肉眼粗调到边缘被标出，
+  再缓慢转过最佳点，回调到 ≥ 95% 后锁紧。
+
+本功能尚未经过真机验证。
 
 ## Reference capture
 

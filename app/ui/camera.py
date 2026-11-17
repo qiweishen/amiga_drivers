@@ -1,5 +1,5 @@
 """Camera Tools: one discovery table for both cameras, Set IP, the GoX and FX10
-exposure workbenches, and the GoX focus assist.
+exposure workbenches, and the GoX and FX10 focus assists.
 
 Discovery is a GigE broadcast, so it also runs during a recording; a camera the
 recording owns is marked "in use" and its snapshot and Set IP stay disabled.
@@ -13,11 +13,11 @@ import ipaddress
 from collections.abc import Callable
 from nicegui import app, ui
 
-from . import fx10_plot, gox_focus as gox_focus_ui, layout
+from . import fx10_focus as fx10_focus_ui, fx10_plot, gox_focus as gox_focus_ui, layout
 from .components import NEXT_RUN, PREVIEW_DETAILS, heading, hint, info, preview_image
 from ..constants import TOOL_TICK_S
-from ..services import (camera_operations, config_store, ebus_tools, fx10_tools, gox_focus, gox_tools, preview_images,
-                        timing)
+from ..services import (camera_operations, config_store, ebus_tools, fx10_focus, fx10_tools, gox_focus, gox_tools,
+                        preview_images, timing)
 from ..state import STATE, ProcState
 
 _COLUMNS = [
@@ -245,6 +245,10 @@ def camera_page() -> None:
         # ============================================== GoX focus assist
         gox_focus_ui.focus_panel(request=lambda remember: _gox_focus_request(remember),
                                  target_ip=lambda: _gox_target()[0], show_raw=lambda text: _show_raw(text))
+
+        # ============================================= FX10 focus assist
+        fx10_focus_ui.focus_panel(request=lambda remember: _fx10_focus_request(remember),
+                                  target_ip=lambda: _fx10_target(), show_raw=lambda text: _show_raw(text))
 
         with ui.expansion("Raw output of the last command", icon="terminal").classes("w-full"):
             raw_pre = ui.element("pre").classes("terminal-surface w-full text-xs font-mono whitespace-pre-wrap")
@@ -553,6 +557,19 @@ def camera_page() -> None:
             if not timing.exposure_fits(exposure_ms, rate):
                 raise ValueError(timing.period_error(exposure_ms, rate))
             return exposure_ms, spatial, spectral, rate
+
+        def _fx10_focus_request(remember: bool) -> fx10_focus.FocusRequest:
+            """Workbench camera, exposure, binning and frame rate, after Take snapshot's checks."""
+            ip = _fx10_target()
+            if not ip:
+                raise ValueError("Select a target FX10 camera first")
+            exposure_ms, spatial, spectral, rate = _fx10_timing_values()
+            if remember:
+                app.storage.general["fx10_exposure_ms"] = fx10_exposure.value
+                app.storage.general["fx10_spatial_binning"] = fx10_spatial.value
+                app.storage.general["fx10_spectral_binning"] = fx10_spectral.value
+                app.storage.general["fx10_frame_rate_hz"] = rate
+            return fx10_focus.FocusRequest(ip, exposure_ms, spatial, spectral, rate)
 
         async def _fx10_snap() -> None:
             if STATE.snapshot_busy:
