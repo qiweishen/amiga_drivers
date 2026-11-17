@@ -99,8 +99,3 @@ def fetch(key: str) -> tuple[bytes, str, str] | None:
             with _guard:
                 _evict()
     return entry.data, entry.media_type, entry.filename
-
-
-def clear() -> None:
-    with _guard:
-        _entries.clear()

@@ -1,34 +1,23 @@
-"""Camera Tools: one discovery table for both camera drivers, a Set IP action
-for field re-addressing, then a per-driver exposure workbench (preview +
-Apply to the recording and snapshot configs).
+"""Camera Tools: one discovery table for both cameras, Set IP, the GoX and FX10
+exposure workbenches, and the GoX focus assist.
 
-Discovery is shared because the two backends answer the same question about the
-same GigE segment: one `ebus_discover --json` scan (common/) fills one table,
-rows are classified by vendor (JAI -> GoX, Specim -> FX10), and selecting a row
-targets that camera's own section. The scan is a broadcast the cameras answer
-without a control channel, so it runs even while a recording is on; a row whose
-driver owns the camera is marked "in use" and its camera-touching actions
-(snapshot, Set IP) stay disabled.
-
-Set IP runs `ebus_set_ip`: a FORCEIP (immediate, transient) followed by the
-persistent-IP GenICam nodes (kept across power cycles), then optionally rewrites
-`device.ip` in the driver's config. Both sections tune AGAINST A LIVE CAMERA
-without touching any config: the snapshot tools take the values as CLI
-overrides. "Apply to config" is the separate, explicit step that writes the
-winning values into both the driver's recording and snapshot configs (comment-preserving, see
-services/config_store.py).
+Discovery is a GigE broadcast, so it also runs during a recording; a camera the
+recording owns is marked "in use" and its snapshot and Set IP stay disabled.
+Workbench values reach the snapshot tools as command-line overrides; only
+"Apply to config" writes them into the recording and snapshot configs.
 """
 
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Callable
 from nicegui import app, ui
 
 from . import fx10_plot, gox_focus as gox_focus_ui, layout
+from .components import NEXT_RUN, PREVIEW_DETAILS, heading, hint, info, preview_image
 from ..constants import TOOL_TICK_S
-from ..decoder.gox.preview import DISPLAY_LONG_EDGE
-from ..services import (config_actions, ebus_tools, fx10_timing, fx10_tools, gox_focus, gox_timing, gox_tools,
-                        preview_images)
+from ..services import (camera_operations, config_store, ebus_tools, fx10_tools, gox_focus, gox_tools, preview_images,
+                        timing)
 from ..state import STATE, ProcState
 
 _COLUMNS = [
@@ -42,7 +31,48 @@ _COLUMNS = [
 ]
 
 _BINNING = [1, 2, 4, 8]
-_CONFIG_KINDS = {"GoX": "gox", "FX10": "fx10"}  # kinds that have a driver config to point at the camera
+
+
+class _ExposureRate:
+    """Exposure slider + number, and a Frame rate field whose maximum follows the exposure.
+
+    The rate starts at the highest value at which the exposure uses at most 90 % of
+    the frame period (``max_rate``); a rate the operator lowered is kept while it
+    stays below that maximum.
+    """
+
+    def __init__(self, model: str, low: float, high: float, exposure_ms: float, rate_floor: float,
+                 rate_ceiling: float, max_rate: Callable[[float], float]) -> None:
+        ui.label("Exposure (ms)").classes("font-medium")
+        ui.label(f"{model} · {low:g}–{high:g} ms").classes("text-xs muted")
+        self.exposure = ui.slider(min=low, max=high, step=0.001, value=min(high, exposure_ms))
+        with ui.row().classes("w-full items-start gap-2 no-wrap"):
+            ui.number("Exposure", min=low, max=high, step=0.001, suffix="ms").bind_value(
+                self.exposure).classes("flex-1 min-w-0")
+            self.rate = ui.number("Frame rate", min=rate_floor, max=rate_ceiling, step=timing.RATE_STEP_HZ,
+                                  precision=3, suffix="Hz").classes("flex-1 min-w-0")
+        self._hint = ui.label("").classes("text-xs muted")
+        self._floor, self._max_rate, self._auto = rate_floor, max_rate, None
+        self.exposure.on_value_change(lambda _event: self.sync())
+
+    def sync(self, restore: float | None = None) -> None:
+        try:
+            auto = self._max_rate(float(self.exposure.value))
+        except (TypeError, ValueError):
+            return
+        previous, current = self._auto, self.rate.value
+        self._auto = auto
+        self.rate.max = auto
+        if restore is not None and self._floor <= restore <= auto:
+            self.rate.set_value(restore)
+        elif current is None or previous is None or current > auto or abs(float(current) - previous) < 1e-9:
+            self.rate.set_value(auto)
+        self._hint.set_text(f"Max {auto:.3f} Hz · exposure ≤ {timing.PERIOD_FRACTION:.0%} of period")
+
+
+def _kind_guard(kind: str) -> str | None:
+    """Why the discovery row's camera must not be touched now, or None."""
+    return camera_operations.guard_reason(camera_operations.DRIVER_OF_KIND.get(kind))
 
 
 def _escape(text: str) -> str:
@@ -83,9 +113,8 @@ def _check_ip_inputs(ip: str, mask: str, gateway: str, host_subnets: list[str], 
         if new_ip in host.network and host.ip in network:
             reachable = True
     if not reachable and not allow_foreign:
-        return (f"{ip}/{network.prefixlen} is not on the host NIC's subnet ({', '.join(host_subnets) or 'no IPv4'}): "
-                "the camera would become unreachable. Pick an address in that subnet, or tick "
-                "'Allow an address outside the host subnet' under Advanced")
+        return (f"{ip}/{network.prefixlen} is outside the host subnet "
+                f"({', '.join(host_subnets) or 'no IPv4'}); see Advanced to allow it")
     return ""
 
 
@@ -94,14 +123,11 @@ def camera_page() -> None:
     with layout.frame("Camera Tools"):
         # =================================================== device discovery
         with ui.column().classes("console-panel w-full"):
-            with ui.row().classes("section-heading w-full"):
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("lan").classes("muted")
-                    ui.label("Device discovery").classes("section-title")
+            with heading("Device discovery", icon="lan"):
                 ui.label("GoX + FX10 · GigE Vision").classes("text-xs mono muted")
-            ui.label("Scan the host's adapters, then select a camera to target its workbench. A camera owned by "
-                     "the running recording is marked \"in use\"; its snapshot and Set IP stay disabled."
-                     ).classes("section-copy")
+            hint("Scan, then select a camera for its workbench.",
+                 "A camera owned by the running recording is marked \"in use\"; its snapshot and Set IP "
+                 "stay disabled.")
             with ui.row().classes("console-toolbar"):
                 scan_btn = ui.button("Scan cameras", icon="search", on_click=lambda: _scan())
                 set_ip_btn = ui.button("Set IP…", icon="lan", on_click=lambda: _set_ip_dialog()).props("outline")
@@ -114,57 +140,20 @@ def camera_page() -> None:
         with ui.element("div").classes("workspace-grid"):
             # ==================================================== GoX section
             with ui.column().classes("console-panel w-full min-w-0"):
-                with ui.row().classes("section-heading w-full"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon("photo_camera").classes("muted")
-                        ui.label("GoX · Exposure workbench").classes("section-title")
-                ui.label("Preview with temporary settings. Apply to config saves exposure, frame rate and gain "
-                         "to both the recording and snapshot configs for the next recording and reference "
-                         "capture.").classes("section-copy")
+                heading("GoX · Exposure workbench", icon="photo_camera")
+                hint("Snapshots use these values temporarily.",
+                     "Apply to config saves exposure, frame rate and gain to the recording and snapshot "
+                     "configs, used by the next recording and reference capture.")
                 gox_target_label = ui.label().classes("text-sm mono break-all")
                 gox_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
                     with ui.column().classes("w-full min-w-0 gap-2"):
-                        ui.label("Exposure (ms)").classes("font-medium")
-                        ui.label(f"GOX-12405C-PGE · {gox_timing.MIN_EXPOSURE_MS:g}–{gox_timing.MAX_EXPOSURE_MS:g} ms"
-                                 ).classes("text-xs muted")
-                        # Camera limit: ExposureTime maximum 399405 µs read back from the GOX-12405C-PGE
-                        gox_exposure = ui.slider(min=gox_timing.MIN_EXPOSURE_MS, max=gox_timing.MAX_EXPOSURE_MS,
-                                                 step=0.001,
-                                                 value=min(gox_timing.MAX_EXPOSURE_MS,
-                                                           app.storage.general.get("gox_exposure_ms", 50.000)))
-                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
-                            ui.number("Exposure", min=gox_timing.MIN_EXPOSURE_MS, max=gox_timing.MAX_EXPOSURE_MS,
-                                      step=0.001, suffix="ms").bind_value(gox_exposure).classes("flex-1 min-w-0")
-                            # AcquisitionFrameRate: starts at the highest rate at which the exposure
-                            # uses <= 90 % of the frame period (and <= 6.054 Hz); may only be lowered.
-                            gox_rate = ui.number("Frame rate", min=gox_timing.MIN_FRAME_RATE_HZ,
-                                                 max=gox_timing.MAX_FRAME_RATE_HZ, step=gox_timing.RATE_STEP_HZ,
-                                                 precision=3, suffix="Hz").classes("flex-1 min-w-0")
-                        gox_rate_hint = ui.label("").classes("text-xs muted")
-                        gox_rate_auto: list[float | None] = [None]  # the last auto (maximum) rate
-
-                        def _sync_gox_rate(*, restore: float | None = None) -> None:
-                            """Follow the exposure: the field's maximum is the auto rate; a value the
-                            operator lowered is kept while it is still below the new maximum."""
-                            try:
-                                auto = gox_timing.max_frame_rate_hz(float(gox_exposure.value))
-                            except (TypeError, ValueError):
-                                return
-                            previous, current = gox_rate_auto[0], gox_rate.value
-                            gox_rate_auto[0] = auto
-                            gox_rate.max = auto
-                            if restore is not None and gox_timing.MIN_FRAME_RATE_HZ <= restore <= auto:
-                                gox_rate.set_value(restore)
-                            elif (current is None or previous is None or current > auto
-                                  or abs(float(current) - previous) < 1e-9):
-                                gox_rate.set_value(auto)
-                            gox_rate_hint.set_text(
-                                f"Max {auto:.3f} Hz: exposure ≤ 90% of the frame period, ≤ "
-                                f"{gox_timing.MAX_FRAME_RATE_HZ:g} Hz. Lower it if needed.")
-
-                        _sync_gox_rate(restore=app.storage.general.get("gox_frame_rate_hz"))
-                        gox_exposure.on_value_change(lambda _event: _sync_gox_rate())
+                        gox_timing = _ExposureRate(
+                            "GOX-12405C-PGE", timing.GOX_MIN_EXPOSURE_MS, timing.GOX_MAX_EXPOSURE_MS,
+                            app.storage.general.get("gox_exposure_ms", 50.0),
+                            timing.GOX_MIN_FRAME_RATE_HZ, timing.GOX_MAX_FRAME_RATE_HZ, timing.gox_max_frame_rate_hz)
+                        gox_timing.sync(restore=app.storage.general.get("gox_frame_rate_hz"))
+                        gox_exposure, gox_rate = gox_timing.exposure, gox_timing.rate
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Gain (magnification)").classes("font-medium")
                         # Gain[AnalogAll] is a MAGNIFICATION on the GO-X, x1.0 .. x126.0
@@ -179,19 +168,10 @@ def camera_page() -> None:
                         "outline")
                     gox_busy = ui.spinner(size="sm").classes("hidden")
                 gox_warn = ui.label("").classes("text-sm text-amber-700")
-                with ui.column().classes("preview-surface w-full justify-center"):
-                    gox_image = ui.interactive_image().classes("w-full")
-                    gox_image.bind_visibility_from(gox_image, "source", backward=bool)
-                    with ui.column().classes("empty-state w-full").bind_visibility_from(
-                            gox_image, "source", backward=lambda source: not source):
-                        ui.icon("photo_camera", size="36px")
-                        ui.label("No snapshot displayed")
-                        ui.label("Select a GoX camera and take a snapshot to inspect exposure.").classes("text-xs")
-                with ui.row().classes("w-full items-center gap-3") as gox_download_row:
+                gox_image = preview_image("photo_camera", "No snapshot displayed")
+                with ui.row().classes("w-full items-center gap-1") as gox_download_row:
                     gox_download = ui.link("Download full-resolution 16-bit PNG", "#").classes("text-xs")
-                    ui.label(f"Screen preview: linear DN, 8-bit, downscaled to ≤ {DISPLAY_LONG_EDGE} px. "
-                             "The download is lossless (DN × 16) and is decoded on first request.").classes(
-                        "text-xs muted")
+                    info(PREVIEW_DETAILS)
                 gox_download_row.set_visibility(False)
                 gox_urls: list[str] = []
 
@@ -215,36 +195,21 @@ def camera_page() -> None:
 
             # =================================================== FX10 section
             with ui.column().classes("console-panel w-full min-w-0"):
-                with ui.row().classes("section-heading w-full"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon("ssid_chart").classes("muted")
-                        ui.label("FX10 · Spectral workbench").classes("section-title")
-                ui.label("Preview with temporary settings. Apply to config saves exposure, frame rate and both "
-                         "binning values to the recording and snapshot configs for the next recording and "
-                         "reference capture.").classes("section-copy")
+                heading("FX10 · Spectral workbench", icon="ssid_chart")
+                hint("Snapshots use these values temporarily.",
+                     "Apply to config saves exposure, frame rate and both binnings to the recording and "
+                     "snapshot configs, used by the next recording and reference capture.")
                 fx10_target_label = ui.label().classes("text-sm mono break-all")
                 fx10_guard = ui.label("").classes("text-sm text-red-700")
                 with ui.element("div").classes("control-grid w-full"):
                     with ui.column().classes("w-full min-w-0 gap-2"):
-                        ui.label("Exposure (ms)").classes("font-medium")
-                        ui.label(f"FX10e · {fx10_timing.MIN_EXPOSURE_MS:.3f}–{fx10_timing.MAX_EXPOSURE_MS:.3f} ms"
-                                 ).classes("text-xs muted")
-                        # Camera limit: ExposureTime is 10..419000 µs (0.01..419 ms) on the FX10e
-                        fx10_exposure = ui.slider(min=fx10_timing.MIN_EXPOSURE_MS, max=fx10_timing.MAX_EXPOSURE_MS,
-                                                  step=0.001,
-                                                  value=min(fx10_timing.MAX_EXPOSURE_MS,
-                                                            app.storage.general.get("fx10_exposure_ms", 50.000)))
-                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
-                            ui.number("Exposure", min=fx10_timing.MIN_EXPOSURE_MS, max=fx10_timing.MAX_EXPOSURE_MS,
-                                      step=0.001, suffix="ms").bind_value(fx10_exposure).classes("flex-1 min-w-0")
-                            # AcquisitionFrameRate: starts at the highest rate at which the exposure uses
-                            # <= 90 % of the frame period (and <= 163.02 Hz at 1 x 1 binning, else
-                            # <= 324.373 Hz); may only be lowered.
-                            fx10_rate = ui.number("Frame rate", min=fx10_timing.MIN_FRAME_RATE_HZ,
-                                                  max=fx10_timing.MAX_FRAME_RATE_HZ_BINNED,
-                                                  step=fx10_timing.RATE_STEP_HZ,
-                                                  precision=3, suffix="Hz").classes("flex-1 min-w-0")
-                        fx10_rate_hint = ui.label("").classes("text-xs muted")
+                        fx10_timing = _ExposureRate(
+                            "FX10e", timing.FX10_MIN_EXPOSURE_MS, timing.FX10_MAX_EXPOSURE_MS,
+                            app.storage.general.get("fx10_exposure_ms", 50.0),
+                            timing.FX10_MIN_FRAME_RATE_HZ, timing.FX10_MAX_FRAME_RATE_HZ_BINNED,
+                            lambda exposure_ms: timing.fx10_max_frame_rate_hz(
+                                exposure_ms, int(fx10_spatial.value), int(fx10_spectral.value)))
+                        fx10_exposure, fx10_rate = fx10_timing.exposure, fx10_timing.rate
                     with ui.column().classes("w-full min-w-0 gap-2"):
                         ui.label("Spatial binning").classes("font-medium")
                         ui.label("1024 / 512 / 256 / 128 px wide").classes("text-xs muted")
@@ -259,32 +224,9 @@ def camera_page() -> None:
                         fx10_spectral = ui.select(_BINNING,
                                                   value=app.storage.general.get("fx10_spectral_binning", 2)).props(
                             "outlined dense").classes("w-full")
-                fx10_rate_auto: list[float | None] = [None]  # the last auto (maximum) rate
-
-                def _sync_fx10_rate(*, restore: float | None = None) -> None:
-                    """Follow exposure and binning: the field's maximum is the auto rate; a value the
-                    operator lowered is kept while it is still below the new maximum."""
-                    try:
-                        spatial, spectral = int(fx10_spatial.value), int(fx10_spectral.value)
-                        auto = fx10_timing.max_frame_rate_hz(float(fx10_exposure.value), spatial, spectral)
-                    except (TypeError, ValueError):
-                        return
-                    previous, current = fx10_rate_auto[0], fx10_rate.value
-                    fx10_rate_auto[0] = auto
-                    fx10_rate.max = auto
-                    if restore is not None and fx10_timing.MIN_FRAME_RATE_HZ <= restore <= auto:
-                        fx10_rate.set_value(restore)
-                    elif (current is None or previous is None or current > auto
-                          or abs(float(current) - previous) < 1e-9):
-                        fx10_rate.set_value(auto)
-                    fx10_rate_hint.set_text(
-                        f"Max {auto:.3f} Hz: exposure ≤ 90% of the frame period, ≤ "
-                        f"{fx10_timing.max_rate_for_binning(spatial, spectral):g} Hz at {spatial}×{spectral} "
-                        "binning. Lower it if needed.")
-
-                _sync_fx10_rate(restore=app.storage.general.get("fx10_frame_rate_hz"))
-                for control in (fx10_exposure, fx10_spatial, fx10_spectral):
-                    control.on_value_change(lambda _event: _sync_fx10_rate())
+                fx10_timing.sync(restore=app.storage.general.get("fx10_frame_rate_hz"))
+                for control in (fx10_spatial, fx10_spectral):  # the binning sets the rate ceiling
+                    control.on_value_change(lambda _event: fx10_timing.sync())
                 with ui.row().classes("console-toolbar"):
                     fx10_snap_btn = ui.button("Take snapshot", icon="photo_camera", on_click=lambda: _fx10_snap())
                     fx10_apply_btn = ui.button("Apply to config", icon="save", on_click=lambda: _fx10_apply()).props(
@@ -293,12 +235,10 @@ def camera_page() -> None:
                 # Per-band raw DN over ~1 s; thresholds use the capture's PixelFormat.
                 with ui.column().classes("plot-surface w-full"):
                     fx10_chart = ui.echart(fx10_plot.workbench_options()).classes("w-full h-96")
-                    ui.label("No spectrum displayed · take an FX10 snapshot to inspect band statistics.").classes(
+                    ui.label("No spectrum displayed").classes(
                         "empty-state w-full text-xs").bind_visibility_from(
                         fx10_chart.options, "series", backward=lambda series: not series)
-                fx10_axis_note = ui.label(
-                    "400–1000 nm · 100 nm ticks. Saturation guides use the captured pixel format.").classes(
-                    "section-copy")
+                fx10_axis_note = ui.label("").classes("section-copy")
                 fx10_meta = ui.label("").classes("text-sm muted mono break-all")
                 ui.link("Collect white and dark references →", "/reference").classes("text-sm")
 
@@ -339,8 +279,8 @@ def camera_page() -> None:
         def refresh_guard() -> None:
             # Pure state reads, and NiceGUI drops setter calls that change
             # nothing — an idle tick sends nothing however often it runs.
-            gox_reason = gox_tools.guard_reason()
-            fx10_reason = fx10_tools.guard_reason()
+            gox_reason = camera_operations.guard_reason("gox")
+            fx10_reason = camera_operations.guard_reason("fx10")
             gox_guard.set_text(gox_reason or "")
             fx10_guard.set_text(fx10_reason or "")
             busy = STATE.snapshot_busy
@@ -348,12 +288,12 @@ def camera_page() -> None:
             fx10_ip = _fx10_target()
             row = _selected_row()
             # Discovery is a broadcast: it never needs the control channel.
-            scan_btn.set_enabled(STATE.env_ok and not busy)
+            scan_btn.set_enabled(not busy)
             # Set IP touches the camera: gated like a snapshot, per the row's driver.
-            set_ip_btn.set_enabled(bool(row) and STATE.env_ok and not busy
-                                   and ebus_tools.guard_reason_for(row.get("kind", "")) is None)
-            gox_snap_btn.set_enabled(gox_reason is None and STATE.env_ok and not busy and bool(gox_ip))
-            fx10_snap_btn.set_enabled(fx10_reason is None and STATE.env_ok and not busy and bool(fx10_ip))
+            set_ip_btn.set_enabled(bool(row) and not busy
+                                   and _kind_guard(row.get("kind", "")) is None)
+            gox_snap_btn.set_enabled(gox_reason is None and not busy and bool(gox_ip))
+            fx10_snap_btn.set_enabled(fx10_reason is None and not busy and bool(fx10_ip))
             # Once initialization finishes, Apply edits the next run's config.
             config_writable = not STATE.config_locked and not STATE.control_uncertain
             gox_apply_btn.set_enabled(bool(gox_ip) and config_writable)
@@ -373,7 +313,7 @@ def camera_page() -> None:
 
             rows: list[dict] = []
             for d in res.devices:
-                in_use = ebus_tools.guard_reason_for(d.kind) is not None
+                in_use = _kind_guard(d.kind) is not None
                 ipcfg = ("valid" if d.config_valid else "INVALID-SUBNET") + " · " + d.ip_config_text
                 if in_use:
                     ipcfg += " · in use"
@@ -394,7 +334,7 @@ def camera_page() -> None:
 
             # Re-select the remembered camera of whichever driver has one listed.
             remembered = {app.storage.general.get("gox_target_ip", ""),
-                          app.storage.general.get("fx10_target_ip", _FX10_DEFAULT_IP)}
+                          app.storage.general.get("fx10_target_ip", "")}
             for row in rows:
                 if row["ip"] in remembered and row["ip"]:
                     table.selected = [row]
@@ -419,7 +359,7 @@ def camera_page() -> None:
             if not row:
                 ui.notify("Scan and select a camera first", type="warning")
                 return
-            reason = ebus_tools.guard_reason_for(row.get("kind", ""))
+            reason = _kind_guard(row.get("kind", ""))
             if reason or STATE.snapshot_busy:
                 ui.notify(reason or "Another camera tool is still running", type="warning")
                 return
@@ -440,15 +380,15 @@ def camera_page() -> None:
                 mask_in = ui.input("Subnet mask", value=default_mask).classes("w-full")
                 with ui.expansion("Advanced").classes("w-full"):
                     gw_in = ui.input("Gateway", value="0.0.0.0").classes("w-full")
-                    allow_cb = ui.checkbox("Allow an address outside the host subnet (camera becomes "
-                                           "unreachable until the host is re-addressed)", value=False)
+                    with ui.row().classes("hint-row"):
+                        allow_cb = ui.checkbox("Allow an address outside the host subnet", value=False)
+                        info("The camera stays unreachable until the host is re-addressed.")
                 writeback_cb = None
-                if kind in _CONFIG_KINDS:
-                    writeback_cb = ui.checkbox(
-                        f"Also update device.ip in the selected {kind} driver config", value=True)
-                ui.label("Two steps: FORCEIP (immediate, lost on power cycle), then the persistent-IP nodes "
-                         "(kept across power cycles). Never run this on a camera that is recording."
-                         ).classes("text-xs text-gray-500")
+                if kind in camera_operations.DRIVER_OF_KIND:
+                    writeback_cb = ui.checkbox(f"Also update device.ip in the {kind} config", value=True)
+                hint("Never run this on a recording camera.",
+                     "Two steps: FORCEIP (immediate, lost on power cycle), then the persistent-IP nodes "
+                     "(kept across power cycles).")
                 with ui.row():
                     ui.button("Set IP", color="negative", on_click=lambda: dialog.submit(True))
                     ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
@@ -491,8 +431,7 @@ def camera_page() -> None:
                 ui.notify(result.message, type="positive", multi_line=True)
                 if writeback:
                     try:
-                        summary = await config_actions.change("apply_device_ip", kind, row.get("ip", ""),
-                                                              row.get("mac", ""), new_ip)
+                        summary = config_store.apply_device_ip(kind, row.get("ip", ""), row.get("mac", ""), new_ip)
                     except Exception as e:
                         ui.notify(f"Camera re-addressed, but the config write failed: {e}",
                                   type="negative", multi_line=True)
@@ -501,8 +440,7 @@ def camera_page() -> None:
             elif result.transient_only:
                 # The config follows the persistent state only: a transient address
                 # would leave it pointing at nothing after the next power cycle.
-                ui.notify(f"Address changed but NOT persisted — a power cycle restores {row.get('ip', '')}; "
-                          f"the driver config was left unchanged. {result.message}",
+                ui.notify(f"Address not persisted; config unchanged. {result.message}",
                           type="warning", multi_line=True)
             else:
                 ui.notify(f"Set IP failed: {result.message}", type="negative", multi_line=True)
@@ -518,16 +456,12 @@ def camera_page() -> None:
         # ------------------------------------------------------------ GoX glue
         def _gox_timing_values() -> tuple[float, float]:
             """(exposure ms, frame rate Hz) after the same checks the driver applies."""
-            exposure_ms = float(gox_exposure.value)
-            if not gox_timing.MIN_EXPOSURE_MS <= exposure_ms <= gox_timing.MAX_EXPOSURE_MS:
-                raise ValueError(f"Exposure must be within {gox_timing.MIN_EXPOSURE_MS:g}–"
-                                 f"{gox_timing.MAX_EXPOSURE_MS:g} ms")
+            exposure_ms = timing.gox_check_exposure(gox_exposure.value)
             if gox_rate.value is None:
                 raise ValueError("Enter a frame rate")
-            rate = gox_timing.check_frame_rate(gox_rate.value)
-            if not gox_timing.exposure_fits(exposure_ms, rate):
-                raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz; "
-                                 f"use at most {gox_timing.max_frame_rate_hz(exposure_ms):.3f} Hz")
+            rate = timing.gox_check_frame_rate(gox_rate.value)
+            if not timing.exposure_fits(exposure_ms, rate):
+                raise ValueError(timing.period_error(exposure_ms, rate))
             return exposure_ms, rate
 
         def _gox_focus_request(remember: bool) -> gox_focus.FocusRequest:
@@ -545,7 +479,7 @@ def camera_page() -> None:
         async def _gox_snap() -> None:
             if STATE.snapshot_busy:
                 return
-            reason = gox_tools.guard_reason()
+            reason = camera_operations.guard_reason("gox")
             ip, _mac = _gox_target()
             if reason or not ip:
                 ui.notify(reason or "Select a target GoX camera first", type="warning")
@@ -601,8 +535,7 @@ def camera_page() -> None:
                 return
             try:
                 exposure_ms, rate = _gox_timing_values()
-                summary = await config_actions.change("apply_gox_acquisition",
-                                                      ip, mac, exposure_ms, float(gox_gain.value), rate)
+                summary = config_store.apply_gox_acquisition(ip, mac, exposure_ms, float(gox_gain.value), rate)
                 app.storage.general["gox_frame_rate_hz"] = rate
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
@@ -612,20 +545,19 @@ def camera_page() -> None:
         # ----------------------------------------------------------- FX10 glue
         def _fx10_timing_values() -> tuple[float, int, int, float]:
             """(exposure ms, spatial, spectral binning, frame rate Hz) after the driver's checks."""
-            exposure_ms = fx10_timing.check_exposure(fx10_exposure.value)
+            exposure_ms = timing.fx10_check_exposure(fx10_exposure.value)
             spatial, spectral = int(fx10_spatial.value), int(fx10_spectral.value)
             if fx10_rate.value is None:
                 raise ValueError("Enter a frame rate")
-            rate = fx10_timing.check_frame_rate(fx10_rate.value, spatial, spectral)
-            if not fx10_timing.exposure_fits(exposure_ms, rate):
-                raise ValueError(f"{exposure_ms:g} ms exceeds 90% of the frame period at {rate:g} Hz; use at most "
-                                 f"{fx10_timing.max_frame_rate_hz(exposure_ms, spatial, spectral):.3f} Hz")
+            rate = timing.fx10_check_frame_rate(fx10_rate.value, spatial, spectral)
+            if not timing.exposure_fits(exposure_ms, rate):
+                raise ValueError(timing.period_error(exposure_ms, rate))
             return exposure_ms, spatial, spectral, rate
 
         async def _fx10_snap() -> None:
             if STATE.snapshot_busy:
                 return
-            reason = fx10_tools.guard_reason()
+            reason = camera_operations.guard_reason("fx10")
             ip = _fx10_target()
             if reason or not ip:
                 ui.notify(reason or "Select a target FX10 camera first", type="warning")
@@ -661,11 +593,7 @@ def camera_page() -> None:
                 wavelengths_nm=result.wavelengths_nm,
             ))
             fx10_chart.update()
-            fx10_axis_note.set_text(
-                "400–1000 nm · 100 nm ticks · recorded wavelength coordinates."
-                if result.wavelengths_nm else
-                "400–1000 nm · 100 nm ticks · linear channel mapping for display; wavelength calibration unavailable."
-            )
+            fx10_axis_note.set_text(fx10_plot.axis_note(result.wavelengths_nm))
             request = result.request
             requested = (f"target {request.target_ip} · requested exposure {request.exposure_ms:g}ms · "
                          + (f"{request.frame_rate_hz:g} Hz · " if request.frame_rate_hz is not None else "")
@@ -681,7 +609,7 @@ def camera_page() -> None:
         async def _fx10_apply() -> None:
             try:
                 exposure_ms, spatial, spectral, rate = _fx10_timing_values()
-                summary = await config_actions.change("apply_fx10_acquisition", exposure_ms, spatial, spectral, rate)
+                summary = config_store.apply_fx10_acquisition(exposure_ms, spatial, spectral, rate)
                 app.storage.general["fx10_frame_rate_hz"] = rate
             except Exception as e:
                 ui.notify(f"Apply failed: {e}", type="negative", multi_line=True)
@@ -689,13 +617,7 @@ def camera_page() -> None:
             _after_apply(summary)
 
         def _after_apply(summary: str) -> None:
-            """Both saved profiles apply to subsequent recording/reference captures."""
-            if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING):
+            recording = STATE.process_state in (ProcState.RUNNING, ProcState.STARTING, ProcState.STOPPING)
+            if recording:
                 STATE.pending_config_notice = True
-                ui.notify(f"Saved recording and snapshot configs ({summary}) — "
-                          "used by the next recording and reference capture",
-                          type="info", multi_line=True)
-            else:
-                ui.notify(f"Saved recording and snapshot configs ({summary}) — "
-                          "used by the next recording and reference capture",
-                          type="positive", multi_line=True)
+            ui.notify(f"{NEXT_RUN} ({summary})", type="info" if recording else "positive", multi_line=True)

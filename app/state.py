@@ -56,15 +56,13 @@ class StorageStatus:
 
 @dataclass(frozen=True)
 class RecordingSnapshot:
-    """Value returned by the acquisition owner; UI code cannot change its lifecycle."""
+    """Recording state owned by the acquisition controller; pages only read it."""
     process_state: ProcState = ProcState.IDLE
-    attached: bool = True  # False after reattach (exit code unknowable)
-    exit_code: int | None = None
+    attached: bool = True  # False after reattach
     last_error: str = ""  # last [Main] failure line / launch stderr tail
     active_session: Path | None = None  # <Output Directory>/<timestamp>
     session_started_at: float | None = None  # time.time()
     enables_at_start: dict[str, bool] = field(default_factory=dict)
-    status_source: str = "unknown"
     status_detail: str = ""
     run_result: dict = field(default_factory=dict)
     stop_requested: bool = False
@@ -83,14 +81,8 @@ def _initial_recording_value(name: str):
 
 @dataclass
 class AppState:
-    """Display/operation state with read-only compatibility access to recording.
-
-    AcquisitionController binds the snapshot reader once. Existing pages may
-    keep reading STATE.process_state etc.; only the controller owns those values.
-    Storage and log-rate services retain their own presentation responsibilities.
-    """
-    env_ok: bool = False
-    env_detail: str = ""
+    """Display and operation state. Recording fields (``STATE.process_state`` …) are
+    read through the acquisition controller, which alone may change them."""
     pending_config_notice: bool = False
     sensors: dict[str, SensorStatus] = field(default_factory=dict)
     storage: StorageStatus = field(default_factory=StorageStatus)
@@ -98,16 +90,10 @@ class AppState:
     tool_uncertain: bool = True
     tool_operation: dict = field(default_factory=dict)
     controller_connected: bool = False
-    _recording_reader: Callable[[], RecordingSnapshot] = field(default=RecordingSnapshot, repr=False)
     _recording_value: Callable[[str], object] = field(default=_initial_recording_value, repr=False)
 
-    def bind_recording(self, reader: Callable[[], RecordingSnapshot], value_reader: Callable[[str], object]) -> None:
-        self._recording_reader = reader
+    def bind_recording(self, value_reader: Callable[[str], object]) -> None:
         self._recording_value = value_reader
-
-    @property
-    def recording(self) -> RecordingSnapshot:
-        return self._recording_reader()
 
     def __getattr__(self, name: str):
         if name in _RECORDING_FIELDS:

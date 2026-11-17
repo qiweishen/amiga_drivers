@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from nicegui import ui
 
 from . import folder_browser
-from ..services import config_actions, config_store
+from ..services import config_store
 
 _FIELDS = (("Operator", "operator"), ("Field", "field"),
            ("Output Directory", "output_dir_raw"))
@@ -53,13 +53,11 @@ class RecordingSettings:
                                 self._choose_folder = ui.button(
                                     "Select Folder", icon="folder_open", on_click=self.choose_folder,
                                 ).props("outline dense no-wrap").classes("metadata-folder")
-                                self._choose_folder.tooltip("Browse the recording computer's directories in this page")
                         field.disable()
                         field.on_value_change(lambda e, k=key: self._edit(k, e.value))
                         self._inputs[key] = field
                         self._hints[key] = ui.label().classes("metadata-hint")
-            ui.label("Paths refer to the GUI server/container. Relative paths use the project root.").classes(
-                "metadata-help")
+            ui.label("Relative paths start at the project root.").classes("metadata-help")
             with ui.row().classes("metadata-actions"):
                 self._status = ui.label("Loading recording details…").classes("metadata-status")
                 self._save = ui.button("Save", icon="save", on_click=self.save).props("unelevated dense")
@@ -198,7 +196,7 @@ class RecordingSettings:
         self._render()
         saved = False
         try:
-            await config_actions.change("set_main_fields", submitted, expected_values=expected)
+            config_store.set_main_fields(submitted, expected_values=expected)
         except config_store.ConflictError as exc:
             for draft in changed.values():
                 draft.conflict = True

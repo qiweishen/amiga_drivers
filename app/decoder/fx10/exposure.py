@@ -4,7 +4,7 @@ The measured quantity is the per-band p90 DN over every frame and spatial
 sample of a white-target capture (the statistic the Reference page plots); the
 brightest band is chosen at the lowest bracket exposure and kept for the whole
 series. The fit and suggestion arithmetic is shared with GOX
-(``app.decoder.gox.exposure``): ``p90_dn = offset + slope * t``. The FX10 has no
+(``app.decoder.exposure``): ``p90_dn = offset + slope * t``. The FX10 has no
 gain; only the exposure is varied or suggested, never the binning.
 """
 
@@ -12,19 +12,18 @@ from __future__ import annotations
 
 import math
 
-from ..gox import exposure as shared
+from .. import exposure as ettr
 
 BRACKET_STEP_MS = 15.0  # hyperspectral response is exposure sensitive: a narrow bracket
 DEFAULT_TARGET_FRACTION = 0.60
 MIN_TARGET_FRACTION, MAX_TARGET_FRACTION = 0.10, 0.95
-NEAR_SATURATION = 0.98  # p90 at or above this fraction of full scale is not fitted
 STATISTIC = "p90"
 UNCHANGED = "Binning is unchanged."
 
 
 def bracket(center_ms: float) -> list[float]:
     """center ± 15 ms; when center <= 15 ms the low step is center / 2."""
-    return shared.bracket(center_ms, BRACKET_STEP_MS)
+    return ettr.bracket(center_ms, BRACKET_STEP_MS)
 
 
 def target_fraction(value: object) -> float:
@@ -45,7 +44,7 @@ def brightest_band(p90: list[float]) -> int:
 def band_status(value_dn: float, full_scale: int) -> str | None:
     if value_dn >= full_scale:
         return "clipped"
-    if value_dn >= NEAR_SATURATION * full_scale:
+    if value_dn >= ettr.NEAR_SATURATION * full_scale:
         return "near_saturation"
     return None
 
@@ -58,11 +57,11 @@ def band_label(band: int, wavelengths_nm: list[float] | tuple[float, ...]) -> st
 
 def point_from_spectrum(label: str, p90: list[float], band: int, exposure_time_us: float, full_scale: int,
                         wavelengths_nm: list[float] | tuple[float, ...] = (), *,
-                        requested_exposure_ms: float | None = None, source: str = "") -> shared.ExposurePoint:
+                        requested_exposure_ms: float | None = None, source: str = "") -> ettr.ExposurePoint:
     if not 1 <= band <= len(p90):
         raise ValueError("Band index does not match the measured spectrum")
     value = float(p90[band - 1])
-    return shared.ExposurePoint(label, float(exposure_time_us), 1.0, band, value, band_label(band, wavelengths_nm),
+    return ettr.ExposurePoint(label, float(exposure_time_us), 1.0, band, value, band_label(band, wavelengths_nm),
                                 band_status(value, full_scale), requested_exposure_ms, source)
 
 

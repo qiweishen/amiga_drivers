@@ -147,10 +147,6 @@ def list_directory(raw: str) -> DirectoryListing:
         raise RuntimeError(f"Permission denied while listing directory: {path}") from None
     except OSError as error:
         raise RuntimeError(f"Cannot list server directory: {path} ({error})") from None
-    # Detect replacement/removal while the listing was being assembled. The
-    # next navigation and final selection independently validate again.
-    if _checked_directory(str(path), root) != path:
-        raise RuntimeError("The server directory changed while it was being listed; open it again")
     directories.sort(key=lambda child: (child.name.casefold(), child.name, str(child)))
     return DirectoryListing(root, path, None if path == root else path.parent,
                             tuple(directories), truncated)
@@ -158,19 +154,7 @@ def list_directory(raw: str) -> DirectoryListing:
 
 def checked_selection(raw: str) -> str:
     """Return a canonical, existing server directory without saving the draft."""
-    root = _root_directory()
-    path = _checked_directory(raw, root)
-    try:
-        # Opening the directory checks listing permission without reading any
-        # contents. Access may have changed since the dialog displayed it.
-        with os.scandir(path):
-            pass
-    except PermissionError:
-        raise RuntimeError(f"Permission denied for selected directory: {path}") from None
-    except OSError as error:
-        raise RuntimeError(f"The selected server directory is unavailable: {path} ({error})") from None
-    if _checked_directory(str(path), root) != path:
-        raise RuntimeError("The selected directory changed; select it again")
+    path = _checked_directory(raw, _root_directory())
     problems = config_store.output_dir_problems(str(path))
     if problems:
         raise RuntimeError("; ".join(problems))

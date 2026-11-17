@@ -11,6 +11,9 @@ from ..ebus import pixels, recording
 BAYER_RG12_PACKED_CODE = 0x010C002B  # GVSP BayerRG12Packed: 2 px / 3 B
 NATIVE_PIXEL_FORMAT = "BayerRG12Packed"
 NATIVE_FULL_SCALE = 4095
+# Default black level: the GOX manual (Ver. 1.3, p.172, "Black Level Adjustment") gives 8LSB@8bit,
+# which the gox driver rescales to 12 bit (8 x 16 = 128 DN). No register reports it.
+DOCUMENTED_PEDESTAL_DN = 128.0
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,6 @@ def _decode_native(record: recording.Record, payload: bytes, skipped_invalid: bo
     if record.pf != BAYER_RG12_PACKED_CODE:
         raise ValueError(f"GOX requires {NATIVE_PIXEL_FORMAT}; received PFNC 0x{record.pf:08X}")
     image, name, _ = pixels.decode_record(record, payload)
-    validate_native_image(image, name)
     return ImageFrame(record, image, name, skipped_invalid)
 
 
@@ -59,8 +61,7 @@ def frame_from_record(record: recording.Record) -> ImageFrame:
 
 
 def latest_frame(directory: Path) -> ImageFrame:
-    frames = recording.latest_records(_camera(directory), 1)
-    if not frames:
+    record = recording.newest_valid_record(_camera(directory))
+    if record is None:
         raise ValueError("No complete valid raw image yet")
-    record = frames[-1]
     return _decode_native(record, recording.read_payload(record))

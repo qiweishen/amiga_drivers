@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .pfnc import (BAYER_GR, BAYER_RG, BAYER_GB, BAYER_BG, RGB, PFNC, NEED_BYTES,
-                   PixelFormat, expected_bytes, format_for_code, format_for_name)
+from .pfnc import BAYER_RG, format_for_code, row_bytes
 
 
 def unpack_gvsp12packed(buf):
@@ -26,60 +25,27 @@ def unpack_gvsp10packed(buf):
     return out
 
 
-def unpack_pfnc12p(buf):
-    """PFNC 12p (LSB-packed): p0 = b0 | (b1&0x0F)<<8, p1 = b1>>4 | b2<<4."""
-    b = np.frombuffer(buf, np.uint8).reshape(-1, 3).astype(np.uint16)
-    out = np.empty(b.shape[0] * 2, np.uint16)
-    out[0::2] = b[:, 0] | ((b[:, 1] & 0x0F) << 8)
-    out[1::2] = (b[:, 1] >> 4) | (b[:, 2] << 4)
-    return out
-
-
-def unpack_pfnc10p(buf):
-    """PFNC 10p (LSB-packed): 4 px / 5 B continuous little-endian bit stream."""
-    b = np.frombuffer(buf, np.uint8).reshape(-1, 5).astype(np.uint16)
-    out = np.empty(b.shape[0] * 4, np.uint16)
-    out[0::4] = b[:, 0] | ((b[:, 1] & 0x03) << 8)
-    out[1::4] = (b[:, 1] >> 2) | ((b[:, 2] & 0x0F) << 6)
-    out[2::4] = (b[:, 2] >> 4) | ((b[:, 3] & 0x3F) << 4)
-    out[3::4] = (b[:, 3] >> 6) | (b[:, 4] << 2)
-    return out
+_UNPACK = {
+    "u8": lambda buf: np.frombuffer(buf, np.uint8),
+    "u16": lambda buf: np.frombuffer(buf, "<u2"),
+    "gvsp10p": unpack_gvsp10packed,
+    "gvsp12p": unpack_gvsp12packed,
+}
 
 
 def decode(pf_code, width, height, payload):
     """Decode only a complete, tightly packed image; ambiguous layout is an error."""
-    entry = PFNC.get(pf_code)
-    if entry is None:
-        raise ValueError("unsupported PixelFormat 0x%08X (extend the PFNC table)" % pf_code)
-    name, layout, pattern, _ = entry
-    if width <= 0 or height <= 0:
+    pixel_format = format_for_code(pf_code)
+    if height <= 0:
         raise ValueError("image dimensions must be positive")
-    group = 4 if layout == "pfnc10p" else 2 if layout in ("gvsp12p", "gvsp10p", "pfnc12p") else 1
-    if width % group:
-        raise ValueError("packed row width is not a complete packing group; row layout must be supplied explicitly")
-    n = width * height
-    need = NEED_BYTES[layout](n)
+    need = row_bytes(pixel_format, width) * height
     if len(payload) < need:
-        raise ValueError("payload too short for %s %dx%d: %d < %d bytes (incomplete frame)" %
-                         (name, width, height, len(payload), need))
+        raise ValueError(f"payload too short for {pixel_format.name} {width}x{height}: "
+                         f"{len(payload)} < {need} bytes (incomplete frame)")
     if len(payload) != need:
         raise ValueError("payload has padding/chunks or an unknown layout; refusing to discard bytes or guess stride")
-    buf = payload[:need]
-    if layout == "u8":
-        arr = np.frombuffer(buf, np.uint8)
-    elif layout == "u16":
-        arr = np.frombuffer(buf, "<u2")
-    elif layout == "rgb8":
-        return np.frombuffer(buf, np.uint8).reshape(height, width, 3), name, pattern
-    elif layout == "gvsp12p":
-        arr = unpack_gvsp12packed(buf)[:n]
-    elif layout == "gvsp10p":
-        arr = unpack_gvsp10packed(buf)[:n]
-    elif layout == "pfnc12p":
-        arr = unpack_pfnc12p(buf)[:n]
-    else:  # pfnc10p
-        arr = unpack_pfnc10p(buf)[:n]
-    return arr.reshape(height, width), name, pattern
+    image = _UNPACK[pixel_format.layout](payload).reshape(height, width)
+    return image, pixel_format.name, pixel_format.pattern
 
 
 def _image_layout(record, payload):
@@ -95,20 +61,15 @@ def _image_layout(record, payload):
     if offset is None:
         raise ValueError("SDK image byte offset is unknown; refusing to guess")
     pf, width, height = image["pixel_format"], image["width"], image["height"]
-    pixel_format = format_for_code(pf)
-    group = 4 if pixel_format.layout == "pfnc10p" else 2 if pixel_format.layout in ("gvsp12p", "gvsp10p",
-                                                                                    "pfnc12p") else 1
-    if width <= 0 or height <= 0 or width % group:
-        raise ValueError("Unsupported SDK image geometry or packed row width")
-    row_bytes = expected_bytes(pf, width, 1)
-    stride = row_bytes + image["padding_x"]
+    if height <= 0:
+        raise ValueError("Unsupported SDK image geometry")
+    row = row_bytes(format_for_code(pf), width)
+    stride = row + image["padding_x"]
     expected = stride * height + image["padding_y"]
-    if (image["effective_image_size"] != row_bytes * height or image["image_size"] != expected
+    if (image["effective_image_size"] != row * height or image["image_size"] != expected
             or offset + expected > len(payload) or len(payload) != record.payload_size):
         raise ValueError("SDK image layout disagrees with the recorded payload")
-    if row_bytes * height > 128 * 1024 * 1024:
-        raise ValueError("Decoded image exceeds the memory budget")
-    return pf, width, height, offset, row_bytes, stride
+    return pf, width, height, offset, row, stride
 
 
 def image_rows(record, payload):
@@ -118,35 +79,28 @@ def image_rows(record, payload):
     outside the image are excluded. Nothing is copied or decoded, so a caller can
     unpack only the rows and columns it needs.
     """
-    _, _, height, offset, row_bytes, stride = _image_layout(record, payload)
+    _, _, height, offset, row, stride = _image_layout(record, payload)
     rows = np.frombuffer(payload, np.uint8, count=stride * height, offset=offset).reshape(height, stride)
-    return rows[:, :row_bytes]
+    return rows[:, :row]
 
 
 def decode_record(record, payload):
     """Derive a tight image from SDK-described bytes, retaining the raw buffer.
 
-    X padding is bytes per row; Y padding is trailing bytes. Pixel/ROI offsets
-    are metadata, not byte offsets. Chunk and other leading/trailing bytes stay
-    in the original payload; only the declared image slice is decoded here.
+    Chunk and other leading/trailing bytes stay in the original payload; only
+    the declared image slice is decoded here.
     """
-    pf, width, height, offset, row_bytes, stride = _image_layout(record, payload)
-    image = record.metadata["image"]
-    if image["padding_x"] == 0:
-        tight = memoryview(payload)[offset:offset + row_bytes * height]
+    pf, width, height, offset, row, stride = _image_layout(record, payload)
+    if stride == row:
+        tight = memoryview(payload)[offset:offset + row * height]
     else:
-        tight = b"".join(payload[offset + row * stride:offset + row * stride + row_bytes] for row in range(height))
+        tight = b"".join(payload[offset + index * stride:offset + index * stride + row] for index in range(height))
     return decode(pf, width, height, tight)
 
 
-# GenICam Bayer pattern -> OpenCV constant (pattern named by the top-left 2x2 cell).
-CV_BAYER = {BAYER_RG: "COLOR_BayerRGGB2BGR", BAYER_GR: "COLOR_BayerGRBG2BGR",
-            BAYER_GB: "COLOR_BayerGBRG2BGR", BAYER_BG: "COLOR_BayerBGGR2BGR"}
-
-
 def demosaic(img, pattern):
+    """OpenCV bilinear demosaic of a BayerRG frame to BGR, keeping the sample depth."""
     import cv2  # optional dependency, imported on demand
-    if pattern not in CV_BAYER:
-        raise ValueError("Demosaicing needs a Bayer frame (got pattern %s)" % pattern)
-    return cv2.cvtColor(img, getattr(cv2, CV_BAYER[pattern]))
-
+    if pattern != BAYER_RG:
+        raise ValueError(f"Demosaicing needs a BayerRG frame (got pattern {pattern})")
+    return cv2.cvtColor(img, cv2.COLOR_BayerRGGB2BGR)

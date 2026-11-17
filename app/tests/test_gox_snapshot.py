@@ -39,7 +39,7 @@ class SnapshotNativeDnTests(unittest.TestCase):
 
     def test_encoder_preserves_full_16_bit_corrected_rgb_codes(self):
         rgb = np.array([[[1, 1001, 2002], [3003, 65534, 65535]]], dtype=np.uint16)
-        np.testing.assert_array_equal(_png_rgb(preview.png16_bytes(rgb)), rgb)
+        np.testing.assert_array_equal(_png_rgb(preview.png_bytes(rgb)), rgb)
 
     def test_demosaic_receives_native_dn_and_keeps_rgb_channel_order(self):
         raw = np.full((8, 8), 1001, dtype=np.uint16)

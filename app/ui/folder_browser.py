@@ -24,10 +24,7 @@ class _FolderBrowser:
             with ui.row().classes("section-heading"):
                 ui.label("Select output directory").classes("section-title")
                 ui.label("Recording computer").classes("section-copy")
-            ui.label(
-                "Browse directories available to the recording service. "
-                "Your selection is saved only when you click Save in Next recording."
-            ).classes("section-copy")
+            ui.label("Saved only with Save in Next recording.").classes("section-copy")
             self._root_label = ui.label().classes("section-copy mono")
             with ui.row().classes("folder-navigation"):
                 self._root_button = ui.button("Root", icon="home", on_click=self._root).props("outline dense")
@@ -91,7 +88,7 @@ class _FolderBrowser:
                     ).props("flat no-caps align=left").classes("folder-entry")
                     self._folder_buttons.append(button)
                 if not listing.directories:
-                    ui.label("No subfolders. You can select the current directory.").classes("folder-empty")
+                    ui.label("No subfolders; you can select this directory.").classes("folder-empty")
             count = len(listing.directories)
             self._status.set_text(
                 f"Showing {count} folders; more are available. Enter a directory above to open it."
@@ -101,7 +98,7 @@ class _FolderBrowser:
             if self._alive:
                 self._error.set_text(str(exc))
                 self._error.set_visibility(True)
-                self._status.set_text("Directory unavailable. Enter another path or refresh to try again.")
+                self._status.set_text("Directory unavailable; try another path.")
         finally:
             self._busy = False
             self._controls()

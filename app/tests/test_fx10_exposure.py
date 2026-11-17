@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.decoder.fx10 import exposure as fx10_exposure
-from app.decoder.gox import exposure
 from app.services import fx10_exposure as service, fx10_tools
 
 BLACK, SLOPE = 160.0, 0.12  # DN, DN per µs (≈1360 DN at 10 ms)
@@ -79,14 +78,15 @@ class SeriesTests(unittest.IsolatedAsyncioTestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(service, "_series", None))
-        self.stack.enter_context(patch.object(service.reference_storage, "tmp_root", return_value=self.root))
-        self.stack.enter_context(patch.object(service, "_config_bytes", return_value=b"acquisition: {}\n"))
+        self.stack.enter_context(patch.object(service.exposure_series.reference_storage, "tmp_root", return_value=self.root))
+        self.stack.enter_context(patch.object(service.config_store, "snapshot_config_bytes", return_value=b"acquisition: {}\n"))
         self.stack.enter_context(patch.object(service.camera_operations, "run", side_effect=self.reserve))
         self.stack.enter_context(patch.object(fx10_tools, "capture_raw", side_effect=self.capture_raw))
         self.stack.enter_context(patch.object(service, "_analyze", side_effect=self.fake_analyze))
         self.stack.enter_context(patch.object(service.raw_recording, "device_metadata",
                                               side_effect=lambda directory: self.devices[Path(directory)]))
-        self.limit = self.stack.enter_context(patch.object(service, "_exposure_limit", return_value=(None, [])))
+        self.limit = self.stack.enter_context(patch.object(service.config_store, "fx10_exposure_limit_ms",
+                                                           return_value=(None, [])))
 
     async def reserve(self, sensor, operation, *, kind):
         self.assertEqual((sensor, kind), ("fx10", "fx10-exposure-series"))

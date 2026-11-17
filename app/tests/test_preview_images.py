@@ -13,10 +13,10 @@ def _key(url: str) -> str:
 
 class PreviewImageStoreTests(unittest.TestCase):
     def setUp(self):
-        preview_images.clear()
+        preview_images._entries.clear()
 
     def tearDown(self):
-        preview_images.clear()
+        preview_images._entries.clear()
 
     def test_ready_bytes_are_served_with_a_safe_filename(self):
         url = preview_images.put(b"png-bytes", 'ref "x"/../y.png')
@@ -76,7 +76,7 @@ class PreviewImageStoreTests(unittest.TestCase):
             preview_images.put(b"3", "3.png")
             self.assertIsNotNone(preview_images.fetch(first))
             self.assertIsNone(preview_images.fetch(second))
-        preview_images.clear()
+        preview_images._entries.clear()
         with patch.object(preview_images, "MAX_BYTES", 10):
             old = _key(preview_images.put(b"123456", "old.png"))
             new = _key(preview_images.put(b"abcdef", "new.png"))

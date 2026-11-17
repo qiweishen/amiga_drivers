@@ -22,19 +22,19 @@ _FRD_AXES = (("F", "#e53935"), ("R", "#43a047"), ("D", "#1e88e5"))
 
 
 def _is_live() -> bool:
-    return (STATE.env_ok and STATE.process_state is ProcState.RUNNING and STATE.ownership_verified
+    return (STATE.process_state is ProcState.RUNNING and STATE.ownership_verified
             and not STATE.control_uncertain and STATE.enables_at_start.get("asterx", False)
             and LIVE.session_dir is not None and LIVE.session_dir == STATE.active_session)
 
 
 def _guard_text() -> str:
     if LIVE.session_dir is None:
-        return "No live recording yet — start recording with AsteRx enabled"
+        return "No live recording; start one with AsteRx enabled"
     if STATE.control_uncertain:
-        return "Acquisition ownership is unknown — displayed telemetry is not verified live"
+        return "Acquisition state unverified; telemetry may be stale"
     if not _is_live():
-        return f"Showing session {LIVE.session_dir.name} — not live"
-    return "Live telemetry · freshness uses recorded host time"
+        return f"Session {LIVE.session_dir.name} (not live)"
+    return "Live telemetry"
 
 
 def _stamp(ns: int | None) -> str:

@@ -8,6 +8,7 @@ from nicegui import ui
 from pathlib import Path
 
 from . import layout
+from .components import hint, info
 from ..constants import DRIVERS, REPO_ROOT
 from ..services import config_store
 from ..services.session_catalog import Catalog
@@ -57,9 +58,8 @@ def sessions_page() -> None:
                     "outlined dense")
                 ui.button("Filter", icon="filter_list", on_click=lambda: render(reset=True)).props("outline")
             note = ui.label().classes("section-copy")
-        ui.label("Completion is the recorded manifest result, not an independent raw-data integrity audit. "
-                 "Unfinished recordings remain visible.").classes(
-            "section-copy")
+        hint("Unfinished recordings stay listed.",
+             "Completion is the result recorded in each manifest, not an independent raw-data audit.")
         rows = ui.column().classes("w-full gap-3")
         with ui.row().classes("console-toolbar w-full justify-between"):
             previous = ui.button("Previous", on_click=lambda: move(-1)).props("flat")
@@ -72,15 +72,14 @@ def sessions_page() -> None:
                 fit_btn = ui.button("Fit route extent", icon="zoom_out_map", on_click=lambda: fit_track()).props(
                     "outline")
                 fit_btn.disable()
-            track_status = ui.label("Select View route on a stopped recording to inspect its recorded extent.").classes(
-                "section-copy whitespace-pre-line")
+            with ui.row().classes("hint-row"):
+                track_status = ui.label("Select View route on a stopped recording.").classes(
+                    "section-copy whitespace-pre-line")
+                info("Long routes may be sampled for display; invalid samples and host-time gaps are not "
+                     "connected. The extent shows recorded positions, not sensor field-of-view coverage.")
             track_map = ui.leaflet(center=(0.0, 0.0), zoom=2).classes("plot-surface w-full h-96")
             route_layer = track_map.generic_layer(name="polyline", args=[[], {"color": "#087f8c", "weight": 3}])
             point_layers = []
-            ui.label("Pan or zoom to inspect the recorded positions. Long routes may be sampled for display; "
-                     "missing or invalid samples and host-time gaps are not connected. "
-                     "The route extent describes recorded positions, not sensor field-of-view coverage.").classes(
-                "section-copy")
 
         def clear_track() -> None:
             route_layer.args[0] = []
@@ -111,7 +110,7 @@ def sessions_page() -> None:
                 await asyncio.wait_for(track_map.initialized(), timeout=10.0)
             except asyncio.TimeoutError:
                 if not track.closed and request == page["track_request"]:
-                    track_status.set_text("The route was read, but the map did not become ready. Reload this page to retry.")
+                    track_status.set_text("Map not ready; reload the page to retry.")
                 return
             if track.closed or request != page["track_request"]:
                 return
@@ -169,7 +168,7 @@ def sessions_page() -> None:
                     with ui.column().classes("empty-state w-full items-center gap-2"):
                         ui.icon("folder_open").classes("text-3xl muted")
                         ui.label("No matching sessions").classes("font-medium")
-                        ui.label("Adjust the date, device or state filters, or refresh the recording root.").classes(
+                        ui.label("Adjust the filters or refresh.").classes(
                             "section-copy")
             paging.set_text(f"{len(selected)} matches · page {page['number'] + 1} / {pages}")
             previous.set_enabled(page["number"] > 0)

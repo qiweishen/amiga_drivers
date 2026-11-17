@@ -22,34 +22,21 @@ def spectrum(cube: np.ndarray, full_scale: int) -> tuple[dict[str, list[float]],
             float(cube.mean()), float((cube >= full_scale).mean() * 100.0))
 
 
-MAX_HISTOGRAM_BYTES = 128 * 1024 * 1024
-
-
 class BandHistograms:
+    """Exact per-band DN histograms; values above nominal full scale are retained, not clipped."""
+
     def __init__(self, bands: int, full_scale: int):
         self.full_scale = full_scale
-        self.memory_bytes = bands * (full_scale + 1) * 8
-        if self.memory_bytes > MAX_HISTOGRAM_BYTES:
-            raise ValueError("Reference geometry exceeds the statistics memory budget")
         self.histograms = [np.zeros(full_scale + 1, dtype=np.uint64) for _ in range(bands)]
         self.count = 0  # pixels per band, across accepted frames and spatial samples
 
     def add(self, cube: np.ndarray) -> None:
-        added = cube.shape[0] * cube.shape[2]
-        if self.count + added > 2 ** 53:
-            raise ValueError("Reference is too large for exact percentile rank calculation")
         for band, histogram in enumerate(self.histograms):
             counts = np.bincount(cube[:, band, :].ravel(), minlength=len(histogram)).astype(np.uint64)
             if len(counts) > len(histogram):
-                # Retain samples above nominal full scale rather than clipping.
-                extra = (len(counts) - len(histogram)) * 8
-                if self.memory_bytes + extra > MAX_HISTOGRAM_BYTES:
-                    raise ValueError("Reference values exceed the statistics memory budget")
-                histogram = np.pad(histogram, (0, len(counts) - len(histogram)))
-                self.histograms[band] = histogram
-                self.memory_bytes += extra
+                histogram = self.histograms[band] = np.pad(histogram, (0, len(counts) - len(histogram)))
             histogram += counts
-        self.count += added
+        self.count += cube.shape[0] * cube.shape[2]
 
     def finish(self) -> tuple[dict[str, list[float]], float, float]:
         if self.count == 0:
@@ -79,7 +66,7 @@ class BandHistograms:
 
 
 def reference_spectrum(directory: Path, expected_frames: int):
-    """Stream one finalized reference phase into bounded raw-DN histograms."""
+    """Stream one finalized reference phase into raw-DN histograms."""
     capture = load_capture(directory)
     histograms = BandHistograms(capture.bands, capture.full_scale)
     count = 0

@@ -1,13 +1,16 @@
-"""Process primitives for the GUI and acquisition in the same Linux container."""
+"""Process primitives; the GUI, the acquisition and the device tools share one Linux container."""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import signal as signals
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..constants import REPO_ROOT, RUNTIME_DIR
+
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
 @dataclass(frozen=True)
@@ -21,27 +24,11 @@ class ExecResult:
         return self.code == 0
 
 
-def exec_path(path: Path | str) -> str:
-    """GUI and binaries share one filesystem namespace."""
-    return str(Path(path))
-
-
-def to_host_path(path: str) -> Path:
-    """A binary-emitted path is already in the GUI's namespace."""
-    return Path(path)
-
-
-def workdir() -> str:
-    return str(REPO_ROOT)
-
-
 async def exec_(args: list[str], *, timeout: float | None = None) -> ExecResult:
     """Run a local utility to completion with bounded waiting."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args, cwd=workdir(),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+            *args, cwd=REPO_ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
         return ExecResult(127, "", str(exc))
     try:
@@ -57,14 +44,11 @@ async def exec_(args: list[str], *, timeout: float | None = None) -> ExecResult:
 
 
 async def spawn(args: list[str]) -> asyncio.subprocess.Process:
-    """Launch acquisition; server shutdown requests an orderly stop/drain.
-
-    A separate process group prevents a terminal signal bypassing the owner's
-    stop sequence. Reattachment still handles an interrupted GUI server.
-    """
+    """Launch acquisition in its own process group, so a terminal signal cannot
+    bypass the owner's orderly stop; reattachment handles an interrupted GUI."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     return await asyncio.create_subprocess_exec(
-        *args, cwd=workdir(),
+        *args, cwd=REPO_ROOT,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "AMIGA_STATUS_FILE": str(RUNTIME_DIR / "acquisition.json")},
         start_new_session=True,
@@ -75,7 +59,7 @@ async def gated_tool(args: list[str]) -> asyncio.subprocess.Process:
     # The PID survives exec; tool_jobs journals it before sending GO.
     gate = 'printf "%s\\n" "$$"; IFS= read -r permit && [ "$permit" = GO ] && exec "$@"'
     return await asyncio.create_subprocess_exec(
-        "/bin/sh", "-c", gate, "amiga-tool", *args, cwd=workdir(),
+        "/bin/sh", "-c", gate, "amiga-tool", *args, cwd=REPO_ROOT,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
@@ -90,27 +74,25 @@ async def pgrep(name: str) -> bool:
 
 @dataclass(frozen=True)
 class ProcessIdentity:
+    """PID, start time and boot id: a later process that reuses the PID never matches."""
     pid: int
     start_ticks: str
     boot_id: str
 
 
-async def _identity(pid: int) -> ProcessIdentity:
-    stat = await exec_(["cat", f"/proc/{pid}/stat"], timeout=5)
-    boot = await exec_(["cat", "/proc/sys/kernel/random/boot_id"], timeout=5)
-    if not stat.ok or not boot.ok:
-        raise RuntimeError("Cannot read acquisition process identity")
+def process_identity(pid: int) -> ProcessIdentity:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        raise ProcessLookupError(f"Process {pid} has exited") from None
+    boot_id = _BOOT_ID.read_text().strip()
     # comm (field 2) may contain spaces or parentheses. Field 22 is starttime.
-    fields = stat.stdout.rsplit(")", 1)[-1].split()
-    if len(fields) < 20 or not fields[19].isdigit() or not boot.stdout.strip():
-        raise RuntimeError("Invalid acquisition process identity")
+    fields = stat.rsplit(")", 1)[-1].split()
+    if len(fields) < 20 or not fields[19].isdigit() or not boot_id:
+        raise RuntimeError("Invalid process identity")
     if fields[0] in ("Z", "X"):
-        raise ProcessLookupError("The acquisition process has exited")
-    return ProcessIdentity(pid, fields[19], boot.stdout.strip())
-
-
-async def process_identity(pid: int) -> ProcessIdentity:
-    return await _identity(pid)
+        raise ProcessLookupError(f"Process {pid} has exited")
+    return ProcessIdentity(pid, fields[19], boot_id)
 
 
 async def running_process(name: str) -> ProcessIdentity | None:
@@ -121,42 +103,26 @@ async def running_process(name: str) -> ProcessIdentity | None:
     if not result.ok or len(pids) != 1 or not pids[0].isdigit():
         raise RuntimeError(f"Cannot identify a single {name} process")
     try:
-        return await _identity(int(pids[0]))
+        return process_identity(int(pids[0]))
     except ProcessLookupError:
         return None
 
 
-async def is_process_alive(ref: ProcessIdentity) -> bool:
-    exists = await exec_(["test", "-d", f"/proc/{ref.pid}"], timeout=5)
-    if exists.code == 1:
-        return False
-    if not exists.ok:
-        raise RuntimeError("Cannot inspect acquisition process")
+def is_process_alive(ref: ProcessIdentity) -> bool:
     try:
-        return await _identity(ref.pid) == ref
+        return process_identity(ref.pid) == ref
     except ProcessLookupError:
         return False
-    except RuntimeError:
-        # A process may exit between test and cat. Other failures stay unknown.
-        exists = await exec_(["test", "-d", f"/proc/{ref.pid}"], timeout=5)
-        if exists.code == 1:
-            return False
-        raise
 
 
-async def signal_process(ref: ProcessIdentity, *, signal: str = "TERM") -> ExecResult:
+def signal_process(ref: ProcessIdentity, *, signal: str = "TERM") -> ExecResult:
+    """Signal exactly the process ``ref`` identifies."""
     if signal not in ("TERM", "KILL"):
         raise ValueError("Unsupported stop signal")
-    if not await is_process_alive(ref):
-        return ExecResult(1, "", "Acquisition process has already exited")
-    return await exec_(["kill", f"-{signal}", "--", str(ref.pid)], timeout=5)
-
-
-async def binary_exists(path: Path | str) -> bool:
-    file = Path(path)
-    return file.is_file() and os.access(file, os.X_OK)
-
-
-async def env_check() -> tuple[bool, str]:
-    """Preflight checks each executable in this process's environment."""
-    return True, ""
+    if not is_process_alive(ref):
+        return ExecResult(1, "", "Process has already exited")
+    try:
+        os.kill(ref.pid, signals.SIGTERM if signal == "TERM" else signals.SIGKILL)
+    except OSError as error:
+        return ExecResult(1, "", str(error))
+    return ExecResult(0, "", "")

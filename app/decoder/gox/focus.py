@@ -33,7 +33,8 @@ import cv2
 import numpy as np
 
 from ..ebus import pixels
-from .color_checker import DOCUMENTED_PEDESTAL_DN
+from .preview import downscale, png_bytes
+from .recording import DOCUMENTED_PEDESTAL_DN
 
 BAYER_RG8_CODE = 0x01080009  # PFNC BayerRG8: 1 px / 1 B
 FOCUS_PIXEL_FORMAT = "BayerRG8"  # gox::kFocusPixelFormat
@@ -103,27 +104,11 @@ def sharpness(green: np.ndarray, pedestal_dn: float = PEDESTAL_DN) -> tuple[floa
     return float(laplacian.var(dtype=np.float64)) / (signal * signal), signal
 
 
-def gray_png(gray8: np.ndarray) -> bytes:
-    gray8 = np.ascontiguousarray(gray8)
-    if gray8.dtype != np.uint8 or gray8.ndim != 2 or gray8.size == 0:
-        raise ValueError("Grayscale PNG encoding requires a nonempty 2-D uint8 image")
-    ok, encoded = cv2.imencode(".png", gray8, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-    data = encoded.tobytes() if ok else b""
-    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[24] != 8 or data[25] != 0:
-        raise ValueError("PNG encoder did not produce an 8-bit grayscale image")
-    return data
-
-
 def _overview(image: np.ndarray) -> tuple[bytes, tuple[float, float]]:
+    """The Gr plane of the whole frame, area-downscaled; and full-resolution px per overview px (x, y)."""
     height, width = image.shape
-    plane = image[GREEN_ROW::2, GREEN_COLUMN::2]
-    plane_h, plane_w = plane.shape
-    scale = min(1.0, OVERVIEW_LONG_EDGE / max(plane_h, plane_w))
-    size = (max(1, round(plane_w * scale)), max(1, round(plane_h * scale)))
-    plane = np.ascontiguousarray(plane)
-    if scale < 1.0:
-        plane = cv2.resize(plane, size, interpolation=cv2.INTER_AREA)
-    return gray_png(plane), (width / size[0], height / size[1])
+    small = downscale(np.ascontiguousarray(image[GREEN_ROW::2, GREEN_COLUMN::2]), OVERVIEW_LONG_EDGE)
+    return png_bytes(small), (width / small.shape[1], height / small.shape[0])
 
 
 def analyze(record, payload: bytes, center: tuple[float, float] | None, half: int, *,
@@ -147,7 +132,7 @@ def analyze(record, payload: bytes, center: tuple[float, float] | None, half: in
     overview_png, overview_scale = _overview(image) if overview else (None, (1.0, 1.0))
     return FocusSample(
         seq=record.seq, width=width, height=height, roi=roi, score=score, signal_dn=signal,
-        clipped_pct=clipped, loupe_png=gray_png(loupe),
+        clipped_pct=clipped, loupe_png=png_bytes(np.ascontiguousarray(loupe)),
         loupe_origin=(roi.x0 + 2 * off_x, roi.y0 + 2 * off_y),
         overview_png=overview_png, overview_scale=overview_scale,
     )

@@ -24,8 +24,10 @@ from pathlib import Path
 import cv2 as cv
 import numpy as np
 
+from .. import exposure as ettr
 from ..ebus import recording as raw_recording
 from . import delta_e, recording, render
+from .recording import DOCUMENTED_PEDESTAL_DN
 from .color import (
     CameraRGBNormalization,
     ColorCalibration,
@@ -37,11 +39,12 @@ from .color import (
 from .preview import (
     DISPLAY_LONG_EDGE,
     display_points,
+    downscale,
     native_display_png,
     native_display_rgb8,
     native_full_png16,
     native_rgb,
-    png8_bytes,
+    png_bytes,
 )
 
 
@@ -80,12 +83,8 @@ _DETECTION_EDGE = 1600
 _MAX_CANDIDATES = 6
 _THUMBNAIL_EDGE = 640  # long edge of a candidate thumbnail, px
 _MIN_PATCH_PIXELS = 16
-_SATURATION_LIMIT = 0.98
+_SATURATION_LIMIT = ettr.NEAR_SATURATION
 
-# Black level: the GOX manual (Ver. 1.3, p.172, "Black Level Adjustment") gives the
-# default level as 8LSB@8bit; the gox driver rescales it to 12 bit (8 x 16 = 128 DN)
-# and records it in device.json derived.black_level. No register reports it.
-DOCUMENTED_PEDESTAL_DN = 128.0
 PEDESTAL_SOURCE = ("GOX manual Ver. 1.3 p.172 'Black Level Adjustment': Default Level 8LSB@8bit; "
                    "rescaled to 12 bit by the gox driver (8 x 16 = 128 DN, device.json "
                    "derived.black_level.pedestal_lsb12_derived). Not measured on this camera.")
@@ -115,25 +114,9 @@ class CalibrationPreview:
 
 
 def capability_reason() -> str | None:
-    """Report missing APIs without loading a detector, model, or device."""
-    if str(getattr(cv, "__version__", "")).split(".")[0] != "5":
-        return "ColorChecker calibration requires the project's OpenCV 5 API."
-    mcc, ccm = getattr(cv, "mcc", None), getattr(cv, "ccm", None)
-    required = (
-        (mcc, ("MCC24", "SG140", "VINYL18", "CCheckerDetector", "CChecker")),
-        (ccm, ("ColorCorrectionModel", "COLORCHECKER_MACBETH", "COLORCHECKER_DIGITAL_SG",
-               "COLORCHECKER_VINYL", "COLOR_SPACE_SRGB", "CCM_LINEAR",
-               "LINEARIZATION_IDENTITY", "DISTANCE_CIE2000")),
-        (getattr(mcc, "CCheckerDetector", None),
-         ("create", "setColorChartType", "process", "getListColorChecker")),
-        (getattr(mcc, "CChecker", None), ("getColorCharts", "getBox", "getTarget", "getCost")),
-        (getattr(ccm, "ColorCorrectionModel", None),
-         ("setColorSpace", "setCcmType", "setLinearization", "setDistance",
-          "setSaturatedThreshold", "compute", "getColorCorrectionMatrix", "getLoss", "getMask")),
-    )
-    for owner, names in required:
-        if owner is None or any(not hasattr(owner, name) for name in names):
-            return "This OpenCV build lacks the OpenCV 5 mcc/ccm APIs required for ColorChecker calibration."
+    """Why ColorChecker calibration is unavailable in this OpenCV build, or None."""
+    if not (cv.__version__.startswith("5.") and hasattr(cv, "mcc") and hasattr(cv, "ccm")):
+        return "ColorChecker calibration requires OpenCV 5 with the mcc and ccm modules."
     return None
 
 
@@ -153,22 +136,9 @@ def _linear_audit(directory: Path) -> dict:
     return evidence
 
 
-def _native_rgb(frame: recording.ImageFrame) -> tuple[np.ndarray, int, int]:
-    return native_rgb(frame), 4095, 12
-
-
-def _display_rgb(rgb: np.ndarray, full_scale: int) -> np.ndarray:
+def _display_rgb(rgb: np.ndarray) -> np.ndarray:
     """A reduced detection input only; previews and sampling use the native image."""
-    height, width = rgb.shape[:2]
-    scale = min(1.0, _DETECTION_EDGE / max(height, width))
-    if scale < 1.0:
-        rgb = cv.resize(rgb, (max(1, round(width * scale)), max(1, round(height * scale))),
-                        interpolation=cv.INTER_AREA)
-    return normalize_camera_rgb(rgb, CameraRGBNormalization(full_scale_dn=full_scale))
-
-
-def _srgb_encode(linear: np.ndarray) -> np.ndarray:
-    return render.srgb_oetf(linear)
+    return normalize_camera_rgb(downscale(rgb, _DETECTION_EDGE), CameraRGBNormalization())
 
 
 def _bgr8(rgb: np.ndarray) -> np.ndarray:
@@ -193,13 +163,13 @@ def _detect(display_rgb: np.ndarray, chart: ChartSpec) -> tuple[list[_Candidate]
     detector = cv.mcc.CCheckerDetector.create()
     detector.setColorChartType(getattr(cv.mcc, chart.key))
     transfer = "sRGB-like OETF on resized camera RGB; temporary BGR8 for geometry only"
-    detected = detector.process(_bgr8(_srgb_encode(display_rgb)), _MAX_CANDIDATES)
+    detected = detector.process(_bgr8(render.srgb_oetf(display_rgb)), _MAX_CANDIDATES)
     if not detected:
         # Detection-only gray-world retry; neither image supplies fitted colors.
         channel_means = display_rgb.mean(axis=(0, 1), dtype=np.float64)
         if np.all(channel_means > 0):
             balanced = display_rgb * (channel_means.mean() / channel_means)
-            detected = detector.process(_bgr8(_srgb_encode(balanced)), _MAX_CANDIDATES)
+            detected = detector.process(_bgr8(render.srgb_oetf(balanced)), _MAX_CANDIDATES)
             transfer = "gray-world gains then sRGB-like OETF; temporary BGR8 for geometry only"
     if not detected:
         raise ValueError(f"No {chart.key} chart detected. Show the full chart clearly and recapture.")
@@ -246,7 +216,7 @@ def _thumbnail_png(rgb: np.ndarray, polygons: np.ndarray) -> bytes:
     _outline(small, points, (0, 255, 0), thickness=1)
     hull = cv.convexHull(np.rint(points.reshape(-1, 2)).astype(np.int32))
     cv.polylines(small, [hull], True, (255, 0, 255), 2, cv.LINE_8)
-    return png8_bytes(small)
+    return png_bytes(small)
 
 
 def detect(directory: Path, chart_key: str) -> Detection:
@@ -256,8 +226,8 @@ def detect(directory: Path, chart_key: str) -> Detection:
     the real one, so nothing is chosen here: the operator selects the chart, and ``measure``
     samples the selected geometry.
     """
-    chart, frame, rgb, full_scale, _, _ = _load(directory, chart_key)
-    display = _display_rgb(rgb, full_scale)
+    chart, frame, rgb, _ = _load(directory, chart_key)
+    display = _display_rgb(rgb)
     found, transfer = _detect(display, chart)
     ratios = np.array([rgb.shape[1] / display.shape[1], rgb.shape[0] / display.shape[0]])
     candidates = []
@@ -278,14 +248,6 @@ def _require_unsaturated(status: list[str | None]) -> None:
             raise ValueError(f"ColorChecker patch {index} is saturated. Reduce exposure and recapture.")
         if state == PATCH_NEAR_SATURATION:
             raise ValueError(f"ColorChecker patch {index} is too close to saturation. Reduce exposure and recapture.")
-
-
-def _sample(rgb: np.ndarray, raw: np.ndarray, polygons: np.ndarray,
-            full_scale: int) -> tuple[np.ndarray, list[int]]:
-    """Patch means for fitting; rejects any saturated patch."""
-    means, counts, status = _sample_patches(rgb, raw, polygons, full_scale)
-    _require_unsaturated(status)
-    return means, counts
 
 
 def _sample_patches(rgb: np.ndarray, raw: np.ndarray, polygons: np.ndarray,
@@ -414,7 +376,7 @@ def _outline(image: np.ndarray, polygons: np.ndarray, value: tuple,
 def _annotated_display_png(rgb: np.ndarray, polygons: np.ndarray) -> bytes:
     """Outlines drawn at display resolution so they stay visible after downscaling."""
     small = native_display_rgb8(rgb)
-    return png8_bytes(_outline(small, display_points(polygons, rgb.shape, small.shape), (0, 255, 0)))
+    return png_bytes(_outline(small, display_points(polygons, rgb.shape, small.shape), (0, 255, 0)))
 
 
 def _reference_black_level(directory: Path) -> dict:
@@ -485,7 +447,6 @@ class ChartMeasurement:
     frame: recording.ImageFrame = field(repr=False)
     rgb: np.ndarray = field(repr=False)
     full_scale: int
-    bits: int
     evidence: dict
     polygons: np.ndarray = field(repr=False)
     geometry: str  # GEOMETRY_SELECTED on this capture, or GEOMETRY_SUPPLIED from another one
@@ -497,7 +458,7 @@ class ChartMeasurement:
 
 
 def _load(directory: Path, chart_key: str):
-    """(chart, frame, native RGB, full scale, bits, linear-audit evidence) of one capture."""
+    """(chart, frame, native RGB, linear-audit evidence) of one capture."""
     if not isinstance(chart_key, str) or chart_key not in CHARTS:
         raise ValueError("Select MCC24, SG140, or VINYL18 before capturing the ColorChecker.")
     reason = capability_reason()
@@ -508,8 +469,7 @@ def _load(directory: Path, chart_key: str):
     frame = recording.snapshot_frame(directory, verify_crc=True)
     if frame.skipped_invalid:
         raise ValueError("The reference contains an invalid received buffer; recapture the ColorChecker.")
-    rgb, full_scale, bits = _native_rgb(frame)
-    return CHARTS[chart_key], frame, rgb, full_scale, bits, evidence
+    return CHARTS[chart_key], frame, native_rgb(frame), evidence
 
 
 def measure(directory: Path, chart_key: str, polygons: np.ndarray, *, geometry: str = GEOMETRY_SUPPLIED,
@@ -519,12 +479,13 @@ def measure(directory: Path, chart_key: str, polygons: np.ndarray, *, geometry: 
     ``polygons`` are native pixels: a ``detect`` candidate of this capture (GEOMETRY_SELECTED), or
     one chosen on another capture of the same static scene (GEOMETRY_SUPPLIED).
     """
-    chart, frame, rgb, full_scale, bits, evidence = _load(directory, chart_key)
+    chart, frame, rgb, evidence = _load(directory, chart_key)
+    full_scale = recording.NATIVE_FULL_SCALE
     polygons = np.asarray(polygons, dtype=np.float64)
     if polygons.shape != (chart.patch_count, 4, 2) or not np.isfinite(polygons).all():
         raise ValueError("The selected chart geometry does not match the selected chart format")
     means, counts, status = _sample_patches(rgb, frame.image, polygons, full_scale)
-    return ChartMeasurement(Path(directory), chart, frame, rgb, full_scale, bits, evidence, polygons,
+    return ChartMeasurement(Path(directory), chart, frame, rgb, full_scale, evidence, polygons,
                             geometry, detection_transfer, means, counts, status, selection)
 
 
@@ -534,7 +495,7 @@ def calibrate(directory: Path, chart_key: str, *, measurement: ChartMeasurement)
         raise ValueError("The supplied measurement belongs to another capture or chart")
     directory = measurement.directory
     chart, frame, rgb = measurement.chart, measurement.frame, measurement.rgb
-    full_scale, bits, evidence = measurement.full_scale, measurement.bits, measurement.evidence
+    full_scale, evidence = measurement.full_scale, measurement.evidence
     polygons, detection_transfer = measurement.polygons, measurement.detection_transfer
     _require_unsaturated(measurement.status)
     means, sample_counts = measurement.means, measurement.counts
@@ -585,7 +546,7 @@ def calibrate(directory: Path, chart_key: str, *, measurement: ChartMeasurement)
         "patch_errors_definition": ("CIEDE2000 (kL=kC=kH=1) between the OpenCV reference linear sRGB and "
                                     "(pedestal-subtracted patch mean @ matrix), both converted to "
                                     "CIE L*a*b* D65/2 deg; the RMS over fitted patches equals the fit loss"),
-        "source_effective_bits": bits,
+        "source_effective_bits": full_scale.bit_length(),
         "source_pixel_format": frame.pixel_format,
         "source_full_scale_dn": full_scale,
         "source_segment": frame.record.path.name,

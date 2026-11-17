@@ -5,8 +5,9 @@ from __future__ import annotations
 from nicegui import ui
 
 from . import layout
+from .components import NEXT_RUN, hint
 from ..constants import CONFIG_FILES
-from ..services import config_store, config_actions
+from ..services import config_store
 from ..services.config_store import ConflictError
 from ..state import STATE, ProcState
 
@@ -17,11 +18,9 @@ _EDIT_ORDER = ("main", "asterx", "fx10", "gox", "lms4xxx")
 def config_page() -> None:
     with layout.frame("Config"):
         with ui.column().classes("console-panel w-full gap-4"):
-            ui.label(
-                "YAML text editor; comments are preserved. Validation checks syntax only; "
-                "the C++ loader is the final authority. "
-                "Saving is locked during initialization and while acquisition ownership is unknown."
-            ).classes("section-copy")
+            hint("YAML editor; comments are preserved.",
+                 "Validation checks syntax only; the C++ loader has the final say. Saving is locked while a "
+                 "recording initializes or its state is unknown.")
 
             with ui.tabs().classes("w-full").props("align=left outside-arrows mobile-arrows") as tabs:
                 tab_handles = {cid: ui.tab(CONFIG_FILES[cid].label) for cid in _EDIT_ORDER}
@@ -63,7 +62,7 @@ def _editor_panel(config_id: str) -> None:
             for e in errors:
                 ui.notify(e, type="negative", multi_line=True)
             return False
-        ui.notify("Syntax check passed (the C++ loader has the final say)", type="positive")
+        ui.notify("Syntax OK", type="positive")
         return True
 
     async def _save(force: bool = False) -> None:
@@ -82,16 +81,16 @@ def _editor_panel(config_id: str) -> None:
         try:
             state["saving"] = True
             submitted = editor.value
-            state["mtime"] = await config_actions.change(
-                "save", config_id, submitted, None if force else state["mtime"], expected_path=state["path"]
+            state["mtime"] = config_store.save(
+                config_id, submitted, None if force else state["mtime"], expected_path=state["path"]
             )
             state["saved_text"] = submitted
             _mark_dirty()
             if STATE.process_state in (ProcState.RUNNING, ProcState.STARTING):
                 STATE.pending_config_notice = True
-                ui.notify("Saved — takes effect on the next recording start", type="info")
+                ui.notify(NEXT_RUN, type="info")
             else:
-                ui.notify("Saved (previous content backed up as .bak)", type="positive")
+                ui.notify("Saved; previous version kept as .bak", type="positive")
         except ConflictError as e:
             with ui.dialog() as dialog, ui.card():
                 ui.label(f"{e} — how to proceed?")
@@ -137,7 +136,7 @@ def _editor_panel(config_id: str) -> None:
         try:
             path = config_store.get(config_id).path
             path_warning.set_text("" if path == state["path"] else
-                                  f"Main now selects {path}. Revert reloads that file; unsaved text is retained until then.")
+                                  f"Main now selects {path}; Revert loads it.")
         except Exception as e:
             path_warning.set_text(f"Cannot resolve the selected config: {e}")
 

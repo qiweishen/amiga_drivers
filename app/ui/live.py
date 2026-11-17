@@ -8,8 +8,8 @@ from __future__ import annotations
 from nicegui import ui
 
 from . import fx10_plot, layout
+from .components import PREVIEW_DETAILS, heading, hint, info, preview_image
 from ..constants import TOOL_TICK_S
-from ..decoder.gox.preview import DISPLAY_LONG_EDGE
 from ..services import live_view, preview_images
 from ..state import STATE, ProcState
 
@@ -37,38 +37,28 @@ def live_page() -> None:
         with ui.element("div").classes("workspace-grid"):
             # -------------------------------------------------------- GoX
             with ui.column().classes("console-panel w-full min-w-0"):
-                ui.label("GoX image preview").classes("section-title")
-                ui.label("Newest frame found in the last ~1 s of recorded data.").classes("section-copy")
+                heading("GoX image preview", icon="photo_camera")
+                hint("Newest recorded frame.")
                 with ui.row().classes("console-toolbar"):
-                    gox_btn = ui.button("Fetch frame", icon="photo_camera", on_click=lambda: _fetch_gox())
+                    gox_btn = ui.button("Fetch frame", icon="photo_camera", on_click=lambda: fetch("gox"))
                     gox_busy = ui.spinner(size="sm").classes("hidden")
-                with ui.column().classes("preview-surface w-full justify-center"):
-                    gox_image = ui.interactive_image().classes("w-full")
-                    gox_image.bind_visibility_from(gox_image, "source", backward=bool)
-                    with ui.column().classes("empty-state w-full").bind_visibility_from(
-                            gox_image, "source", backward=lambda source: not source):
-                        ui.icon("image_search", size="36px")
-                        ui.label("No recorded frame displayed")
-                        ui.label("Use Fetch frame during an active GoX recording.").classes("text-xs")
-                with ui.row().classes("w-full items-center gap-3") as gox_download_row:
+                gox_image = preview_image("image_search", "No recorded frame displayed")
+                with ui.row().classes("w-full items-center gap-1") as gox_download_row:
                     gox_download = ui.link("Download full-resolution 16-bit PNG", "#").classes("text-xs")
-                    ui.label(f"Screen preview: linear DN, 8-bit, downscaled to ≤ {DISPLAY_LONG_EDGE} px. "
-                             "The download is lossless (DN × 16) and is decoded on first request.").classes(
-                        "text-xs muted")
+                    info(PREVIEW_DETAILS)
                 gox_download_row.set_visibility(False)
                 gox_meta = ui.label("").classes("text-sm muted mono break-all")
 
             # -------------------------------------------------------- FX10
             with ui.column().classes("console-panel w-full min-w-0"):
-                ui.label("FX10 spectral statistics").classes("section-title")
-                ui.label("Raw DN statistics over recent frames; window size follows the expected frame rate.").classes(
-                    "section-copy")
+                heading("FX10 spectral statistics", icon="ssid_chart")
+                hint("Raw DN per band over the last ~1 s of frames.")
                 with ui.row().classes("console-toolbar"):
-                    fx10_btn = ui.button("Fetch spectrum", icon="ssid_chart", on_click=lambda: _fetch_fx10())
+                    fx10_btn = ui.button("Fetch spectrum", icon="ssid_chart", on_click=lambda: fetch("fx10"))
                     fx10_busy = ui.spinner(size="sm").classes("hidden")
                 with ui.column().classes("plot-surface w-full"):
                     chart = ui.echart(fx10_plot.workbench_options()).classes("w-full h-80")
-                    ui.label("No spectrum displayed · use Fetch spectrum during an active FX10 recording.").classes(
+                    ui.label("No spectrum displayed").classes(
                         "empty-state w-full text-xs").bind_visibility_from(
                         chart.options, "series", backward=lambda series: not series)
                 fx10_axis_note = ui.label("").classes("text-xs muted")
@@ -97,16 +87,16 @@ def live_page() -> None:
             tone = "text-warning"
             if STATE.control_uncertain or (STATE.process_state is ProcState.RUNNING
                                            and not STATE.ownership_verified):
-                reason = "Acquisition state is unverified — previews are unavailable until the controller confirms it."
+                reason = "Acquisition state unverified; previews unavailable."
             elif STATE.process_state is ProcState.STARTING:
-                reason = "Recording is starting — previews become available after sensor initialization."
+                reason = "Recording is starting."
             elif STATE.process_state is ProcState.STOPPING:
-                reason = "Recording is stopping — previews are unavailable."
+                reason = "Recording is stopping."
             elif STATE.process_state is ProcState.FAILED:
-                reason = "Recording failed — review Overview and System logs before restarting."
+                reason = "Recording failed; see Overview and Logs."
                 tone = "text-negative"
             else:
-                reason = "" if running else "Recording is not running — start it on the Overview page first"
+                reason = "" if running else "Start a recording on the Overview page first."
                 tone = "muted"
             guard_label.set_text(reason)
             guard_label.classes(add=tone, remove=" ".join(
@@ -119,72 +109,16 @@ def live_page() -> None:
         ui.timer(TOOL_TICK_S, refresh_guard)
         refresh_guard()
 
-        async def _fetch_gox() -> None:
-            if pending["gox"] or not page["alive"]:
-                return
-            pending["gox"] = True
-            versions["gox"] += 1
-            version = versions["gox"]
-            gox_busy.classes(remove="hidden")
-            gox_btn.set_enabled(False)
-            try:
-                result = await live_view.fetch_gox()
-            except live_view.PreviewObsolete:
-                return
-            except Exception as e:
-                if page["alive"] and version == versions["gox"]:
-                    ui.notify(f"Preview unavailable: {e}", type="warning", multi_line=True)
-                return
-            finally:
-                pending["gox"] = False
-                if page["alive"]:
-                    gox_busy.classes(add="hidden")
-                    refresh_guard()
-            if (not page["alive"] or version != versions["gox"]
-                    or not live_view.is_current(result.request)):
-                return
-            if not result.ok:
-                ui.notify(result.reason, type="warning", multi_line=True)
-                gox_meta.set_text(result.reason)
-                return
+        def show_gox(result) -> None:
             release_gox_urls()
             page["gox_urls"] = [result.image_url, result.full_image_url]
             gox_image.set_source(result.image_url)
             gox_download.props["href"] = preview_images.download_url(result.full_image_url)
             gox_download_row.set_visibility(True)
-            gox_meta.set_text(
-                f"{result.camera} · seq {result.seq} · {result.width}×{result.height} · "
-                f"{result.pixel_format} · {result.age_s:.1f}s ago"
-            )
+            gox_meta.set_text(f"{result.camera} · seq {result.seq} · {result.width}×{result.height} · "
+                              f"{result.pixel_format} · {result.age_s:.1f}s ago")
 
-        async def _fetch_fx10() -> None:
-            if pending["fx10"] or not page["alive"]:
-                return
-            pending["fx10"] = True
-            versions["fx10"] += 1
-            version = versions["fx10"]
-            fx10_busy.classes(remove="hidden")
-            fx10_btn.set_enabled(False)
-            try:
-                result = await live_view.fetch_fx10()
-            except live_view.PreviewObsolete:
-                return
-            except Exception as e:
-                if page["alive"] and version == versions["fx10"]:
-                    ui.notify(f"Preview unavailable: {e}", type="warning", multi_line=True)
-                return
-            finally:
-                pending["fx10"] = False
-                if page["alive"]:
-                    fx10_busy.classes(add="hidden")
-                    refresh_guard()
-            if (not page["alive"] or version != versions["fx10"]
-                    or not live_view.is_current(result.request)):
-                return
-            if not result.ok:
-                ui.notify(result.reason, type="warning", multi_line=True)
-                fx10_meta.set_text(result.reason)
-                return
+        def show_fx10(result) -> None:
             chart.options.update(fx10_plot.workbench_options(
                 result.spectrum_dn, full_scale=result.full_scale, bands=result.bands,
                 wavelengths_nm=result.wavelengths_nm,
@@ -193,5 +127,38 @@ def live_page() -> None:
             fx10_axis_note.set_text(fx10_plot.axis_note(result.wavelengths_nm))
             fx10_meta.set_text(
                 f"{result.frames} frames · {result.bands} bands · {result.samples} px/line · "
-                f"{result.pixel_format} · full scale {result.full_scale} DN · newest {result.age_s:.1f}s ago"
-            )
+                f"{result.pixel_format} · full scale {result.full_scale} DN · newest {result.age_s:.1f}s ago")
+
+        # kind -> (button, spinner, status label, service fetch, display)
+        panels = {"gox": (gox_btn, gox_busy, gox_meta, live_view.fetch_gox, show_gox),
+                  "fx10": (fx10_btn, fx10_busy, fx10_meta, live_view.fetch_fx10, show_fx10)}
+
+        async def fetch(kind: str) -> None:
+            button, spinner, meta, fetch_preview, show = panels[kind]
+            if pending[kind] or not page["alive"]:
+                return
+            pending[kind] = True
+            versions[kind] += 1
+            version = versions[kind]
+            spinner.classes(remove="hidden")
+            button.set_enabled(False)
+            try:
+                result = await fetch_preview()
+            except live_view.PreviewObsolete:
+                return
+            except Exception as e:
+                if page["alive"] and version == versions[kind]:
+                    ui.notify(f"Preview unavailable: {e}", type="warning", multi_line=True)
+                return
+            finally:
+                pending[kind] = False
+                if page["alive"]:
+                    spinner.classes(add="hidden")
+                    refresh_guard()
+            if not page["alive"] or version != versions[kind] or not live_view.is_current(result.request):
+                return
+            if not result.ok:
+                ui.notify(result.reason, type="warning", multi_line=True)
+                meta.set_text(result.reason)
+                return
+            show(result)

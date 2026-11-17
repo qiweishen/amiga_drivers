@@ -17,20 +17,17 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from ..constants import FX10_SNAPSHOT_CONFIG
 from ..decoder import fx10
 from ..decoder.ebus import recording as raw_recording
 from ..decoder.fx10 import exposure as fx10_exposure
-from ..decoder.gox import exposure
-from . import atomic_json, camera_operations, config_store, fx10_tools, reference_storage
+from ..decoder import exposure
+from . import camera_operations, config_store, exposure_series, fx10_tools
+from .exposure_series import ExposureCheck
 
-MAX_SERIES_BYTES = 4 * 1024 * 1024
-MAX_CONFIG_BYTES = 1024 * 1024
 EXPOSURE_OFFSET_US = 0.0  # no documented FX10 integration offset; the fitted intercept absorbs any
 
 _status = ""
@@ -53,24 +50,7 @@ class BracketPoint:
 
 
 @dataclass(frozen=True)
-class ExposureCheck:
-    """A white reference compared with the ETTR target of the active series."""
-
-    point: exposure.ExposurePoint
-    target_dn: float
-    deviation: float | None  # None when the band saturated (only a lower bound is known)
-    within: bool
-    suggestion: exposure.Suggestion | None
-    message: str
-
-    def to_dict(self) -> dict:
-        return {"point": self.point.to_dict(), "target_dn": self.target_dn, "deviation": self.deviation,
-                "within_tolerance": self.within, "tolerance": exposure.TOLERANCE,
-                "suggestion": self.suggestion.to_dict() if self.suggestion else None, "message": self.message}
-
-
-@dataclass(frozen=True)
-class ExposureSeries:
+class ExposureSeries(exposure_series.Suggested):
     ok: bool
     reason: str = ""
     directory: str = ""
@@ -91,18 +71,6 @@ class ExposureSeries:
     initial_suggestion: exposure.Suggestion | None = None
     elapsed_s: float = 0.0
     raw_output: str = ""
-
-    @property
-    def suggestion(self) -> exposure.Suggestion | None:
-        if self.checks and self.checks[-1].suggestion is not None:
-            return self.checks[-1].suggestion
-        if self.checks and self.checks[-1].within:
-            return None  # verified; nothing left to apply
-        return self.initial_suggestion
-
-    @property
-    def suggested_exposure_ms(self) -> float | None:
-        return self.suggestion.exposure_ms if self.suggestion else None
 
     def to_dict(self) -> dict:
         return {
@@ -160,31 +128,12 @@ def _analyze(session_dir: Path, requested_ms: float) -> _Analysis:
     return result
 
 
-def _config_bytes() -> bytes:
-    path = config_store.checked_snapshot_path(FX10_SNAPSHOT_CONFIG)
-    with path.open("rb") as source:
-        raw = source.read(MAX_CONFIG_BYTES + 1)
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ValueError("FX10 snapshot configuration exceeds the capture limit")
-    return raw
-
 
 def _prepare_series(exposures: list[float], target_fraction: float):
-    root = reference_storage.tmp_root()
-    raw = _config_bytes()
-    now = datetime.now(timezone.utc)
-    directory = root / f"exposure_fx10_{now:%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
-    config = directory / "config" / "config-fx10-snapshot.yaml"
-    directory.mkdir(parents=True, exist_ok=False)
-    config.parent.mkdir()
-    config.write_bytes(raw)
-    atomic_json.write(directory / "series.json", {
-        "format": "fx10-exposure-series-v1", "status": "capturing", "created_utc": now.isoformat(),
-        "exposures_ms": exposures, "target_fraction": target_fraction,
-        "binning": "unchanged (snapshot config)", "config_source": str(FX10_SNAPSHOT_CONFIG),
-        "config_snapshot": config.relative_to(directory).as_posix(),
-    }, limit=MAX_SERIES_BYTES)
-    return directory, config
+    return exposure_series.prepare(
+        "exposure_fx10", "config-fx10-snapshot.yaml", config_store.snapshot_config_bytes(FX10_SNAPSHOT_CONFIG),
+        {"format": "fx10-exposure-series-v1", "exposures_ms": exposures, "target_fraction": target_fraction,
+         "binning": "unchanged (snapshot config)", "config_source": str(FX10_SNAPSHOT_CONFIG)})
 
 
 async def run(center_ms: float, target_fraction: float = fx10_exposure.DEFAULT_TARGET_FRACTION) -> ExposureSeries:
@@ -257,7 +206,8 @@ async def _run(center_ms: float, exposures: list[float], target_fraction: float)
                                target_fraction=target_fraction)
         except ValueError as error:
             fit_error = str(error)
-        limit_ms, limit_notes = await asyncio.to_thread(_exposure_limit)
+        limit_ms, limit_notes = await asyncio.to_thread(exposure_series.exposure_limit,
+                                                        config_store.fx10_exposure_limit_ms)
         suggestion = None
         if fit is not None:
             try:
@@ -286,37 +236,12 @@ async def _run(center_ms: float, exposures: list[float], target_fraction: float)
     return series
 
 
-def _exposure_limit() -> tuple[float | None, list[str]]:
-    try:
-        return config_store.fx10_exposure_limit_ms()
-    except (OSError, ValueError, config_store.ApplyError) as error:
-        return None, [f"frame-period limit unavailable ({error}); it is checked on Apply"]
-
-
 async def _save(series: ExposureSeries) -> None:
-    if series.directory:
-        document = series.to_dict()
-        document["status"] = "completed" if series.ok else "failed"
-        try:
-            await asyncio.to_thread(atomic_json.write, Path(series.directory) / "series.json", document,
-                                    limit=MAX_SERIES_BYTES)
-        except (OSError, ValueError):
-            pass  # the in-memory result still reports the outcome
+    await exposure_series.save(series.directory,
+                               {**series.to_dict(), "status": "completed" if series.ok else "failed"})
 
 
 # --- verification of a white reference --------------------------------------------
-
-def _refit(series: ExposureSeries, extra: exposure.ExposurePoint) -> tuple[exposure.Suggestion | None, str]:
-    points = [point.point for point in series.points if point.point is not None]
-    points += [check.point for check in series.checks] + [extra]
-    try:
-        suggestion, prefix = exposure.refine(series.fit, points, extra, exposure_offset_us=EXPOSURE_OFFSET_US,
-                                             limit_ms=series.limit_ms, unchanged=fx10_exposure.UNCHANGED)
-    except ValueError as error:
-        return None, f"Refit failed: {error}"
-    note = f" {suggestion.note}" if suggestion.note else ""
-    return suggestion, f"{prefix} {suggestion.exposure_ms:g} ms; apply it and collect again.{note}"
-
 
 def check_reference(white_dir: Path, p90: list[float], full_scale: int, source: str) -> ExposureCheck | None:
     """Compare a white reference with the active series' ETTR target; None if not applicable.
@@ -337,20 +262,8 @@ def check_reference(white_dir: Path, p90: list[float], full_scale: int, source: 
         return None
     point = fx10_exposure.point_from_spectrum("white reference", p90, series.band, readback["exposure_time_us"],
                                               full_scale, source=source)
-    target, ceiling_ms = exposure.reachable_target(series.fit, gain=1.0, exposure_offset_us=EXPOSURE_OFFSET_US,
-                                                   limit_ms=series.limit_ms)
-    reach = "" if ceiling_ms is None else (
-        f" The {series.limit_ms:g} ms frame-period limit caps the exposure at {ceiling_ms:g} ms, so the reachable "
-        f"p90 ({target:.0f} DN) is the target instead of {series.fit.target_dn:.0f} DN.")
-    if not point.usable:
-        suggested, message = _refit(series, point)
-        check = ExposureCheck(point, target, None, False, suggested, message)
-    else:
-        deviation = exposure.deviation(point.peak_dn, target)
-        within = abs(deviation) <= exposure.TOLERANCE
-        suggested, message = (None, f"Within ±{exposure.TOLERANCE:.0%} of the ETTR target.{reach}") \
-            if within else _refit(series, point)
-        check = ExposureCheck(point, target, deviation, within, suggested, message)
+    check = exposure_series.check(series, point, gain=1.0, exposure_offset_us=EXPOSURE_OFFSET_US, what="p90",
+                                  again="collect", unchanged=fx10_exposure.UNCHANGED)
     _series = dataclasses.replace(series, checks=series.checks + (check,))
     return check
 

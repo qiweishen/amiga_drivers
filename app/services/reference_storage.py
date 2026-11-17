@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config_store
@@ -23,12 +25,19 @@ def tmp_root() -> Path:
     return output_root() / TMP_FOLDER
 
 
-def move_to_output(session: Path, root: Path) -> Path:
-    """Rename ``session`` from ``root``/tmp to ``root``; refuses anything else or an existing target."""
+def save(session: Path, record: Callable[[Path, dict], None]) -> Path:
+    """Move ``session`` from <output>/tmp into <output>; never replaces an existing directory.
+
+    ``record(session, note)`` writes the move note (saved_utc, saved_from) into the
+    session before it is renamed.
+    """
+    root = output_root()
+    target = root / session.name
     if session.parent != root / TMP_FOLDER:
         raise ValueError(f"Only references under {root / TMP_FOLDER} can be saved")
-    target = root / session.name
     if target.exists():
         raise ValueError(f"{target} already exists")
+    record(session, {"saved_utc": datetime.now(timezone.utc).isoformat(),
+                     "saved_from": session.relative_to(root).as_posix()})
     os.rename(session, target)
     return target

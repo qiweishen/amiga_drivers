@@ -47,7 +47,7 @@ class ReferenceValidationTests(unittest.IsolatedAsyncioTestCase):
                                                    new_callable=AsyncMock))
             prepare = stack.enter_context(patch.object(gox_reference, "_prepare"))
             capture = stack.enter_context(patch.object(gox_tools, "capture_raw", new_callable=AsyncMock))
-            capability = stack.enter_context(patch.object(gox_reference, "capability_reason"))
+            capability = stack.enter_context(patch.object(gox_reference.color_checker, "capability_reason"))
             for chart_key in (None, "", "mcc24", "MCC25", 0, []):
                 with self.subTest(chart_key=chart_key), self.assertRaises(ValueError):
                     await gox_reference.capture(chart_key)
@@ -58,7 +58,7 @@ class ReferenceValidationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_opencv_capability_blocks_before_camera_reservation(self):
         with ExitStack() as stack:
-            stack.enter_context(patch.object(gox_reference, "capability_reason",
+            stack.enter_context(patch.object(gox_reference.color_checker, "capability_reason",
                                              return_value="OpenCV mcc/ccm unavailable"))
             run = stack.enter_context(patch.object(gox_reference.camera_operations, "run",
                                                    new_callable=AsyncMock))
@@ -76,7 +76,7 @@ class ReferenceValidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kind, "gox-color-reference")
             return await operation()
 
-        with patch.object(gox_reference, "capability_reason", return_value=None), \
+        with patch.object(gox_reference.color_checker, "capability_reason", return_value=None), \
                 patch.object(gox_reference.camera_operations, "run", side_effect=reserve), \
                 patch.object(gox_reference, "_capture", new_callable=AsyncMock) as capture:
             for chart_key in ("MCC24", "SG140", "VINYL18"):
@@ -110,7 +110,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         }))
         self.problems = self.stack.enter_context(patch.object(
             gox_reference.config_store, "output_dir_problems", return_value=[]))
-        self.stack.enter_context(patch.object(gox_reference, "capability_reason", return_value=None))
+        self.stack.enter_context(patch.object(gox_reference.color_checker, "capability_reason", return_value=None))
         self.stack.enter_context(patch.object(gox_reference.camera_operations, "run", side_effect=self.reserve))
         self.capture = self.stack.enter_context(patch.object(
             gox_tools, "capture_raw", side_effect=self.capture_raw))
@@ -123,9 +123,9 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.analyse = self.stack.enter_context(patch.object(
             color_checker, "calibrate",
             side_effect=lambda _directory, chart_key, *, measurement: calibration(chart_key)))
-        self.cleanup = self.stack.enter_context(patch.object(gox_tools, "_cleanup_old"))
+        self.cleanup = self.stack.enter_context(patch.object(gox_tools.snapshot_tool, "prune"))
         self.snapshot = self.stack.enter_context(patch.object(gox_tools, "_snapshot", new_callable=AsyncMock))
-        self.spawn = self.stack.enter_context(patch.object(gox_tools.tool_jobs, "spawn", new_callable=AsyncMock))
+        self.spawn = self.stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "spawn", new_callable=AsyncMock))
 
     async def reserve(self, sensor, operation, *, kind):
         self.assertEqual((sensor, kind), ("gox", "gox-color-reference"))
@@ -242,9 +242,9 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         result = await gox_reference.reject()
         self.assertFalse(result.ok)
         self.assertFalse(result.awaiting_selection)
-        self.assertEqual(result.reason, gox_reference.NO_CHART_SELECTED)
+        self.assertEqual(result.reason, gox_reference.gox_chart.NO_CHART_SELECTED)
         document = json.loads((Path(pending.session_dir) / "reference.json").read_text(encoding="utf-8"))
-        self.assertEqual((document["status"], document["error"]), ("failed", gox_reference.NO_CHART_SELECTED))
+        self.assertEqual((document["status"], document["error"]), ("failed", gox_reference.gox_chart.NO_CHART_SELECTED))
         self.assertEqual(self.raw_files[0].read_bytes(), self.raw_bytes)
         self.measure.assert_not_called()
         self.analyse.assert_not_called()
@@ -317,7 +317,7 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_validation_failure_precedes_config_snapshot_and_capture(self):
         self.problems.return_value = ["Output directory is outside the allowed root"]
-        with patch.object(gox_reference, "_config_bytes") as config_bytes:
+        with patch.object(gox_reference.config_store, "snapshot_config_bytes") as config_bytes:
             result = await gox_reference.capture("VINYL18")
         self.assertFalse(result.ok)
         self.assertIn("outside the allowed root", result.reason)
@@ -326,14 +326,6 @@ class ReferenceCaptureTests(unittest.IsolatedAsyncioTestCase):
         config_bytes.assert_not_called()
         self.capture.assert_not_awaited()
         self.detect.assert_not_called()
-
-    async def test_config_size_limit_prevents_creating_reference_output(self):
-        with patch.object(gox_reference, "MAX_CONFIG_BYTES", len(self.config_bytes) - 1):
-            result = await gox_reference.capture("MCC24")
-        self.assertFalse(result.ok)
-        self.assertIn("configuration exceeds", result.reason)
-        self.assertEqual(list(self.output.iterdir()), [])
-        self.capture.assert_not_awaited()
 
     async def test_tool_failure_does_not_publish_calibration_or_remove_partial_raw(self):
         async def failed_capture(request, output, *, config):
@@ -358,12 +350,10 @@ class RawCapturePathTests(unittest.IsolatedAsyncioTestCase):
         config = Path("/reference/raw/config/config-gox-snapshot.yaml")
         process = SimpleNamespace(returncode=0)
         with ExitStack() as stack:
-            spawn = stack.enter_context(patch.object(gox_tools.tool_jobs, "spawn",
+            spawn = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "spawn",
                                                      new_callable=AsyncMock, return_value=process))
-            stack.enter_context(patch.object(gox_tools.tool_jobs, "communicate", new_callable=AsyncMock,
+            stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "communicate", new_callable=AsyncMock,
                                              return_value=(b"SNAPSHOT: OK /reference/raw/gox/camera0\n", b"")))
-            stack.enter_context(patch.object(gox_tools.runtime, "exec_path", side_effect=str))
-            stack.enter_context(patch.object(gox_tools.runtime, "to_host_path", side_effect=Path))
             result = await gox_tools.capture_raw(None, output, config=config)
         self.assertTrue(result.ok, result.reason)
         arguments = spawn.await_args.args[0]
@@ -375,12 +365,10 @@ class RawCapturePathTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_or_unknown_success_marker_is_rejected_before_resolving_path(self):
         process = SimpleNamespace(returncode=0)
         with ExitStack() as stack:
-            stack.enter_context(patch.object(gox_tools.tool_jobs, "spawn",
+            stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "spawn",
                                              new_callable=AsyncMock, return_value=process))
-            communicate = stack.enter_context(patch.object(gox_tools.tool_jobs, "communicate",
+            communicate = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "communicate",
                                                            new_callable=AsyncMock))
-            stack.enter_context(patch.object(gox_tools.runtime, "exec_path", side_effect=str))
-            to_host = stack.enter_context(patch.object(gox_tools.runtime, "to_host_path"))
             for marker in ("SNAPSHOT: OK", "SNAPSHOT: OK ", "SNAPSHOT: OK \t",
                            "SNAPSHOT: UNKNOWN /untrusted/camera0", "SNAPSHOT: OKAY /untrusted/camera0"):
                 communicate.return_value = (f"{marker}\n".encode(), b"")
@@ -390,7 +378,6 @@ class RawCapturePathTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(result.ok)
                     self.assertEqual(result.reason, "Malformed SNAPSHOT result marker")
                     self.assertIsNone(result.camera_dir)
-            to_host.assert_not_called()
 
     async def test_cloned_config_is_passed_to_tool_and_only_direct_camera_children_are_accepted(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -403,13 +390,11 @@ class RawCapturePathTests(unittest.IsolatedAsyncioTestCase):
                 # The container sets AMIGA_CONFIG_ROOT=/workspace; keep the boundary check
                 # active, rooted at this test's directory instead of the environment's.
                 stack.enter_context(patch.dict(os.environ, {"AMIGA_CONFIG_ROOT": temporary}))
-                spawn = stack.enter_context(patch.object(gox_tools.tool_jobs, "spawn",
+                spawn = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "spawn",
                                                          new_callable=AsyncMock, return_value=process))
-                communicate = stack.enter_context(patch.object(gox_tools.tool_jobs, "communicate",
+                communicate = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "communicate",
                                                                new_callable=AsyncMock))
-                stack.enter_context(patch.object(gox_tools.runtime, "exec_path", side_effect=str))
-                stack.enter_context(patch.object(gox_tools.runtime, "to_host_path", side_effect=Path))
-                cleanup = stack.enter_context(patch.object(gox_tools, "_cleanup_old"))
+                cleanup = stack.enter_context(patch.object(gox_tools.snapshot_tool, "prune"))
                 for camera, accepted in ((output / "camera0", True),
                                          (output.parent / "other/camera0", False),
                                          (output / "../elsewhere/camera0", False),

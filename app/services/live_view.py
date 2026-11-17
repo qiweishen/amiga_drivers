@@ -92,12 +92,11 @@ async def _fetch(driver: str, decode):
     global _preview_task
     if busy():
         raise PreviewUnavailable("Another live preview is still being decoded; wait for it to finish")
-    if (STATE.process_state is not ProcState.RUNNING or STATE.active_session is None
-            or not STATE.ownership_verified or STATE.control_uncertain):
+    request = PreviewRequest(STATE.active_session, STATE.session_generation)
+    if STATE.active_session is None or not is_current(request):
         raise PreviewUnavailable("There is no verified running session to preview")
     if not STATE.enables_at_start.get(driver, False):
         raise PreviewUnavailable(f"{driver} is not enabled in this recording")
-    request = PreviewRequest(STATE.active_session, STATE.session_generation)
 
     async def decode_request():
         # Pass a fixed path into the worker. It must never switch sessions by

@@ -1,9 +1,8 @@
-"""Bounded, read-only session metadata browsing. Never traverses sensor payloads."""
+"""Read-only session browsing from each run manifest; sensor payloads are never read."""
 
 from __future__ import annotations
 
 import asyncio
-import heapq
 import json
 import os
 import re
@@ -15,10 +14,6 @@ from .run_status import SCHEMA
 from ..constants import DRIVERS, SESSION_DIR_RE
 
 _SLOTS = asyncio.Semaphore(2)
-MAX_SESSIONS = 5000
-MAX_ENTRIES = 100000
-MAX_MANIFEST = 256 * 1024
-MAX_METADATA = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -31,67 +26,50 @@ class Session:
     duration_s: float | None
 
 
+def _session(path: Path, active: Path | None) -> Session:
+    """One session from its manifest; an unreadable manifest is reported, not raised."""
+    name = path.name
+    try:
+        doc = json.loads((path / "raw" / "drivers.json").read_bytes())
+        if not isinstance(doc, dict) or doc.get("status_schema") != SCHEMA:
+            raise ValueError("Unsupported run manifest version")
+        run = doc["run"]
+        if run["timestamp"] != name:
+            raise ValueError("Manifest timestamp does not match the session directory")
+        drivers = tuple(k for k in DRIVERS if doc.get("drivers", {}).get(k, {}).get("enabled") is True)
+        detail = str(run.get("status", "Unknown recording result"))
+        finalized = bool(run.get("ended")) and doc.get("lifecycle", {}).get("phase") == "finished"
+        failed = run.get("recording_failed")
+        if path == active:
+            status = "active"
+        elif not finalized or not isinstance(failed, bool):
+            status = "unfinished"
+        elif failed:
+            status = "failed"
+        elif detail == "completed":
+            status = "completed"
+        elif detail.startswith("interrupted (signal "):
+            status = "stopped"
+        else:
+            status = "unknown"
+        value = run.get("duration_s")
+        duration = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        return Session(path, str(run.get("started", name)), drivers, status, detail, duration)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return Session(path, name, (), "unknown", f"Metadata unavailable: {exc}", None)
+
+
 def _scan(root: Path, active: Path | None, cancel: threading.Event) -> tuple[list[Session], str]:
-    candidates = []
-    seen = matching = 0
-    limited = False
     with os.scandir(root) as entries:
-        for entry in entries:
-            if cancel.is_set():
-                return [], "Cancelled"
-            seen += 1
-            if seen > MAX_ENTRIES:
-                limited = True
-                break
-            if re.fullmatch(SESSION_DIR_RE, entry.name) and entry.is_dir(follow_symlinks=False):
-                matching += 1
-                heapq.heappush(candidates, entry.name)
-                if len(candidates) > MAX_SESSIONS:
-                    heapq.heappop(candidates)
-    result, metadata_bytes = [], 0
-    for name in sorted(candidates, reverse=True):
+        names = sorted((entry.name for entry in entries
+                        if re.fullmatch(SESSION_DIR_RE, entry.name) and entry.is_dir(follow_symlinks=False)),
+                       reverse=True)
+    result = []
+    for name in names:
         if cancel.is_set():
             return [], "Cancelled"
-        path = root / name
-        status, detail, started, drivers, duration, finalized = "unknown", "", name, (), None, False
-        try:
-            with (path / "raw" / "drivers.json").open("rb") as stream:
-                data = stream.read(MAX_MANIFEST + 1)
-            metadata_bytes += len(data)
-            if metadata_bytes > MAX_METADATA:
-                limited = True
-                break
-            if len(data) > MAX_MANIFEST:
-                raise ValueError("Manifest exceeds the metadata preview limit")
-            doc = json.loads(data)
-            if not isinstance(doc, dict) or doc.get("status_schema") != SCHEMA:
-                raise ValueError("Unsupported recording manifest; amiga-run-v1 is required")
-            run = doc["run"]
-            if run["timestamp"] != name:
-                raise ValueError("Manifest timestamp does not match the session directory")
-            started = str(run.get("started", name))
-            drivers = tuple(k for k in DRIVERS if doc.get("drivers", {}).get(k, {}).get("enabled") is True)
-            detail = str(run.get("status", "Unknown recording result"))
-            finalized = bool(run.get("ended")) and doc.get("lifecycle", {}).get("phase") == "finished"
-            if path == active:
-                status = "active"
-            elif finalized and run.get("recording_failed") is True:
-                status = "failed"
-            elif finalized and run.get("recording_failed") is False:
-                status = "completed" if detail == "completed" else "stopped" if detail.startswith(
-                    "interrupted (signal ") else "unknown"
-            else:
-                status = "unfinished"
-            value = run.get("duration_s")
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 1e10:
-                duration = float(value)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            detail = f"Metadata unavailable: {exc}"
-        result.append(Session(path, started, drivers, status, detail, duration))
-    note = f"{len(result)} sessions indexed; only top-level directories and small manifests were read"
-    if limited or matching > MAX_SESSIONS:
-        note += f". Partial listing: limit {MAX_SESSIONS} sessions / {MAX_ENTRIES} entries / 64 MiB metadata"
-    return result, note
+        result.append(_session(root / name, active))
+    return result, f"{len(result)} sessions"
 
 
 class Catalog:

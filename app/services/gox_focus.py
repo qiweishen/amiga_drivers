@@ -3,7 +3,7 @@
 ``jai_snapshot --stream-s`` uses the freerun snapshot profile (PTP and SensorSync
 off; the workbench camera, exposure and gain as command-line overrides) but in
 8-bit BayerRG8 and always at the highest frame rate the exposure allows under
-the 9.079 Hz focus ceiling (gox_timing.MAX_FOCUS_FRAME_RATE_HZ). It keeps
+the 9.079 Hz focus ceiling (timing.GOX_MAX_FOCUS_FRAME_RATE_HZ). It keeps
 acquiring, one RAW record per segment, until it receives SIGTERM. This service
 follows the newest committed record, scores it
 with decoder.gox.focus, and deletes the closed segments behind it, so a stream
@@ -36,7 +36,7 @@ from ..constants import BIN_SNAPSHOT, FOCUS_DIR, SNAPSHOT_CONFIG
 from ..decoder.ebus import recording as raw_recording
 from ..decoder.gox import focus
 from ..state import STATE
-from . import camera_operations, config_store, gox_timing, preview_images, runtime, tool_jobs
+from . import camera_operations, config_store, preview_images, snapshot_tool, timing, tool_jobs
 
 MAX_STREAM_S = 1800.0  # jai_snapshot --stream-s: bounds a stream whose GUI went away
 HEARTBEAT_TIMEOUT_S = 15.0
@@ -57,16 +57,13 @@ class FocusRequest:
     target_ip: str
     exposure_ms: float
     gain: float
-    frame_rate_hz: float  # always gox_timing.max_frame_rate_hz(exposure_ms, MAX_FOCUS_FRAME_RATE_HZ)
+    frame_rate_hz: float  # always timing.gox_max_frame_rate_hz(exposure_ms, MAX_FOCUS_FRAME_RATE_HZ)
 
 
 def request_for(target_ip: str, exposure_ms: float, gain: float) -> FocusRequest:
     """The focus stream runs at the highest rate at which the exposure uses <= 90 % of the period."""
-    exposure_ms = float(exposure_ms)
-    if not gox_timing.MIN_EXPOSURE_MS <= exposure_ms <= gox_timing.MAX_EXPOSURE_MS:
-        raise ValueError(f"Exposure must be within {gox_timing.MIN_EXPOSURE_MS:g}–"
-                         f"{gox_timing.MAX_EXPOSURE_MS:g} ms")
-    rate = gox_timing.max_frame_rate_hz(exposure_ms, gox_timing.MAX_FOCUS_FRAME_RATE_HZ)
+    exposure_ms = timing.gox_check_exposure(exposure_ms)
+    rate = timing.gox_max_frame_rate_hz(exposure_ms, timing.GOX_MAX_FOCUS_FRAME_RATE_HZ)
     return FocusRequest(target_ip, exposure_ms, float(gain), rate)
 
 
@@ -240,8 +237,8 @@ async def _stream(request: FocusRequest) -> StreamResult:
     output = await asyncio.to_thread(_fresh_output)
     config = config_store.checked_snapshot_path(SNAPSHOT_CONFIG)
     argv = [
-        runtime.exec_path(BIN_SNAPSHOT), "--config", runtime.exec_path(config),
-        "--out", runtime.exec_path(output), "--ip", request.target_ip,
+        str(BIN_SNAPSHOT), "--config", str(config),
+        "--out", str(output), "--ip", request.target_ip,
         "--exposure-ms", str(request.exposure_ms), "--gain", str(request.gain),
         "--frame-rate-hz", str(request.frame_rate_hz), "--stream-s", f"{MAX_STREAM_S:g}",
     ]
@@ -276,20 +273,16 @@ async def _stream(request: FocusRequest) -> StreamResult:
         await asyncio.to_thread(_drop_segments, output)
     if STATE.tool_operation.get("stop_requested"):
         ended_by = ended_by or "Stopped from the header's Stop tool"
-    out, err = stdout.text(), stderr.text()
-    raw_output = (out + "\n--- stderr ---\n" + err).strip()
+    run = snapshot_tool.interpret(stdout.text(), stderr.text(), proc.returncode)
     if failure:
-        return StreamResult(False, failure, raw_output)
-    marker = next((line for line in reversed(out.splitlines()) if line.startswith("SNAPSHOT: ")), "")
-    if marker.startswith("SNAPSHOT: OK "):
+        return StreamResult(False, failure, run.raw_output)
+    if run.ok:
         return StreamResult(True, ended_by or f"Stream reached its {MAX_STREAM_S / 60:g}-minute limit; "
-                                              "start it again to continue", raw_output)
-    if ended_by and marker.startswith(("SNAPSHOT: FAIL 7 ", "SNAPSHOT: FAIL 130 ")):
-        return StreamResult(True, f"{ended_by} before the first frame", raw_output)
-    if marker.startswith("SNAPSHOT: FAIL "):
-        return StreamResult(False, "Stream failed: " + marker[len("SNAPSHOT: FAIL "):], raw_output)
-    return StreamResult(False, f"jai_snapshot exited with code {proc.returncode} without a result marker",
-                        raw_output)
+                                              "start it again to continue", run.raw_output)
+    # A stop during camera bring-up ends the tool with "no frame" (7) or "interrupted" (130).
+    if ended_by and run.reason.startswith(("7 ", "130 ")):
+        return StreamResult(True, f"{ended_by} before the first frame", run.raw_output)
+    return StreamResult(False, f"Stream failed: {run.reason}", run.raw_output)
 
 
 async def _poll(output: Path) -> str:

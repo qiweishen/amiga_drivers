@@ -22,12 +22,12 @@ class SessionInfo:
     started_at: float
 
 
-async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
+def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
     session = run_status.control_session(ref)
     if session is None:
-        raise SessionMetadataPending("Waiting for an amiga-run-v1 manifest matching this process")
+        raise SessionMetadataPending("Waiting for the run manifest of this process")
     info = read(session, ref)
-    if not await runtime.is_process_alive(ref):
+    if not runtime.is_process_alive(ref):
         raise ValueError("The acquisition exited while its session was being identified")
     return info
 
@@ -35,7 +35,7 @@ async def recover(ref: runtime.ProcessIdentity) -> SessionInfo:
 def read(session: Path, ref: runtime.ProcessIdentity) -> SessionInfo:
     doc = run_status.read_session(session, ref)
     run = doc["run"]
-    output_dir = runtime.to_host_path(run["output_directory"])
+    output_dir = Path(run["output_directory"])
     if run["timestamp"] != session.name or output_dir.resolve() != session.parent.resolve():
         raise ValueError("The run manifest does not match the process's session directory")
     drivers = doc["drivers"]

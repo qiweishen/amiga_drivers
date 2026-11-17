@@ -103,23 +103,16 @@ def _measure(request: _Request) -> tuple[StorageStatus, dict[str, int] | None]:
     return status, sizes
 
 
-# Self-throttle: a scan costing T seconds waits another 3*T, so the
-# recursive du can never consume more than ~25% of a worker thread no matter how
-# fast the timer ticks. Matters on the field rig, where the output directory can
-# be a slow shared mount holding thousands of segment files.
-_MAX_DUTY_CYCLE = 0.25
-_next_poll_at = 0.0
 _last_request: _Request | None = None
 _scan_task: asyncio.Task | None = None
 
 
 async def poll() -> None:
+    """One disk / session-size sample (the service calls it every 2 s)."""
     global _scan_task
     if _scan_task is not None and not _scan_task.done():
         return
     request = _request()
-    if request == _last_request and time.monotonic() < _next_poll_at:
-        return
     if request != _last_request:
         STATE.storage = StorageStatus(disk_path=request.disk_path, disk_scope=request.disk_scope,
                                       next_output_path=request.next_output, generation=request.generation)
@@ -130,8 +123,7 @@ async def poll() -> None:
 
 
 async def _scan(request: _Request) -> None:
-    global _next_poll_at, _last_request, _prev_session
-    started = time.monotonic()
+    global _last_request, _prev_session
     status, sizes = await asyncio.to_thread(_measure, request)
     if request != _request():
         return
@@ -152,7 +144,6 @@ async def _scan(request: _Request) -> None:
         sensor.bytes_total = total
         _prev[key] = (status.sampled_at, total)
     _last_request = request
-    _next_poll_at = time.monotonic() + (time.monotonic() - started) * (1 / _MAX_DUTY_CYCLE - 1)
 
 
 def human_bytes(n: float) -> str:
@@ -160,4 +151,3 @@ def human_bytes(n: float) -> str:
         if abs(n) < 1024 or unit == "TiB":
             return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
         n /= 1024
-    return f"{n:.1f} TiB"

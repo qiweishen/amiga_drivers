@@ -7,7 +7,6 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from app.decoder import fx10
 from app.decoder.ebus import pixels, recording
@@ -217,11 +216,6 @@ class EbusRawFormatTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fx10.reference_spectrum(self.camera, 2)
 
-    def test_live_scan_budget_fails_explicitly_instead_of_returning_an_old_prefix(self):
-        with patch.object(recording, "MAX_PREVIEW_SCAN_RECORDS", 1):
-            with self.assertRaises(ValueError):
-                recording.latest_records(self.camera, 1)
-
     def test_invalid_record_payload_crc_can_be_checked_by_reader(self):
         damaged = bytearray(self.segment.read_bytes())
         damaged[-1] ^= 1
@@ -242,14 +236,13 @@ class EbusRawFormatTests(unittest.TestCase):
                            "frames_written": 1, "records_written": 2, "session_dir": str(path.relative_to(session))})
         manifest = {"format": "fx10-reference-v1", "status": "completed", "phase_duration_s": 5.0, "phases": phases}
         (session / "reference.json").write_text(json.dumps(manifest))
-        with patch.object(fx10_reference.runtime, "to_host_path", side_effect=Path):
-            path, doc = fx10_reference._validate_result(str(session), self.root, 5.0)
-            self.assertEqual(path, session)
-            self.assertEqual(doc["phases"][0]["frames_written"], 1)
-            manifest["phases"][0]["records_written"] = 1
-            (session / "reference.json").write_text(json.dumps(manifest))
-            with self.assertRaises(ValueError):
-                fx10_reference._validate_result(str(session), self.root, 5.0)
+        path, doc = fx10_reference._validate_result(str(session), self.root, 5.0)
+        self.assertEqual(path, session)
+        self.assertEqual(doc["phases"][0]["frames_written"], 1)
+        manifest["phases"][0]["records_written"] = 1
+        (session / "reference.json").write_text(json.dumps(manifest))
+        with self.assertRaises(ValueError):
+            fx10_reference._validate_result(str(session), self.root, 5.0)
 
 
 if __name__ == "__main__":

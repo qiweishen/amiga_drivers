@@ -178,11 +178,6 @@ body {
     letter-spacing: .02em;
 }
 
-.brand-subtitle {
-    font-size: 12px;
-    font-weight: 400;
-    color: #5a6974;
-}
 
 .console-nav {
     width: 100%;
@@ -301,10 +296,6 @@ body {
     font-weight: 600;
 }
 
-.page-context {
-    font-size: 12px;
-    color: var(--console-muted);
-}
 
 .global-notices {
     width: 100%;
@@ -382,6 +373,27 @@ body {
     font-size: 12px;
     line-height: 1.5;
     overflow-wrap: anywhere;
+}
+
+/* One short hint line; the details open from the ⓘ button (click or tap). */
+.hint-row {
+    align-items: center;
+    gap: 2px;
+    flex-wrap: nowrap;
+}
+
+.console-main .q-btn.info-button, .q-dialog .q-btn.info-button {
+    min-height: 0;
+    padding: 2px;
+    color: var(--console-muted);
+}
+
+.info-popup {
+    max-width: min(26rem, 90vw);
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-line;
 }
 
 .eyebrow {
@@ -1152,7 +1164,7 @@ body {
         min-width: 0;
     }
 
-    .console-main .w-72, .console-main .w-64 {
+    .console-main .w-64 {
         max-width: 100%;
     }
 

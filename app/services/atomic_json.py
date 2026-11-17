@@ -7,10 +7,8 @@ import os
 from pathlib import Path
 
 
-def write(path: Path, value, *, limit: int) -> None:
+def write(path: Path, value) -> None:
     raw = json.dumps(value, allow_nan=False).encode("utf-8")
-    if len(raw) > limit:
-        raise ValueError("Controller journal exceeds its size limit")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     with temporary.open("wb") as stream:

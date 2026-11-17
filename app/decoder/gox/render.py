@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .preview import DISPLAY_LONG_EDGE, downscale, png8_bytes, png16_bytes
+from .preview import DISPLAY_LONG_EDGE, downscale, png_bytes
 
 PROVENANCE = {
     "scope": "display only; scene-linear values, fitting and RAW are unchanged",
@@ -36,10 +36,10 @@ def display_png(linear: np.ndarray, long_edge: int = DISPLAY_LONG_EDGE) -> bytes
     """8-bit on-screen PNG, area-downscaled in linear light before encoding."""
     _check_linear(linear)
     encoded = srgb_oetf(downscale(linear, long_edge))
-    return png8_bytes(np.rint(encoded * 255.0).astype(np.uint8))
+    return png_bytes(np.rint(encoded * 255.0).astype(np.uint8))
 
 
 def full_png16(linear: np.ndarray) -> bytes:
     """Full-resolution 16-bit PNG with the same fixed encoding as the screen image."""
     _check_linear(linear)
-    return png16_bytes(np.rint(srgb_oetf(linear) * 65535.0).astype(np.uint16))
+    return png_bytes(np.rint(srgb_oetf(linear) * 65535.0).astype(np.uint16))

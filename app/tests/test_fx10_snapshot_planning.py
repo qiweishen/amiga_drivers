@@ -46,11 +46,10 @@ class SnapshotPlanningTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_and_timeout_use_the_same_configured_rate(self):
         self.config.write_text("acquisition:\n  frame_rate_hz: 0.1\n", encoding="utf-8")
         with ExitStack() as stack:
-            stack.enter_context(patch.object(fx10_tools.runtime, "exec_path", side_effect=str))
             stack.enter_context(patch.object(fx10_tools, "FX10_SNAPSHOT_DIR", self.config.parent / "captures"))
-            spawn = stack.enter_context(patch.object(fx10_tools.tool_jobs, "spawn", new_callable=AsyncMock,
+            spawn = stack.enter_context(patch.object(fx10_tools.snapshot_tool.tool_jobs, "spawn", new_callable=AsyncMock,
                                                      return_value=SimpleNamespace(returncode=2)))
-            communicate = stack.enter_context(patch.object(fx10_tools.tool_jobs, "communicate",
+            communicate = stack.enter_context(patch.object(fx10_tools.snapshot_tool.tool_jobs, "communicate",
                                                            new_callable=AsyncMock, return_value=(b"", b"")))
             await fx10_tools._snapshot("192.0.2.10", 10, 2, 4)
         arguments = spawn.await_args.args[0]

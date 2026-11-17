@@ -14,19 +14,16 @@ from app.state import AppState, ProcState
 
 
 class RecordingViewTests(unittest.TestCase):
-    def test_pages_cannot_change_owner_state_or_nested_results(self):
+    def test_pages_read_but_cannot_assign_owner_state(self):
         owner = process.AcquisitionController()
-        owner._update(enables_at_start={"gox": True}, run_result={"run": {"status": "running"}})
+        owner._update(enables_at_start={"gox": True})
         view = AppState()
-        view.bind_recording(owner.snapshot, owner.snapshot_value)
+        view.bind_recording(owner.snapshot_value)
+        self.assertTrue(view.enables_at_start["gox"])
         with self.assertRaises(AttributeError):
             view.process_state = ProcState.RUNNING
         with self.assertRaises(FrozenInstanceError):
-            view.recording.session_generation = 99
-        view.enables_at_start["gox"] = False
-        view.run_result["run"]["status"] = "completed"
-        self.assertTrue(owner.snapshot().enables_at_start["gox"])
-        self.assertEqual(owner.snapshot().run_result["run"]["status"], "running")
+            owner.snapshot().session_generation = 99
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -38,16 +35,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def preflight():
             entered.set()
             await release.wait()
-            return [], []
+            return []
 
         with ExitStack() as stack:
-            stack.enter_context(patch.object(process, "STATE", AppState(env_ok=True, tool_uncertain=False)))
+            stack.enter_context(patch.object(process, "STATE", AppState(tool_uncertain=False)))
             for name in ("TAILER", "ASTERX_LIVE", "BUFFER", "STATS"):
                 stack.enter_context(patch.object(process, name))
             stack.enter_context(patch.object(process.control_owner, "require"))
             stack.enter_context(patch.object(owner, "preflight", preflight))
             spawn = stack.enter_context(patch.object(runtime, "spawn", new_callable=AsyncMock))
-            signal = stack.enter_context(patch.object(runtime, "signal_process", new_callable=AsyncMock))
+            signal = stack.enter_context(patch.object(runtime, "signal_process"))
             page = asyncio.create_task(owner.start())
             await asyncio.wait_for(entered.wait(), 1)
             page.cancel()
@@ -60,7 +57,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await asyncio.wait_for(owner._start_task, 1))
             await asyncio.wait_for(owner._stop_task, 1)
             spawn.assert_not_awaited()
-            signal.assert_not_awaited()
+            signal.assert_not_called()
             self.assertEqual(owner.snapshot().process_state, ProcState.EXITED)
             self.assertFalse(owner.snapshot().config_locked)
 
@@ -69,7 +66,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         ref = runtime.ProcessIdentity(42, "123", "boot")
         owner._ref = ref
 
-        async def recover(_ref):
+        def recover(_ref):
             owner._update(session_generation=1)
             return SimpleNamespace(path=Path("/data/stale"), started_at=1, enables={"gox": True}, lms_names=[])
 
@@ -121,16 +118,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(polls, 2)
         self.assertEqual(owner.snapshot().process_state, ProcState.FAILED)
-        self.assertEqual(owner.snapshot().exit_code, 1)
         self.assertEqual(len(buffer.snapshot()), 1)  # the actual failed exit, not startup waiting
 
     async def test_old_stop_worker_cannot_signal_new_generation(self):
         owner = process.AcquisitionController()
         owner._update(session_generation=2, stop_requested=True)
         owner._ref = runtime.ProcessIdentity(42, "123", "boot")
-        with patch.object(runtime, "signal_process", new_callable=AsyncMock) as signal:
+        with patch.object(runtime, "signal_process") as signal:
             await owner._stop_when_ready(1, 0)
-            signal.assert_not_awaited()
+            signal.assert_not_called()
 
     async def test_service_shutdown_rejects_new_start(self):
         owner = process.AcquisitionController()
@@ -142,8 +138,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_gate_closes_before_tool_shutdown_yields(self):
         owner = process.AcquisitionController()
         owner._update(control_uncertain=False)
-        display = AppState(env_ok=True, tool_uncertain=False)
-        display.bind_recording(owner.snapshot, owner.snapshot_value)
+        display = AppState(tool_uncertain=False)
+        display.bind_recording(owner.snapshot_value)
 
         async def stop_tools():
             await asyncio.sleep(0)
@@ -158,7 +154,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(control_service.tool_jobs, "shutdown", side_effect=stop_tools))
             stack.enter_context(patch.object(control_service, "TAILER"))
             stack.enter_context(patch.object(control_service, "ASTERX_LIVE"))
-            await control_service.ApplicationServices().shutdown()
+            await control_service.shutdown()
 
 
 class ManifestTests(unittest.TestCase):
@@ -232,13 +228,12 @@ class ManifestTests(unittest.TestCase):
 
         with patch.object(process, "STATE", display), patch.object(process, "BUFFER", buffer), \
                 patch.object(run_status, "read_json", return_value=self.doc):
-            owner._finish(1, clean=False)
+            owner._finish(clean=False)
 
         final = owner.snapshot()
         self.assertEqual([line.raw for line in buffer.snapshot()], [diagnostic])
         self.assertEqual(final.last_error, diagnostic)
         self.assertEqual(final.process_state, ProcState.FAILED)
-        self.assertEqual(final.exit_code, 1)
         self.assertTrue(final.run_result["run"]["recording_failed"])
         self.assertEqual(final.run_result["run"]["status"], "failed (gox)")
         self.assertEqual(display.sensors["gox"].state.value, "failed")
@@ -247,8 +242,8 @@ class ManifestTests(unittest.TestCase):
         owner = process.AcquisitionController()
         buffer = LogBuffer()
         with patch.object(process, "BUFFER", buffer):
-            owner._finish(1, clean=False)
-            owner._finish(1, clean=False)
+            owner._finish(clean=False)
+            owner._finish(clean=False)
         self.assertEqual(len(buffer.snapshot()), 1)
         self.assertEqual(owner.snapshot().last_error, buffer.snapshot()[0].raw)
         self.assertEqual(owner.snapshot().process_state, ProcState.FAILED)

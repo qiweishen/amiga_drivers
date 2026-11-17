@@ -9,8 +9,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.decoder.gox import color_checker, exposure
-from app.services import gox_exposure, gox_reference, gox_timing, gox_tools
+from app.decoder import exposure as ettr
+from app.decoder.gox import color_checker
+from app.services import gox_exposure, gox_reference, gox_tools, reference_storage, timing
 
 OFFSET_US = 2.45
 BLACK, SLOPE = 145.0, 0.0081  # DN, DN/µs at gain x1
@@ -37,9 +38,9 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(gox_exposure, "_series", None))
         self.stack.enter_context(patch.object(gox_exposure, "_pending", None))
-        self.stack.enter_context(patch.object(gox_reference, "reference_tmp_root", return_value=self.root))
-        self.stack.enter_context(patch.object(gox_reference, "_config_bytes", return_value=b"cameras: []\n"))
-        self.stack.enter_context(patch.object(gox_reference, "capability_reason", return_value=None))
+        self.stack.enter_context(patch.object(reference_storage, "tmp_root", return_value=self.root))
+        self.stack.enter_context(patch.object(gox_exposure.config_store, "snapshot_config_bytes", return_value=b"cameras: []\n"))
+        self.stack.enter_context(patch.object(color_checker, "capability_reason", return_value=None))
         self.stack.enter_context(patch.object(gox_exposure.camera_operations, "run", side_effect=self.reserve))
         self.stack.enter_context(patch.object(gox_tools, "capture_raw", side_effect=self.capture_raw))
         self.detect = self.stack.enter_context(patch.object(gox_exposure, "_detect_capture",
@@ -60,8 +61,8 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(request)
         self.assertIsNone(gain)  # the series never overrides the configured gain
         # Each one-frame capture runs at the fastest rate its exposure allows (<= 90 % of the period).
-        self.assertEqual(frame_rate_hz, gox_timing.max_frame_rate_hz(exposure_ms))
-        self.assertTrue(gox_timing.exposure_fits(exposure_ms, frame_rate_hz))
+        self.assertEqual(frame_rate_hz, timing.gox_max_frame_rate_hz(exposure_ms))
+        self.assertTrue(timing.exposure_fits(exposure_ms, frame_rate_hz))
         self.rates.append(frame_rate_hz)
         self.assertEqual(config.read_bytes(), b"cameras: []\n")
         camera = output / "cam0"
@@ -167,9 +168,9 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         series = await gox_exposure.reject()
         self.assertFalse(series.ok)
         self.assertFalse(series.awaiting_selection)
-        self.assertEqual(series.reason, gox_reference.NO_CHART_SELECTED)
+        self.assertEqual(series.reason, gox_reference.gox_chart.NO_CHART_SELECTED)
         document = json.loads((Path(pending.directory) / "series.json").read_text(encoding="utf-8"))
-        self.assertEqual((document["status"], document["reason"]), ("failed", gox_reference.NO_CHART_SELECTED))
+        self.assertEqual((document["status"], document["reason"]), ("failed", gox_reference.gox_chart.NO_CHART_SELECTED))
         self.analyze.assert_not_called()
 
     async def test_no_candidate_in_any_capture_fails_before_selection(self):
@@ -205,7 +206,7 @@ class ExposureSeriesTests(unittest.IsolatedAsyncioTestCase):
         suggested = series.suggested_exposure_ms
         good = gox_exposure.check_reference("MCC24", self._provenance(suggested), "reference_a")
         self.assertTrue(good.within)
-        self.assertLess(abs(good.deviation), exposure.TOLERANCE)
+        self.assertLess(abs(good.deviation), ettr.TOLERANCE)
         self.assertIsNone(good.suggestion)
         self.assertIsNone(gox_exposure.last_series().suggestion)  # verified: nothing to apply
         # A capture 20 % long: outside tolerance, refit including it.

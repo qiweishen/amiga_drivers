@@ -58,7 +58,7 @@ def main() -> None:
     ui.run(
         host=GUI_HOST,
         port=GUI_PORT,
-        title="Amiga Sensor Console",
+        title="Phenomate Sensor Console",
         reload=False,
         show=False,
         favicon="app/resource/appn.svg",

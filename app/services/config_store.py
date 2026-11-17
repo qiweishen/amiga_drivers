@@ -16,7 +16,7 @@ from pathlib import Path
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken
 
-from . import control_owner, fx10_timing, gox_timing, sensor_sync_rates
+from . import control_owner, sensor_sync_rates, timing
 from ..constants import CONFIG_FILES, ENABLE_KEYS, FX10_SNAPSHOT_CONFIG, REPO_ROOT, SNAPSHOT_CONFIG, ConfigFile
 from ..state import STATE
 
@@ -53,6 +53,13 @@ def checked_snapshot_path(path: Path) -> Path:
     if root and not path.is_relative_to(Path(root).resolve()):
         raise ValueError(f"Configuration must remain inside {root}: {path}")
     return path
+
+
+def snapshot_config_bytes(path: Path) -> bytes:
+    """A camera tool's snapshot profile, read once so a capture keeps the exact text it ran with."""
+    raw = checked_snapshot_path(path).read_bytes()
+    raw.decode("utf-8")  # the C++ loaders read UTF-8 YAML
+    return raw
 
 
 def _checked_config(file: ConfigFile) -> ConfigFile:
@@ -165,14 +172,6 @@ def main_settings() -> dict:
         if type(value) is not bool:
             raise ValueError(f"General.{key} must be a boolean")
         enables[driver] = value
-    sensor_trigger = doc.get("Sensor Trigger", {})
-    if not isinstance(sensor_trigger, dict):
-        raise ValueError("Sensor Trigger must be a YAML mapping")
-    sensor_trigger_port = sensor_trigger.get("Port", "")
-    if not isinstance(sensor_trigger_port, str):
-        raise ValueError("Sensor Trigger.Port must be a string")
-    if sensor_trigger_port and not Path(sensor_trigger_port).is_absolute():
-        raise ValueError("Sensor Trigger.Port must be an absolute device path or empty")
     # yaml-cpp reads scalar text as-is, including unquoted numbers or words
     # such as yes. PyYAML's constructed booleans would lose that spelling.
     nodes = _main_field_nodes(text, allow_missing=True)
@@ -192,12 +191,6 @@ def main_settings() -> dict:
         "output_dir": resolve_output_dir(output_dir),
         "output_dir_raw": output_dir,
         "enables": enables,
-        "enable_logging": True,  # The main executable always initializes session logging.
-        "lms_config_path": str(
-            general.get("LMS4XXX Driver Config Path", "./lms4xxx_driver/config/config-lms4xxx.yaml")),
-        # The rig's one SensorSync board; "" = none. Recording drivers receive
-        # it through main; standalone snapshot/reference tools use freerun without this port.
-        "sensor_trigger_port": sensor_trigger_port,
     }
 
 
@@ -368,29 +361,24 @@ def _stage_apply(loaded: LoadedConfig, text: str | None) -> Path:
 
 
 def _save_acquisition_pair(edits: list[tuple[LoadedConfig, str]]) -> None:
-    """Stage both validated edits before publishing; restore on a caught failure.
+    """Stage both validated edits, then publish them; restore the first if the second fails.
 
-    Each rename is atomic. Two paths cannot be published atomically together;
-    .bak files also preserve the originals if the process is interrupted.
-    GUI writes run synchronously in the control owner, without an await between
-    commits. External edits are checked again before replacement and rollback.
+    Each rename is atomic, but two files cannot be published together; the .bak
+    files keep the originals if the process is interrupted. External edits are
+    checked again right before each replacement and before a rollback.
     """
     _require_writable()
     unique: dict[Path, tuple[LoadedConfig, str]] = {}
     for loaded, text in edits:
         _check_apply_source(loaded)
-        previous = unique.get(loaded.file.path)
-        if previous is not None and previous[1] != text:
+        if unique.setdefault(loaded.file.path, (loaded, text))[1] != text:
             raise ApplyError(f"Recording and snapshot edits disagree for {loaded.file.path}")
-        unique.setdefault(loaded.file.path, (loaded, text))
-    backups = {}
     for path in unique:
         backup = path.with_suffix(path.suffix + ".bak")
-        if checked_snapshot_path(backup.parent) != backup.parent:
+        if checked_snapshot_path(path.parent) != path.parent:
             raise ConfigPathChangedError(f"Backup directory changed for {path}; retry Apply")
-        if backup in unique or backup.resolve() in unique:
+        if backup in unique or backup.resolve() in unique:  # a backup must never overwrite the other config
             raise ApplyError(f"Backup path {backup} overlaps an active configuration")
-        backups[path] = backup
     staged: list[tuple[LoadedConfig, str, Path]] = []
     committed: list[tuple[LoadedConfig, LoadedConfig]] = []
     temporary: list[Path] = []
@@ -399,14 +387,11 @@ def _save_acquisition_pair(edits: list[tuple[LoadedConfig, str]]) -> None:
             path = _stage_apply(loaded, text)
             temporary.append(path)
             staged.append((loaded, text, path))
-        for loaded, _ in edits:
-            _check_apply_source(loaded)
         for loaded, _, _ in staged:
             backup = _stage_apply(loaded, None)
             temporary.append(backup)
-            # Replacing the directory entry never follows an existing .bak
-            # symlink into another configuration or outside the allowed root.
-            backup.replace(backups[loaded.file.path])
+            # Replacing the directory entry never follows an existing .bak symlink.
+            backup.replace(loaded.file.path.with_suffix(loaded.file.path.suffix + ".bak"))
         for loaded, text, path in staged:
             _require_writable()
             _check_apply_source(loaded)
@@ -420,7 +405,6 @@ def _save_acquisition_pair(edits: list[tuple[LoadedConfig, str]]) -> None:
                 _check_apply_source(written)
                 restored = _stage_apply(original, original.text)
                 temporary.append(restored)
-                _check_apply_source(written)
                 restored.replace(original.file.path)
             except Exception as restore_error:
                 unrestored.append(f"{original.file.path}: {restore_error}")
@@ -437,6 +421,11 @@ def _save_acquisition_pair(edits: list[tuple[LoadedConfig, str]]) -> None:
     STATE.pending_config_notice = STATE.process_state.value in ("starting", "running", "stopping")
 
 
+def _mac(value) -> str:
+    """MAC address hex digits in lower case, for comparison."""
+    return re.sub(r"[^0-9a-f]", "", str(value or "").lower())
+
+
 def _gox_camera_entry(lines: list[str], target_ip: str, target_mac: str) -> tuple[int, int, int, dict]:
     """The config-gox.yaml `cameras:` entry that identifies the selected camera:
     (index, start line, end line, parsed entry).
@@ -448,9 +437,6 @@ def _gox_camera_entry(lines: list[str], target_ip: str, target_mac: str) -> tupl
     cameras = doc.get("cameras")
     if not isinstance(cameras, list) or not cameras:
         raise ApplyError("config-gox.yaml has no 'cameras:' list")
-
-    def _mac(value: str) -> str:
-        return re.sub(r"[^0-9a-f]", "", str(value).lower())
 
     def _rank(camera: dict) -> int:
         """2 = exact MAC, 1 = IP, 0 = no match.
@@ -516,21 +502,21 @@ def apply_gox_acquisition(target_ip: str, target_mac: str, exposure_ms: float, g
     exposure_ms = float(exposure_ms)
     if not math.isfinite(exposure_ms) or exposure_ms <= 0:
         raise ApplyError("exposure_ms must be finite and positive")
-    if exposure_ms > gox_timing.MAX_EXPOSURE_MS:
-        raise ApplyError(f"exposure_ms must be <= {gox_timing.MAX_EXPOSURE_MS:g} ms (GOX ExposureTime maximum)")
+    if exposure_ms > timing.GOX_MAX_EXPOSURE_MS:
+        raise ApplyError(f"exposure_ms must be <= {timing.GOX_MAX_EXPOSURE_MS:g} ms (GOX ExposureTime maximum)")
     if gain is not None:
         gain = float(gain)
         if not math.isfinite(gain) or not 1 <= gain <= 126:
             raise ApplyError("gain must be finite and within [1, 126]")
     if frame_rate_hz is not None:
         try:
-            frame_rate_hz = gox_timing.check_frame_rate(frame_rate_hz)
+            frame_rate_hz = timing.gox_check_frame_rate(frame_rate_hz)
         except (TypeError, ValueError) as error:
             raise ApplyError(str(error)) from error
     edits = []
     descriptions = []
     for config_id in ("gox", "gox_snapshot"):
-        loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
+        loaded = _read_file(_apply_file(config_id))
         try:
             text, camera_id = _gox_acquisition_text(loaded, target_ip, target_mac, exposure_ms, gain,
                                                    frame_rate_hz, freerun=config_id == "gox_snapshot")
@@ -552,10 +538,10 @@ def gox_exposure_limit_ms(target_ip: str, target_mac: str = "") -> tuple[float |
     over the recording and snapshot configs that apply the period check, plus a
     description of each binding constraint.
     """
-    limits = [gox_timing.MAX_EXPOSURE_MS]
-    notes = [f"GOX ExposureTime maximum: exposure <= {gox_timing.MAX_EXPOSURE_MS:g} ms"]
+    limits = [timing.GOX_MAX_EXPOSURE_MS]
+    notes = [f"GOX ExposureTime maximum: exposure <= {timing.GOX_MAX_EXPOSURE_MS:g} ms"]
     for config_id in ("gox", "gox_snapshot"):
-        loaded = read("gox") if config_id == "gox" else _read_file(_apply_file(config_id))
+        loaded = _read_file(_apply_file(config_id))
         lines = loaded.text.splitlines()
         _index, _start, _end, camera = _gox_camera_entry(lines, target_ip, target_mac)
         acquisition = camera.get("acquisition") or {}
@@ -573,26 +559,16 @@ def gox_exposure_limit_ms(target_ip: str, target_mac: str = "") -> tuple[float |
         except (TypeError, ValueError):
             continue
         if math.isfinite(rate) and rate > 0:
-            limits.append(gox_timing.exposure_limit_ms(rate))
-            notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {gox_timing.exposure_limit_ms(rate):g} ms")
+            limits.append(timing.exposure_limit_ms(rate))
+            notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {timing.exposure_limit_ms(rate):g} ms")
     return min(limits), notes
 
 
 def _check_gox_exposure_period(exposure_ms: float, frame_rate: object) -> None:
     """GOX rule, as in gox_driver: the exposure uses at most 90 % of the frame period."""
-    try:
-        if isinstance(frame_rate, bool):
-            raise ValueError
-        rate = float(frame_rate)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ApplyError("acquisition.frame_rate_hz must be finite and positive") from error
-    if not math.isfinite(rate) or rate <= 0:
-        raise ApplyError("acquisition.frame_rate_hz must be finite and positive")
-    if not gox_timing.exposure_fits(exposure_ms, rate):
-        raise ApplyError(
-            f"exposure {exposure_ms:g} ms must not exceed {gox_timing.exposure_limit_ms(rate):g} ms "
-            f"at {rate:g} Hz (90% of the frame period). Lower the exposure or the frame rate."
-        )
+    rate = _number(frame_rate, "acquisition.frame_rate_hz")
+    if not timing.exposure_fits(exposure_ms, rate):
+        raise ApplyError(timing.period_error(exposure_ms, rate))
 
 
 def _gox_acquisition_text(loaded: LoadedConfig, target_ip: str, target_mac: str,
@@ -648,15 +624,8 @@ def _gox_entry_for_readdress(lines: list[str], target_ip: str, target_mac: str,
         doc = yaml.safe_load("\n".join(lines)) or {}
         cameras = doc.get("cameras") or []
 
-        def _mac(value) -> str:
-            return re.sub(r"[^0-9a-f]", "", str(value or "").lower())
-
-        candidates = [
-            (i, c) for i, c in enumerate(cameras)
-            if isinstance(c, dict)
-               and (not _mac((c.get("device") or {}).get("mac")) or _mac((c.get("device") or {}).get("mac")) == _mac(
-                target_mac))
-        ]
+        candidates = [(i, c) for i, c in enumerate(cameras) if isinstance(c, dict)
+                      and _mac((c.get("device") or {}).get("mac")) in ("", _mac(target_mac))]
         if any(str((c.get("device") or {}).get("ip", "")) == new_ip for _, c in candidates):
             return (*_gox_camera_entry(lines, new_ip, ""), True)
         enabled = [(i, c) for i, c in candidates if c.get("enabled", True)]
@@ -698,8 +667,8 @@ def apply_device_ip(kind: str, target_ip: str, target_mac: str, new_ip: str) -> 
         lines = loaded.text.splitlines()
         doc = yaml.safe_load("\n".join(lines)) or {}
         device = doc.get("device") or {}
-        entry_mac = re.sub(r"[^0-9a-f]", "", str(device.get("mac", "")).lower())
-        if entry_mac and target_mac and entry_mac != re.sub(r"[^0-9a-f]", "", target_mac.lower()):
+        entry_mac = _mac(device.get("mac"))
+        if entry_mac and target_mac and entry_mac != _mac(target_mac):
             raise ApplyError(f"config-fx10.yaml is bound to MAC {device.get('mac')}, not to {target_mac}")
         start, end = _block_bounds(lines, "device")
         _replace_scalar(lines, "ip", quoted, start=start, end=end)
@@ -717,7 +686,7 @@ def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spec
     ``frame_rate_hz=None`` leaves each config's ``frame_rate_hz`` as it is.
     """
     try:
-        exposure_ms = fx10_timing.check_exposure(exposure_ms)
+        exposure_ms = timing.fx10_check_exposure(exposure_ms)
     except (TypeError, ValueError) as error:
         raise ApplyError(str(error)) from error
     if (spatial_binning is None) != (spectral_binning is None):
@@ -734,7 +703,7 @@ def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spec
             raise ApplyError(str(error)) from error
     edits = []
     for config_id in ("fx10", "fx10_snapshot"):
-        loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
+        loaded = _read_file(_apply_file(config_id))
         try:
             text = _fx10_acquisition_text(loaded, exposure_ms, spatial_binning, spectral_binning, frame_rate_hz)
         except ApplyError as error:
@@ -750,14 +719,9 @@ def apply_fx10_acquisition(exposure_ms: float, spatial_binning: int | None, spec
 
 def _number(value: object, name: str) -> float:
     try:
-        if isinstance(value, bool):
-            raise ValueError
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ApplyError(f"{name} must be finite and positive") from error
-    if not math.isfinite(number) or number <= 0:
-        raise ApplyError(f"{name} must be finite and positive")
-    return number
+        return timing.positive(value, name)
+    except ValueError as error:
+        raise ApplyError(str(error)) from error
 
 
 def _check_fx10_timing(document: dict, exposure_ms: float, spatial: object, spectral: object,
@@ -765,14 +729,11 @@ def _check_fx10_timing(document: dict, exposure_ms: float, spatial: object, spec
     """The fx10_driver loader's rules (CheckAcquisitionTiming + SensorSync pulse range)."""
     rate = _number(frame_rate, "acquisition.frame_rate_hz")
     try:
-        fx10_timing.check_frame_rate(rate, int(spatial), int(spectral))
+        timing.fx10_check_frame_rate(rate, int(spatial), int(spectral))
     except (TypeError, ValueError) as error:
         raise ApplyError(str(error)) from error
-    if not fx10_timing.exposure_fits(exposure_ms, rate):
-        raise ApplyError(
-            f"exposure {exposure_ms:g} ms must not exceed {fx10_timing.exposure_limit_ms(rate):g} ms "
-            f"at {rate:g} Hz (90% of the frame period). Lower the exposure or the frame rate."
-        )
+    if not timing.exposure_fits(exposure_ms, rate):
+        raise ApplyError(timing.period_error(exposure_ms, rate))
     acquisition = document.get("acquisition") or {}
     trigger = acquisition.get("trigger") or {}
     sensor_trigger = document.get("sensor_trigger") or {}
@@ -817,10 +778,10 @@ def _fx10_acquisition_text(loaded: LoadedConfig, exposure_ms: float,
 def fx10_exposure_limit_ms() -> tuple[float, list[str]]:
     """The exposure ceiling apply_fx10_acquisition enforces (read-only): the FX10e
     ExposureTime maximum and 90 % of the frame period over the recording and snapshot configs."""
-    limits = [fx10_timing.MAX_EXPOSURE_MS]
-    notes = [f"FX10e ExposureTime maximum: exposure <= {fx10_timing.MAX_EXPOSURE_MS:g} ms"]
+    limits = [timing.FX10_MAX_EXPOSURE_MS]
+    notes = [f"FX10e ExposureTime maximum: exposure <= {timing.FX10_MAX_EXPOSURE_MS:g} ms"]
     for config_id in ("fx10", "fx10_snapshot"):
-        loaded = read("fx10") if config_id == "fx10" else _read_file(_apply_file(config_id))
+        loaded = _read_file(_apply_file(config_id))
         acquisition = (yaml.safe_load(loaded.text) or {}).get("acquisition")
         if not isinstance(acquisition, dict):
             raise ApplyError(f"{loaded.file.path}: config has no 'acquisition:' block")
@@ -828,8 +789,8 @@ def fx10_exposure_limit_ms() -> tuple[float, list[str]]:
             rate = _number(acquisition.get("frame_rate_hz", 50.0), "acquisition.frame_rate_hz")
         except ApplyError as error:
             raise ApplyError(f"{loaded.file.path}: {error}") from error
-        limits.append(fx10_timing.exposure_limit_ms(rate))
-        notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {fx10_timing.exposure_limit_ms(rate):g} ms")
+        limits.append(timing.exposure_limit_ms(rate))
+        notes.append(f"{loaded.file.path}: {rate:g} Hz → exposure <= {timing.exposure_limit_ms(rate):g} ms")
     return min(limits), notes
 
 
@@ -887,11 +848,6 @@ def _main_field_node(text: str, key: str) -> ScalarNode:
     if node.start_mark.line != node.end_mark.line or node.style in ("|", ">"):
         raise ApplyError(f"General.{key} must occupy one line for Overview editing")
     return node
-
-
-def set_main_field(key: str, value: str, *, expected_value: str) -> None:
-    """Compatibility wrapper for saving one Overview field."""
-    set_main_fields({key: value}, expected_values={key: expected_value})
 
 
 def set_main_fields(values: dict[str, str], *, expected_values: dict[str, str]) -> None:

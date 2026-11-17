@@ -14,35 +14,12 @@ from pathlib import Path
 
 from ..constants import SNAPSHOT_CONFIG
 from ..decoder.gox import color_checker
-from . import atomic_json, camera_operations, config_store, gox_tools, preview_images, reference_storage
+from . import (atomic_json, camera_operations, config_store, gox_chart, gox_exposure, gox_tools, preview_images,
+               reference_storage)
 
 _status = ""
 _last_result: ReferenceResult | None = None
 _pending: _Pending | None = None
-MAX_CONFIG_BYTES = 1024 * 1024
-MAX_REFERENCE_BYTES = 4 * 1024 * 1024
-NO_CHART_SELECTED = "The operator found no chart among the detected candidates"
-
-
-@dataclass(frozen=True)
-class CandidateView:
-    """One detector candidate as the GUI offers it: a thumbnail with the candidate outlined."""
-
-    number: int  # what choose() takes
-    label: str
-    image: str  # preview_images URL
-
-
-def register_candidates(stem: str, offered: list[tuple[str, color_checker.ChartCandidate]]
-                        ) -> tuple[CandidateView, ...]:
-    """Publish (label, candidate) thumbnails, numbered from 1 in the given order."""
-    return tuple(CandidateView(number, f"{label} · OpenCV cost {candidate.cost:.3g}",
-                               preview_images.put(candidate.thumbnail_png, f"{stem}_candidate{number}.png"))
-                 for number, (label, candidate) in enumerate(offered, 1))
-
-
-def release_candidates(candidates: tuple[CandidateView, ...]) -> None:
-    preview_images.release(*(candidate.image for candidate in candidates))
 
 
 @dataclass
@@ -77,19 +54,11 @@ class ReferenceResult:
     exposure_check: object | None = None
     saved: bool = False  # moved from the output directory's tmp folder into the output directory
     # Detector candidates waiting for the operator (choose / reject); empty otherwise.
-    candidates: tuple[CandidateView, ...] = ()
+    candidates: tuple[gox_chart.CandidateView, ...] = ()
 
     @property
     def awaiting_selection(self) -> bool:
         return bool(self.candidates)
-
-
-def capability_reason() -> str | None:
-    return color_checker.capability_reason()
-
-
-def guard_reason() -> str | None:
-    return camera_operations.guard_reason("gox")
 
 
 def last_result() -> ReferenceResult | None:
@@ -121,45 +90,12 @@ def _register_images(analysis: color_checker.CalibrationPreview) -> dict[str, st
 def _release(result: ReferenceResult | None) -> None:
     if result is not None:
         preview_images.release(*result.images.values())
-        release_candidates(result.candidates)
-
-
-def _validate_chart(chart_key: str) -> None:
-    if not isinstance(chart_key, str) or chart_key not in color_checker.CHARTS:
-        raise ValueError("Explicitly select MCC24, SG140 or VINYL18 before capturing a reference")
-
-
-def _config_bytes() -> bytes:
-    def signature(stat):
-        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
-
-    path = config_store.checked_snapshot_path(SNAPSHOT_CONFIG)
-    with path.open("rb") as source:
-        before = signature(os.fstat(source.fileno()))
-        raw = source.read(MAX_CONFIG_BYTES + 1)
-        if before != signature(os.fstat(source.fileno())) or before != signature(path.stat()):
-            raise ValueError("GOX snapshot configuration changed while being read; retry")
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ValueError("GOX snapshot configuration exceeds the reference capture limit")
-    raw.decode("utf-8")
-    return raw
-
-
-TMP_FOLDER = reference_storage.TMP_FOLDER
-
-
-def _output_root() -> Path:
-    return reference_storage.output_root()
-
-
-def reference_tmp_root() -> Path:
-    """Unconfirmed references and exposure series live in <output>/tmp until saved."""
-    return _output_root() / TMP_FOLDER
+        gox_chart.release(result.candidates)
 
 
 def _prepare(chart_key: str):
-    root = reference_tmp_root()
-    raw = _config_bytes()
+    root = reference_storage.tmp_root()
+    raw = config_store.snapshot_config_bytes(SNAPSHOT_CONFIG)
     now = datetime.now(timezone.utc)
     session = root / f"reference_gox_{now:%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
     config = session / "raw" / "config" / "config-gox-snapshot.yaml"
@@ -183,13 +119,13 @@ def _initialize(session: Path, config: Path, document: dict, raw: bytes) -> None
         saved.write(raw)
         saved.flush()
         os.fsync(saved.fileno())
-    atomic_json.write(session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+    atomic_json.write(session / "reference.json", document)
 
 
 async def capture(chart_key: str) -> ReferenceResult:
     """Capture with snapshot-config parameters after an explicit chart selection."""
-    _validate_chart(chart_key)
-    if reason := capability_reason():
+    gox_chart.check_key(chart_key)
+    if reason := color_checker.capability_reason():
         raise ValueError(reason)
     return await camera_operations.run(
         "gox", lambda: _capture(chart_key), kind="gox-color-reference")
@@ -205,7 +141,7 @@ async def _write_failed(session: Path | None, document: dict | None, failure: st
     document.pop("calibration", None)
     document.pop("completed_utc", None)
     try:
-        await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+        await asyncio.to_thread(atomic_json.write, session / "reference.json", document)
     except (OSError, ValueError) as save_error:
         failure += f"; failure metadata could not be saved: {save_error}"
     return failure
@@ -249,7 +185,7 @@ async def _capture(chart_key: str) -> ReferenceResult:
         detection = await asyncio.to_thread(color_checker.detect, camera_dir, chart_key)
         document.update(status="awaiting_chart_selection", detection_transfer=detection.transfer,
                         chart_candidates=[candidate.to_dict() for candidate in detection.candidates])
-        await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+        await asyncio.to_thread(atomic_json.write, session / "reference.json", document)
     except asyncio.CancelledError:
         _status = "GOX reference capture interrupted; any acquired RAW is retained"
         raise
@@ -264,7 +200,7 @@ async def _capture(chart_key: str) -> ReferenceResult:
         return _last_result
     _pending = _Pending(session, config, document, camera_dir, chart_key, detection, raw_output, started)
     offered = [(f"Candidate {candidate.number}", candidate) for candidate in detection.candidates]
-    _last_result = ReferenceResult(ok=False, candidates=register_candidates(session.name, offered), **common)
+    _last_result = ReferenceResult(ok=False, candidates=gox_chart.register(session.name, offered), **common)
     _status = (f"{len(offered)} {chart_key} candidate(s) detected; select the chart "
                "(only you can tell the chart from a regular texture)")
     return _last_result
@@ -288,7 +224,6 @@ async def choose(number: int) -> ReferenceResult:
     if candidate is None:
         raise ValueError(f"Candidate {number} was not offered")
     pending = _take_pending()
-    from . import gox_exposure  # imports this module; resolved at call time
     session, document, chart_key = pending.session, pending.document, pending.chart_key
     selection = {"candidate": candidate.number, "opencv_cost": candidate.cost,
                  "candidate_count": len(pending.detection.candidates), "selected_by": "operator"}
@@ -316,7 +251,7 @@ async def choose(number: int) -> ReferenceResult:
                          # provenance.reference_exposure_unavailable_reason.
                          "color_calibration": analysis.color_calibration},
         )
-        await asyncio.to_thread(atomic_json.write, session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
+        await asyncio.to_thread(atomic_json.write, session / "reference.json", document)
     except asyncio.CancelledError:
         _status = "GOX reference calibration interrupted; the RAW is retained"
         raise
@@ -347,7 +282,7 @@ async def reject() -> ReferenceResult:
     """None of the candidates is the chart: the reference fails and its RAW is kept."""
     global _status, _last_result
     pending = _take_pending()
-    failure = await _write_failed(pending.session, pending.document, NO_CHART_SELECTED)
+    failure = await _write_failed(pending.session, pending.document, gox_chart.NO_CHART_SELECTED)
     _release(_last_result)
     _last_result = ReferenceResult(
         ok=False, reason=failure, chart_key=pending.chart_key, session_dir=str(pending.session),
@@ -357,17 +292,9 @@ async def reject() -> ReferenceResult:
     return _last_result
 
 
-def _move_to_output(session: Path) -> Path:
-    root = _output_root()
-    if session.parent != root / TMP_FOLDER:
-        raise ValueError(f"Only references under {root / TMP_FOLDER} can be saved")
-    if (root / session.name).exists():
-        raise ValueError(f"{root / session.name} already exists")
+def _record_save(session: Path, note: dict) -> None:
     document = json.loads((session / "reference.json").read_text(encoding="utf-8"))
-    document["saved_utc"] = datetime.now(timezone.utc).isoformat()
-    document["saved_from"] = session.relative_to(root).as_posix()
-    atomic_json.write(session / "reference.json", document, limit=MAX_REFERENCE_BYTES)
-    return reference_storage.move_to_output(session, root)
+    atomic_json.write(session / "reference.json", {**document, **note})
 
 
 async def save_to_data() -> ReferenceResult:
@@ -379,7 +306,7 @@ async def save_to_data() -> ReferenceResult:
     if result.saved:
         raise ValueError(f"This reference is already saved: {result.session_dir}")
     session = Path(result.session_dir)
-    target = await asyncio.to_thread(_move_to_output, session)
+    target = await asyncio.to_thread(reference_storage.save, session, _record_save)
     analysis = result.analysis
     if analysis.source_dir is not None:
         analysis = dataclasses.replace(analysis, source_dir=target / analysis.source_dir.relative_to(session))

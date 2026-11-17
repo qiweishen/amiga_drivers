@@ -72,8 +72,6 @@ class GoxFormatTests(unittest.TestCase):
                 (0x010C0006, bytes([0xAB, 0x3C, 0x12]), [0xABC, 0x123]),
                 (0x010C002B, bytes([0xAB, 0x3C, 0x12]), [0xABC, 0x123]),  # GOX BayerRG12Packed
                 (0x010C0004, bytes([0xAA, 0x13, 0x55]), [0x2AB, 0x155]),
-                (0x010C0047, bytes([0xBC, 0x3A, 0x12]), [0xABC, 0x123]),
-                (0x010A0046, bytes([0x01, 0x0C, 0x58, 0xD0, 0xFD]), [0x001, 0x203, 0x105, 0x3F7]),
         ):
             with self.subTest(code=code):
                 image, _, _ = pixels.decode(code, len(expected), 1, raw)
@@ -103,7 +101,6 @@ class GoxFormatTests(unittest.TestCase):
             segment = root / "seg_00001.raw"
             segment.write_bytes(b"JAIRAWSG" + bytes(504))
             (root / "device.json").write_text('{"format":"jai-raw-seg"}', encoding="utf-8")
-            self.assertFalse(recording.is_segment(segment))
             with self.assertRaises(ValueError):
                 list(recording.iter_records(segment))
             for reader in (gox_recording.snapshot_frame, gox_recording.latest_frame):

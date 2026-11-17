@@ -39,9 +39,7 @@ class ReferenceCommandTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(fx10_reference, "FX10_SNAPSHOT_CONFIG", snapshot), \
                 patch.object(fx10_reference, "_status", ""), \
                 patch.object(fx10_reference, "_last_result", None), \
-                patch.object(fx10_reference.runtime, "binary_exists", new_callable=AsyncMock, return_value=True), \
                 patch.object(fx10_reference.runtime, "pgrep", new_callable=AsyncMock, return_value=False), \
-                patch.object(fx10_reference.runtime, "exec_path", side_effect=str), \
                 patch.object(fx10_reference.config_store, "checked_snapshot_path", return_value=snapshot) as checked, \
                 patch.object(fx10_reference.reference_storage, "tmp_root", return_value=Path("/captures/tmp")), \
                 patch.object(fx10_reference.config_store, "get") as get, \

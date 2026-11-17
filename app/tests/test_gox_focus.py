@@ -11,7 +11,7 @@ import numpy as np
 
 from app.decoder.ebus import pixels, recording
 from app.decoder.gox import focus
-from app.services import gox_focus, gox_timing
+from app.services import gox_focus, timing
 from app.tests.test_ebus_raw_format import fixture_header, fixture_image, fixture_record
 
 BAYER_RG8 = 0x01080009
@@ -146,15 +146,15 @@ class AnalyzeTests(unittest.TestCase):
 
 class StreamRateTests(unittest.TestCase):
     def test_focus_rate_is_the_maximum_under_the_8_bit_ceiling(self):
-        self.assertEqual(gox_timing.MAX_FOCUS_FRAME_RATE_HZ, 9.079)
+        self.assertEqual(timing.GOX_MAX_FOCUS_FRAME_RATE_HZ, 9.079)
         for exposure_ms, expected in ((10.0, 9.079), (99.12, 9.079), (99.13, 9.078), (100.0, 9.0),
                                       (150.0, 6.0), (399.405, 2.253)):
             with self.subTest(exposure_ms=exposure_ms):
-                rate = gox_timing.max_frame_rate_hz(exposure_ms, gox_timing.MAX_FOCUS_FRAME_RATE_HZ)
+                rate = timing.gox_max_frame_rate_hz(exposure_ms, timing.GOX_MAX_FOCUS_FRAME_RATE_HZ)
                 self.assertEqual(rate, expected)
-                self.assertTrue(gox_timing.exposure_fits(exposure_ms, rate))
+                self.assertTrue(timing.exposure_fits(exposure_ms, rate))
                 self.assertEqual(gox_focus.request_for("10.95.1.101", exposure_ms, 1.0).frame_rate_hz, expected)
-        self.assertEqual(gox_timing.max_frame_rate_hz(10.0), gox_timing.MAX_FRAME_RATE_HZ)  # default unchanged
+        self.assertEqual(timing.gox_max_frame_rate_hz(10.0), timing.GOX_MAX_FRAME_RATE_HZ)  # default unchanged
 
     def test_request_rejects_an_exposure_outside_the_camera_range(self):
         for exposure_ms in (0.0, 399.406, math.nan):

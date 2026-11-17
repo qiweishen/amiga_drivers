@@ -1,4 +1,9 @@
-"""Event-loop-owned reservations shared by recording and camera tools."""
+"""Event-loop-owned reservations shared by recording and camera tools.
+
+GigE control is exclusive: while a recording runs, a camera tool may touch only a
+camera whose driver was disabled at that recording's start ("discovery" is a
+broadcast and always allowed; ``None`` means the whole rig must be idle).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from ..state import STATE, ProcState
 
 T = TypeVar("T")
 _task: asyncio.Task | None = None
+DRIVER_OF_KIND = {"GoX": "gox", "FX10": "fx10"}  # discovery table kind -> driver
 
 
 class CameraBusyError(RuntimeError):
@@ -18,12 +24,12 @@ class CameraBusyError(RuntimeError):
 
 
 def guard_reason(driver: str | None) -> str | None:
+    """Why a tool for ``driver`` must not run now, or None. Uses the enables captured
+    at recording start: a config edit mid-run must not unlock the camera the driver owns."""
     if STATE.tool_uncertain:
         return "A previous device tool may still be running; waiting for verified exit"
     if STATE.control_uncertain:
         return "Acquisition ownership is unknown; camera tools are locked until it can be verified"
-    if not STATE.env_ok:
-        return "The execution environment is unavailable"
     if STATE.process_state in (ProcState.STARTING, ProcState.STOPPING):
         return "Recording is starting or stopping; wait for the operation to finish"
     if STATE.process_state is ProcState.RUNNING and driver != "discovery":

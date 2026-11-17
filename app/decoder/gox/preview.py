@@ -36,41 +36,27 @@ class SnapshotPreview:
     mean_dn: float
 
 
-def _png_bytes(rgb: np.ndarray, depth: int) -> bytes:
-    ok, encoded = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-    if not ok:
-        raise ValueError(f"{depth}-bit PNG encoding failed")
-    # The codec byte stream is uint8; it is not an 8-bit pixel image.
-    data = encoded.tobytes()
-    if (len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR"
-            or data[24] != depth or data[25] != 2):
-        raise ValueError(f"PNG encoder did not preserve {depth}-bit RGB samples")
+def png_bytes(image: np.ndarray) -> bytes:
+    """Lossless PNG of a uint8/uint16 grayscale (H, W) or RGB (H, W, 3) image; samples are unchanged."""
+    gray = image.ndim == 2
+    if (image.dtype not in (np.uint8, np.uint16) or image.size == 0
+            or not (gray or (image.ndim == 3 and image.shape[2] == 3))):
+        raise ValueError("PNG encoding requires a nonempty uint8/uint16 grayscale or RGB image")
+    bgr = image if gray else cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    ok, encoded = cv2.imencode(".png", bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    data = encoded.tobytes() if ok else b""
+    depth, color_type = image.dtype.itemsize * 8, 0 if gray else 2
+    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[24] != depth or data[25] != color_type:
+        raise ValueError(f"PNG encoder did not preserve the {depth}-bit samples")
     return data
-
-
-def png16_bytes(rgb16: np.ndarray) -> bytes:
-    """Encode uint16 RGB samples unchanged; no scaling or 8-bit conversion."""
-    if rgb16.dtype != np.uint16 or rgb16.ndim != 3 or rgb16.shape[2] != 3 or rgb16.size == 0:
-        raise ValueError("GOX PNG encoding requires a nonempty uint16 RGB image")
-    return _png_bytes(rgb16, 16)
-
-
-def png8_bytes(rgb8: np.ndarray) -> bytes:
-    if rgb8.dtype != np.uint8 or rgb8.ndim != 3 or rgb8.shape[2] != 3 or rgb8.size == 0:
-        raise ValueError("Display PNG encoding requires a nonempty uint8 RGB image")
-    return _png_bytes(rgb8, 8)
-
-
-def display_scale(shape: tuple[int, ...], long_edge: int = DISPLAY_LONG_EDGE) -> float:
-    return min(1.0, long_edge / max(shape[0], shape[1]))
 
 
 def downscale(image: np.ndarray, long_edge: int = DISPLAY_LONG_EDGE) -> np.ndarray:
     """Area-average to at most ``long_edge`` pixels; a new array either way."""
-    scale = display_scale(image.shape, long_edge)
+    height, width = image.shape[:2]
+    scale = min(1.0, long_edge / max(height, width))
     if scale >= 1.0:
         return image.copy()
-    height, width = image.shape[:2]
     size = (max(1, round(width * scale)), max(1, round(height * scale)))
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
 
@@ -82,9 +68,8 @@ def display_points(points: np.ndarray, native_shape: tuple[int, ...], display_sh
 
 
 def _check_native_rgb(rgb_dn: np.ndarray) -> None:
-    if (rgb_dn.dtype != np.uint16 or rgb_dn.ndim != 3 or rgb_dn.shape[2] != 3
-            or rgb_dn.size == 0 or int(rgb_dn.max()) > NATIVE_FULL_SCALE):
-        raise ValueError("Native GOX preview requires uint16 RGB in DN 0..4095")
+    if rgb_dn.dtype != np.uint16 or rgb_dn.ndim != 3 or rgb_dn.shape[2] != 3 or rgb_dn.size == 0:
+        raise ValueError("Native GOX preview requires a nonempty uint16 RGB image")
 
 
 def native_rgb(frame: ImageFrame) -> np.ndarray:
@@ -102,13 +87,13 @@ def native_display_rgb8(rgb_dn: np.ndarray, long_edge: int = DISPLAY_LONG_EDGE) 
 
 
 def native_display_png(rgb_dn: np.ndarray, long_edge: int = DISPLAY_LONG_EDGE) -> bytes:
-    return png8_bytes(native_display_rgb8(rgb_dn, long_edge))
+    return png_bytes(native_display_rgb8(rgb_dn, long_edge))
 
 
 def native_full_png16(rgb_dn: np.ndarray) -> bytes:
     """Map each 12-bit DN to an exact 16-bit code, DN * 16, at full resolution."""
     _check_native_rgb(rgb_dn)
-    return png16_bytes(np.left_shift(rgb_dn, 4))
+    return png_bytes(np.left_shift(rgb_dn, 4))
 
 
 def snapshot(directory: Path) -> SnapshotPreview:

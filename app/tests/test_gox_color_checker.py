@@ -4,7 +4,6 @@ These tests exercise native sample handling and rejected calibration results.
 They do not establish detector accuracy or calibration accuracy on real charts.
 """
 
-import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +45,13 @@ def _checker(target, polygons, cost=0.05):
     return checker
 
 
+def _sample(rgb, raw, polygons, full_scale):
+    """Patch means for fitting; a saturated patch raises, as in calibrate()."""
+    means, counts, status = cc._sample_patches(rgb, raw, polygons, full_scale)
+    cc._require_unsaturated(status)
+    return means, counts
+
+
 def _mcc_stub(key, polygons):
     constants = {"MCC24": 11, "SG140": 22, "VINYL18": 33}
     checker = _checker(constants[key], polygons)
@@ -79,7 +85,7 @@ class GoxColorCheckerTests(unittest.TestCase):
                 native = np.broadcast_to(np.array([1001, 2002, 3003], dtype=np.uint16),
                                          (12, 12, 3)).copy()
                 original = native.copy()
-                display = cc._display_rgb(native, 4095)
+                display = cc._display_rgb(native)
                 display_before = display.copy()
                 mcc, detector, _ = _mcc_stub(key, polygons)
                 with patch.object(cc.cv, "mcc", mcc, create=True):
@@ -90,7 +96,7 @@ class GoxColorCheckerTests(unittest.TestCase):
                 self.assertEqual(detection_image.shape, native.shape)
                 # An upper bound on OpenCV's candidates, not a count of charts.
                 self.assertEqual(max_candidates, cc._MAX_CANDIDATES)
-                expected_rgb8 = np.rint(cc._srgb_encode(display) * 255).astype(np.uint8)
+                expected_rgb8 = np.rint(cc.render.srgb_oetf(display) * 255).astype(np.uint8)
                 np.testing.assert_array_equal(detection_image, expected_rgb8[..., ::-1])
                 self.assertEqual(len(candidates), 1)
                 np.testing.assert_array_equal(candidates[0].polygons, polygons)
@@ -128,18 +134,17 @@ class GoxColorCheckerTests(unittest.TestCase):
             with self.subTest(pixel_format=name):
                 frame = SimpleNamespace(image=native, pixel_format=name)
                 with self.assertRaisesRegex(ValueError, "GOX requires BayerRG12Packed"):
-                    cc._native_rgb(frame)
+                    cc.native_rgb(frame)
 
     def test_bayer_demosaic_keeps_native_12_bit_values_and_converts_bgr_to_rgb(self):
         native = np.full((8, 8), 1001, dtype=np.uint16)
         bgr = np.broadcast_to(np.array([103, 205, 307], dtype=np.uint16), (8, 8, 3)).copy()
         frame = SimpleNamespace(image=native, pixel_format="BayerRG12Packed")
         with patch.object(preview.pixels, "demosaic", return_value=bgr) as demosaic:
-            rgb, full_scale, bits = cc._native_rgb(frame)
+            rgb = cc.native_rgb(frame)
         supplied, pattern = demosaic.call_args.args
         self.assertIs(supplied, native)  # No shift-to-16 or 8-bit intermediate.
         self.assertEqual(pattern, "RG")
-        self.assertEqual((full_scale, bits), (4095, 12))
         self.assertEqual(rgb.dtype, np.dtype("uint16"))
         np.testing.assert_array_equal(rgb[3, 3], [307, 205, 103])
         np.testing.assert_array_equal(native, np.full((8, 8), 1001, dtype=np.uint16))
@@ -148,11 +153,11 @@ class GoxColorCheckerTests(unittest.TestCase):
         rgb = np.broadcast_to(np.array([1001, 2002, 3003], dtype=np.uint16), (10, 12, 3)).copy()
         raw = np.full((10, 12), 1001, dtype=np.uint16)
         polygon = np.array([[[2, 2], [8, 2], [8, 6], [2, 6]]], dtype=np.float64)
-        means, counts = cc._sample(rgb, raw, polygon, 4095)
+        means, counts = _sample(rgb, raw, polygon, 4095)
         np.testing.assert_allclose(means[0] * 4095, [1001, 2002, 3003], rtol=0, atol=1e-10)
         self.assertEqual(counts, [35])
         rgb[:, :, 0] += 1
-        shifted, _ = cc._sample(rgb, raw, polygon, 4095)
+        shifted, _ = _sample(rgb, raw, polygon, 4095)
         self.assertAlmostEqual((shifted[0, 0] - means[0, 0]) * 4095, 1.0)
 
     def test_vinyl_sampling_uses_provided_unequal_rectangles_in_reference_order(self):
@@ -167,7 +172,7 @@ class GoxColorCheckerTests(unittest.TestCase):
             polygons.append(polygon)
             expected.append(value)
         polygons = np.asarray(polygons, dtype=np.float64)
-        means, counts = cc._sample(rgb, rgb, polygons, 4095)
+        means, counts = _sample(rgb, rgb, polygons, 4095)
         np.testing.assert_allclose(means * 4095, expected, rtol=0, atol=1e-10)
         self.assertEqual(counts, [36] * 12 + [78] * 6)
 
@@ -181,7 +186,7 @@ class GoxColorCheckerTests(unittest.TestCase):
         )
         for polygon in cases:
             with self.subTest(polygon=polygon), self.assertRaises(ValueError):
-                cc._sample(image, image, np.array([polygon], dtype=np.float64), 4095)
+                _sample(image, image, np.array([polygon], dtype=np.float64), 4095)
 
     def test_saturated_native_photosite_is_rejected_even_if_demosaic_conceals_it(self):
         rgb = np.full((12, 12, 3), 1000, dtype=np.uint16)
@@ -189,10 +194,10 @@ class GoxColorCheckerTests(unittest.TestCase):
         raw[4, 4] = 4095
         polygon = np.array([[[2, 2], [8, 2], [8, 8], [2, 8]]], dtype=np.float64)
         with self.assertRaisesRegex(ValueError, "saturated"):
-            cc._sample(rgb, raw, polygon, 4095)
+            _sample(rgb, raw, polygon, 4095)
         almost_full = np.full((12, 12, 3), 4090, dtype=np.uint16)
         with self.assertRaisesRegex(ValueError, "close to saturation"):
-            cc._sample(almost_full, almost_full, polygon, 4095)
+            _sample(almost_full, almost_full, polygon, 4095)
 
     def test_detection_rejects_wrong_patch_count_nonfinite_geometry_and_wrong_chart_type(self):
         chart = cc.CHARTS["MCC24"]
@@ -398,13 +403,13 @@ class GoxColorCheckerTests(unittest.TestCase):
         self.assertIn("p.172", black["source"])
         self.assertIn("8LSB@8bit", black["source"])
         self.assertEqual(result.provenance["reference_exposure"], exposure.to_dict())
-        reusable = cc.ColorCalibration.from_dict(result.color_calibration)
-        self.assertEqual(reusable.applicability["exposure_compensation"], "scale_by_exposure_ratio")
-        self.assertEqual(reusable.applicability["gain"], 2.0)
-        self.assertEqual(reusable.applicability["exposure_time_us"], 10002.45)
-        self.assertEqual((reusable.normalization.pedestal_status, reusable.normalization.pedestal_dn),
+        reusable = result.color_calibration
+        self.assertEqual(reusable["applicability"]["exposure_compensation"], "scale_by_exposure_ratio")
+        self.assertEqual(reusable["applicability"]["gain"], 2.0)
+        self.assertEqual(reusable["applicability"]["exposure_time_us"], 10002.45)
+        self.assertEqual((reusable["normalization"]["pedestal_status"], reusable["normalization"]["pedestal_dn"]),
                          ("documented", 128.0))
-        self.assertEqual(reusable.source["block_id"], 1)
+        self.assertEqual(reusable["source"]["block_id"], 1)
         display = result.provenance["display"]
         self.assertEqual(display, cc.render.PROVENANCE)
         self.assertEqual(display["exposure_adjustment"], "none")

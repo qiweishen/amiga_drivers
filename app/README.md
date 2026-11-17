@@ -9,15 +9,30 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| `decoder/ebus/` | `ebus-raw` 记录读取、完整性检查、PFNC 像素解包；GOX 与 FX10 共用 |
-| `decoder/fx10/` | FX10 元数据、预览数据立方体和原始 DN 光谱统计 |
-| `decoder/gox/` | GOX 图像读取、快照和实时图像编码，以及参考色卡检测和色彩矩阵拟合 |
+| `decoder/ebus/` | `ebus-raw` 记录读取、完整性检查（CRC-32C、序号、session_end 计数）、PFNC 像素解包；GOX 与 FX10 共用。`pfnc.py` 只登记实际使用的 7 种格式 |
+| `decoder/exposure.py` | ETTR 通用运算（线性拟合、曝光建议、帧周期封顶、复核），GOX 与 FX10 共用 |
+| `decoder/fx10/` | FX10 元数据、预览数据立方体、原始 DN 光谱统计和白参考 ETTR 测量点 |
+| `decoder/gox/` | GOX 图像读取、预览编码、对焦指标、色卡检测与矩阵拟合、色卡 ETTR 测量点 |
 | `decoder/asterx/` | 当前采集会话的 CSV 遥测解析、增量读取及历史扫描轨迹读取 |
 | `services/` | 进程和设备操作生命周期、配置、会话状态、实时预览及历史轨迹读取调度 |
 | `ui/` | 页面交互、图表选项和结果展示 |
 | `tests/` | 解码、服务和界面的测试源码 |
 | `resource/` | 界面静态资源 |
 | `_runtime/` | 应用运行时文件与工具输出，不属于源码层 |
+
+`services/` 中 GoX/FX10 共用的模块：
+
+| 模块 | 内容 |
+| --- | --- |
+| `snapshot_tool.py` | 运行 snapshot 类工具：先解析 `SNAPSHOT: OK/FAIL` 标记再看退出码、输出目录与清理 |
+| `timing.py` | 两台相机的帧率/曝光上限与 90% 帧周期规则（对应两个驱动的 `app_config.h`） |
+| `exposure_series.py` | 曝光序列的保存、复核点与建议值的公共部分 |
+| `gox_chart.py` | GOX 色卡候选的登记与操作者选择校验 |
+| `camera_operations.py` | 相机互斥：录制占用的相机不能被工具使用（`guard_reason` + `snapshot_busy`） |
+
+`ui/components.py` 放共享控件（`info`/`hint`/`heading`、`preview_image`、`metric`、
+`raw_output`、`confirm`、`busy`）和共享文案；`ui/ettr_section.py` 是两个参考页共用的
+ETTR 曝光序列面板。
 
 ## 依赖方向
 
@@ -29,11 +44,40 @@ decoder/fx10、decoder/gox → decoder/ebus
 
 `decoder/` 不依赖 `services/`、`ui/` 或全局应用状态，不控制设备或启动采集进程。
 读取和统计函数不修改采集文件；GUI 图像编码仅用于快照和实时展示。
-GOX 快照保留原始 RAW，16-bit PNG 预览和原始 DN 直方图在内存中生成，不另存预览文件。
+GOX 快照保留原始 RAW，预览图和原始 DN 直方图在内存中生成，不另存预览文件。
 GOX 色卡参考也保留 RAW；色彩校正预览只在内存中生成，拟合结果写入参考元数据。
 图表配置保留在 `ui/`，请求互斥、任务取消、会话切换和结果发布保留在 `services/`。
 新增传感器数据算法时，应放入对应的 `decoder/<sensor>/`。
 当前 app 没有 LMS payload 解码器，因此不建立空的 LMS 模块。
+
+## 数据保护规则
+
+简化代码时下列规则逐条保留；它们保护采集数据或配置，不是可删的“防御代码”：
+
+- 相机互斥：`camera_operations.guard_reason` 与 `snapshot_busy` 预留；录制开始时
+  记录的 enables 决定哪台相机被占用。`tool_jobs.check_idle`（pgrep 互斥）、作业日志、
+  启动门、按 PID 身份停止工具。
+- 采集进程只发 TERM，从不 KILL；GUI 关闭时等待采集排空。重新附着按进程身份三元组
+  （PID、启动时间、boot id）匹配；`control_owner` 用 flock 保证单一控制者。
+- 配置写入：`_require_writable`（录制中锁定）、mtime 冲突检测、`.bak` 备份、写后读回
+  （`_verified_text`）、正式与 snapshot 两个配置的成对写入与回滚、备份路径重叠检查。
+- 失败的工具保留 RAW；`reference_storage` 不覆盖已有目录；参考校准校验 payload CRC-32C
+  并写入 provenance。
+- 与 C++ 共享的契约字符串一字不改：`amiga-run-v1`、`SNAPSHOT: OK/FAIL`、
+  `REFERENCE: CONFIG/SESSION/PHASE/OK/FAIL`、`AMIGA_*` 环境变量、`AmigaDrivers`
+  二进制名，以及 `tools/check_contracts.py` 检查的 `driver_stats` 正则。
+
+字节上限、严格 JSON、重复复验、节流等不保护数据的检查已删除。
+
+## GUI 文案规则
+
+1. 每个区块只有标题和至多一行可见提示（约 60 字符，英文短语）；原理、公式和来源放进
+   ⓘ（`components.info`，点击/触屏打开，不超过 3 句），完整说明写在本 README。
+2. 数值引用常量，例如 `f"{timing.PERIOD_FRACTION:.0%}"`、`ettr.TOLERANCE`。
+3. 多处共用的文案只定义一次（`components.NEXT_RUN`、`components.PREVIEW_DETAILS`）。
+4. notify 一句话（约 80 字符），其后附原始错误。
+5. 界面不出现内部名称（AmigaDrivers、amiga-run-v1、build/bin、函数名）；平台名显示为
+   Phenomate。
 
 ## 格式与显示约定
 
@@ -51,9 +95,10 @@ GOX 色卡参考也保留 RAW；色彩校正预览只在内存中生成，拟合
   `SensorDigitizationBits=12`。RAW 保留 SDK 原始打包字节；GUI 无损解包后的 Bayer
   样本为 `uint16` 容器中的 12-bit DN（0–4095）。未打包 `BayerRG12` 等其他格式的
   记录不被读取。
-  快照、实时与参考原图预览先在 `uint16` 下去马赛克，再以 `DN << 4` 映射到
-  16-bit PNG，保留每个去马赛克后 DN 代码，不经过 8-bit 图像或 JPEG。
-  这描述应用输出的图像数据；浏览器、操作系统合成及显示器的实际显示位深尚未验证。
+  预览编码：先在 `uint16` 下去马赛克。屏幕预览为线性 DN / 4095，面积平均缩小到长边
+  ≤ 1600 px 后量化为 8-bit PNG（浏览器和显示器本就以 8 bit 显示）；下载为全分辨率
+  16-bit PNG，以 `DN << 4`（DN × 16）保留每个去马赛克后的 DN 代码，首次请求时从 RAW
+  重新解码生成。两者都不参与测量。浏览器、操作系统合成及显示器的实际显示位深未验证。
 - `BayerRG12Packed` 每像素占 12 bit（手册 “Pixel Format” 的 PixelSize 表）。
   4128×3008 完整帧为 18,625,536 字节，为未打包 `BayerRG12` 的 3/4。主配置 5 fps
   的图像 payload 约 93.13 MB/s。现有采集记录的链路为 125,000,000 B/s，带宽裕量
@@ -71,7 +116,7 @@ GOX 色卡参考也保留 RAW；色彩校正预览只在内存中生成，拟合
 的曝光、帧率、增益，或 FX10 的曝光、帧率、空间及光谱 binning，同时保存到对应的
 正式录制配置和 snapshot 配置，供下一次录制与参考采集使用。
 
-FX10 时序限制与 `fx10_driver` 一致（`services/fx10_timing.py` 对应
+FX10 时序限制与 `fx10_driver` 一致（`services/timing.py` 的 `FX10_*` 常量对应
 `fx10_driver/include/app_config.h` 的 `CheckAcquisitionTiming`）：`frame_rate_hz`
 在空间与光谱 binning 均为 1 时不超过 163.02 Hz，其余 binning 组合不超过
 324.373 Hz；`exposure_ms` 为 0.01–419 ms，且不超过帧周期的 90%（含等号）。
@@ -83,7 +128,7 @@ PWM 能产生的频率（FX 组 17.882–9847.689 Hz，JAI 组 0.140–9847.689 
 `services/sensor_sync_rates.py` 对应 `common/include/sensor_sync_rates.h`）。ETTR 曝光序列的每个点取配置帧率与该曝光可用最大帧率中的较小值；ETTR
 建议的 Apply 只改曝光，帧率不变。
 
-GOX 时序限制与 `gox_driver` 一致（`services/gox_timing.py` 对应
+GOX 时序限制与 `gox_driver` 一致（`services/timing.py` 的 `GOX_*` 常量对应
 `gox_driver/include/app_config.h`）：`frame_rate_hz` 为 0.125–6.054 Hz（全幅
 `BayerRG12Packed` 的 AcquisitionFrameRate 上限），`exposure_ms` 不超过 399.405 ms
 （相机回读的 ExposureTime 上限 399405 µs），且曝光不超过帧周期的 90%
@@ -101,7 +146,7 @@ ETTR 建议的 Apply 只改曝光，帧率不变。snapshot 配置仍不在 Conf
 增益持续采集，实时给出 ROI 清晰度相对本次峰值的百分比。对焦更看重帧率而非位深，所以
 这条流固定使用 8-bit `BayerRG8`，并始终以最高帧率运行：
 `floor(min(9.079, 900 / exposure_ms), 0.001)` Hz。9.079 Hz 是全幅 BayerRG8 的
-AcquisitionFrameRate 上限，曝光仍须 ≤ 帧周期的 90%（`gox_timing.MAX_FOCUS_FRAME_RATE_HZ`
+AcquisitionFrameRate 上限，曝光仍须 ≤ 帧周期的 90%（`timing.GOX_MAX_FOCUS_FRAME_RATE_HZ`
 对应 C++ 的 `gox::kMaxFocusFrameRateHz`）。工作台的 Frame rate 框不参与对焦流。
 流运行中修改曝光或增益不会生效，需停止后重新开始。
 
@@ -154,7 +199,7 @@ GOX 操作必须先显式选择 `cv.mcc.MCC24`、`cv.mcc.SG140` 或 `cv.mcc.VINY
 检测用的 8-bit 像素不参与色块均值、校准拟合或 GUI 预览。
 校准读取会校验所用 RAW payload 的 CRC32C；普通快照与实时预览
 的读取策略保持不变。目标为 sRGB（D65），矩阵将归一化的线性相机 RGB 映射到线性
-sRGB，校正预览使用 sRGB 传递函数后编码为 16-bit PNG。原图和检测标注图使用
+sRGB，校正图使用 sRGB 传递函数（屏幕 8-bit，下载 16-bit PNG）。原图和检测标注图的下载使用
 上述 `DN << 4` 映射。设备记录必须提供所需的线性处理状态审计；
 检测失败、色块饱和或拟合失败会显示失败，不生成成功的校准结果。
 当前完整流程尚未进行运行或硬件验证。
@@ -167,26 +212,51 @@ sRGB，校正预览使用 sRGB 传递函数后编码为 16-bit PNG。原图和�
 拟合出的矩阵不写回相机，也不自动应用于后续采集或原始记录；离线批量校正仍由
 `amiga_decoders` 负责。
 
-GOX 可复用色彩处理的第一阶段接口位于 `decoder/gox/color.py`：
+### 色彩数值接口（`decoder/gox/color.py`）
 
-- `CameraRGBNormalization` 明确区分未经黑电平校正的 `dn_over_full_scale`
-  与已测标量黑电平的 `pedestal_subtracted`。当前参考拟合继续采用原有
-  `DN / 4095`，黑电平状态记录为 `unknown`，不会把文档推导的 128 DN 当实测值。
-- `normalize_camera_rgb` 从原生 `uint16` RGB 生成不裁剪的 `float32`；
-  `normalize_patch_means` 对先用 `float64` 聚合的色块均值使用同一归一化公式，
-  并保留 `float64` 精度。负值不会被静默截零。
-- `ColorCalibration` 提供带版本、来源和适用条件的 `to_dict` / `from_dict`，
-  不自行读写文件。`correct_linear` 按行向量约定应用矩阵，返回未裁剪的
-  `float32` linear sRGB；负值和大于 1 的值属于分析结果，不能先转换成 `uint16`。
-  调用者仍须确认待处理帧与标定的设备和采集条件相符。
-- 四值 `[R, Gr, Gb, B]` 黑电平可保存在对象中，但当前 RGB 接口拒绝应用；
-  它需要独立的 Bayer 域处理，不能在去马赛克后随意平均两个绿色偏置。
-  标量黑电平默认取文档值 128 DN（`pedestal_status="documented"`，手册 Ver. 1.3
-  p.172 “8LSB@8bit” 按 8×16 换算），来源写入 provenance `black_level`。
-  `scale_by_exposure_ratio` 按 (t_cal·g_cal)/(t·g) 缩放归一化值后再乘矩阵。
-- 全流程没有 EV、色调曲线或逐图统计：校色预览与下载图只把 linear sRGB 截到
-  [0, 1] 后做 sRGB OETF（provenance `display.exposure_adjustment="none"`）。
-  逐块色差和批量分析导出尚未接入。
+本应用只拟合、保存和预览校准；把矩阵应用到其他帧（曝光比缩放、批量校正）由
+`amiga_decoders` 离线完成，本应用不提供该接口。
 
-新增数值契约的测试源码为 `tests/test_gox_color.py`。第一阶段尚未通过运行验证；
-既有参考的色块均值运算也不能代替整帧回放、色差验证或真实设备测试。
+- `CameraRGBNormalization`：`dn_over_full_scale`（DN / 4095，黑电平未知或为零）或
+  `pedestal_subtracted`（(DN − B) / (4095 − B)，B 为单个 `measured` 或 `documented`
+  标量）。参考拟合使用文档黑电平 128 DN（`documented`）。
+- `normalize_camera_rgb` 把原生 `uint16` RGB 转成不裁剪的 `float32`，低于黑电平的
+  值保持为负；`normalize_patch_means` 对 `float64` 聚合的色块均值用同一公式。
+- `ColorCalibration.to_dict()` 写入 `reference.json`，键名为 `schema_version`、
+  `calibration_id`、`matrix`、`matrix_convention`（行向量 `camera_rgb @ matrix →
+  linear sRGB D65`）、`normalization`、`applicability`（设备、积分时间、增益、
+  像素格式、线性审计、`exposure_compensation`）、`fit`、`source`。构造时要求矩阵
+  为有限 3×3、满秩且条件数 ≤ 1e6。
+- `frame_exposure_from_device` 从 device.json 读取实际积分时间（ExposureTime 回读 +
+  驱动记录的偏移）和 Gain 回读，缺失时报错，不默认 ×1。
+
+### 黑电平
+
+GOX 手册 Ver. 1.3 p.172 “Black Level Adjustment” 给出默认黑电平 8LSB@8bit，驱动按
+8 × 16 换算为 12 bit 的 128 DN（`gox/recording.DOCUMENTED_PEDESTAL_DN`）。没有寄存器
+报告该值，因此是文档值而非实测值。参考校准在拟合与校正前扣除它，并与 device.json 的
+`derived.black_level` 交叉核对：派生值不是 128 或 `BlackLevel` 寄存器不为 0 时给出
+警告（此时应拍暗帧实测）。对焦流为 8 bit，同一电平是 8 DN。
+
+### ETTR 曝光建议
+
+两台相机的被测量都与曝光线性相关：`peak_dn = offset + slope × (t × g)`，`t` 为实际
+积分时间，`g` 为增益倍数（FX10 为 1）。在初始曝光两侧各拍一次（GOX ±50 ms，FX10
+±15 ms；初始值不大于步长时低端取一半），只用未饱和的点拟合直线（达到满量程 98% 即
+视为接近饱和，不参与拟合），求出被测量达到目标的曝光：GOX 为最亮色块的最亮通道
+达到 80% 满量程，FX10 为最亮波段的 p90 达到可调目标（默认 60%）。建议曝光超过
+配置帧周期允许的上限时封顶在上限的 98%，增益和 binning 永不改变。之后的参考采集
+自动作为复核点：偏差在 ±5% 内即通过，否则用全部点重新拟合给出新建议；饱和的复核点
+只能给出保守的下调值。
+
+### 色差 ΔE00
+
+拟合损失为 OpenCV `cv.ccm` 的 CIEDE2000 均方根。逐块 ΔE00 比较 OpenCV 参考 linear
+sRGB 与“扣除黑电平的色块均值 @ 矩阵”，两者都换算到 CIE L*a*b*（D65/2°），
+kL = kC = kH = 1；对拟合色块求均方根即等于拟合损失。校色预览把 linear sRGB 截到
+[0, 1] 后做 sRGB OETF，不做 EV、色调曲线或逐图统计。
+
+数值契约的测试源码为 `tests/test_gox_color.py` 与 `tests/test_gox_delta_e.py`。
+2026-11-17 对本地参考 `data/tmp/reference_gox_20261110T114217Z_4e0bd0d8` 重算，
+色块均值、矩阵、损失与逐块 ΔE00 与当时保存的结果逐位一致；这不能代替真实设备上的
+完整采集验证。

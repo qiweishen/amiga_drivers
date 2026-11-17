@@ -18,20 +18,19 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from ..decoder.ebus import recording as raw_recording
+from ..decoder import exposure as ettr
 from ..decoder.gox import color_checker, exposure
 from ..decoder.gox.color import frame_exposure_from_device
-from . import atomic_json, camera_operations, config_store, gox_reference, gox_timing, gox_tools
-
-MAX_SERIES_BYTES = 4 * 1024 * 1024
+from . import camera_operations, config_store, exposure_series, gox_chart, gox_tools, timing
+from .exposure_series import ExposureCheck
+from ..constants import SNAPSHOT_CONFIG
 
 _status = ""
 _series: ExposureSeries | None = None
@@ -42,7 +41,7 @@ _pending: _PendingSeries | None = None
 class BracketPoint:
     requested_exposure_ms: float
     session: str  # camera directory relative to the series directory
-    point: exposure.ExposurePoint | None
+    point: ettr.ExposurePoint | None
     loss: float | None  # RMS CIEDE2000 when the chart could also be color-fitted
     geometry: str  # color_checker.GEOMETRY_SELECTED on the chosen capture, GEOMETRY_SUPPLIED elsewhere
     error: str = ""
@@ -54,24 +53,7 @@ class BracketPoint:
 
 
 @dataclass(frozen=True)
-class ExposureCheck:
-    """A normal reference capture compared with the ETTR target of the active series."""
-
-    point: exposure.ExposurePoint
-    target_dn: float
-    deviation: float | None  # None when the patch clipped (only a lower bound is known)
-    within: bool
-    suggestion: exposure.Suggestion | None  # refined suggestion when not within tolerance
-    message: str
-
-    def to_dict(self) -> dict:
-        return {"point": self.point.to_dict(), "target_dn": self.target_dn, "deviation": self.deviation,
-                "within_tolerance": self.within, "tolerance": exposure.TOLERANCE,
-                "suggestion": self.suggestion.to_dict() if self.suggestion else None, "message": self.message}
-
-
-@dataclass(frozen=True)
-class ExposureSeries:
+class ExposureSeries(exposure_series.Suggested):
     ok: bool
     reason: str = ""
     chart_key: str = ""
@@ -84,32 +66,20 @@ class ExposureSeries:
     patch: int | None = None
     points: tuple[BracketPoint, ...] = ()
     checks: tuple[ExposureCheck, ...] = ()
-    fit: exposure.ExposureFit | None = None
+    fit: ettr.ExposureFit | None = None
     fit_error: str = ""
     limit_ms: float | None = None  # exposure ceiling of the configs an Apply writes
     limit_notes: tuple[str, ...] = ()
-    initial_suggestion: exposure.Suggestion | None = None
+    initial_suggestion: ettr.Suggestion | None = None
     elapsed_s: float = 0.0
     raw_output: str = ""
     # Detector candidates waiting for the operator (choose / reject); empty otherwise.
-    candidates: tuple[gox_reference.CandidateView, ...] = ()
+    candidates: tuple[gox_chart.CandidateView, ...] = ()
     selection: dict | None = None  # the chart the operator selected for every bracket capture
 
     @property
     def awaiting_selection(self) -> bool:
         return bool(self.candidates)
-
-    @property
-    def suggestion(self) -> exposure.Suggestion | None:
-        if self.checks and self.checks[-1].suggestion is not None:
-            return self.checks[-1].suggestion
-        if self.checks and self.checks[-1].within:
-            return None  # verified; nothing left to apply
-        return self.initial_suggestion
-
-    @property
-    def suggested_exposure_ms(self) -> float | None:
-        return self.suggestion.exposure_ms if self.suggestion else None
 
     def to_dict(self) -> dict:
         return {
@@ -123,7 +93,7 @@ class ExposureSeries:
             "exposure_limit_ms": self.limit_ms, "exposure_limit_sources": list(self.limit_notes),
             "initial_suggestion": self.initial_suggestion.to_dict() if self.initial_suggestion else None,
             "suggestion": self.suggestion.to_dict() if self.suggestion else None,
-            "target_fraction": exposure.TARGET_FRACTION, "tolerance": exposure.TOLERANCE,
+            "target_fraction": exposure.TARGET_FRACTION, "tolerance": ettr.TOLERANCE,
             "chart_selection": self.selection,
             "scope": "exposure estimation only; configs are changed only by an explicit Apply",
         }
@@ -186,36 +156,26 @@ def _analyze(camera_dir: Path, requested_ms: float, chart_key: str, polygons: np
 
 
 def _prepare_series(chart_key: str, exposures: list[float]):
-    root = gox_reference.reference_tmp_root()
-    raw = gox_reference._config_bytes()
-    now = datetime.now(timezone.utc)
-    directory = root / f"exposure_gox_{now:%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
-    config = directory / "config" / "config-gox-snapshot.yaml"
-    directory.mkdir(parents=True, exist_ok=False)
-    config.parent.mkdir()
-    config.write_bytes(raw)
-    atomic_json.write(directory / "series.json", {
-        "format": "gox-exposure-series-v1", "status": "capturing", "created_utc": now.isoformat(),
-        "chart_type": chart_key, "exposures_ms": exposures, "gain": "unchanged (snapshot config)",
-        "config_snapshot": config.relative_to(directory).as_posix(),
-    }, limit=MAX_SERIES_BYTES)
-    return directory, config
+    return exposure_series.prepare(
+        "exposure_gox", "config-gox-snapshot.yaml", config_store.snapshot_config_bytes(SNAPSHOT_CONFIG),
+        {"format": "gox-exposure-series-v1", "chart_type": chart_key, "exposures_ms": exposures,
+         "gain": "unchanged (snapshot config)"})
 
 
 async def run(chart_key: str, center_ms: float) -> ExposureSeries:
     """Bracket the exposure only; the gain stays whatever the snapshot config sets (x1 in the field)."""
-    gox_reference._validate_chart(chart_key)
+    gox_chart.check_key(chart_key)
     exposures = exposure.bracket(center_ms)
-    if max(exposures) > gox_timing.MAX_EXPOSURE_MS:
+    if max(exposures) > timing.GOX_MAX_EXPOSURE_MS:
         raise ValueError(f"The bracket reaches {max(exposures):g} ms, above the GOX ExposureTime maximum "
-                         f"{gox_timing.MAX_EXPOSURE_MS:g} ms; lower the initial exposure")
-    if reason := gox_reference.capability_reason():
+                         f"{timing.GOX_MAX_EXPOSURE_MS:g} ms; lower the initial exposure")
+    if reason := color_checker.capability_reason():
         raise ValueError(reason)
     return await camera_operations.run(
         "gox", lambda: _run(chart_key, float(center_ms), exposures), kind="gox-exposure-series")
 
 
-def _point(analysis: _Analysis, patch: int, directory: Path) -> exposure.ExposurePoint:
+def _point(analysis: _Analysis, patch: int, directory: Path) -> ettr.ExposurePoint:
     return exposure.point_from_means(
         f"bracket {analysis.requested_exposure_ms:g} ms", analysis.means, analysis.patch_status, patch,
         analysis.exposure_time_us, analysis.gain, analysis.full_scale,
@@ -269,7 +229,7 @@ def _take_pending() -> _PendingSeries:
     if pending is None:
         raise ValueError("No exposure series is waiting for a chart selection")
     if _series is not None:
-        gox_reference.release_candidates(_series.candidates)
+        gox_chart.release(_series.candidates)
     return pending
 
 
@@ -297,7 +257,7 @@ async def _run(chart_key: str, center_ms: float, exposures: list[float]) -> Expo
             output = directory / f"exposure_{index}_{exposure_ms:g}ms" / "raw" / "gox"
             # One freerun frame: run each point at the fastest rate its exposure allows (90 % rule).
             captured = await gox_tools.capture_raw(None, output, config=config, exposure_ms=exposure_ms,
-                                                   frame_rate_hz=gox_timing.max_frame_rate_hz(exposure_ms))
+                                                   frame_rate_hz=timing.gox_max_frame_rate_hz(exposure_ms))
             raw_outputs.append(f"--- {exposure_ms:g} ms ---\n{captured.raw_output}")
             if not captured.ok or captured.camera_dir is None:
                 tasks.append(_Capture(output, exposure_ms, captured=False,
@@ -313,7 +273,7 @@ async def _run(chart_key: str, center_ms: float, exposures: list[float]) -> Expo
             reasons = "; ".join(f"{item.requested_exposure_ms:g} ms: {item.error}" for item in captures)
             raise ValueError(f"No exposure produced a chart candidate ({reasons})")
         raw_output = "\n".join(raw_outputs)
-        views = gox_reference.register_candidates(directory.name, [
+        views = gox_chart.register(directory.name, [
             (f"{capture.requested_exposure_ms:g} ms · candidate {candidate.number}", candidate)
             for capture, candidate in offered])
         _pending = _PendingSeries(chart_key, center_ms, directory, captures, offered, raw_output, started)
@@ -381,7 +341,7 @@ async def choose(number: int) -> ExposureSeries:
 async def reject() -> ExposureSeries:
     """None of the candidates is the chart: the series fails and its RAW is kept."""
     global _status, _series
-    series = _failed(_take_pending(), gox_reference.NO_CHART_SELECTED)
+    series = _failed(_take_pending(), gox_chart.NO_CHART_SELECTED)
     await _save(series)
     _series = series
     _status = f"Exposure series failed: {series.reason}"
@@ -408,18 +368,18 @@ async def _finish(pending: _PendingSeries, analyses: list[_Analysis], selection:
         item.loss, item.geometry, item.error) for item in analyses)
     fit, fit_error = None, ""
     try:
-        fit = exposure.fit([point.point for point in points if point.point is not None],
-                           gain=gain, exposure_offset_us=lowest.exposure_offset_us,
-                           full_scale=lowest.full_scale)
+        fit = ettr.fit([point.point for point in points if point.point is not None],
+                       gain=gain, exposure_offset_us=lowest.exposure_offset_us,
+                       full_scale=lowest.full_scale, target_fraction=exposure.TARGET_FRACTION)
     except ValueError as error:
         fit_error = str(error)
     limit_ms, limit_notes = await asyncio.to_thread(_exposure_limit, lowest.camera_ip)
     suggestion = None
     if fit is not None:
         try:
-            suggestion = exposure.suggest(fit.target_signal, gain=gain,
-                                          exposure_offset_us=lowest.exposure_offset_us, limit_ms=limit_ms,
-                                          fit=fit)
+            suggestion = ettr.suggest(fit.target_signal, gain=gain,
+                                      exposure_offset_us=lowest.exposure_offset_us, limit_ms=limit_ms,
+                                      fit=fit)
         except ValueError as error:
             fit_error = str(error)
     return ExposureSeries(
@@ -434,23 +394,12 @@ async def _finish(pending: _PendingSeries, analyses: list[_Analysis], selection:
 def _exposure_limit(camera_ip: str) -> tuple[float | None, list[str]]:
     if not camera_ip:
         return None, ["camera address unknown; the frame-period limit is checked on Apply"]
-    try:
-        return config_store.gox_exposure_limit_ms(camera_ip)
-    except (OSError, ValueError, config_store.ApplyError) as error:
-        return None, [f"frame-period limit unavailable ({error}); it is checked on Apply"]
+    return exposure_series.exposure_limit(lambda: config_store.gox_exposure_limit_ms(camera_ip))
 
 
 async def _save(series: ExposureSeries, extra: dict | None = None) -> None:
-    if series.directory:
-        document = series.to_dict()
-        document["status"] = ("completed" if series.ok
-                              else "awaiting_chart_selection" if series.awaiting_selection else "failed")
-        document.update(extra or {})
-        try:
-            await asyncio.to_thread(atomic_json.write, Path(series.directory) / "series.json", document,
-                                    limit=MAX_SERIES_BYTES)
-        except (OSError, ValueError):
-            pass  # the in-memory result still reports the outcome
+    status = "completed" if series.ok else "awaiting_chart_selection" if series.awaiting_selection else "failed"
+    await exposure_series.save(series.directory, {**series.to_dict(), "status": status, **(extra or {})})
 
 
 # --- verification of a normal reference capture ----------------------------------
@@ -458,28 +407,6 @@ async def _save(series: ExposureSeries, extra: dict | None = None) -> None:
 def _applicable(series: ExposureSeries | None, chart_key: str, device_id: str | None) -> bool:
     return (series is not None and series.ok and series.fit is not None and series.patch is not None
             and series.chart_key == chart_key and bool(device_id) and device_id == series.device_id)
-
-
-def _refit(series: ExposureSeries, extra: exposure.ExposurePoint) -> tuple[exposure.Suggestion | None, str]:
-    points = [point.point for point in series.points if point.point is not None]
-    points += [check.point for check in series.checks] + [extra]
-    try:
-        suggestion, prefix = exposure.refine(series.fit, points, extra, exposure_offset_us=series.exposure_offset_us,
-                                             limit_ms=series.limit_ms)
-    except ValueError as error:
-        return None, f"Refit failed: {error}"
-    note = f" {suggestion.note}" if suggestion.note else ""
-    return suggestion, f"{prefix} {suggestion.exposure_ms:g} ms; apply it and capture again.{note}"
-
-
-def _reachable_target(series: ExposureSeries, gain: float) -> tuple[float, str]:
-    """The ETTR target, or the peak the frame-period ceiling allows when that is lower."""
-    target, ceiling_ms = exposure.reachable_target(series.fit, gain=gain, exposure_offset_us=series.exposure_offset_us,
-                                                   limit_ms=series.limit_ms)
-    if ceiling_ms is None:
-        return target, ""
-    return target, (f" The {series.limit_ms:g} ms frame-period limit caps the exposure at {ceiling_ms:g} ms, "
-                    f"so the reachable peak ({target:.0f} DN) is the target instead of {series.fit.target_dn:.0f} DN.")
 
 
 def check_reference(chart_key: str, provenance: dict, source: str,
@@ -500,16 +427,8 @@ def check_reference(chart_key: str, provenance: dict, source: str,
     point = exposure.point_from_means("verification", means, status, series.patch,
                                       reference["exposure_time_us"], reference["gain"],
                                       int(provenance.get("source_full_scale_dn", 4095)), source=source)
-    target, reach_note = _reachable_target(series, point.gain)
-    if not point.usable:
-        suggested, message = _refit(series, point)
-        check = ExposureCheck(point, target, None, False, suggested, message)
-    else:
-        deviation = exposure.deviation(point.peak_dn, target)
-        within = abs(deviation) <= exposure.TOLERANCE
-        suggested, message = (None, f"Within ±{exposure.TOLERANCE:.0%} of the ETTR target.{reach_note}") \
-            if within else _refit(series, point)
-        check = ExposureCheck(point, target, deviation, within, suggested, message)
+    check = exposure_series.check(series, point, gain=point.gain, exposure_offset_us=series.exposure_offset_us,
+                                  what="peak", again="capture")
     _series = dataclasses.replace(series, checks=series.checks + (check,))
     return check
 

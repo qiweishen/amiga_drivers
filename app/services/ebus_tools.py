@@ -13,10 +13,9 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from . import camera_operations, fx10_tools, gox_tools, runtime, tool_jobs
+from . import camera_operations, tool_jobs
 from ..constants import BIN_EBUS_DISCOVER, BIN_EBUS_SET_IP
 
-SET_IP_TOOL = "ebus_set_ip"
 # GUI-side hard timeout; the tool's own budget is discovery (4 s) + the
 # reachable-timeout (10 s) + connect/persist, so this must stay above that.
 SET_IP_TIMEOUT_S = 45.0
@@ -82,30 +81,19 @@ def classify_kind(vendor: str, model: str) -> str:
     return "Other"
 
 
-def guard_reason_for(kind: str) -> str | None:
-    """Why a camera-touching action on a device of this kind must not run now."""
-    if kind == "GoX":
-        return gox_tools.guard_reason()
-    if kind == "FX10":
-        return fx10_tools.guard_reason()
-    return camera_operations.guard_reason(None)
-
-
 async def discover(timeout_ms: int = 1500) -> DiscoverResult:
     return await camera_operations.run("discovery", lambda: _discover(timeout_ms), kind="discover")
 
 
 async def _discover(timeout_ms: int) -> DiscoverResult:
-    if type(timeout_ms) is not int or not 100 <= timeout_ms <= 10000:
-        raise ValueError("Discovery timeout must be between 100 and 10000 ms")
-    proc = await tool_jobs.spawn([runtime.exec_path(BIN_EBUS_DISCOVER), "--timeout", str(timeout_ms), "--json"])
-    out, err = await tool_jobs.communicate(proc, timeout_ms / 1000 + 15)
-    res = runtime.ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
-    raw = (res.stdout + ("\n--- stderr ---\n" + res.stderr if res.stderr.strip() else "")).strip()
-    if not res.ok:
-        return DiscoverResult(raw_output=raw, error=f"ebus_discover failed (exit {res.code}): {res.stderr.strip()}")
+    proc = await tool_jobs.spawn([str(BIN_EBUS_DISCOVER), "--timeout", str(timeout_ms), "--json"])
+    out_b, err_b = await tool_jobs.communicate(proc, timeout_ms / 1000 + 15)
+    stdout, stderr = out_b.decode(errors="replace"), err_b.decode(errors="replace")
+    raw = (stdout + ("\n--- stderr ---\n" + stderr if stderr.strip() else "")).strip()
+    if proc.returncode:
+        return DiscoverResult(raw_output=raw, error=f"ebus_discover failed (exit {proc.returncode}): {stderr.strip()}")
     try:
-        doc = json.loads(res.stdout)
+        doc = json.loads(stdout)
     except json.JSONDecodeError as e:
         return DiscoverResult(raw_output=raw, error=f"Cannot parse the --json output: {e}")
     devices: list[Device] = []
@@ -142,7 +130,7 @@ async def _discover(timeout_ms: int) -> DiscoverResult:
 async def set_ip(mac: str, ip: str, subnet_mask: str, gateway: str = "0.0.0.0",
                  allow_foreign_subnet: bool = False, *, kind: str) -> SetIpResult:
     """Recheck recording ownership after dialogs and reserve before any await."""
-    driver = {"GoX": "gox", "FX10": "fx10"}.get(kind)
+    driver = camera_operations.DRIVER_OF_KIND.get(kind)
     return await camera_operations.run(
         driver, lambda: _set_ip(mac, ip, subnet_mask, gateway, allow_foreign_subnet), kind="set-ip")
 
@@ -151,7 +139,7 @@ async def _set_ip(mac: str, ip: str, subnet_mask: str, gateway: str,
                   allow_foreign_subnet: bool) -> SetIpResult:
     """FORCEIP + persistent write with a service-owned camera reservation."""
     t0 = time.monotonic()
-    args = [runtime.exec_path(BIN_EBUS_SET_IP), "--mac", mac, "--ip", ip, "--subnet-mask", subnet_mask,
+    args = [str(BIN_EBUS_SET_IP), "--mac", mac, "--ip", ip, "--subnet-mask", subnet_mask,
             "--gateway", gateway, "--json"]
     if allow_foreign_subnet:
         args.append("--allow-foreign-subnet")

@@ -54,7 +54,7 @@ class MainConfigFieldTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value):
                 self.path.write_text(MAIN, encoding="utf-8")
-                config_store.set_main_field("Operator", value, expected_value="Dev #1")
+                config_store.set_main_fields({"Operator": value}, expected_values={"Operator": "Dev #1"})
                 saved = self.contents()
                 parsed = yaml.safe_load(saved)
                 self.assertIsInstance(parsed["General"]["Operator"], str)
@@ -73,14 +73,14 @@ class MainConfigFieldTests(unittest.TestCase):
         changed = MAIN.replace("'Dev #1'", "'Someone else'")
         self.path.write_text(changed, encoding="utf-8")
         with self.assertRaises(config_store.ConflictError):
-            config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+            config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
         self.assertEqual(self.contents(), changed)
         self.assertFalse(self.path.with_suffix(".yaml.bak").exists())
 
     def test_other_fields_changed_elsewhere_are_retained(self):
         changed = MAIN.replace("./data", "./another-output").replace("Enable GOX: true", "Enable GOX: false")
         self.path.write_text(changed, encoding="utf-8")
-        config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+        config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
         parsed = yaml.safe_load(self.contents())["General"]
         self.assertEqual(parsed["Operator"], "New operator")
         self.assertEqual(parsed["Output Directory"], "./another-output")
@@ -136,7 +136,7 @@ class MainConfigFieldTests(unittest.TestCase):
 
     def test_matching_requested_value_is_a_no_op_even_with_an_older_baseline(self):
         before = self.path.stat().st_mtime_ns
-        config_store.set_main_field("Operator", "Dev #1", expected_value="Earlier operator")
+        config_store.set_main_fields({"Operator": "Dev #1"}, expected_values={"Operator": "Earlier operator"})
         self.assertEqual(self.contents(), MAIN)
         self.assertEqual(self.path.stat().st_mtime_ns, before)
         self.assertFalse(self.path.with_suffix(".yaml.bak").exists())
@@ -148,26 +148,26 @@ class MainConfigFieldTests(unittest.TestCase):
         stat = self.path.stat()
         os.utime(self.path, ns=(stat.st_atime_ns, loaded.mtime + 1_000_000))
         with patch.object(config_store, "read", return_value=loaded), self.assertRaises(config_store.ConflictError):
-            config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+            config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
         self.assertEqual(self.contents(), changed)
 
     def test_blank_fields_and_control_characters_in_paths_are_rejected(self):
         for key in ("Operator", "Field", "Output Directory"):
             for value in ("", " \t "):
                 with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                    config_store.set_main_field(key, value, expected_value="unused")
+                    config_store.set_main_fields({key: value}, expected_values={key: "unused"})
         for value in ("./data\nnew", "./data\x00", "./data\x7f", "./data\x85"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                config_store.set_main_field("Output Directory", value, expected_value="./data")
+                config_store.set_main_fields({"Output Directory": value}, expected_values={"Output Directory": "./data"})
         self.assertEqual(self.contents(), MAIN)
 
     def test_output_path_respects_shared_root_and_does_not_create_a_directory(self):
         allowed = self.directory / "new recording directory"
         with patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(self.directory)}):
             with self.assertRaises(ValueError):
-                config_store.set_main_field("Output Directory", str(self.directory.parent / "outside"),
-                                            expected_value="./data")
-            config_store.set_main_field("Output Directory", str(allowed), expected_value="./data")
+                config_store.set_main_fields({"Output Directory": str(self.directory.parent / "outside")},
+                                             expected_values={"Output Directory": "./data"})
+            config_store.set_main_fields({"Output Directory": str(allowed)}, expected_values={"Output Directory": "./data"})
         self.assertFalse(allowed.exists())
         self.assertEqual(yaml.safe_load(self.contents())["General"]["Output Directory"], str(allowed))
 
@@ -184,7 +184,7 @@ class MainConfigFieldTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.path.write_text(text, encoding="utf-8")
                 with self.assertRaises(config_store.ApplyError):
-                    config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+                    config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
                 self.assertEqual(self.contents(), text)
                 self.assertFalse(self.path.with_suffix(".yaml.bak").exists())
 
@@ -193,17 +193,17 @@ class MainConfigFieldTests(unittest.TestCase):
             with self.subTest(lock=lock):
                 setattr(self.state, lock, True)
                 with self.assertRaises(config_store.ConfigBusyError):
-                    config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+                    config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
                 setattr(self.state, lock, False)
                 self.assertEqual(self.contents(), MAIN)
         self.require_owner.side_effect = RuntimeError("Not the control owner")
         with self.assertRaisesRegex(RuntimeError, "Not the control owner"):
-            config_store.set_main_field("Operator", "New operator", expected_value="Dev #1")
+            config_store.set_main_fields({"Operator": "New operator"}, expected_values={"Operator": "Dev #1"})
         self.assertEqual(self.contents(), MAIN)
 
     def test_running_acquisition_gets_pending_configuration_notice(self):
         self.state.process_state = ProcState.RUNNING
-        config_store.set_main_field("Field", "East field", expected_value="Test: west #2")
+        config_store.set_main_fields({"Field": "East field"}, expected_values={"Field": "Test: west #2"})
         self.assertTrue(self.state.pending_config_notice)
 
     def test_missing_metadata_uses_acquisition_defaults_for_display(self):
@@ -219,7 +219,7 @@ class MainConfigFieldTests(unittest.TestCase):
         settings = config_store.main_settings()
         self.assertEqual(settings["operator"], "yes")
         self.assertEqual(settings["field"], "00123")
-        config_store.set_main_field("Operator", "true", expected_value="yes")
+        config_store.set_main_fields({"Operator": "true"}, expected_values={"Operator": "yes"})
         self.assertEqual(yaml.safe_load(self.contents())["General"]["Operator"], "true")
         self.assertIn("    Field: 00123\n", self.contents())
 
@@ -228,4 +228,4 @@ class MainConfigFieldTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             config_store.main_settings()
         with self.assertRaises(config_store.ApplyError):
-            config_store.set_main_field("Operator", "Someone", expected_value="null")
+            config_store.set_main_fields({"Operator": "Someone"}, expected_values={"Operator": "null"})

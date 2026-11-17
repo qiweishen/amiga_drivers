@@ -235,15 +235,6 @@ class FolderBrowserTests(unittest.TestCase):
                 folder_picker.list_directory(str(self.root))
             self.assertTrue(str(raised.exception))
 
-    def test_selection_reports_permission_or_disappearance_after_navigation(self):
-        folder_picker.list_directory(str(self.root))
-        for error in (PermissionError("permission denied"), FileNotFoundError("directory disappeared")):
-            with self.subTest(error=type(error).__name__):
-                with patch.object(folder_picker.os, "scandir", side_effect=error), \
-                        self.assertRaises(RuntimeError) as raised:
-                    folder_picker.checked_selection(str(self.root))
-                self.assertTrue(str(raised.exception))
-
     def test_selection_reuses_shared_output_directory_policy(self):
         child = self.root / "field"
         child.mkdir()

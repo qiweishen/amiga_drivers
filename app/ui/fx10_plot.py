@@ -16,9 +16,8 @@ from collections.abc import Sequence
 def axis_note(wavelengths_nm: Sequence[float]) -> str:
     """Describe the coordinate source for a persistent workbench annotation."""
     if len(wavelengths_nm):
-        return "Wavelength coordinates recorded with this capture."
-    return ("Uncalibrated linear display mapping: band positions span 400–1000 nm; "
-            "this is not wavelength calibration.")
+        return "Recorded wavelengths"
+    return "Uncalibrated 400–1000 nm display mapping"
 
 
 def workbench_options(

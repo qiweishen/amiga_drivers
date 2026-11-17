@@ -1,6 +1,5 @@
 """One operation may run several device tools in sequence (exposure bracket); never two at once."""
 
-import asyncio
 import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
@@ -53,9 +52,9 @@ class SequentialToolTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(tool_jobs.STATE, "tool_operation", {"id": "op", "state": "starting"}))
         self.stack.enter_context(patch.object(runtime, "gated_tool", new_callable=AsyncMock,
                                               side_effect=lambda args: _Proc(next(self.pids))))
-        self.stack.enter_context(patch.object(runtime, "process_identity", new_callable=AsyncMock,
+        self.stack.enter_context(patch.object(runtime, "process_identity",
                                               side_effect=lambda pid: runtime.ProcessIdentity(pid, "1", "boot")))
-        self.alive = self.stack.enter_context(patch.object(runtime, "is_process_alive", new_callable=AsyncMock,
+        self.alive = self.stack.enter_context(patch.object(runtime, "is_process_alive",
                                                            return_value=False))
 
     async def test_a_finished_tool_frees_the_slot_for_the_next_capture(self):

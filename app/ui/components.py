@@ -1,14 +1,15 @@
-"""Small reusable UI builders (sensor card, disk gauge).
+"""Small reusable UI builders: short hints with ⓘ details, headings, sensor card, disk gauge.
 
-Both builders create their elements ONCE and return an ``update()`` callable.
-The obvious alternative — rebuilding the container on every timer tick — costs a
-full element teardown per tick *per open browser tab* and drops clicks that land
-in the swap window; layout.py's banner carries the same rule. Assigning the same
-value to an element is free (NiceGUI's setters are change-guarded), so an idle
-tick sends nothing and the refresh interval stays a free parameter.
+GUI copy rule: a section shows its title and at most one short hint line; the
+explanation sits behind ⓘ (``info``), the full rationale in app/README.md.
+
+Builders create their elements once and return an ``update()`` callable; NiceGUI
+setters are change-guarded, so an idle timer tick sends nothing.
 """
 
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 from nicegui import ui
 from typing import Callable
@@ -38,6 +39,85 @@ _SENSOR_KIND = {
     "asterx": "GNSS / IMU",
     "fx10": "Hyperspectral",
 }
+
+# Copy shared by several pages.
+NEXT_RUN = "Saved; applies to the next recording."
+PREVIEW_DETAILS = ("Screen preview: linear DN, 8-bit, downscaled. The download is the full-resolution "
+                   "16-bit PNG (DN × 16), decoded on first request.")
+
+
+def info(details: str) -> ui.label:
+    """ⓘ button whose details open on click or tap; returns the label for later set_text()."""
+    with ui.button(icon="info_outline").props('flat round dense size=sm aria-label="Details"').classes(
+            "info-button"):
+        with ui.menu().props('anchor="bottom left" self="top left"'):
+            return ui.label(details).classes("info-popup")
+
+
+def hint(text: str, details: str = "") -> ui.label:
+    """One short muted line, with the longer explanation behind ⓘ."""
+    with ui.row().classes("hint-row"):
+        label = ui.label(text).classes("section-copy")
+        if details:
+            info(details)
+    return label
+
+
+def heading(title: str, *, icon: str = "", details: str = "") -> ui.row:
+    """Section title row; returns the row so a caller can add a status label on the right."""
+    with ui.row().classes("section-heading w-full") as row:
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            if icon:
+                ui.icon(icon).classes("muted")
+            ui.label(title).classes("section-title")
+            if details:
+                info(details)
+    return row
+
+
+def preview_image(icon: str, empty: str, classes: str = "", **kwargs) -> ui.interactive_image:
+    """An image surface that shows an empty state until it has a source."""
+    with ui.column().classes("preview-surface w-full justify-center"):
+        image = ui.interactive_image(**kwargs).classes(f"w-full {classes}")
+        image.bind_visibility_from(image, "source", backward=bool)
+        with ui.column().classes("empty-state w-full").bind_visibility_from(
+                image, "source", backward=lambda source: not source):
+            ui.icon(icon, size="36px")
+            ui.label(empty)
+    return image
+
+
+def metric(label: str, value_classes: str = "metric-value") -> ui.label:
+    """One cell of an ``overview-metrics`` row; returns the value label."""
+    with ui.column().classes("metric-cell"):
+        ui.label(label).classes("eyebrow")
+        return ui.label("—").classes(value_classes)
+
+
+def raw_output(title: str) -> Callable[[str], None]:
+    """A collapsed terminal-style panel for a tool's raw output; returns its setter."""
+    with ui.expansion(title, icon="terminal").classes("w-full"):
+        label = ui.label("").classes("terminal-surface w-full text-xs mono whitespace-pre-wrap break-all p-4")
+    return label.set_text
+
+
+async def confirm(text: str, ok: str, *, color: str = "primary") -> bool:
+    with ui.dialog() as dialog, ui.card():
+        ui.label(text)
+        with ui.row():
+            ui.button(ok, color=color, on_click=lambda: dialog.submit(True))
+            ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
+    return bool(await dialog)
+
+
+@contextmanager
+def busy(spinner: ui.element):
+    """Show ``spinner`` (created with class "hidden") while the block runs."""
+    spinner.classes(remove="hidden")
+    try:
+        yield
+    finally:
+        spinner.classes(add="hidden")
 
 
 def sensor_card(st: SensorStatus) -> Callable[[SensorStatus], None]:

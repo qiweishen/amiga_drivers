@@ -64,11 +64,6 @@ class AsterxTrackTests(unittest.TestCase):
         self.assertEqual(result.bounds, ((1.0, 1.0), (8.0, 8.0)))
 
     def test_limits_fail_instead_of_publishing_a_partial_range(self):
-        self.write([csv_row(1, 1, 1), csv_row(2, 2, 2)])
-        for name, limit in (("MAX_TRACK_BYTES", 1), ("MAX_TRACK_ROWS", 1)):
-            with self.subTest(limit=name), patch.object(track, name, limit):
-                with self.assertRaisesRegex(ValueError, "no partial range"):
-                    self.read()
         self.write([csv_row(1, 1, 1), "bad,row\n", csv_row(2, 2, 2)])
         with patch.object(track, "MAX_TRACK_SEGMENTS", 1):
             with self.assertRaisesRegex(ValueError, "no partial range"):

@@ -19,9 +19,7 @@ from ..state import STATE
 
 NAMES = ("jai_snapshot", "fx10_snapshot", "ebus_set_ip", "fx10_reference", "ebus_discover")
 JOURNAL = RUNTIME_DIR / "tool-operation.json"
-MAX_OUTPUT = 4 * 1024 * 1024
 _handle = None
-_reconciling = False
 _stopping = False
 
 
@@ -33,7 +31,7 @@ class Handle:
 
 
 def _save() -> None:
-    atomic_json.write(JOURNAL, STATE.tool_operation, limit=65536)
+    atomic_json.write(JOURNAL, STATE.tool_operation)
 
 
 def begin(kind: str, driver: str | None) -> None:
@@ -61,7 +59,7 @@ async def spawn(args: list[str]) -> asyncio.subprocess.Process:
         line = await asyncio.wait_for(proc.stdout.readline(), 10)
         if not line.strip().isdigit():
             raise RuntimeError("Tool launch did not provide a process identity")
-        identity = await runtime.process_identity(int(line))
+        identity = runtime.process_identity(int(line))
         _handle = Handle(proc, identity, name)
         STATE.tool_operation.update(state="running", process=asdict(identity), executable=name)
         _save()  # A GUI/controller restart can recover this exact PID and birth time.
@@ -86,7 +84,7 @@ async def spawn(args: list[str]) -> asyncio.subprocess.Process:
 
 async def _wait_absent(identity: runtime.ProcessIdentity, seconds: float) -> bool:
     deadline = time.monotonic() + seconds
-    while await runtime.is_process_alive(identity):
+    while runtime.is_process_alive(identity):
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(0.2)
@@ -94,15 +92,15 @@ async def _wait_absent(identity: runtime.ProcessIdentity, seconds: float) -> boo
 
 
 async def _terminate_identity(identity: runtime.ProcessIdentity) -> None:
-    if not await runtime.is_process_alive(identity):
+    if not runtime.is_process_alive(identity):
         return
-    response = await runtime.signal_process(identity)
-    if not response.ok and await runtime.is_process_alive(identity):
+    response = runtime.signal_process(identity)
+    if not response.ok and runtime.is_process_alive(identity):
         raise RuntimeError("Tool termination request failed")
     if await _wait_absent(identity, 15):
         return
-    response = await runtime.signal_process(identity, signal="KILL")
-    if (not response.ok and await runtime.is_process_alive(identity)) or not await _wait_absent(identity, 5):
+    response = runtime.signal_process(identity, signal="KILL")
+    if (not response.ok and runtime.is_process_alive(identity)) or not await _wait_absent(identity, 5):
         raise RuntimeError("Tool exit could not be confirmed; controls remain locked")
 
 
@@ -120,23 +118,11 @@ async def terminate(proc: asyncio.subprocess.Process) -> None:
 
 
 async def communicate(proc: asyncio.subprocess.Process, timeout: float) -> tuple[bytes, bytes]:
-    async def drain(stream):
-        chunks, size = [], 0
-        while chunk := await stream.read(65536):
-            size += len(chunk)
-            if size <= MAX_OUTPUT:
-                chunks.append(chunk)
-        return b"".join(chunks), size > MAX_OUTPUT
-
-    readers = [asyncio.create_task(drain(proc.stdout)), asyncio.create_task(drain(proc.stderr))]
-    done = asyncio.gather(*readers, proc.wait())
+    done = asyncio.gather(proc.stdout.read(-1), proc.stderr.read(-1), proc.wait())  # -1: until EOF
     try:
         out, err, _ = await asyncio.wait_for(asyncio.shield(done), timeout)
-        await confirm_exit(proc)
-        if out[1] or err[1]:
-            raise RuntimeError("Tool output exceeded the capture limit; output was not interpreted")
         await release(proc)  # A multi-capture operation (exposure bracket) may launch the next tool.
-        return out[0], err[0]
+        return out, err
     except BaseException:
         await terminate(proc)
         raise
@@ -181,18 +167,14 @@ async def finish(error: str = "") -> None:
 
 
 async def reconcile() -> None:
-    """Recover surviving tools after restart; never signal an unowned name."""
-    global _reconciling
-    if STATE.snapshot_busy or _reconciling:
+    """Recover surviving tools after restart; never signal an unowned name.
+
+    Called sequentially (startup, then the 2 s maintenance loop)."""
+    if STATE.snapshot_busy:
         return
-    _reconciling = True
     try:
         if not STATE.tool_operation and JOURNAL.exists():
-            with JOURNAL.open(encoding="utf-8") as stream:
-                text = stream.read(65537)
-            if len(text) > 65536:
-                raise ValueError("Tool journal exceeds its size limit")
-            doc = json.loads(text)
+            doc = json.loads(JOURNAL.read_text(encoding="utf-8"))
             if not isinstance(doc, dict):
                 raise ValueError("Invalid tool journal")
             STATE.tool_operation = doc
@@ -200,7 +182,7 @@ async def reconcile() -> None:
         # A journaled gate can briefly exist before exec: check it as well.
         entry = STATE.tool_operation
         if entry.get("state") in ("starting", "running", "stopping", "unknown"):
-            if entry.get("process") and await runtime.is_process_alive(runtime.ProcessIdentity(**entry["process"])):
+            if entry.get("process") and runtime.is_process_alive(runtime.ProcessIdentity(**entry["process"])):
                 raise RuntimeError("A previous tool operation is still running")
             entry.update(state="interrupted", error="Controller connection ended; inspect retained outputs",
                          ended_ns=str(time.time_ns()))
@@ -209,8 +191,6 @@ async def reconcile() -> None:
     except Exception as exc:
         STATE.tool_uncertain = True
         STATE.tool_operation["error"] = str(exc)
-    finally:
-        _reconciling = False
 
 
 async def stop(operation_id: str) -> None:

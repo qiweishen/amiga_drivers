@@ -14,11 +14,7 @@ SCHEMA = "amiga-run-v1"
 
 
 def read_json(path: Path) -> dict:
-    with path.open(encoding="utf-8") as stream:
-        text = stream.read(1024 * 1024 + 1)
-    if len(text) > 1024 * 1024:
-        raise ValueError("Run manifest exceeds the status size limit")
-    doc = json.loads(text)
+    doc = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(doc, dict):
         raise ValueError("Run manifest must be an object")
     return doc
@@ -40,7 +36,7 @@ def control_session(ref: runtime.ProcessIdentity) -> Path | None:
         return None  # The previous run's rendezvous cannot identify this process.
     if doc.get("status_schema") != SCHEMA:
         raise ValueError("Unsupported acquisition status protocol")
-    return runtime.to_host_path(doc["run"]["session_directory"])
+    return Path(doc["run"]["session_directory"])
 
 
 def read_session(session: Path, ref: runtime.ProcessIdentity | None) -> dict:
@@ -49,7 +45,7 @@ def read_session(session: Path, ref: runtime.ProcessIdentity | None) -> dict:
         raise ValueError("Status protocol or process identity does not match the active recording")
     run, lifecycle = doc["run"], doc["lifecycle"]
     if (run["timestamp"] != session.name
-            or runtime.to_host_path(run["session_directory"]).resolve() != session.resolve()):
+            or Path(run["session_directory"]).resolve() != session.resolve()):
         raise ValueError("Status document identifies a different session")
     if lifecycle.get("phase") not in ("initializing", "running", "stopping", "finished"):
         raise ValueError("Unknown acquisition lifecycle phase")
