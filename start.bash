@@ -32,3 +32,6 @@ docker stop amiga-drivers-dev && docker rm amiga-drivers-dev
 docker compose -f "$compose_file" up -d --build --remove-orphans
 docker exec -w /workspace amiga-drivers-dev bash -lc \
   'cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)'
+
+# Teensy 4.1 burning
+cd "$project_dir/3rd_party/External/sensor_trigger" && pio run -e teensy41 -t upload
