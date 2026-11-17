@@ -35,6 +35,11 @@ namespace fx10 {
         constexpr std::int64_t kUserSetAnswerTimeoutMs = 10000;
         constexpr int kControlReadyTimeoutMs = 15000;
         constexpr int kControlReadyPollMs = 200;
+        // The .pvcfg lists Width/Height/OffsetX/OffsetY before Binning*. A pass that
+        // starts from another binning writes Height under that binning and the
+        // following binning write rescales it (suspected cause of 112 instead of
+        // 224 bands at 1x2); the second pass starts from the file's binning.
+        constexpr int kEbusConfigRestorePasses = 2;
 
 
         // PvString -> std::string via the shared NULL-safe helper (common/).
@@ -67,6 +72,15 @@ namespace fx10 {
             if (!result.IsOK()) {
                 failNode(node, std::string(op) + " failed: " + pv(result.GetCodeString()));
             }
+        }
+
+
+        nlohmann::json GeometryJson(const SensorGeometry &g) {
+            return {
+                {"Width", g.width}, {"Height", g.height}, {"OffsetX", g.offset_x}, {"OffsetY", g.offset_y},
+                {"BinningHorizontal", g.binning_horizontal}, {"BinningVertical", g.binning_vertical},
+                {"window_columns", g.WindowColumns()}, {"window_rows", g.WindowRows()}
+            };
         }
     } // namespace
 
@@ -283,6 +297,7 @@ namespace fx10 {
     void CameraControl::RestoreEbusConfiguration(const std::filesystem::path &pvcfg,
                                                  const std::function<bool()> &stop) {
         ebus_config_ = {{"status", "pending"}, {"path", pvcfg.string()}};
+        restored_geometry_.reset();
         try {
             if (stop && stop()) throw ControlError("[eBUS] ebus_config restore interrupted");
             // 1. The file's directory names the camera it was saved from.
@@ -292,26 +307,55 @@ namespace fx10 {
             CheckEbusConfigSerial(pvcfg, serial);
             // 2. SHA-256 against checksums.txt.
             ebus_config_["sha256"] = CheckEbusConfigChecksum(pvcfg);
+            // 3. The calibration geometry the file carries; checked after the restore.
+            const SensorGeometry expected = ReadEbusConfigGeometry(pvcfg);
+            ebus_config_["file_geometry"] = GeometryJson(expected);
 
-            // 3. Full load with the SDK, as eBUS Player does on a connected device.
-            g_log.Info("[eBUS] Restoring eBUS configuration {} (serial {}, sha256 {})", pvcfg.string(), serial,
-                       ebus_config_["sha256"].get<std::string>());
+            // 4. Full load with the SDK, as eBUS Player does on a connected device,
+            // applied kEbusConfigRestorePasses times. Every pass is the whole file,
+            // unfiltered; a non-OK result in any pass is fatal and not retried.
+            g_log.Info("[eBUS] Restoring eBUS configuration {} (serial {}, sha256 {}, {} passes)", pvcfg.string(),
+                       serial, ebus_config_["sha256"].get<std::string>(), kEbusConfigRestorePasses);
             PvStringList errors; // outlives the reader that reports into it
             PvConfigurationReader reader;
             Check(reader.Load(PvString(pvcfg.string().c_str())), "ebus_config", "load");
-            reader.SetErrorList(&errors, PvString(""));
-            const PvResult result = reader.Restore(0u, &device_);
-            nlohmann::json restore_errors = nlohmann::json::array();
-            for (std::uint32_t i = 0; i < errors.GetSize(); ++i) {
-                restore_errors.push_back(pv(*errors.GetItem(i)));
-                g_log.Warn("[eBUS] ebus_config restore: {}", restore_errors.back().get<std::string>());
+            if (reader.GetDeviceCount() != 1) {
+                throw ControlError("[eBUS] ebus_config must contain exactly one device, found " +
+                                   std::to_string(reader.GetDeviceCount()));
             }
-            ebus_config_["restore_result"] = pv(result.GetCodeString());
-            ebus_config_["restore_errors"] = restore_errors;
-            Check(result, "ebus_config", "restore (not retried)");
-            VerifyControlReady();
+            reader.SetErrorList(&errors, PvString(""));
+            ebus_config_["passes"] = nlohmann::json::array();
+            for (int pass = 1; pass <= kEbusConfigRestorePasses; ++pass) {
+                if (stop && stop()) throw ControlError("[eBUS] ebus_config restore interrupted");
+                errors.Clear();
+                const PvResult result = reader.Restore(0u, &device_);
+                nlohmann::json restore_errors = nlohmann::json::array();
+                for (std::uint32_t i = 0; i < errors.GetSize(); ++i) {
+                    restore_errors.push_back(pv(*errors.GetItem(i)));
+                    g_log.Warn("[eBUS] ebus_config restore pass {}: {}", pass,
+                               restore_errors.back().get<std::string>());
+                }
+                ebus_config_["passes"].push_back({
+                    {"pass", pass}, {"restore_result", pv(result.GetCodeString())},
+                    {"restore_errors", restore_errors}
+                });
+                Check(result, "ebus_config", ("restore pass " + std::to_string(pass) + " (not retried)").c_str());
+                g_log.Info("[eBUS] ebus_config restore pass {}/{} done", pass, kEbusConfigRestorePasses);
+                VerifyControlReady();
+            }
+
+            // 5. The camera must now hold exactly the file's calibration geometry.
+            const SensorGeometry actual = ReadSensorGeometry();
+            ebus_config_["readback_geometry"] = GeometryJson(actual);
+            if (actual != expected) {
+                throw ControlError("[eBUS] geometry after restoring the eBUS configuration differs from the file: "
+                                   "file " + FormatSensorGeometry(expected) + "; camera " +
+                                   FormatSensorGeometry(actual));
+            }
+            restored_geometry_ = actual;
             ebus_config_["status"] = "restored";
-            g_log.Info("[eBUS] eBUS configuration restored; applying acquisition configuration next");
+            g_log.Info("[eBUS] eBUS configuration restored; geometry matches the file: {}",
+                       FormatSensorGeometry(actual));
         } catch (const std::exception &e) {
             ebus_config_["status"] = "failed";
             ebus_config_["error"] = e.what();
@@ -659,7 +703,40 @@ namespace fx10 {
             throw ControlError("[eBUS] final image configuration disagrees with acquisition settings; "
                 "remove conflicting features.raw overrides");
         }
+        // Binning may change; the calibrated detector window restored from the
+        // .pvcfg may not (FX10 manual p.25: do not change the ROI values).
+        if (restored_geometry_) {
+            const SensorGeometry after = ReadSensorGeometry();
+            sensor_window_ = {
+                {"status", "pending"}, {"restored", GeometryJson(*restored_geometry_)},
+                {"after_write_plan", GeometryJson(after)}
+            };
+            if (!SameSensorWindow(*restored_geometry_, after)) {
+                sensor_window_["status"] = "changed";
+                throw ControlError("[eBUS] the acquisition configuration changed the calibrated sensor window: "
+                                   "restored " + FormatSensorGeometry(*restored_geometry_) + "; now " +
+                                   FormatSensorGeometry(after));
+            }
+            sensor_window_["status"] = "unchanged";
+            g_log.Info("[eBUS] Sensor window unchanged after configuration: {}", FormatSensorGeometry(after));
+        } else {
+            sensor_window_ = {{"status", "not-checked"}, {"reason", "no device.ebus_config restored"}};
+        }
         g_log.Info("[eBUS] Acquisition configuration applied ({} feature writes)", plan.size());
+    }
+
+
+    SensorGeometry CameraControl::ReadSensorGeometry() const {
+        Check(device_.GetParameters()->InvalidateCache(), "node cache", "invalidate before geometry readback");
+        SensorGeometry geometry;
+        geometry.width = GetInt("Width");
+        geometry.height = GetInt("Height");
+        geometry.offset_x = GetInt("OffsetX");
+        geometry.offset_y = GetInt("OffsetY");
+        geometry.binning_horizontal = GetInt(node::kSpatialBinning);
+        geometry.binning_vertical = GetInt(node::kSpectralBinning);
+        ValidateSensorGeometry(geometry, "[eBUS] camera geometry readback");
+        return geometry;
     }
 
 
@@ -715,7 +792,7 @@ namespace fx10 {
 
     nlohmann::json CameraControl::CollectDeviceMetadata() const {
         // The shared camera engine adds the SDK-derived document identity.
-        nlohmann::json doc = {{"applied", applied_}, {"ebus_config", ebus_config_}};
+        nlohmann::json doc = {{"applied", applied_}, {"ebus_config", ebus_config_}, {"sensor_window", sensor_window_}};
         doc["applied_semantics"] =
                 "ordered writes; readback immediately after each write in its selector context; raw overrides run last";
         for (const char *name: {

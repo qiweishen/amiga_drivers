@@ -49,17 +49,38 @@ User Manual 2.2).
   1. `DeviceSerialNumber` (trimmed) must equal the file's directory name;
   2. the file's SHA-256 must equal its single entry in `checksums.txt` in the
      same directory (`sha256sum` format);
-  3. the whole file, unfiltered, is loaded with `PvConfigurationReader::Load`
-     and applied with `Restore(0, device)`, as eBUS Player does on a connected
-     device;
-  4. control readiness is re-verified.
+  3. `Width/Height/OffsetX/OffsetY/BinningHorizontal/BinningVertical` are read
+     from the file's single `<device>` parameter section (each exactly once, a
+     decimal integer; shipped file: 1024/224/112/285/1/2, i.e. a 1024 x 448
+     detector window);
+  4. the whole file, unfiltered, is loaded with `PvConfigurationReader::Load`
+     (exactly one device) and applied with `Restore(0, device)` **twice**, as
+     eBUS Player does on a connected device. Control readiness is re-verified
+     after each pass. Reason: the file lists `Height` before `BinningVertical`.
+     If factory preparation left another binning, the first pass writes
+     `Height = 224` under that binning and the following `BinningVertical = 2`
+     write rescales it (suspected cause of 112 instead of 224 bands at 1 x 2).
+     The second pass starts from the file's binning;
+  5. a fresh readback of those six nodes must equal the file's values.
   The file was saved by Specim for this camera and is applied as is, including
-  its ROI (`Width/Height/OffsetX/OffsetY`) and `MotorShutter_*` values.
-  A failed check restores nothing and fails the bring-up. A non-OK `Restore`
-  result is fatal and not retried; per-parameter errors from the SDK error list
-  are logged as WARN and kept in `device.json` → `ebus_config`. `OpenStream`
-  then re-negotiates the packet size and the write plan overrides only the
-  nodes it owns. `""` skips the step.
+  its ROI (`Width/Height/OffsetX/OffsetY`) and `MotorShutter_*` values (so each
+  pass also writes `MotorShutter_PulseFwd = 204` and `MotorShutter_PulseRev = 200`).
+  A failed pre-load check (1–3) restores nothing and fails the bring-up. A
+  non-OK `Restore` result in either pass and a geometry mismatch are fatal and
+  not retried; per-parameter errors from the SDK error list are logged as WARN
+  and kept per pass in `device.json` → `ebus_config.passes`, next to
+  `file_geometry` and `readback_geometry`. `OpenStream` then re-negotiates the
+  packet size and the write plan overrides only the nodes it owns. `""` skips
+  the step.
+* **The write plan may change binning, never the detector window.** After a
+  `.pvcfg` restore, `ApplyAcquisitionConfig` re-reads the six geometry nodes:
+  `OffsetX`, `OffsetY`, `Width x BinningHorizontal` and
+  `Height x BinningVertical` must equal the restored values (e.g. 1 x 1 binning
+  must read back 1024 x 448, 1 x 4 must read back 1024 x 112). A difference fails
+  the bring-up. `device.json` → `sensor_window` keeps both readbacks. Whether the
+  FX10e firmware keeps the window (rather than `Height` or the offsets) across
+  a binning change is unconfirmed on hardware; if it does not, a non-file
+  binning fails here instead of recording a different spectral range.
 * **Volatile.** `UserSetSave` is never executed.
 * **The driver never writes the calibration ROI itself.** "The ROI values are provided in the
   calibration pack. ROI feature is reserved for this purpose alone. Do not

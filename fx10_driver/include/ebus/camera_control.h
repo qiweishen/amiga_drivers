@@ -61,9 +61,13 @@ namespace fx10 {
 
         // After PrepareFactoryDefaults, before the stream open and ApplyAcquisitionConfig.
         // Requires DeviceSerialNumber == the file's directory name and the checksums.txt
-        // SHA-256, then loads the whole file with PvConfigurationReader::Load + Restore(0,
-        // device), unfiltered, and re-verifies control readiness. Throws ControlError /
-        // ConfigError; nothing is restored when a check fails. Result: EbusConfigRestore().
+        // SHA-256 and reads the file's Width/Height/OffsetX/OffsetY/Binning* values,
+        // then loads the whole file with PvConfigurationReader::Load and applies it,
+        // unfiltered, with Restore(0, device) TWICE (the file lists Height before
+        // BinningVertical; the second pass starts from the file's binning). Control
+        // readiness is re-verified after each pass, and the final geometry readback
+        // must equal the file's values. Throws ControlError / ConfigError; nothing is
+        // restored when a pre-load check fails. Result: EbusConfigRestore().
         void RestoreEbusConfiguration(const std::filesystem::path &pvcfg, const std::function<bool()> &stop = {});
 
         [[nodiscard]] const nlohmann::json &EbusConfigRestore() const noexcept { return ebus_config_; }
@@ -91,7 +95,10 @@ namespace fx10 {
         [[nodiscard]] std::optional<double> TryGetFloat(const std::string &node) const;
 
         // Walks BuildApplyPlan() after loadFactoryDefaults and the stream open. Throws ControlError
-        // on the first required write that cannot be applied or verified.
+        // on the first required write that cannot be applied or verified. After a
+        // .pvcfg restore, the plan may change binning but not the detector window:
+        // OffsetX/OffsetY, Width x BinningHorizontal and Height x BinningVertical must
+        // equal the restored values, or this throws.
         void ApplyAcquisitionConfig(const AcquisitionConfig &acquisition, const std::vector<RawFeature> &raw);
 
         // One plan entry. Returns false when a non-required write was skipped (node absent).
@@ -123,9 +130,13 @@ namespace fx10 {
         nlohmann::json ReadNodeMetadata(const std::string &name) const;
     private:
         void WriteShutterPulse(bool open, const std::function<bool()> &stop);
+        // Fresh (cache-invalidated) Width/Height/OffsetX/OffsetY/Binning* readback.
+        SensorGeometry ReadSensorGeometry() const;
         PvDevice &device_;
         nlohmann::json applied_ = nlohmann::json::array();
         nlohmann::json shutter_preparation_ = {{"status", "not-attempted"}};
         nlohmann::json ebus_config_ = {{"status", "not-configured"}};
+        std::optional<SensorGeometry> restored_geometry_; // set once the .pvcfg geometry check passes
+        nlohmann::json sensor_window_ = {{"status", "not-checked"}};
     };
 } // namespace fx10

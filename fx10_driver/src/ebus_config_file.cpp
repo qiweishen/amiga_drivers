@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <string_view>
 
 namespace fx10 {
     namespace {
@@ -91,5 +93,93 @@ namespace fx10 {
                               " does not match " + checksum_file.string() + " (" + expected + ")");
         }
         return actual;
+    }
+
+
+    std::string FormatSensorGeometry(const SensorGeometry &g) {
+        return "Width=" + std::to_string(g.width) + " Height=" + std::to_string(g.height) +
+               " OffsetX=" + std::to_string(g.offset_x) + " OffsetY=" + std::to_string(g.offset_y) +
+               " BinningHorizontal=" + std::to_string(g.binning_horizontal) +
+               " BinningVertical=" + std::to_string(g.binning_vertical) +
+               " (window " + std::to_string(g.WindowColumns()) + "x" + std::to_string(g.WindowRows()) + ")";
+    }
+
+
+    void ValidateSensorGeometry(const SensorGeometry &g, const std::string &what) {
+        // Bounds keep the window products far from overflow.
+        constexpr std::int64_t kLimit = std::int64_t{1} << 20;
+        const auto in = [](std::int64_t value, std::int64_t lowest) { return value >= lowest && value <= kLimit; };
+        if (!in(g.width, 1) || !in(g.height, 1) || !in(g.binning_horizontal, 1) || !in(g.binning_vertical, 1) ||
+            !in(g.offset_x, 0) || !in(g.offset_y, 0)) {
+            throw ConfigError(what + ": implausible geometry Width=" + std::to_string(g.width) +
+                              " Height=" + std::to_string(g.height) + " OffsetX=" + std::to_string(g.offset_x) +
+                              " OffsetY=" + std::to_string(g.offset_y) +
+                              " BinningHorizontal=" + std::to_string(g.binning_horizontal) +
+                              " BinningVertical=" + std::to_string(g.binning_vertical));
+        }
+    }
+
+
+    bool SameSensorWindow(const SensorGeometry &a, const SensorGeometry &b) {
+        return a.offset_x == b.offset_x && a.offset_y == b.offset_y &&
+               a.WindowColumns() == b.WindowColumns() && a.WindowRows() == b.WindowRows();
+    }
+
+
+    SensorGeometry ParseEbusConfigGeometry(const std::string &text, const std::string &what) {
+        // eBUS Player stores the device's feature values as
+        // <device name=".." version=".."> <mac/> <communication/> <device>
+        //   <parameter name="Width">1024</parameter> ... </device> </device>.
+        // Only that inner section is searched: other sections reuse parameter names.
+        constexpr std::string_view kOpen = "<device>";
+        constexpr std::string_view kClose = "</device>";
+        const auto open = text.find(kOpen);
+        if (open == std::string::npos || text.find(kOpen, open + kOpen.size()) != std::string::npos) {
+            throw ConfigError(what + ": expected exactly one <device> parameter section");
+        }
+        const auto body = open + kOpen.size();
+        const auto close = text.find(kClose, body);
+        if (close == std::string::npos) {
+            throw ConfigError(what + ": unterminated <device> parameter section");
+        }
+        const std::string_view section(text.data() + body, close - body);
+
+        const auto read = [&](const char *name) {
+            const std::string tag = std::string("<parameter name=\"") + name + "\">";
+            const auto at = section.find(tag);
+            if (at == std::string_view::npos || section.find(tag, at + tag.size()) != std::string_view::npos) {
+                throw ConfigError(what + ": device parameter '" + name + "' must appear exactly once");
+            }
+            const auto value_begin = at + tag.size();
+            const auto value_end = section.find("</parameter>", value_begin);
+            if (value_end == std::string_view::npos) {
+                throw ConfigError(what + ": device parameter '" + name + "' is not terminated");
+            }
+            const std::string value = Trim(std::string(section.substr(value_begin, value_end - value_begin)));
+            std::int64_t out = 0;
+            const char *first = value.data();
+            const char *last = value.data() + value.size();
+            const auto [ptr, ec] = std::from_chars(first, last, out);
+            if (value.empty() || ec != std::errc() || ptr != last) {
+                throw ConfigError(what + ": device parameter '" + name + "' is not a decimal integer: '" + value + "'");
+            }
+            return out;
+        };
+
+        SensorGeometry geometry;
+        geometry.width = read("Width");
+        geometry.height = read("Height");
+        geometry.offset_x = read("OffsetX");
+        geometry.offset_y = read("OffsetY");
+        geometry.binning_horizontal = read("BinningHorizontal");
+        geometry.binning_vertical = read("BinningVertical");
+        ValidateSensorGeometry(geometry, what);
+        return geometry;
+    }
+
+
+    SensorGeometry ReadEbusConfigGeometry(const std::filesystem::path &pvcfg) {
+        return ParseEbusConfigGeometry(ReadBytes(pvcfg, "device.ebus_config"),
+                                       "device.ebus_config '" + pvcfg.string() + "'");
     }
 } // namespace fx10
