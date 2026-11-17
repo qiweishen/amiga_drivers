@@ -156,19 +156,23 @@ operator's device information, not a claim of confirmation from that manual.
 entry points call `OpenShutter` after all acquisition configuration writes and
 before `StreamReceiver::Start`. It invalidates the node cache, obtains the
 numeric node as `PvGenInteger`, checks writability and that its reported range
-contains both values, then calls `SetValue(1)` and, only after the SDK has
-acknowledged it, `SetValue(200)` (close: `SetValue(204)`; 200/204 are the values in
-the Specim `.pvcfg`). It never skips a write
-because the previous value was the same, calls `PvGenCommand::Execute`, polls a stored
-value as position, or uses the generic `SetInt` readback to claim motion completion.
+contains both values, then calls `SetValue(1)`, invalidates the node cache and
+reads the value back from the device with `GetValue`; only when the readback
+equals 1 does it call `SetValue(200)` and read that back the same way (close:
+`SetValue(204)`; 200/204 are the values in the Specim `.pvcfg`). The sequence is
+therefore: `.pvcfg` restore → acquisition write plan → write 1 → read back 1 →
+write 200 → read back 200 → `StreamEnable` / `AcquisitionStart`. It never skips a
+write because the previous value was the same, calls `PvGenCommand::Execute`,
+polls a stored value as position, or treats the value readback as motion completion.
 The driver has no configurable shutter binding or enable/disable switch; the
 normal acquisition and snapshot YAML files need no `shutter` section.
 
 Missing/wrong-type/unwritable nodes, range-read errors, an unsupported pulse,
-SDK write failure (including timeout), cancellation or disconnect stop startup.
-A failed or ambiguous write is not automatically repeated. Cancellation is
-checked before and after the blocking SDK operation. A successful SDK result
-permits startup to continue, but does not confirm mechanical motion completion.
+SDK write or readback failure (including timeout), a readback that differs from
+the written value, cancellation or disconnect stop startup. A failed or
+ambiguous write is not automatically repeated. Cancellation is checked before
+and after the blocking SDK operations. A matching readback permits startup to
+continue; it confirms the stored node value, not mechanical motion completion.
 No motion-complete signal or settling time has been provided, so the driver
 does not invent a state check or a fixed wait.
 
@@ -176,9 +180,10 @@ does not invent a state check or a fixed wait.
 not contain an unexecuted `shutter_preparation` placeholder. After the startup
 hook succeeds, `events.jsonl` records a `profile_start` event whose
 `actions.shutter_preparation` contains the pulse node, value sequence, acknowledged write count,
-device-reported range, SDK acknowledgement, elapsed time, acknowledged open/close
-status and `state_verified: false`. This result comes from the pulse operation's
-cached outcome, without another device-configuration readback. If the startup
+the per-write device `readbacks`, `value_readback_verified`, device-reported range,
+elapsed time, `open-pulses-read-back` / `close-pulses-read-back` status and
+`state_verified: false`. This result comes from the pulse operation's cached
+outcome, without another device-configuration readback. If the startup
 hook fails, the existing error/cleanup path runs without publishing
 `profile_start`; this event does not itself prove AcquisitionStart succeeded.
 `features.raw` rejects `AcquisitionStart`, `AcquisitionStop` and both motor-shutter
@@ -374,4 +379,7 @@ accepted by the current GUI reader.
   `MotorShutter_PulseRev` / `MotorShutter_PulseFwd` actions (1 then 200 opens, 1 then 204 closes),
   but their stored values cannot confirm position. Actual motion-completion
   feedback and any required settling interval remain unspecified; the driver
-  records only acknowledgement of the explicit open/close writes.
+  records acknowledgement and value readback of the explicit open/close writes.
+  Whether this firmware reads back exactly the written pulse value (rather than,
+  for example, resetting it after the move) is unconfirmed; a different value
+  fails startup.

@@ -59,8 +59,8 @@ AmigaDrivers 项目版本。RAW 文件头的数字布局版本独立保存，当
 缓冲配置和记录语义。Run 不再重新读取并复制整份设备元数据。
 开始前动作的结果直接写入 `profile_start.actions`：GOX 的 `trigger_counter` 保存
 复位是否尝试/确认、基线采样是否执行及基线值；device.json 中该块仅保留配置时的绑定结果。
-FX10 的 `shutter_preparation` 保存快门脉冲写入结果，`missed_triggers` 保存计数基线和绑定结果；
-device.json 中的 `profile.shutter_request` 仅表示配置意图，快门命令确认不等于机械位置已验证。
+FX10 的 `shutter_preparation` 保存快门脉冲写入结果及每次写入后的设备回读值，`missed_triggers` 保存计数基线和绑定结果；
+device.json 中的 `profile.shutter_request` 仅表示配置意图，快门命令确认与节点值回读都不等于机械位置已验证。
 基线读不到时保持 null。`profile_start` 表示开始前动作已返回，实际采集启动另由
 `acquisition_started` 记录；任一步骤失败仍沿原异常路径结束会话。
 最终设备读数在 `device_health` 的 stop 事件，落盘完成状态与计数对账保留在 `session_end`。

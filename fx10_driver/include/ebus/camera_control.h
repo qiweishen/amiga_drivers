@@ -69,13 +69,14 @@ namespace fx10 {
         [[nodiscard]] const nlohmann::json &EbusConfigRestore() const noexcept { return ebus_config_; }
 
         // After all config writes, before StreamEnable/AcquisitionStart. Every
-        // call writes MotorShutter_PulseRev = 1, then, once that write is acknowledged,
-        // 200; its stored value is NOT shutter position. Checks SDK write
-        // acknowledgement, not motion completion. Throws on missing/unwritable/wrong-type
-        // node, invalid range, SDK failure or cancellation. No automatic retry or
-        // conditional skip based on readback.
+        // call writes MotorShutter_PulseRev = 1, reads it back from the device
+        // (cache invalidated), then writes 200 and reads it back; its stored value
+        // is NOT shutter position. Checks SDK write acknowledgement and value
+        // readback, not motion completion. Throws on missing/unwritable/wrong-type
+        // node, invalid range, SDK write/read failure, readback mismatch or
+        // cancellation. No automatic retry or conditional skip based on readback.
         void OpenShutter(const std::function<bool()> &stop = {});
-        // Reference capture only: same pulse semantics, MotorShutter_PulseFwd = 1, then 204.
+        // Reference capture only: same pulse/readback semantics, MotorShutter_PulseFwd = 1, then 204.
         void CloseShutter(const std::function<bool()> &stop = {});
         // Cached outcome of the latest pulse; no SDK reads and no state verification.
         [[nodiscard]] const nlohmann::json &ShutterPreparation() const noexcept { return shutter_preparation_; }

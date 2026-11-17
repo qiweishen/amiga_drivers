@@ -39,9 +39,10 @@ reference:
 
 
 # Mechanical shutter is a mandatory driver step, with no YAML override:
-# after applying config, write MotorShutter_PulseRev = 1, then 200, before AcquisitionStart.
+# after applying config, write MotorShutter_PulseRev = 1, then 200, before AcquisitionStart;
+# each write is read back from the camera and must match before the next step.
 # Each write sequence opens the shutter; the stored value does not report shutter state.
-# MotorShutter_PulseFwd = 1, then 204, closes it (dark reference only).
+# MotorShutter_PulseFwd = 1, then 204, closes it (dark reference only; same readback).
 
 # =============================================================
 # ADVANCED: do not change without a reason

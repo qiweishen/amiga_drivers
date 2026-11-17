@@ -333,7 +333,8 @@ namespace fx10 {
         // range 1..255. Rev opens; Fwd closes. WRITING causes motion; neither
         // node's stored number reports position or motion completion.
         // Each operation is two writes: 1, then the Specim .pvcfg value
-        // (Rev 200 / Fwd 204); the second is sent only after the first is acknowledged.
+        // (Rev 200 / Fwd 204). Every write is read back from the device; the
+        // second is sent only after the first readback matches.
         const char *pulse_node_name = open ? "MotorShutter_PulseRev" : "MotorShutter_PulseFwd";
         const std::array<std::int64_t, 2> sequence = {1, open ? 200 : 204};
         const auto started = std::chrono::steady_clock::now();
@@ -342,8 +343,9 @@ namespace fx10 {
             {"operation", open ? "open" : "close"}, {"node", pulse_node_name},
             {"type", "integer pulse value"}, {"sequence", sequence},
             {"binding_source", "operator-provided FX10e node definition"},
-            {"writes_acknowledged", 0}, {"state_verified", false},
-            {"completion", "SDK write acknowledgement only; pulse value is not shutter state"}
+            {"writes_acknowledged", 0}, {"readbacks", nlohmann::json::array()},
+            {"value_readback_verified", false}, {"state_verified", false},
+            {"completion", "SDK write acknowledgement and node value readback; pulse value is not shutter state"}
         };
         const auto check_ready = [&] {
             if (stop && stop()) throw ControlError("[eBUS] shutter operation interrupted");
@@ -372,11 +374,14 @@ namespace fx10 {
                 }
             }
 
-            // Always call SetValue, including when a previous run wrote the same
-            // value. Do not use SetInt/GetValue, equality checks, state polling or
-            // PvGenCommand::Execute for this numeric action node. A failed or
-            // ambiguous write is fatal and is never automatically repeated, and
-            // the next write is sent only after the previous one is acknowledged.
+            // Always call SetValue, including when a previous run or the .pvcfg
+            // restore left the same value: never skip a write because of a read.
+            // Do not poll the stored value as shutter position or use
+            // PvGenCommand::Execute for this numeric action node. After each
+            // write, invalidate the cache so the SDK's write-through cache cannot
+            // answer, read the value back from the device and require equality
+            // before the next write. A failed write, failed readback or mismatch
+            // is fatal and is never automatically repeated.
             for (const std::int64_t value: sequence) {
                 check_ready();
                 g_log.Info("[eBUS] {} mechanical shutter: write {} = {}", open ? "Opening" : "Closing",
@@ -385,15 +390,25 @@ namespace fx10 {
                 Check(pulse_node->SetValue(value), pulse_node_name,
                       ("write shutter pulse " + std::to_string(value) + " (not retried)").c_str());
                 shutter_preparation_["writes_acknowledged"] = shutter_preparation_["writes_acknowledged"].get<int>() + 1;
-                g_log.Info("[eBUS] {} = {} acknowledged ({} ms)", pulse_node_name, value, elapsed_ms());
+                Check(parameters->InvalidateCache(), "node cache", "invalidate before shutter pulse readback");
+                std::int64_t readback = 0;
+                Check(pulse_node->GetValue(readback), pulse_node_name,
+                      ("read back shutter pulse " + std::to_string(value) + " (not retried)").c_str());
+                shutter_preparation_["readbacks"].push_back(readback);
+                if (readback != value) {
+                    failNode(pulse_node_name, "read-back mismatch: wrote " + std::to_string(value) +
+                                              ", camera reports " + std::to_string(readback) + " (not retried)");
+                }
+                g_log.Info("[eBUS] {} = {} acknowledged and read back ({} ms)", pulse_node_name, value, elapsed_ms());
             }
             // SDK calls block without cancellation; recheck before letting the
-            // caller arm acquisition after the last write returns.
+            // caller arm acquisition after the last readback returns.
             check_ready();
-            shutter_preparation_["status"] = open ? "open-pulses-acknowledged" : "close-pulses-acknowledged";
+            shutter_preparation_["value_readback_verified"] = true;
+            shutter_preparation_["status"] = open ? "open-pulses-read-back" : "close-pulses-read-back";
             shutter_preparation_["elapsed_ms"] = elapsed_ms();
-            g_log.Info("[eBUS] Shutter-{} sequence acknowledged ({} ms); mechanical state is not reported by this node",
-                       open ? "open" : "close", elapsed_ms());
+            g_log.Info("[eBUS] Shutter-{} sequence written and read back ({} ms); "
+                       "mechanical state is not reported by this node", open ? "open" : "close", elapsed_ms());
         } catch (const std::exception &e) {
             shutter_preparation_["status"] = "failed";
             shutter_preparation_["error"] = e.what();
