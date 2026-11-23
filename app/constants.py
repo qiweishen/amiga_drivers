@@ -10,23 +10,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GUI and binaries run in one container and share these paths.
 BUILD_BIN = REPO_ROOT / "build" / "bin"
-BIN_AMIGA = BUILD_BIN / "AmigaDrivers"
+BIN_PHENOMATE = BUILD_BIN / "PhenomateDrivers"
 BIN_EBUS_DISCOVER = BUILD_BIN / "ebus_discover"  # common/: GigE enumeration for both camera drivers
 BIN_EBUS_SET_IP = BUILD_BIN / "ebus_set_ip"  # common/: FORCEIP + persistent IP write
 BIN_SNAPSHOT = BUILD_BIN / "jai_snapshot"
 BIN_FX10_SNAPSHOT = BUILD_BIN / "fx10_snapshot"
 BIN_FX10_REFERENCE = BUILD_BIN / "fx10_reference"
 
-MAIN_CONFIG = Path(os.environ.get("AMIGA_MAIN_CONFIG", str(REPO_ROOT / "config" / "config-main.yaml")))
+MAIN_CONFIG = Path(os.environ.get("PHENOMATE_MAIN_CONFIG", str(REPO_ROOT / "config" / "config-main.yaml")))
 SNAPSHOT_CONFIG = Path(
-    os.environ.get("AMIGA_SNAPSHOT_CONFIG", str(REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml")))
+    os.environ.get("PHENOMATE_SNAPSHOT_CONFIG", str(REPO_ROOT / "gox_driver" / "config" / "config-gox-snapshot.yaml")))
 FX10_SNAPSHOT_CONFIG = Path(
-    os.environ.get("AMIGA_FX10_SNAPSHOT_CONFIG",
+    os.environ.get("PHENOMATE_FX10_SNAPSHOT_CONFIG",
                    str(REPO_ROOT / "fx10_driver" / "config" / "config-fx10-snapshot.yaml")))
 
 # --- GUI ---------------------------------------------------------------------
-GUI_HOST = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
-GUI_PORT = int(os.environ.get("AMIGA_GUI_PORT", "8619"))
+GUI_HOST = os.environ.get("PHENOMATE_GUI_HOST", "0.0.0.0")
+GUI_PORT = int(os.environ.get("PHENOMATE_GUI_PORT", "8619"))
 
 # --- theme -------------------------------------------------------------------
 # Quasar brand colors, applied application-wide in main() via app.colors().
@@ -60,7 +60,7 @@ LOG_POLL_S = 0.2  # session log tail
 UI_TICK_S = 0.25  # pages showing live sensor/session state (Overview, headers)
 TOOL_TICK_S = 0.5  # tool pages whose tick only mirrors process state
 
-RUNTIME_DIR = Path(os.environ.get("AMIGA_RUNTIME_DIR", str(REPO_ROOT / "app" / "_runtime")))
+RUNTIME_DIR = Path(os.environ.get("PHENOMATE_RUNTIME_DIR", str(REPO_ROOT / "app" / "_runtime")))
 SNAPSHOT_DIR = RUNTIME_DIR / "snapshot"
 FX10_SNAPSHOT_DIR = RUNTIME_DIR / "snapshot_fx10"
 SNAPSHOT_KEEP = 10  # retained snapshot session dirs

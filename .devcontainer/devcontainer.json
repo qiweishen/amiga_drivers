@@ -1,8 +1,8 @@
 {
-    "name": "Amiga Drivers Dev",
+    "name": "Phenomate Drivers Dev",
     "dockerComposeFile": "./docker-compose.yml",
-    "service": "amiga-drivers-dev",
-    "runServices": ["amiga-drivers-dev"],
+    "service": "phenomate-drivers-dev",
+    "runServices": ["phenomate-drivers-dev"],
     "overrideCommand": false,
     "workspaceFolder": "/workspace",
 

@@ -76,7 +76,9 @@ namespace fx10 {
         while (std::getline(lines, line)) {
             std::istringstream fields(line);
             std::string hash, file;
-            if (!(fields >> hash >> file)) continue; // blank line
+            if (!(fields >> hash >> file)) {
+                continue; // blank line
+            }
             if (!file.empty() && file.front() == '*') file.erase(0, 1);
             if (file == name) {
                 expected = Lower(hash);

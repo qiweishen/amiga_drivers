@@ -76,9 +76,9 @@ ENV LD_LIBRARY_PATH=${EBUS_SDK_ROOT}/lib:${EBUS_SDK_ROOT}/lib/genicam/bin/Linux6
 # =============================================================
 # Python dependencies
 # =============================================================
-COPY requirements.txt /opt/amiga-python/
+COPY requirements.txt /opt/phenomate-python/
 RUN python3 -m pip install --no-cache-dir --ignore-installed \
-    -r /opt/amiga-python/requirements.txt
+    -r /opt/phenomate-python/requirements.txt
 
 # =============================================================
 # Load ld.so and clean up APT cache to reduce image size

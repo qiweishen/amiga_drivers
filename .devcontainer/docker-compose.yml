@@ -1,14 +1,14 @@
 services:
-    amiga-drivers-dev:
-        container_name: amiga-drivers-dev
-        image: amiga-drivers-dev:local
+    phenomate-drivers-dev:
+        container_name: phenomate-drivers-dev
+        image: phenomate-drivers-dev:local
         build:
             context: ..
             dockerfile: .devcontainer/Dockerfile
             target: drivers
             args:
-                USER_UID: ${AMIGA_UID:-1000}
-                USER_GID: ${AMIGA_GID:-1000}
+                USER_UID: ${PHENOMATE_UID:-1000}
+                USER_GID: ${PHENOMATE_GID:-1000}
 
         # The GUI manages the C++ acquisition process inside this container.
         init: true
@@ -44,15 +44,15 @@ services:
             # Software rendering (set 0 for GPU acceleration)
             LIBGL_ALWAYS_SOFTWARE: 0
             # Linux host networking; this address selects the listening interface.
-            AMIGA_GUI_HOST: ${AMIGA_GUI_HOST:-0.0.0.0}
-            AMIGA_GUI_PORT: "8619"
+            PHENOMATE_GUI_HOST: ${PHENOMATE_GUI_HOST:-0.0.0.0}
+            PHENOMATE_GUI_PORT: "8619"
             NICEGUI_STORAGE_PATH: /tmp/nicegui
-            AMIGA_MAIN_CONFIG: /workspace/config/config-main.yaml
-            AMIGA_SNAPSHOT_CONFIG: /workspace/gox_driver/config/config-gox-snapshot.yaml
-            AMIGA_CONFIG_ROOT: /workspace
-            AMIGA_DATA_ROOT: /workspace
-            AMIGA_RUNTIME_DIR: /workspace/app/_runtime
-            AMIGA_CONTROL_LOCK: /workspace/app/_runtime/controller.lock
+            PHENOMATE_MAIN_CONFIG: /workspace/config/config-main.yaml
+            PHENOMATE_SNAPSHOT_CONFIG: /workspace/gox_driver/config/config-gox-snapshot.yaml
+            PHENOMATE_CONFIG_ROOT: /workspace
+            PHENOMATE_DATA_ROOT: /workspace
+            PHENOMATE_RUNTIME_DIR: /workspace/app/_runtime
+            PHENOMATE_CONTROL_LOCK: /workspace/app/_runtime/controller.lock
 
         # No `devices:` entries: Compose refuses to start when a listed node is
         # missing (test machines have no Teensy). /dev is bind-mounted below, so
