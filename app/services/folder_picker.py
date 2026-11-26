@@ -52,7 +52,7 @@ def _is_directory(path: Path) -> bool:
 
 
 def _root_directory() -> Path:
-    raw = os.environ.get("AMIGA_DATA_ROOT", "") or str(config_store.REPO_ROOT)
+    raw = os.environ.get("PHENOMATE_DATA_ROOT", "") or str(config_store.REPO_ROOT)
     _check_text(raw)
     root = _resolve(Path(raw), strict=True)
     if not _is_directory(root):

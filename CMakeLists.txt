@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
-project(AmigaDrivers
+project(PhenomateDrivers
         VERSION 0.1.0
-        DESCRIPTION "Amiga Drivers - Septentrio AsteRx, Specim FX10e, JAI Go-X, and SICK LMS4xxx"
+        DESCRIPTION "Phenomate Drivers - Septentrio AsteRx, Specim FX10e, JAI Go-X, and SICK LMS4xxx"
         LANGUAGES CXX C
 )
 
@@ -33,9 +33,9 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # Allow our options to override subdirect
 
 ################################################################################
 # Caller-provided application identity; no version-control query for metadata.
-set(AMIGA_BUILD_REVISION "unknown" CACHE STRING "Source revision recorded in drivers.json")
-if (NOT AMIGA_BUILD_REVISION MATCHES "^[A-Za-z0-9._+-]+$")
-    message(FATAL_ERROR "AMIGA_BUILD_REVISION must contain only letters, digits, '.', '_', '+' or '-'")
+set(PHENOMATE_BUILD_REVISION "unknown" CACHE STRING "Source revision recorded in drivers.json")
+if (NOT PHENOMATE_BUILD_REVISION MATCHES "^[A-Za-z0-9._+-]+$")
+    message(FATAL_ERROR "PHENOMATE_BUILD_REVISION must contain only letters, digits, '.', '_', '+' or '-'")
 endif ()
 
 ################################################################################
@@ -75,19 +75,19 @@ add_subdirectory(ebus_driver)
 
 ################################################################################
 # Unified executable: all four hardware adapters are always included.
-add_executable(AmigaDrivers main.cpp)
-target_compile_definitions(AmigaDrivers PRIVATE
-        AMIGA_DRIVERS_VERSION="${PROJECT_VERSION}"
-        AMIGA_DRIVERS_GIT_SHA="${AMIGA_BUILD_REVISION}"
+add_executable(PhenomateDrivers main.cpp)
+target_compile_definitions(PhenomateDrivers PRIVATE
+        PHENOMATE_DRIVERS_VERSION="${PROJECT_VERSION}"
+        PHENOMATE_DRIVERS_GIT_SHA="${PHENOMATE_BUILD_REVISION}"
 )
-target_link_libraries(AmigaDrivers PRIVATE
-        amiga_common
+target_link_libraries(PhenomateDrivers PRIVATE
+        phenomate_common
         asterx_lib
         lms4xxx_lib
         ebus_camera
 )
 
-set_target_properties(AmigaDrivers PROPERTIES
+set_target_properties(PhenomateDrivers PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 

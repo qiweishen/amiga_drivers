@@ -1,4 +1,4 @@
-"""Read and validate the C++ amiga-run-v1 protocol without changing UI state."""
+"""Read and validate the C++ phenomate-run-v1 protocol without changing UI state."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ from . import runtime
 from ..constants import RUNTIME_DIR
 from ..state import SensorState, SensorStatus
 
-SCHEMA = "amiga-run-v1"
+SCHEMA = "phenomate-run-v1"
+# History only: recordings made before the PhenomateDrivers rename carry the
+# same manifest under its former name. Active runs must publish SCHEMA.
+HISTORY_SCHEMAS = (SCHEMA, "amiga-run-v1")
 
 
 def read_json(path: Path) -> dict:

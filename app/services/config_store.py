@@ -49,7 +49,7 @@ class LoadedConfig:
 def checked_snapshot_path(path: Path) -> Path:
     """Resolve a tool-only config under the same root policy as editable configs."""
     path = path.resolve()
-    root = os.environ.get("AMIGA_CONFIG_ROOT", "")
+    root = os.environ.get("PHENOMATE_CONFIG_ROOT", "")
     if root and not path.is_relative_to(Path(root).resolve()):
         raise ValueError(f"Configuration must remain inside {root}: {path}")
     return path
@@ -203,7 +203,7 @@ def resolve_output_dir(raw: str) -> Path:
 def output_dir_problems(raw: str) -> list[str]:
     """Start-preflight checks for the Output Directory value."""
     path = resolve_output_dir(raw)
-    root = os.environ.get("AMIGA_DATA_ROOT", "")
+    root = os.environ.get("PHENOMATE_DATA_ROOT", "")
     if root and not path.resolve().is_relative_to(Path(root).resolve()):
         return [f"Output Directory must remain inside the shared recording mount {root}"]
     return []

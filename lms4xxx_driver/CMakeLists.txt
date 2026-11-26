@@ -1,6 +1,6 @@
 ################################################################################
 # LMS4xxx Driver (SICK LMS4xxx 2D LiDAR, CoLa B over TCP)
-# This is a subdirectory of the top-level AmigaDrivers project.
+# This is a subdirectory of the top-level PhenomateDrivers project.
 
 
 ################################################################################
@@ -47,7 +47,7 @@ target_include_directories(lms4xxx_lib PUBLIC
 target_link_libraries(lms4xxx_lib PUBLIC
         Threads::Threads
         Boost::boost # Asio
-        amiga_common
+        phenomate_common
 )
 
 ################################################################################

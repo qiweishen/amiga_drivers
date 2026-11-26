@@ -28,7 +28,11 @@ fi
 sudo sysctl -w net.core.rmem_max=33554432
 
 # Keep the existing image and C++ build workflow.
-docker stop amiga-drivers-dev && docker rm amiga-drivers-dev
-docker compose -f "$compose_file" up -d --build --remove-orphans
-docker exec -w /workspace amiga-drivers-dev bash -lc \
+docker stop phenomate-drivers-dev && docker rm phenomate-drivers-dev
+# Container name before the PhenomateDrivers rename; it would otherwise keep
+# port 8619 and the sensors.
+docker stop phenomate-drivers-dev && docker rm phenomate-drivers-dev
+docker compose -f "$compose_file" up -d --build
+# --remove-orphans
+docker exec -w /workspace phenomate-drivers-dev bash -lc \
   'cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)'

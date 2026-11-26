@@ -4,13 +4,13 @@ find_package(OpenSSL REQUIRED) # libcrypto: SHA-256 of device.ebus_config (libss
 add_library(fx10_config_core STATIC src/app_config.cpp src/apply_plan.cpp src/wavelengths.cpp
     src/ebus_config_file.cpp)
 target_include_directories(fx10_config_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(fx10_config_core PUBLIC amiga_common PRIVATE OpenSSL::Crypto)
+target_link_libraries(fx10_config_core PUBLIC phenomate_common PRIVATE OpenSSL::Crypto)
 target_compile_options(fx10_config_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(fx10_device_config STATIC src/ebus/camera_control.cpp ../ebus_driver/src/fx10_config.cpp)
 target_include_directories(fx10_device_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/ebus_driver/include)
-target_link_libraries(fx10_device_config PRIVATE fx10_config_core amiga_ebus eBUS::eBUS)
+target_link_libraries(fx10_device_config PRIVATE fx10_config_core phenomate_ebus eBUS::eBUS)
 target_compile_options(fx10_device_config PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(fx10_snapshot tools/snapshot_main.cpp)

@@ -1,406 +1,308 @@
-# FX10 camera configuration
+# FX10 device configuration
 
-On every bring-up (`AmigaDrivers`, `fx10_snapshot`, or the start of an
-`fx10_reference` pair) the driver executes factory preparation and then applies its own
-configuration. The scope of the reset and unverified settings remains unknown;
-this does not establish that every setting left by a previous user is cleared.
-Before each normal acquisition, it issues the mechanical-shutter open pulse and
-checks the SDK write result. The pulse value does not report shutter position or
-motion completion. Nothing is saved on
-the camera; the IP configuration is never written. Page numbers refer to the
-Specim FX10 user manual (`docs/161584-Specim-FX10-Reference-Manual.pdf`,
-User Manual 2.2).
+## Scope
 
-## Rules
+This document describes how the driver configures the Specim FX10e (GigE Vision, Pleora eBUS SDK
+6.5.1) on every bring-up, which settings it leaves to Specim's configuration file, and how it reacts
+to failures. The same sequence runs in `PhenomateDrivers`, `fx10_snapshot` and each phase of
+`fx10_reference`; nothing is saved on the camera. The code lives in `fx10_driver/` and in
+`ebus_driver/src/fx10_config.cpp`, the FX10 hooks of the shared `ebus_driver/src/camera_driver.cpp`.
+Page references `(p. N)` refer to the Specim FX10 User Manual 2.2
+(`fx10_driver/docs/161584-Specim-FX10-Reference-Manual.pdf`), which uses Lumo/ASCII feature names
+and defers GenICam to the GigE Vision standard (p. 20); node names here come from the code or the
+Specim `.pvcfg` file.
 
-* **Baseline = `CameraHeadFactoryReset` then `UserSetLoad`.** The manual
-  documents no user sets, no IP configuration and no reset command (it defers
-  the GenICam interface to the GigE Vision standard, p.20), so both node names
-  need confirmation in the device's GenICam node map. The current driver
-  requires both commands and fails bring-up if either is unavailable.
-  An acknowledged command and subsequent control readiness do not prove
-  every factory value; the driver verifies the configuration it applies.
-* **Order.** The reset runs after connect and before the stream open (it resets
-  `GevSCPSPacketSize`, which `openStream()` then negotiates or writes), after a
-  best-effort `AcquisitionStop` — user sets load only while acquisition is
-  stopped.
-* **Completion and readiness are separate.** SDK-side `AnswerTimeout` raised to 10 s and
-  `DisconnectOnAnyTimeout` cleared for the duration (eBUS Player precedent),
-  commands checked for Execute errors. No `IsDone` query is issued: the supplied
-  eBUS 6.5.1 `UserSetsManager::Load()` uses Execute followed by parameter refresh,
-  and the FX10 log showed one IsDone call taking 10004 ms before link loss.
-  This observation does not establish that the query caused the disconnect.
-  Each acknowledged command is followed by cache invalidation and positive
-  Width/Height/PayloadSize/PixelFormat readback on the existing connection.
-  Temporarily unavailable nodes are polled every 200 ms within a 15 s readiness
-  budget, with progress logged every 2 s. This wait never re-executes a command.
-  There is no disconnect/reconnect inside factory preparation; connection loss
-  or expiry of the readiness budget fails bring-up. Blocking SDK calls cannot
-  be interrupted and may overrun the budget.
-  A failed Execute is not automatically replayed. Both communication parameters
-  are restored after each command stage. Readiness does not prove every
-  factory value; subsequent required acquisition writes are still verified.
-  The snapshot tool and acquisition app share this workflow.
-* **eBUS configuration file, right after factory preparation.** When
-  `device.ebus_config` is set (relative paths resolve against the project root;
-  the shipped value is `fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg`),
-  `CameraControl::RestoreEbusConfiguration` runs before the stream open and the
-  write plan:
-  1. `DeviceSerialNumber` (trimmed) must equal the file's directory name;
-  2. the file's SHA-256 must equal its single entry in `checksums.txt` in the
-     same directory (`sha256sum` format);
-  3. `Width/Height/OffsetX/OffsetY/BinningHorizontal/BinningVertical` are read
-     from the file's single `<device>` parameter section (each exactly once, a
-     decimal integer; shipped file: 1024/224/112/285/1/2, i.e. a 1024 x 448
-     detector window);
-  4. the whole file, unfiltered, is loaded with `PvConfigurationReader::Load`
-     (exactly one device) and applied with `Restore(0, device)` **twice**, as
-     eBUS Player does on a connected device. Control readiness is re-verified
-     after each pass. Reason: the file lists `Height` before `BinningVertical`.
-     If factory preparation left another binning, the first pass writes
-     `Height = 224` under that binning and the following `BinningVertical = 2`
-     write rescales it (suspected cause of 112 instead of 224 bands at 1 x 2).
-     The second pass starts from the file's binning;
-  5. a fresh readback of those six nodes must equal the file's values.
-  The file was saved by Specim for this camera and is applied as is, including
-  its ROI (`Width/Height/OffsetX/OffsetY`) and `MotorShutter_*` values (so each
-  pass also writes `MotorShutter_PulseFwd = 204` and `MotorShutter_PulseRev = 200`).
-  A failed pre-load check (1–3) restores nothing and fails the bring-up. A
-  non-OK `Restore` result in either pass and a geometry mismatch are fatal and
-  not retried; per-parameter errors from the SDK error list are logged as WARN
-  and kept per pass in `device.json` → `ebus_config.passes`, next to
-  `file_geometry` and `readback_geometry`. `OpenStream` then re-negotiates the
-  packet size and the write plan overrides only the nodes it owns. `""` skips
-  the step.
-* **The write plan may change binning, never the detector window.** After a
-  `.pvcfg` restore, `ApplyAcquisitionConfig` re-reads the six geometry nodes:
-  `OffsetX`, `OffsetY`, `Width x BinningHorizontal` and
-  `Height x BinningVertical` must equal the restored values (e.g. 1 x 1 binning
-  must read back 1024 x 448, 1 x 4 must read back 1024 x 112). A difference fails
-  the bring-up. `device.json` → `sensor_window` keeps both readbacks. Whether the
-  FX10e firmware keeps the window (rather than `Height` or the offsets) across
-  a binning change is unconfirmed on hardware; if it does not, a non-file
-  binning fails here instead of recording a different spectral range.
-* **Volatile.** `UserSetSave` is never executed.
-* **The driver never writes the calibration ROI itself.** "The ROI values are provided in the
-  calibration pack. ROI feature is reserved for this purpose alone. Do not
-  change these values." (p.25). The driver has no ROI role (the window comes
-  from the Specim `device.ebus_config` file) and
-  `features.raw` must never carry `OffsetX/OffsetY/Width/Height`
-  (`tests/test_config.cpp` enforces this for the shipped templates).
-* **A clamp is a failure, not a warning.** Every driver-derived write is read
-  back, and a value the camera silently changed (`ExposureTime`,
-  `AcquisitionFrameRate`, binning, …) fails the bring-up: those values are
-  baked into every recorded line, so a session that quietly used a different
-  exposure is worse than no session. `features.raw` keeps warn-on-clamp — an
-  operator override is not driver intent — but an unknown node name there is
-  still fatal, because a silent no-op is what that layer used to do wrong.
-* Any failure in this sequence is fatal (`ControlError`, exit code 2).
+## Network prerequisites
 
-## Parameters
-
-Exposed to the operator in `config/config-fx10.yaml` (`acquisition:`), factory
-values from **Table 8, p.44**:
-
-| Parameter | Factory | Shipped | Why it is exposed |
-|---|---|---|---|
-| `exposure_ms` | 5 ms | 10 ms | The primary radiometric control. Config is ms, the node is µs. 0.01..419 ms, and at most 90 % of the frame period (`0.9 * 1000 / frame_rate_hz`, inclusive) in every trigger mode (`CheckAcquisitionTiming`) |
-| `frame_rate_hz` | 50 | 51 | Freerun line rate; under an external trigger it is the EXPECTED pulse rate and is used only to size the buffer pool. Ceiling: 163.02 Hz when both binnings are 1, 324.373 Hz for every other combination (operator values, 2026-11-08). The Camera workbench starts at the highest rate that fits the exposure and binning; it can only be lowered, and Apply writes it to both configs |
-| `spectral_binning` | **2** | **2** | 2/4/8 → 224/112/56 bands (p.46). The factory offset, black-level and bad-pixel calibration was performed at 2, and the optical FWHM is 5.5 nm, so 1× (1.35 nm sampling) oversamples and departs from the calibrated state. 1 is accepted |
-| `spatial_binning` | 1 | 1 | 1/2/4/8 → 1024/512/256/128 samples |
-| `pixel_format` | Mono12 | Mono12Packed | Same bit depth, less wire bandwidth; the recorder preserves the SDK buffer, while GUI preview unpacks supported pixels |
-| AIE | Enabled | not a YAML key | Owned by the Specim `.pvcfg` (`AberCorrection_Enable 1`, read back into `device.json`). See below — it decides whether the data is resampled and which calibration pack applies |
-| Status line | off | not a YAML key | Owned by the Specim `.pvcfg` (`EnStatusLine 0`); not written by the plan, read back into `profile.status_line` and used by the calibration check. It **replaces the last image row** with camera status (p.34), i.e. it destroys a band |
-| MROI | Disabled | not a YAML key | Owned by the Specim `.pvcfg` (`MROI_Enable 0`); not written by the plan, `MROI_Enable` is read back into `device.json` |
-| `trigger.*` | camera-internal | external | mode / activation / delay / exposure_control / source and selector entries |
-
-**AIE (Automatic Image Enhancement, p.32-33, p.39).** In-camera wavelength
-calibration plus smile and keystone correction, applied by **interpolating every
-pixel at a fractional address** — the pixels in the file are resampled, not raw.
-It is factory-enabled and the calibration pack that applies depends on it (the
-pack with `FX` in its name is for AIE on; the manual recommends it, p.44). The
-driver therefore writes it **only when the config asks for `false`**, which is
-also why a default configuration never needs a node name the manual does not
-print. The state and the matching pack are recorded in device/profile metadata
-for later interpretation of the original recording.
-
-Deliberately left at the factory value and **not** exposed:
-
-| Feature | Factory | Why it is not touched |
-|---|---|---|
-| Digital gain | 0 (×1) | ×2/×4/×8 are binary shifts that zero-fill the LSBs and produce missing codes (p.34) |
-| Fine gain / digital offset | 1 / — | Part of the factory calibration; the digital offset is unavailable at ×1 anyway (p.34) |
-| NUC (offset + bad-pixel) | Enabled | Factory correction; with AIE on the bad-pixel correction happens regardless (p.34) |
-| Readout / interleave mode | Enabled | Switching it requires new `BlackLevelOffset` and image-correction settings (p.22) |
-| ROI (`OffsetX/Y`, `Width`, `Height`) | calibration pack | p.25; the driver has no ROI role at all |
-| Test images (Ramp, LFSR) | off | They REPLACE the sensor data (p.36-38): a diagnostic tool, not a driver setting |
-| Burst / software trigger | — | Timing comes from the SensorSync board's hardware pulses (p.30-31) |
-| Strobe delay / duration | — | The strobe is the exposure read-back in the timing chain; changing it breaks that chain |
-
-The mechanical shutter is **not** left at an assumed default. Table 8 on p.44
-says it opens at power-up; that is not a guarantee for a later acquisition,
-configuration reset or reconnect. See the mandatory shutter action below.
-
-Written but **not** exposed (hidden, driver-internal):
-
-| Write | Why |
+| Item | Requirement |
 |---|---|
-| `AcquisitionMode = Continuous` | The only mode this driver supports |
-| `EnAcquisitionFrameRate` | `true` in freerun, **`false` under an external trigger** — a constant frame rate left on by a previous freerun session fights the pulse train (p.28) |
-| Counter1 `EventSource = MissedTrigger` + `Counter1_Reset` | The missed-trigger counter (p.27) is BOUND and RESET by the driver, so `missed_triggers=` cannot report some other event source a previous user configured. Optional: a camera without those nodes costs the metric, not the recording |
-| `DeviceTemperatureSelector` before each temperature read | Two sensors with different limits — processing board 80 °C, FPGA 90 °C, and the camera CANCELS operation above them (p.44). A read without the selector means nothing |
-| `LineSelector` before `LineSource` (`features.raw`), when the node exists | `CameraControl` requires an explicit preceding selector write when the camera exposes `LineSelector`. A camera without this node can expose `LineSource` directly; the driver does not invent a `Line1` entry. The physical strobe routing still needs confirmation on the actual device. |
+| Address | `10.95.0.100` on host interface `enp1s0f0` (`10.95.0.1/24`), per `resource/devices_ip.yaml`. The driver connects by `device.mac` (discovery; wins over `ip`) or `device.ip` and never re-addresses the camera. |
+| MTU | 9000 on `enp1s0f0` (`resource/01-network-manager-all.yaml`); the manual asks for the maximum jumbo-frame value (p. 17). |
+| Packet size | `network.packet_size: 0` calls `PvDeviceGEV::NegotiatePacketSize`; on failure the driver logs a WARN and sets 1476 bytes. A nonzero value is set directly. Either overrides the `.pvcfg` value (`GevSCPSPacketSize = 8228`); the final value is in `device.json` → `runtime.packet_size`. |
+| Socket buffer | `network.socket_rx_buffer_mb: 32` requests 33 554 432 bytes through `SetUserModeSocketRxBufferSize`; host `net.core.rmem_max` must be at least that value. When it is lower, eBUS 6.5.1 caps the request and returns `INVALID_PARAMETER`; the driver logs a WARN, continues and records the request, an `rmem_max` snapshot and the effective size read after `PvStreamGEV::Open`. Otherwise an effective size below the request, a zero readback or any other SDK error fails bring-up. The driver never changes host settings; see "Prerequisites" in the top-level `README.md`. |
 
-## Sequence
+## Bring-up sequence
 
-The shared [eBUS lifecycle](../../ebus_driver/README.md) owns connect, SDK
-buffers, workers and RAW storage. The FX10 profile loads factory defaults,
-restores the verified `device.ebus_config` file, applies the ordered write
-plan, reads actual image geometry and resolves the
-calibration axis. It opens the shutter (or requests closed for a dark reference)
-before AcquisitionStart, then establishes the missed-trigger counter baseline.
-Device-specific shutter commands remain in CameraControl; no tool implements
-a second acquisition loop.
-
-### Mandatory mechanical-shutter action
-
-The operator supplied the following FX10e control definition. The supplied FX10
-User Manual 2.2 does not document these node names; this mapping is based on the
-operator's device information, not a claim of confirmation from that manual.
-
-| Node | Numeric range | Operation |
+| Step | Stage | Action |
 |---|---|---|
-| `MotorShutter_PulseRev` | 1..255 | Writing 1, then 200, opens the shutter. |
-| `MotorShutter_PulseFwd` | 1..255 | Writing 1, then 204, closes the shutter. |
+| 1 | Init | Connect with `PvDeviceGEV::Connect`. |
+| 2 | Init | [Factory preparation](#factory-preparation): `CameraHeadFactoryReset`, then `UserSetLoad`. |
+| 3 | Init | [Restore the Specim `.pvcfg`](#specim-pvcfg-restore). |
+| 4 | Init | Open the stream: socket buffer, packet size, stream destination. |
+| 5 | Init | Walk the [write plan](#write-plan); check final image settings and the sensor window. |
+| 6 | Init | Read `Width`, `Height`, `OffsetX`, `OffsetY`, `PayloadSize`, `PixelFormat`, `EnStatusLine`; resolve wavelengths; read the `Counter1_EventSource` binding. |
+| 7 | Init | Read `GevGVSPExtendedIDMode`; allocate buffers; write `device.json`; register with SensorSync. |
+| 8 | Run | [Open the shutter](#mechanical-shutter) (close it for a dark reference); read the missed-trigger baseline; log `profile_start`. |
+| 9 | Run | Require an unchanged `PayloadSize`; `StreamEnable`; `AcquisitionStart`; arm SensorSync. |
 
-**The write causes the action; the stored value is not shutter state.** Both
-entry points call `OpenShutter` after all acquisition configuration writes and
-before `StreamReceiver::Start`. It invalidates the node cache, obtains the
-numeric node as `PvGenInteger`, checks writability and that its reported range
-contains both values, then calls `SetValue(1)`, invalidates the node cache and
-reads the value back from the device with `GetValue`; only when the readback
-equals 1 does it call `SetValue(200)` and read that back the same way (close:
-`SetValue(204)`; 200/204 are the values in the Specim `.pvcfg`). The sequence is
-therefore: `.pvcfg` restore → acquisition write plan → write 1 → read back 1 →
-write 200 → read back 200 → `StreamEnable` / `AcquisitionStart`. It never skips a
-write because the previous value was the same, calls `PvGenCommand::Execute`,
-polls a stored value as position, or treats the value readback as motion completion.
-The driver has no configurable shutter binding or enable/disable switch; the
-normal acquisition and snapshot YAML files need no `shutter` section.
+`PhenomateDrivers` runs steps 1–7 for each enabled driver in turn, then steps 8–9 for all drivers
+concurrently. Any failure fails the FX10 driver; in `PhenomateDrivers` it stops the rig and the
+process exits with status 1. Tool exit codes are listed under [Tools](#tools).
 
-Missing/wrong-type/unwritable nodes, range-read errors, an unsupported pulse,
-SDK write or readback failure (including timeout), a readback that differs from
-the written value, cancellation or disconnect stop startup. A failed or
-ambiguous write is not automatically repeated. Cancellation is checked before
-and after the blocking SDK operations. A matching readback permits startup to
-continue; it confirms the stored node value, not mechanical motion completion.
-No motion-complete signal or settling time has been provided, so the driver
-does not invent a state check or a fixed wait.
+### Factory preparation
 
-`device.json` records the requested action in `profile.shutter_request`; it does
-not contain an unexecuted `shutter_preparation` placeholder. After the startup
-hook succeeds, `events.jsonl` records a `profile_start` event whose
-`actions.shutter_preparation` contains the pulse node, value sequence, acknowledged write count,
-the per-write device `readbacks`, `value_readback_verified`, device-reported range,
-elapsed time, `open-pulses-read-back` / `close-pulses-read-back` status and
-`state_verified: false`. This result comes from the pulse operation's cached
-outcome, without another device-configuration readback. If the startup
-hook fails, the existing error/cleanup path runs without publishing
-`profile_start`; this event does not itself prove AcquisitionStart succeeded.
-`features.raw` rejects `AcquisitionStart`, `AcquisitionStop` and both motor-shutter
-pulse nodes to preserve the order and prevent duplicate/opposing motor writes.
-The normal startup does not write `MotorShutter_PulseFwd`; the separate
-reference tool uses it for the dark phase described below. External trigger start still
-follows `AcquisitionStart`; this does not establish that an independently
-controlled trigger source was idle beforehand.
+The manual documents neither command; the driver requires both nodes and executes each exactly once.
 
-Future operator verification should cover repeated acquisitions with the stored
-value already at 200/204, initially open/closed shutters, missing or wrongly typed
-nodes, incompatible range, rejected/timed-out writes, cancellation and both
-entry points. Check the actual motor response and whether the first retained
-exposure needs a documented settling interval. Config tests, C++ execution and
-hardware verification were not run for this change.
+| Phase | Behavior |
+|---|---|
+| Before Execute | Best-effort `AcquisitionStop` (result only logged); user sets load only while acquisition is stopped. |
+| During Execute | `AnswerTimeout` raised to at least 10 000 ms and `DisconnectOnAnyTimeout` cleared when available (eBUS Player precedent); both are restored afterward. |
+| `UserSetLoad` | `UserSetSelector` is not written but logged, so the camera loads whichever set is selected. |
+| Result | A non-OK Execute is fatal and not replayed. No `IsDone` poll is issued: eBUS 6.5.1 `UserSetsManager::Load` does not poll it either, and on this camera one `IsDone` call took about 10 s before a link-loss notification. |
+| Readiness | Node cache invalidated; `Width`, `Height`, `PayloadSize` > 0 and a nonempty `PixelFormat` required. Polled every 200 ms for up to 15 s on the same connection, without reconnecting or re-executing; link loss or timeout is fatal. Blocking SDK calls can overrun the budget. |
+| Evidence | `device.json` → `factory_preparation` lists both commands. Acknowledgement and readiness do not prove every factory value; the driver verifies only the values it writes. |
+
+### Specim .pvcfg restore
+
+| Step | Rule |
+|---|---|
+| Path | `device.ebus_config`; both shipped YAML files use `fx10_driver/resource/ebus_config/077000060381/3210798.pvcfg`, saved by Specim for this camera. A relative path resolves two directories above the executable (the project root for `build/bin/`). The loader requires a `.pvcfg` file inside a named directory. `""` skips the restore and the sensor-window guard. |
+| Serial | The trimmed `DeviceSerialNumber` must equal the directory name. |
+| Checksum | `checksums.txt` beside the file (`sha256sum` format) must hold exactly one entry for it, equal to the file's SHA-256 (OpenSSL). |
+| Geometry | `Width`, `Height`, `OffsetX`, `OffsetY`, `BinningHorizontal` and `BinningVertical` are parsed from the single inner `<device>` section, each exactly once as a decimal integer. Shipped: 1024, 224, 112, 285, 1, 2 (detector window 1024 × 448). |
+| Apply | `PvConfigurationReader::Load` (exactly one device), then `Restore(0, device)` twice, whole file, unfiltered; control readiness is checked once after each pass. The `<stream>` section is not applied. Each pass also writes `MotorShutter_PulseFwd = 204`, then `MotorShutter_PulseRev = 200`. |
+| Verify | A fresh readback of the six geometry nodes must equal the file values. |
+| Failure | A failed check before loading restores nothing. A non-OK `Restore` result or a geometry mismatch is fatal and not retried; per-parameter SDK errors are logged as WARN. |
+| Evidence | `device.json` → `ebus_config`: `status`, `path`, `device_serial`, `sha256`, `file_geometry`, each pass's `restore_result` and `restore_errors`, `readback_geometry`. |
+
+Two passes are needed because the file lists `Height` before `BinningVertical`: a pass starting
+from another binning writes `Height = 224` under that binning, and the following binning write
+rescales it (suspected cause of 112 instead of 224 bands at 1 × 2). The second pass starts from the
+file's binning.
+
+### Write plan
+
+`BuildApplyPlan()` is pure and SDK-free; `fx10_driver/tests/test_apply_plan.cpp` pins its order. The
+node names in `fx10::node` are marked in the code as verified with eBUS Player 6.5.1.
+
+| Order | Node | Value | Note |
+|---|---|---|---|
+| 1 | `BinningHorizontal` | `spatial_binning` | Binning first: it changes the geometry later values depend on (p. 46). |
+| 2 | `BinningVertical` | `spectral_binning` | |
+| 3 | `PixelFormat` | `pixel_format` | |
+| 4 | `ExposureMode` | `Timed`; `TriggerControlled` for external trigger with `pulse_width` | Before `ExposureTime` (p. 29). |
+| 5 | `ExposureTime` | `exposure_ms` × 1000 µs | Omitted under `TriggerControlled`. |
+| 6 | `AcquisitionMode` | `Continuous` | The only supported mode. |
+| 7 | `TriggerSelector` | `trigger.selector_entry` | Both trigger modes. |
+| 8 (freerun) | `TriggerMode`, `EnAcquisitionFrameRate`, `AcquisitionFrameRate` | `Off`, `true`, `frame_rate_hz` | Constant frame rate (p. 28). |
+| 8 (external) | `TriggerSource`, `TriggerActivation`, `TriggerDelay`, `TriggerMode`, `EnAcquisitionFrameRate` | `source_entry`, `RisingEdge` or `FallingEdge`, `delay_ms` × 1000 µs, `On`, `false` | `EnAcquisitionFrameRate` is written in both modes so an earlier session's value never persists (p. 28). |
+| 9 (external) | `Counter1_EventSource`, `Counter1_Reset` | `MissedTrigger`, execute | Missed-trigger counter (p. 27). |
+| 10 | `features.raw` entries | as configured | Last, in file order. |
+
+| Write | Readback rule |
+|---|---|
+| Every write | Read back immediately and recorded in `device.json` → `applied` (`requested`, `attempted`, `readback`, `status`). |
+| Driver-derived integer or float | Any change by the camera fails bring-up (float tolerance 0.1 % relative, at least 1e-9). |
+| `AcquisitionFrameRate` | Clamped to the node's live `[min, max]` before writing, because the FX10e rejects out-of-range writes instead of clamping; WARN, and the clamped value is recorded as `attempted`. |
+| Any enum, boolean or string | A mismatch fails bring-up, including in `features.raw`. |
+| `features.raw` integer or float | A clamp logs a WARN; an unknown node fails bring-up. The loader rejects `AcquisitionStart`, `AcquisitionStop` and both `MotorShutter_*` nodes. |
+| `Counter1_*` | Optional: an absent node or failed write logs a WARN and is skipped. |
+| `LineSource` | When the camera exposes `LineSelector`, an applied `LineSelector` write must precede it. |
+
+After the plan, `PixelFormat` and both binnings must equal the configuration. After a `.pvcfg`
+restore, `OffsetX`, `OffsetY`, `Width × BinningHorizontal` and `Height × BinningVertical` must also
+equal the restored values: binning may change, the calibrated window may not (p. 25). At 1 × 1 the
+readback must be 1024 × 448, at 1 × 4 it must be 1024 × 112. `device.json` → `sensor_window` keeps
+both readbacks and the status `unchanged`, `changed` or `not-checked`.
+
+## YAML parameters
+
+Both files have a strict schema: unknown keys are errors, omitted keys keep the code defaults.
+`config/config-fx10.yaml` drives acquisition; `config/config-fx10-snapshot.yaml` drives the Camera
+workbench and reference capture. Factory values are from Table 8 (p. 44).
+
+| Key | Default | `config-fx10.yaml` | Constraint |
+|---|---|---|---|
+| `acquisition.spatial_binning` | 1 | 1 | 1, 2, 4, 8 → 1024, 512, 256, 128 samples. Factory 1. |
+| `acquisition.spectral_binning` | 2 | 2 | 1, 2, 4, 8 → 448, 224, 112, 56 bands in the shipped window. Factory 2; the manual lists only 2, 4 and 8 (p. 46). |
+| `acquisition.pixel_format` | `Mono12Packed` | `Mono12Packed` | `Mono12Packed`, `Mono12`, `Mono10Packed`, `Mono10`, `Mono8`. Factory `Mono12`. |
+| `acquisition.exposure_ms` | 5 | 10 | > 0 and ≤ 419 ms; ≤ 90 % of the frame period, `0.9 × 1000 / frame_rate_hz` (inclusive), in every trigger mode. Factory 5 ms. |
+| `acquisition.frame_rate_hz` | 50 | 51 | > 0; ≤ 163.02 Hz at 1 × 1 binning, ≤ 324.373 Hz otherwise. Freerun: the written rate. External: the expected pulse rate, which sizes buffers and, with SensorSync, is the pulse rate. Factory 50. |
+| `acquisition.trigger.mode` | `external` | `external` | `freerun` or `external`. |
+| `acquisition.trigger.activation` | `rising` | `rising` | `rising` or `falling`. |
+| `acquisition.trigger.delay_ms` | 0 | 0 | 0–419 ms. |
+| `acquisition.trigger.exposure_control` | `camera` | `camera` | `camera` or `pulse_width` (external trigger only). |
+| `acquisition.trigger.selector_entry`, `source_entry` | `FrameStart`, `Line0` | same | Written verbatim; the YAML comment maps `Line0` to ISO_TRIGGER pin 8. |
+| `sensor_trigger.enabled`, `trigger_channel` | `false`, 0 | `true`, 0 | Channel 0–3. With SensorSync and external trigger, `frame_rate_hz` must lie within [17.882, 9847.689] Hz for channels 0/1 (FX pair). |
+| `reference.duration_s` | 5 | 5 | 0.1–3600 s per reference phase. |
+| `output.rotation.max_lines` | 0 | 0 | SDK records per RAW segment, including flagged buffers; 0 disables. |
+| `output.rotation.max_mb` | 2048 | 2048 | Segment size limit in MiB, including record headers and metadata; 0 disables. |
+| `output.flush_interval_mb` | 64 | 64 | 0–4096; `fdatasync` on the writer thread after that many bytes; 0 syncs only at segment boundaries. |
+| `output.on_gap` | `record` | `pad_zero` | Accepted and ignored; RAW never inserts zeros. |
+| `output.wavelengths.source` | `none` | `none` | `none` records DN without a wavelength axis. `file`/`list` need a `calibration` block whose serial, `samples`, `bands`, `offset_x` and `offset_y` match the delivered image, with the status line off. `grid` parses but fails bring-up. |
+| `output.max_duration_s`, `max_frames` | 0, 0 | 0, 0 | Seconds from immediately before `AcquisitionStart`; admitted valid image buffers. 0 = unlimited. |
+
+The frame-rate ceilings and the 419 ms exposure maximum are operator-set values (2026-11-08).
+`CheckAcquisitionTiming` runs in the loader and again in `fx10_snapshot` after CLI overrides. The
+recorded band count is the `Height` readback. The remaining `network.*` and `logging.*` keys are
+documented inline in the YAML files.
+
+## Settings the driver does not write
+
+The write plan does not touch the following. Where a value is listed, the restored `.pvcfg` sets
+it; without a `.pvcfg` it keeps whatever factory preparation left. `device.json` → `final_readback`
+records `AberCorrection_Enable`, `EnStatusLine`, `MROI_Enable`, `DigitalGain`, `DigitalOffset`,
+`BlackLevelOffset`, `Correction_Mode`, `TestPattern`, `LinLog_Mode`, `BinningBitshift` and
+`BinningSaturationMode`.
+
+| Feature | `.pvcfg` value | Reason the driver does not write it |
+|---|---|---|
+| AIE (`AberCorrection_Enable`) | 1 | In-camera wavelength calibration with smile and keystone correction that interpolates every pixel at a fractional address (p. 32–33), so recorded pixels are resampled. The calibration pack with "FX" in its name applies with AIE on and is recommended (p. 44). |
+| Status line (`EnStatusLine`) | 0 | When enabled it replaces the last image row with camera status (p. 34); recorded as `profile.status_line`, and wavelength assignment is refused when it is on. |
+| MROI (`MROI_Enable`) | 0 | Factory disabled (p. 44); the image area is the calibration ROI. |
+| Digital gain (`DigitalGain`) | `Gain1x` | ×2, ×4 and ×8 are binary shifts that zero the LSBs and produce missing codes (p. 34). |
+| Fine gain, digital offset | 1, 0 | Part of the factory calibration; the digital offset is unavailable at ×1 (p. 34). |
+| NUC (`Correction_Mode`) | `OffsetHotpixel` | Factory correction; with AIE on, hot-pixel correction runs regardless (p. 34). |
+| Readout (interleave) mode | — (factory: enabled, p. 44) | Switching it requires a new `BlackLevelOffset` (103 in the file) and new image-correction settings (p. 22). |
+| ROI (`OffsetX`, `OffsetY`, `Width`, `Height`) | 112, 285, 1024, 224 | "ROI feature is reserved for this purpose alone. Do not change these values." (p. 25) |
+| Test image (`TestPattern`) | `Off` | Test images are generated in the FPGA independently of the sensor (p. 36). |
+| Burst and software trigger | — | Exposures are paced by freerun or by external pulses (p. 30–31). |
+| Strobe delay and duration | — | The strobe output is the exposure signal that SensorSync logs. |
+| `UserSetSave`, `UserSetSelector` | — | Configuration is volatile; every bring-up starts from factory preparation. |
+| `DeviceReset` | — | It reboots the camera and may re-address it; the manual documents only a power cycle (p. 43). |
+| Persistent IP nodes, `PvDeviceGEV::SetIPConfiguration` | — | Re-addressing is an operator action through `ebus_set_ip`; a camera on a foreign subnet fails `PvDeviceGEV::Connect`. |
+
+## Mechanical shutter
+
+The manual does not document the shutter nodes; the definition is operator-supplied, and 200 and
+204 are the Specim `.pvcfg` values. Table 8 states that the shutter opens at power-up (p. 44); the
+driver does not rely on that state and has no YAML switch for the shutter.
+
+| Node | Range | Sequence | Effect | Used by |
+|---|---|---|---|---|
+| `MotorShutter_PulseRev` | 1–255 | 1, then 200 | Opens | Acquisition, snapshots, white reference phase |
+| `MotorShutter_PulseFwd` | 1–255 | 1, then 204 | Closes | Dark reference phase |
+
+The operation runs after the write plan and before `StreamEnable`. It requires an available,
+writable `PvGenInteger` whose reported range contains both values. For each value it calls
+`SetValue`, invalidates the node cache, reads the value back with `GetValue` and requires equality
+before the next write; it always writes, never calls `PvGenCommand::Execute` and never retries. A
+missing or wrongly typed node, an unsupported range, an SDK error, a mismatch, cancellation or link
+loss stops startup. A matching readback confirms the stored value, not motion; no settling time is
+applied. `device.json` → `profile.shutter_request` holds the intent (`open` or
+`closed-dark-reference`); `events.jsonl` → `profile_start.actions.shutter_preparation` holds
+`status` (`open-pulses-read-back`, `close-pulses-read-back` or `failed`), `sequence`,
+`writes_acknowledged`, `readbacks`, `node_min`, `node_max` and `state_verified: false`.
+
+## Triggering and timing
+
+| `trigger.mode` | `sensor_trigger.enabled` | Behavior |
+|---|---|---|
+| `external` | `true` | Registers on the rig's shared `common::SensorSyncHub` with `pulse_hz = frame_rate_hz`; pulses start once every registered camera has armed. Frames are required. |
+| `external` | `false` | Not registered; the camera waits for pulses on `source_entry`. A run without frames is not a failure. |
+| `freerun` | `true` | Registered at 0 Hz (strobe logging only). |
+| `freerun` | `false` | No SensorSync. |
+
+The board's port is set in `config/config-main.yaml` ("Sensor Trigger: Port"); the timing log is
+`raw/sensor_trigger.log` in the session, and channels 0/1 share one rate. The camera registers
+during Init, arms after `AcquisitionStart` and disarms before `AcquisitionStop`. A hub error, a
+timing log stalled for more than 15 s or participants not all armed within 30 s fails the session;
+the end of the shared session stops the camera. At shutdown with pulses, exposure and frame
+accounting from the log must be complete; in freerun only the log's integrity is checked. The
+shipped `features.raw` writes `LineSelector = LineOut0` and `LineSource = ExposureActive` to drive
+the strobe output that SensorSync logs.
+
+Each record keeps the unscaled `PvBuffer::GetTimestamp` (unit and epoch unverified) and host
+realtime and monotonic times sampled after `RetrieveBuffer`, which mark reception, not exposure;
+`device.json` → `timing.association_verified` is `false`.
+
+| Health value | `device_health` events at start, every 60 s and at stop |
+|---|---|
+| Missed triggers | `Counter1_Value` against a baseline read before `AcquisitionStart`. The binding is verified when `Counter1_EventSource` reads `MissedTrigger`; with a verified binding, a positive delta or a counter regression fails the session. |
+| Temperatures | `DeviceTemperatureSelector` is written before each read of `ProcPCB` and `FPGA` (cancel limits 80 °C and 90 °C, p. 44). A WARN is logged at ≥ 75 °C or ≥ 85 °C and re-armed at ≤ 70 °C and ≤ 80 °C; unreadable values are `null`. |
+
+## Recording
+
+The shared engine copies the complete `GetAcquiredSize()` bytes of each SDK buffer before requeue;
+it does not unpack pixels, strip padding or chunk data, remove the status line or build an ENVI
+cube. One SDK image is one pushbroom line: width holds spatial samples, height holds spectral rows.
+The RAW layout is specified in `ebus_driver/README.md`; offline conversion belongs to
+`PhenomateDecoders`. `PhenomateDrivers` copies the YAML to
+`raw/config/config-fx10_<timestamp>.yaml`, loads that copy and records `device.json`, `seg_*.raw`
+and `events.jsonl` under `raw/fx10/fx10_<UTC>/`. `device.json` is written once during Init and
+holds identity, `applied`, `ebus_config`, `sensor_window`, `final_readback`, `transport`,
+`runtime`, `sdk.header_version` (compile-time `NVERSION_STRING`; the runtime SDK version is not
+queried), `timing` and `profile` (geometry, `pixel_format`, `full_scale`, `expected_frame_rate_hz`,
+wavelengths, `status_line`, `calibration`, `shutter_request`). The configured frame rate is not
+evidence of the achieved rate.
+
+## Runtime guards and failure policy
+
+| Condition | Result |
+|---|---|
+| Invalid YAML value or unknown key | Load fails before connecting. |
+| Any bring-up or readback failure in steps 1–9 | Driver fails; no session is recorded as complete. |
+| Missed triggers, counter regression, temperature | See the health table under [Triggering and timing](#triggering-and-timing). |
+| Control link lost | Session fails; there is no reconnect. |
+| SDK operation error, BlockID discontinuity, incomplete image, increase of `BlocksDropped` | Session fails; received bytes are retained. |
+| Buffer pool or recording queue exhausted | Session fails; accepted buffers drain. |
+| No valid frame when frames are required | Session fails. |
+
+## Tools
+
+### fx10_snapshot
+
+`fx10_snapshot --config <snapshot.yaml> --out <dir>` accepts `--ip` or `--mac`, `--exposure-ms`,
+`--spatial-binning`, `--spectral-binning` and `--fps`, reapplies `CheckAcquisitionTiming`, disables
+size-based rotation and forces freerun: `trigger.mode: freerun`, `selector_entry: FrameStart`,
+`exposure_control: camera`, SensorSync off, and final `features.raw` writes `TriggerMode = Off`,
+`TriggerSelector = FrameStart`, `ExposureMode = Timed`, `AcquisitionMode = Continuous` and
+`EnAcquisitionFrameRate = true`. `--frames N` (default 64) sets `max_frames = N` and
+`max_duration_s = max(5, N / frame_rate_hz × 3 + 5)` in one segment. `--stream-s S` (1–3600,
+exclusive with `--frames`) is the focus-assist stream: no frame limit, `max_duration_s = S` and
+`max_lines = ceil(frame_rate_hz × 0.25)`, so the GUI can delete closed segments; the GUI passes
+`--fps <rate> --stream-s 1800` and ends the stream with SIGTERM. Output goes to
+`<dir>/fx10_<UTC>_<ns>`; no data for 10 s ends the capture. The last stdout line is
+`SNAPSHOT: OK <dir>` or `SNAPSHOT: FAIL <code> <reason>`, with codes 2 (arguments or
+configuration), 3 (initialization), 5 (incomplete or failed), 7 (no frame) and 130 (interrupted).
 
 ### Collect Reference page
 
-The UI invokes `fx10_reference` using `config-fx10-snapshot.yaml` and the output root.
-The operator places an illuminated white reference before starting. The tool
-captures white/open and dark/closed phases, each for reference.duration_s.
-The config text is read once and snapshotted. Exposure, frame rate, binning,
-pixel format and other camera settings come from this snapshot profile.
-Camera workbench overrides are not carried into reference capture.
+The GUI runs `fx10_reference --config fx10_driver/config/config-fx10-snapshot.yaml --out <root>`
+after the operator places an illuminated white reference. The tool reads the YAML once, forces
+freerun as `fx10_snapshot` does and takes no other overrides; workbench values reach it only after
+Apply writes them to the YAML. It captures a white phase (shutter opened), then a dark phase
+(shutter closed), each for `reference.duration_s` with its own `EbusCameraDriver`, connection and
+full bring-up. Output goes to `<root>/reference_<UTC>_<ns>/`: `reference.request.json`,
+`reference.json` (`fx10-reference-v1`), `reference.log`, the loaded YAML text as
+`raw/config/config-fx10.yaml`, and per phase `raw/fx10/<phase>/fx10_*/` with `device.json`,
+`seg_*.raw`, `events.jsonl` and `reference_phase.json`.
 
-Both tools enforce freerun with SensorSync disabled. Required final timing
-writes follow `features.raw`, are verified by readback and appear in `device.json`.
-Reference capture requires `TriggerMode=Off`, `ExposureMode=Timed` and
-`EnAcquisitionFrameRate=true` in its final readbacks. It does not wait for PTP,
-hardware pulses or a trigger-board serial port, and does not claim an absolute
-device time scale. The original SDK timestamps and host clock readings remain
-recorded with their existing provenance.
-
-Both phases now use independent EbusCameraDriver instances and connections.
-Before dark acquisition, serial/model, geometry, PixelFormat, exposure/trigger
-readbacks, ordered applied entries and calibration references must match.
-The manifest explicitly says `connection_scope="separate verified phases"`;
-undocumented factory state, AIE implementation and mechanical shutter position
-are not proven identical. The shutter remains closed after the dark phase until
-a subsequent normal/snapshot run requests opening it.
-
-Each phase records device.json, seg_*.raw and events.jsonl, plus
-reference_phase.json. No SensorSync timing log is created for GUI references.
-The root stores raw/config/config-fx10.yaml, reference.request.json,
-reference.json and reference.log. An interrupted or failed phase preserves its
-partial recording and publishes no successful pair.
-
-CLI markers CONFIG/SESSION/PHASE/OK/FAIL and the GUI workflow remain supported.
-GUI plots decode supported RAW image buffers in DN and exclude invalid records.
-The RAW data remains available if rendering fails. Camera readers accept only
-`ebus-raw-eBUS_SDK_v<SDK version>`; old ENVI reference sessions are not supported.
-Offline export and format conversion belong to `amiga_decoders`, outside this
-repository's scope.
-See [format and lifecycle details](../../ebus_driver/README.md).
-
-### Receive payload and image layout
-
-The acquisition path copies the entire eBUS acquired buffer unchanged. It does
-not unpack Mono10/12, strip padding or Chunk bytes, delete a status line,
-convert to uint16, or assemble an ENVI cube. Every record carries the SDK's
-PixelFormat, geometry, image offset, padding, image/effective sizes and status.
-An SDK image represents one pushbroom scan line with spatial samples across
-width and spectral rows across height; a sequence forms a scan over time.
-
-Known image formats are decoded by the shared Python reader for GUI snapshots,
-reference plots and live preview. Unsupported PFNC is not a reason to transform or
-discard safe payload bytes. A decoder rejects unknown layouts rather than guessing.
-Actual ROI, MROI, binning and device-side processing still determine what the
-camera has already output.
-
-### The write plan
-
-The order is a hardware contract and lives in one pure, SDK-free function,
-`BuildApplyPlan()` (`include/apply_plan.h` carries the reasoning with page
-numbers, `tests/test_apply_plan.cpp` pins it without a camera). The GenICam
-node names are constants in `apply_plan.h` (`fx10::node::*`), verified with
-eBUS Player 6.5.1; `features.raw` is the escape hatch for anything else.
-
-1. `spatial_binning`, `spectral_binning` — first: binning changes the readout
-   geometry every later value is validated against (p.46).
-2. `pixel_format`.
-3. `exposure_mode` → `exposure_time` (skipped under pulse-width exposure, where
-   the node is unavailable, p.29).
-4. `acquisition_mode = Continuous`.
-5. Trigger group: `trigger_selector` first, then (external) `trigger_source`,
-   `trigger_activation`, `trigger_delay`, `trigger_mode=On`,
-   `frame_rate_enable=false`, then the Counter1 binding and reset; or (freerun)
-   `trigger_mode=Off`, `frame_rate_enable=true`, `frame_rate` — the only write
-   clamped to the node's live range, because the FX10e REJECTS an out-of-range
-   rate instead of clamping it.
-6. `features.raw`, last, so an operator can override anything above.
+Before a phase acquires, its `device.json` must hold verified readbacks of serial, model, geometry,
+`PixelFormat`, binnings, `EnStatusLine`, `MROI_Enable`, `ExposureTime` and `AcquisitionFrameRate`,
+with `ExposureMode = Timed`, `EnAcquisitionFrameRate = true`, `TriggerSelector = FrameStart` and
+`TriggerMode = Off`. The dark signature, which also covers `applied`, the `.pvcfg` status and
+SHA-256, wavelengths and calibration, must equal the white one. The manifest records
+`connection_scope = "separate verified phases"`: AIE, undocumented state and shutter position are
+not proven identical. A failed or interrupted phase keeps its partial recording and no successful
+pair is published; the shutter stays closed after the dark phase until the next run opens it. No
+SensorSync log is created, and manifests never overwrite existing files. Stdout markers are
+`REFERENCE: CONFIG`, `SESSION`, `PHASE`, `OK` and `FAIL`; exit codes are 0, 2 (arguments),
+3 (failure) and 130 (interrupted).
 
 ## Discovering node names
 
-The manual names features in the Lumo/ASCII interface, not in GenICam, so a few
-roles must be filled in from the camera itself:
+GenICam names must come from the camera, because the manual uses Lumo and ASCII names. Inspect an
+existing node-map export or the feature tree in eBUS Player; the shipped `.pvcfg` is an export of
+feature values. `fx10_snapshot` has no feature-dump option and always performs factory preparation
+and acquisition, so it is not a read-only node dump. Before adding a `features.raw` entry, confirm
+node type, access and entry spelling, in particular for AIE (`AberCorrection_Enable` in the
+`.pvcfg`, Lumo `Camera.Image.AberrationCorrection.Enabled`, p. 39), the `DeviceTemperatureSelector`
+entries, `Counter1_EventSource`, and `LineSelector`/`LineSource`. The `.pvcfg` names the line
+entries `LineOut0`, `LineIn0`–`LineIn2` and `LED0`–`LED2`.
 
-Inspect an existing GenICam node-map export or the device's feature list in an
-already available eBUS Player. The current `fx10_snapshot` tool has no
-`--dump-features` option and performs factory preparation and acquisition; it
-must not be treated as a read-only node-dump command. Confirm the node types,
-access and entry spellings for `features.raw` (e.g. the AIE node),
-`DeviceTemperatureSelector`, `Counter1_EventSource`, and `LineSource`.
-Check whether `LineSelector` exists before choosing an entry for it.
+## Limitations
 
-## Recording policy: time source, fail-fast, durability
+The following are not verified on hardware:
 
-All capture paths now use the [shared RAW recorder](../../ebus_driver/README.md).
-It stores the raw SDK timestamp integer with unverified unit/epoch and the
-host reception realtime/monotonic observations separately. SensorSync
-association is evaluated from its observation log, not inferred from a common
-host timestamp. Shared-trigger participants register during Init and arm in Run.
-
-output.max_frames counts admitted valid image buffers. max_duration_s starts
-at the AcquisitionStart command. rotation.max_lines now limits SDK records per
-segment (including flagged/non-image buffers); max_mb limits total RAW bytes.
-on_gap remains accepted as legacy configuration, but RAW never inserts zeros:
-gaps are metadata and trigger a failed session. Existing config validation and
-device apply semantics remain in the FX10 profile.
-
-The shared engine records safe flagged buffers and fails on loss, queue
-exhaustion, SDK or file errors. It drains admitted buffers, synchronizes segments
-and records session_end only during finalization. A missing/failed final result
-is incomplete. Native RAW remains the authoritative record; this repository does
-not export ENVI or other offline derivative formats.
-
-## Dataset metadata
-
-device.json contains `ebus-device-eBUS_SDK_v<SDK version>` identity, factory
-actions, applied writes, final configuration readbacks, calibration/profile,
-SDK header version and the actual buffer budget. Runtime SDK version is unknown
-unless queried.
-Both the device identity and `recording_format` (`ebus-raw-eBUS_SDK_v<SDK version>`)
-use the compiled Pleora SDK's `PvVersion.h` `NVERSION_STRING`, matching
-`sdk.header_version`; for example, `ebus-device-eBUS_SDK_v6.5.1.6797` and
-`ebus-raw-eBUS_SDK_v6.5.1.6797`. This is not the AmigaDrivers project version or
-a runtime SDK version query. The RAW binary header's numeric layout version
-remains `1` and is validated separately. Old `-v1` and unversioned identities
-are not accepted; existing recordings are not rewritten.
-The profile records the actual geometry and expected frame rate separately;
-configuration is not evidence of an achieved rate.
-
-The `profile_start` event contains only startup action results in `actions`:
-`shutter_preparation` and `missed_triggers` with `baseline` (null when unreadable)
-and `binding_verified`. It does not repeat the static `device.json` snapshot or
-reread its configuration nodes. Start/periodic/stop `device_health` events preserve
-temperatures, raw missed-trigger counter, baseline, delta, binding and regression
-evidence. `stream_final_statistics` records the
-available SDK counters. sensor_sync_quality and capture_final retain final
-accounting; session_end distinguishes SDK records from valid frames.
-
-Each RAW record independently describes SDK byte count, image offset and layout,
-padding, PixelFormat, Chunk count, operation status, ID and timestamps.
-A counter unavailable to the profile remains null; unknown metadata cannot be
-promoted to a synchronization claim. The historical capture.json, .hdr, .lines.csv,
-segments.jsonl and telemetry.jsonl belong to the legacy ENVI format and are not
-accepted by the current GUI reader.
-
-## Not done, and why
-
-| Feature | Reason |
-|---|---|
-| `DeviceReset` | reboots the camera and may re-address; the manual documents only a physical power cycle (p.43) |
-| `UserSetSave` | volatile by decision |
-| `GevPersistentIPAddress` & co., `PvDeviceGEV::SetIPConfiguration` | network; the driver reaches the camera by its id/MAC/IP and never re-addresses it (a foreign-subnet camera fails `StreamReceiver::connect` with the remedy in the message). Re-addressing is the operator's explicit action: `ebus_set_ip` (common/, web GUI Camera Tools → Set IP) sends a FORCEIP and then writes the persistent-IP nodes so the address survives a power cycle. The former `device.force_ip` block is retired (parsed leniently, ignored) |
-| `OffsetX/OffsetY/Width/Height` in `features.raw` | calibration ROI (p.25); removed from the shipped templates |
-
-## Open points (first run on hardware)
-
-* **What `CameraHeadFactoryReset` actually resets**, and whether the subsequent
-  `UserSetLoad` lands on the factory set — the driver does not write
-  `UserSetSelector`, so it loads whichever set the camera currently has
-  selected. Compare device node-map exports before and after a bring-up
-  performed by the operator; the manual alone does not establish the reset scope.
-* **The AIE GenICam node name.** The manual gives only the Lumo name
-  (`Camera.Image.AberrationCorrection.Enabled`, p.39). AIE is not a YAML key: the
-  Specim `.pvcfg` sets `AberCorrection_Enable 1` (likely this node); to turn
-  AIE off, first confirm the node and supported values in the actual device's
-  node map before configuring a write through `features.raw`.
-* **`Counter1_EventSource` and its `MissedTrigger` entry.** The counter is
-  documented (p.27), the node names are not. Both writes are optional: a camera
-  without them logs a WARN and `missed_triggers=` reads `n/a`.
-* **`DeviceTemperatureSelector` entry spellings** (`ProcPCB` / `FPGA`). A wrong
-  entry means the corresponding `temp_*` field reads `n/a`, never a wrong
-  number.
-* **Whether `LineSelector` exists, and the strobe entry if it does.** The current
-  acquisition template writes `LineSelector = LineOut0`, then
-  `LineSource = ExposureActive`. `CameraControl` also permits a direct source
-  write on a device without `LineSelector`; when a selector exists it requires
-  an explicit preceding selector write. Every configured enum write is read back.
-  Neither the template nor a unit test proves routing to `ISO_STROBE` pin 2.
-* **Mechanical-shutter completion timing.** The operator supplied the numeric
-  `MotorShutter_PulseRev` / `MotorShutter_PulseFwd` actions (1 then 200 opens, 1 then 204 closes),
-  but their stored values cannot confirm position. Actual motion-completion
-  feedback and any required settling interval remain unspecified; the driver
-  records acknowledgement and value readback of the explicit open/close writes.
-  Whether this firmware reads back exactly the written pulse value (rather than,
-  for example, resetting it after the move) is unconfirmed; a different value
-  fails startup.
+- What `CameraHeadFactoryReset` resets and which user set `UserSetLoad` loads.
+- Whether the firmware keeps the detector window across a binning change; if not, every binning
+  other than the file's fails the window guard.
+- Whether two `.pvcfg` passes suffice, and whether their `MotorShutter_*` writes move the shutter.
+- The shutter node definition, whether the firmware reads back the written pulse value, and the
+  motion completion and settling time.
+- Routing of `LineOut0`/`ExposureActive` to ISO_STROBE pin 2 and of `Line0` to ISO_TRIGGER pin 8.
+- How the `.pvcfg` value `Counter1_AcquisitionStartReset = 1` interacts with the pre-start baseline.
+- The `DeviceTemperatureSelector` entry spellings `ProcPCB` and `FPGA`.
+- The operator-set rate and exposure limits, and whether the live-range clamp lowers a freerun rate.
+- The unit and epoch of the device timestamp.

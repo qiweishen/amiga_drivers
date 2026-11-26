@@ -43,9 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     qtbase5-dev \
     libqt5serialport5-dev \
-    libcli11-dev \
-    libgtest-dev \
-    libgmock-dev
+    libcli11-dev
 
 # =============================================================
 # Wayland client libraries (GUI forwarding defaults to X11/XWayland)

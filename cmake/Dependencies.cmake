@@ -8,7 +8,7 @@ set(FETCHCONTENT_QUIET FALSE)
 ################################################################################
 # SensorSync host API follows upstream main without a version/content pin.
 # There is no CMakeLists.txt, so MakeAvailable only populates the sources.
-# amiga_common includes session_client.cpp; board firmware is not built here.
+# phenomate_common includes session_client.cpp; board firmware is not built here.
 # Host copies of firmware rules (log format 3): common/include/sensor_sync_rates.h
 # (pair rates, triggers.cpp) and sensor_sync_quality.h (session log framing).
 FetchContent_Declare(

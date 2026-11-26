@@ -1,268 +1,183 @@
-# AsteRx receiver configuration
+# AsteRx device configuration
 
-On every connection (first start and every reconnect during warm-up) the
-driver resets the receiver's running configuration to the factory defaults,
-applies exactly what
-`config/config-asterx.yaml` lists and verifies it. Every SDK-delivered SBF block
-is recorded, including blocks arriving during configuration and warm-up, in
-the same file sequence used after readiness. Blocks arriving before the reset
-can still reflect the receiver's previous settings; the warm-up gate controls
-when the other rig drivers may start. Page numbers refer to the AsteRx RBi3 Pro+ Firmware
-v1.5.2 Reference Guide (`docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.pdf`).
+## Scope
 
-## Rules
+The AsteRx driver configures and records a Septentrio AsteRx RBi3 Pro+ GNSS/INS receiver over one
+TCP connection, through the vendored SsnRx SDK (Qt, `asterx_driver/3rd_party/RxTools/ssnrx`). Page
+numbers refer to the AsteRx RBi3 Pro+ Firmware v1.5.2 Reference Guide
+(`asterx_driver/docs/AsteRx_RBi3_Pro+_Firmware_v1.5.2_Reference_Guide.pdf`). The code is in
+`asterx_driver/src/` (`commands.cpp`, `session.cpp`, `app_config.cpp`, `sbf_write_queue.cpp`,
+`sbf_writer.cpp`, `asterx_driver_app.cpp`); the configuration is in
+`asterx_driver/config/config-asterx.yaml`.
 
-* **Baseline = `exeCopyConfigFile, RxDefault, Current`** (p.69). A
-  configuration file is "the list of user commands needed to bring the
-  receiver from its default configuration to a certain non-default
-  configuration" (p.68); copying `RxDefault` into `Current` empties that list.
-  It is the **second** command of the sequence, before any read-only step: the
-  previous session's `setSBFOutput … IPxx` lines are still armed on the
-  connection descriptor we just received, so SBF would otherwise interleave
-  with the listings.
-* **IP settings survive.** Permanent commands are "not erased even after a
-  reset to default configuration" and are listed with a leading `#` by
-  `lstConfigFile` (p.68). `setIPSettings`, `setIPPortSettings`,
-  `setEthernetMode`, `setDynamicDNS` and `setUSBInternetAccess` carry that
-  property (p.21, p.70, p.176, p.180). The command port (28784) is therefore
-  untouched and the TCP session stays up.
-* **Accounts do not survive.** `setUserAccessLevel` (p.90) is ordinary
-  configuration content (p.18 persists the first account with
-  `exeCopyConfigFile, current, boot`; `factoryReset` p.86 lists "known users"
-  among the erased user settings), and anonymous users cannot send commands
-  over TCP/IP (p.15, p.87). Observed on hardware: after the reset every
-  command answers `$R? … Not authorized! …` — the accounts *and* the session
-  authorisation are gone. The driver therefore sends the login again right
-  after the reset; the long form re-creates the account (`User1`) and
-  re-authorises the session in one step (p.18).
-* **One login form.** "The receiver will always accept the long version of the
-  login command, but the RxAdmin and S3pt3ntr10 arguments are considered only
-  if there are no user accounts with full-control rights. In all other cases,
-  they are ignored" (p.18). `login, <user>, <password>, RxAdmin, S3pt3ntr10`
-  therefore covers both a provisioned and a bare receiver, and the driver needs
-  no error fallback.
-* **Volatile, except the account.** The driver never copies anything to
-  `Boot` itself, but the login after the reset does (p.18): `Boot` becomes
-  "defaults + the driver account" on every bring-up. Everything the driver
-  configures afterwards stays volatile: after a power cycle the receiver
-  returns to that `Boot` until the driver connects again.
-* **Replies are bound to their command by name.** A `$R:` / `$R;` reply opens
-  with "an exact copy of the command as entered by the user" (p.62). The
-  Session compares the echoed command *name* with the outstanding one and
-  ignores anything else, so a stray prompt — SsnRx writes `\r\n` on its own
-  after 5 s of silence, and the receiver answers it with a bare prompt — can
-  no longer shift the whole sequence by one command.
-* **Every `set` is immediately followed by its `get` readback.** Fields whose
-  echo is deterministic are byte-compared (case-insensitive, quotes stripped);
-  fields whose echo is an expanded list (satellite/signal lists, SBF block
-  lists, NMEA message lists) or encrypted (the NTRIP password) are read back
-  for presence only. The final `lstConfigFile, Current` must additionally
-  contain nothing but the driver's own commands. Any mismatch is a startup
-  failure.
-* **The yaml is the single source of truth.** Every documented key is
-  required, and an unknown or misspelled key is a startup error — a typo can
-  never leave a compiled-in default in force.
-* **Warm-up gate.** Rig readiness requires at least
-  `receiver.warmup.min_recording_s` of host monotonic time since the first
-  nonempty SBF block is accepted by the recording queue, plus `RxState` bit 6
-  FINETIME when `receiver.warmup.require_finetime` is enabled. The shipped YAML
-  uses 90 s and does not require FINETIME. `Init()` blocks until the configured
-  conditions hold, while AsteRx already records all received SBF blocks through
-  the shared writer. Receiver uptime does not advance or satisfy this duration.
-* **A failed disk write stops the driver.** `SbfWriter::WriteBlock` reports
-  failure, the Session logs it at critical level, emits `FatalError` and the
-  rig shuts down. The .sbf file is the record of truth; a write that cannot
-  land must never scroll past while the GUI still shows "recording".
-* **Recording runs on its own thread.** SsnRx parses the socket on the Qt
-  event thread; `Session::OnSbfBlock` only hands the block to
-  `SbfWriteQueue` (`include/sbf_write_queue.h`), whose thread feeds the
-  synchronous `SbfWriter`. A disk stall therefore never stops the socket
-  reader (which would make the receiver drop blocks or close the link). The
-  queue is bounded by `output.write_queue_mb` (256 MiB ≈ many minutes at the
-  receiver's rate); a block that does not fit is *refused*, never dropped, and
-  the run ends (`queue_pending=`/`queue_max=` in the status line show how far
-  the disk lags). Every accepted block reaches the disk before `Shutdown()`
-  returns.
-* **Fail-fast after rig readiness.** Once the gate has opened, a link loss, a
-  damaged block (CRC/length), a receiver reset (`UpTime` going backwards) or a
-  write failure ends the whole rig at once — the `.sbf` would be incomplete
-  either way, and the operator restarts immediately. Reconnect and re-warm-up
-  only exist before the gate opens, and keep the same SBF writer/file open.
-  Damage, link gaps and receiver resets in that phase also increment
-  `recording_errors` and leave `known_acquisition_incomplete` true even if
-  recovery succeeds. CRC/length diagnostics retain their separate counters.
-  Write failure or queue overflow is fatal in every phase. The final
-  `blocks_written`, `bytes_written` and `files_opened` include all phases;
-  `recording_errors` counts integrity failures, including recoverable startup
-  events, rather than only fatal events.
+## Connection and login
 
-## Sequence
+Each attempt creates a new `SSN::SsnRx` instance, connects to `device.ip:device.port` within 5 s and
+waits up to 15 s for the connection descriptor (`IPxx`), which becomes the SBF output target. The
+driver logs in with `login, <user>, <password>` (p. 87) and never creates or changes accounts. The
+account must have `User` access (p. 90) and be stored in `Boot`, because step 2 replaces `Current`,
+including its accounts, with `Boot`.
 
-`build_command_list()` in `src/commands.cpp`; the Session sends one command,
-waits for its reply (`$R:`/`$R!` success, `$R?` error, p.62) and moves on.
-`lst` replies open with `$R;` and are complete at the prompt that follows their
-formatted blocks, not at the `$R;` line.
+To provision the account, send `login, <user>, <password>, RxAdmin, S3pt3ntr10` over TCP/IP to a
+receiver without a full-control account; this creates `User1` and copies `Current` to `Boot`
+(p. 18). Alternatively, on a COM or USB console (anonymous full control, p. 85; Ethernet-over-USB
+at `192.168.3.1`, p. 15), send `setUserAccessLevel` (p. 90) and `exeCopyConfigFile, Current, Boot`.
 
-| # | Command | Reply handling | Page |
+## Configuration sequence
+
+`BuildCommandList()` builds the sequence and `Session` sends it one command at a time, waiting up to
+15 s per reply: `$R:` and `$R!` mean success, `$R?` an error (p. 62). Replies that echo another
+command name are ignored, and a prompt only completes a listing whose `$R;` header has arrived, so a
+late prompt or the answer to the SsnRx `\r\n` keep-alive cannot shift the sequence.
+
+Each `set…` is followed by its `get…`; the listed fields of the first reply line that starts with
+the setting name are compared case-insensitively, without quotes. Any rejection, timeout or mismatch
+is a configuration failure.
+
+| Step | Command | Purpose and readback check | Page |
 |---|---|---|---|
-| 1 | `login, <user>, <password>, RxAdmin, S3pt3ntr10` | `$R?` is fatal. Creates `User1` and copies Current→Boot only on a receiver without any full-control account; otherwise a plain login | 18, 87 |
-| 2 | `exeCopyConfigFile, RxDefault, Current` | fatal on `$R?`; runs before every read-only step so the previous session's streams are off | 69 |
-| 3 | `login, <user>, <password>, RxAdmin, S3pt3ntr10` | the reset wiped the accounts and the session authorisation, so the same command re-creates the account (`User1`, Current→Boot) and re-authorises the session | 18, 87 |
-| 4 | `getReceiverCapabilities` | Aux1 must be listed (dual-antenna attitude is always on) | 74 |
-| 5 | `lstAntennaInfo, Overview` (only when a type ≠ `Unknown`) | every configured antenna name must be an `ID="…"` of the XML, exactly (case, spaces); otherwise fatal with the closest names | 66, 107 |
-| 6 | `setPPSParameters, …` + get · `setNTPServer` + get · `setPTPServer` + get | the receiver is the rig's time source, so its outputs are restored first after the reset (delay 2 decimals, width 6) | 156, 155, 158 |
-| 7 | `setDataInOut, <pin>, , +NMEA` + get · `setNMEAOutput, StreamN, …` + get per `receiver.nmea_streams` | Cd/interval compared; message list presence-checked | 168, 193 |
-| 8 | `setDataInOut, <our IPxx>, , +SBF` + `getDataInOut` | an IPxx port opens in the default modes: `auto`, `SBF+NMEA` (p.169) | 168 |
-| 9 | `setAntennaType, Main/Aux1, <name>` + get · `setAttitudeOffset, h, p` + get · `setINSAntLeverArm, x, y, z` + get | names verified at step 5, quoted when they contain spaces; the receiver echoes the same fixed-point text the driver sends | 107, 141, 113 |
-| 10 | `setCN0Mask, all, N` · `setElevationMask, all, N` · `setSatelliteTracking` · `setSatelliteUsage` · `setSatelliteHealthOverride, v, v` · `setSignalTracking` · `setSignalUsage, v, v`, each with its `get*` | mask values compared on the first echo line; list echoes are expanded, presence-checked (`none` compared exactly) | 94, 110, 96, 128, 127, 100, 131 |
-| 11 | `setIMUStartupDataMode` + get · `setIMUOrientation` + get | readback; the thetas are compared when the mode is not `SensorDefault` | 173, 112 |
-| 12 | `setGNSSAttitude, MultiAntenna` + get | readback (constant) | 142 |
-| 13 | `setPVTMode, Rover, v` · `setReceiverDynamics` · `setVehicleApplication` · `setClockSyncThreshold` · `setMultipathMitigation, b, b` · `setINSNavConfig, on, all, loc`, each with its `get*` | first fields of the echo must match (`PVTMode`: `Rover`; `INSNavConfig`: `on, *, loc`) | 123, 125, 135, 152, 95, 115 |
-| 14 | `setNtripSettings, NTR1, …` + get · `setNtripTlsSettings` + get — or `setNtripSettings, NTR1, off` + get | all fields compared except the encrypted password (p.185); the user name is compared | 185, 187 |
-| 15 | `lstConfigFile, Current` | every line without `#` must name a command the driver sent (`driver_command_whitelist()`, plus `setUserAccessLevel` — the account line the login left); otherwise fatal | 68 |
-| 16 | `setSBFOutput, StreamN, …` + `getSBFOutput, StreamN` per `receiver.sbf_streams` | Cd and interval compared; the block-list echo is the expanded group content, presence-checked | 202 |
+| 1 | `login, <user>, <password>` | Authorizes the session. | 87 |
+| 2 | `exeCopyConfigFile, Boot, Current` | Replaces the running configuration with `Boot`. | 68, 69 |
+| 3 | `getReceiverCapabilities` | The antenna list must contain `Aux1`. | 74 |
+| 4 | `setPPSParameters` · `setNTPServer` · `setPTPServer` | Time outputs; all fields compared (PPS delay 2 decimals, width 6). | 156, 155, 158 |
+| 5 | `setDataInOut, <port>, , +NMEA` per distinct port · `setNMEAOutput, Stream<n>, <port>, <msgs>, <interval>` | NMEA on fixed ports; port, stream and interval compared, message list not. | 168, 193 |
+| 6 | `lstAntennaInfo, Overview`, only if a type is not `Unknown` | Each configured type must equal an `ID="…"` exactly (case, spaces); the error lists up to 5 IDs sharing the first 4 characters. | 66, 107 |
+| 7 | `setAntennaType, Main\|Aux1, <name>` · `setAttitudeOffset, h, p` · `setINSAntLeverArm, x, y, z` | Names quoted when they contain whitespace; all fields compared, numbers with 3 decimals. | 107, 141, 113 |
+| 8 | `setCN0Mask, all, N` · `setElevationMask, all, N` · `setSatelliteTracking` · `setSatelliteUsage` · `setSatelliteHealthOverride, v, v` · `setSignalTracking` · `setSignalUsage, v, v` | Masks: value on the first echo line. Lists: presence only; `none` is compared. | 94, 110, 96, 128, 127, 100, 131 |
+| 9 | `setIMUStartupDataMode` · `setIMUOrientation` | Mode compared; angles compared unless `SensorDefault`. | 173, 112 |
+| 10 | `setGNSSAttitude, MultiAntenna` | Dual-antenna attitude, always on. | 142 |
+| 11 | `setNtripSettings, NTR1, …` and `setNtripTlsSettings`, or `setNtripSettings, NTR1, off` | All fields except the password. | 185, 187 |
+| 12 | `setPVTMode, Rover, <modes>` · `setReceiverDynamics` · `setVehicleApplication` · `setClockSyncThreshold` · `setMultipathMitigation, b, b` · `setINSNavConfig, on, all, <loc>` | Leading fields; `PVTMode` compares `Rover` only, `INSNavConfig` compares `on` and `<loc>`. | 123, 125, 135, 152, 95, 115 |
+| 13 | `setDataInOut, <IPxx>, , +SBF` | Enables SBF on the driver's connection; port compared. | 168 |
+| 14 | `lstConfigFile, Current` | Every line without `#` must carry a `set…` name the driver sends, or `setUserAccessLevel`; names only, not arguments. | 68 |
+| 15 | `setSBFOutput, Stream<n>, <IPxx>, <blocks>, <interval>` per stream | Stream, port and interval compared; the expanded block list is not. | 202 |
 
-Step 15 runs before step 16 on purpose: once SBF streams on the same socket,
-a multi-block listing could be interleaved with binary data. The vendored
-SsnRx SDK's reply limit was raised to 256 KiB for the listings
-(`3rd_party/RxTools/ssnrx/include/ssnrx.h`).
+Step 2 precedes every read-only step, so outputs that an earlier session left in `Current` are
+removed unless `Boot` defines them. Step 14 precedes step 15 so that SBF cannot interleave with the
+listing; the SDK reply limit `sMaxASCIICommandReplySize` is raised to 256 KiB for listings
+(`asterx_driver/3rd_party/RxTools/ssnrx/include/ssnrx.h`). Commands over 2000 characters are
+rejected before sending (p. 62).
 
-Log lines (module `AsteRx`): `Connecting to …` → `Connected` →
-`Configuring receiver on IPxx (N commands)` → `AsteRx Capabilities: …` →
-`Antenna types verified …` → one `Verified <Key> (<payload>)` per readback →
-`Verified running configuration: M command(s), all ours` →
-`Streams enabled — warming up (min SBF recording 20:00, FINETIME required)` → every
-3 s `Receiver warming up: recorded 07:12 / 20:00, FINETIME not yet set` →
-`Warm-up complete; rig ready (SBF recorded 20:01, FINETIME set)`.
+## YAML parameters
 
-## Warm-up gate
+Unknown keys and null, blank or out-of-range values are startup errors naming the dotted key.
+`device.ip`, `device.user`, `device.password`, `receiver.sbf_streams`, and `id` and `blocks` (SBF)
+or `descriptor` and `messages` (NMEA) per stream entry are required; omitted keys keep the defaults
+given in parentheses.
 
-* Duration source: the host monotonic clock, starting when the first nonempty
-  SBF block is successfully accepted by the shared recording queue. Blocks
-  received during receiver configuration count; starting the session or
-  connecting the socket does not start this clock. The configured interval is
-  elapsed time from this first block, not accumulated block transmission or
-  disk-write time. A rejected block cannot start the clock.
-* `ReceiverStatus` (4014, 1 Hz at `OnChange`) supplies `RxState` bit 6 FINETIME
-  (p.374) when that condition is enabled. This requires a fresh status after
-  configuration completes; a status received during configuration cannot
-  satisfy FINETIME readiness. Its `UpTime` field (p.373) remains a receiver-reset
-  diagnostic only. The yaml must keep `ReceiverStatus` (or the `Status` group)
-  in a stream at an interval other than `off`; validation enforces both.
-* During warm-up every SDK-delivered SBF block, including unknown block IDs,
-  enters the same asynchronous queue as later data, and the live `live_*.csv`
-  sidecars continue to update. The block that opens the gate is recorded once.
-  The local SBF watchdog stays armed. `[Statistics] warmup=07:12/20:00
-  finetime=0 …` also includes cumulative write and queue counters.
-* `Init()` blocks until the gate opens. The session coordinator initialises
-  the drivers sequentially with AsteRx first, so the other drivers wait for
-  receiver warm-up while AsteRx is already recording. Ctrl+C aborts and drains
-  the queued warm-up blocks to disk.
-* Warm-up completion and warm-up reconnects never force a new SBF file or
-  restart the elapsed-time clock. Normal `output.rotation.max_bytes`/
-  `max_interval_s` limits still apply across all phases; file rotation also
-  leaves the clock running.
-* A receiver reset during warm-up normally drops the TCP session: the
-  reconnect path reconfigures and reevaluates readiness, while marking the
-  recording incomplete. The duration continues across the gap, but receiver
-  status and FINETIME are reset for the new connection. An observed drop of
-  `UpTime` during warm-up also marks it incomplete; after the gate opens, that
-  drop is fatal (see the rules above).
-* `receiver.warmup.min_recording_s: 0` with `require_finetime: false` disables
-  the gate immediately (bench tests).
-* The duration key was renamed from `receiver.warmup.min_uptime_s` to
-  `receiver.warmup.min_recording_s`. Update existing configurations: the old
-  key is rejected by strict schema validation and has no compatibility alias.
+| Block | Keys: accepted values (default) | Commands |
+|---|---|---|
+| `device` | `ip`; `port` 1–65535 (28784); `user` 1–16 characters, not `RxAdmin`; `password` 1–32 characters, of which the manual makes only half usable (p. 87); both in the charset of p. 64 without `" ' $ & ,` | `login` |
+| `receiver.warmup` | `min_recording_s` ≥ 0, 0 = no duration condition (1200); `require_finetime` (true) | – |
+| `receiver.time_system` | `ntp_server`, `ptp_server` (false); `pps.interval` `off`, `msec10`…`sec60` (`sec1`); `pps.polarity` `Low2High`, `High2Low` (`Low2High`); `pps.delay_ns` ±1 000 000 (0); `pps.time_scale` `GPS`, `Galileo`, `BeiDou`, `GLONASS`, `UTC`, `RxClock` (`GPS`); `pps.max_holdover_s` 0–3600 (60); `pps.pulse_width_ms` 0.000001–1000 (5) | `setNTPServer`, `setPTPServer`, `setPPSParameters` |
+| `receiver.nmea_streams[]` | ≤ 10 entries, stream ID = list position (`[]`); `descriptor` `COM1–2`, `USB1–2`, `IP10–17`, `NTR1–3`, `IPS1–5`, `IPR1–5`, `LOG1–2`; `messages` from `GGA GLL GNS GST HDT RMC VTG ZDA HRP THS PASHR`; `interval` as for SBF (`sec1`) | `setDataInOut`, `setNMEAOutput` |
+| `receiver.antenna` | `main_antenna_type`, `aux_antenna_type`: exact `lstAntennaInfo` ID or `Unknown`, 1–20 characters without `,` or `"` (`Unknown`); `attitude_offset_deg.heading` ±360, `.pitch` ±90, Main→Aux1 baseline relative to the vehicle axis (0); `antenna_lever_arm_m.x/y/z` ±100 m, IMU reference to main ARP, X forward, Y right, Z down (p. 113) (0) | `setAntennaType`, `setAttitudeOffset`, `setINSAntLeverArm` |
+| `receiver.gnss` | `cn0_mask_dbhz` 0–60 (0); `elevation_mask_deg` −90–90 (0); `satellite_tracking`, `satellite_usage`, `satellite_health_override`: `all`, `none` or `+`-joined constellations and IDs `G01–G39` without `G37` (usage `G01–G32`), `R01–R30`, `E01–E36`, `S120–S158`, `C01–C63`, `J01–J10` (`all`, `all`, `none`); `signal_tracking`, `signal_usage`: `all` or `+`-joined signal names, constellations only for tracking (p. 131) (`all`) | `setCN0Mask`, `setElevationMask`, `setSatellite…`, `setSignal…` |
+| `receiver.imu` | `startup_data_mode` `GnssTimeKnown`, `Boot` (`GnssTimeKnown`); `imu_orientation.orientation_mode` `SensorDefault`, `manual`, `fixed` (`SensorDefault`); `theta_x_deg` ±180, `theta_y_deg` ±90, `theta_z_deg` ±180 (0) | `setIMUStartupDataMode`, `setIMUOrientation` |
+| `receiver.navigation` | `pvt_mode` `all` or `+`-joined `StandAlone`, `SBAS`, `DGNSS`, `RTKFloat`, `RTKFixed`, `RTK` (`all`); `receiver_dynamics` `Max`, `High`, `Moderate`, `Low` (`Moderate`); `vehicle_application` one of 17 names in `kVehicleApplications` (`Unknown`); `clock_sync_threshold` `ClockSteering`, `usec500`, `msec1`–`msec5` (`usec500`); `multipath_mitigation`, code and carrier (true); `ins_output_location` `MainAnt`, `POI1` (`POI1`) | `setPVTMode`, `setReceiverDynamics`, `setVehicleApplication`, `setClockSyncThreshold`, `setMultipathMitigation`, `setINSNavConfig` |
+| `receiver.ntrip` | `enabled` (false); `port` 1–65535 (2101); `version` `v1`, `v2` (`v2`); `tls` (false); `send_gga_to_caster` `auto`, `off`, `sec1`, `sec5`, `sec10`, `sec60` (`auto`); only when enabled: `caster` ≤ 40 and `mount_point` ≤ 32 characters without whitespace, `username` ≤ 128, `password` ≤ 32, all in the charset of p. 64, empty or `<?>` rejected | `setNtripSettings`, `setNtripTlsSettings` |
+| `receiver.sbf_streams[]` | ≥ 1 entry, at least one containing `ReceiverStatus` or the `Status` or `Support` group; unique `id` 1–10; ≥ 1 block or group name, not validated locally; `interval` `OnChange`, `msec5`–`msec500`, `sec1`–`sec60`, `min2`–`min60`, not `off` (`OnChange`, p. 202) | `setSBFOutput` |
+| `output` | `file_prefix` (`asterx`); `live_csv` (true); `write_queue_mb` 16–4096 (256); `rotation.max_bytes` 1–2 147 483 647 (1 GiB); `rotation.max_interval_s` 1–604 800 (3600) | – |
+| `logging` | `stats_interval_s` 0.001–3600 (2.5), period of the `[Statistics]` line | – |
 
-## Antenna types
+The NTRIP password characters `" ' $ & ,` are sent as `%%DQ %%SQ %%DL %%AM %%CM` (p. 64), and the
+password is redacted from logs (`RedactCmd`); the receiver account is logged in clear. NTR1 decodes
+RTCMv3 in its default `auto` input mode.
 
-`setAntennaType` accepts only names from the receiver's own table (p.107): "If
-*Type* does not match any entry in the list returned by lstAntennaInfo,
-Overview, the receiver will assume that the phase center variation is zero at
-all elevations and frequency bands." The driver therefore refuses to start
-when `main_antenna_type`/`aux_antenna_type` is not an exact `ID` of that list
-(`Unknown` = no model, always accepted). Look the name up in RxControl
-(Expert Console: `lstAntennaInfo, Overview`, p.66) and copy it with its spaces.
+## Settings not written
 
-## NTRIP client
-
-`setNtripSettings` (p.185): the password is limited to 32 characters and the
-characters `" ' $ & ,` are sent as `%%DQ %%SQ %%DL %%AM %%CM` (p.64) by the
-driver; other characters must be in the receiver's message charset. The
-receiver encrypts only the password, so every other field — including the user
-name — is compared against the readback. `<?>` is treated as a placeholder and
-rejected when `enabled: true`. The password is redacted from every log line
-(`redact_cmd`). The NTR1 connection decodes RTCMv3 in its default `auto` input
-mode; no `setDataInOut` is needed.
-
-## Not done, and why
+A configuration file lists the commands that bring the receiver from its default to its current
+configuration (p. 68). A successful step 14 therefore shows that every other setting is at its
+default, except permanent (`#`) commands and other instances of the driver's own command names.
 
 | Command | Reason |
 |---|---|
-| `factoryReset` (p.86) | erases the accounts and all user settings; keeps IP, but the driver would have no account left |
-| `exeResetReceiver, …, Config` (p.79) | reboots the receiver, erases `Current` and `Boot` (accounts included) |
-| `exeCopyConfigFile, Current, Boot` (p.69) | volatile configuration by decision; other users' `Boot` stays theirs |
-| `lstCurrentUser` (p.84) | a failed login already answers `$R?` (p.87); the extra round trip proves nothing |
-| `setINSPOILeverArm` (p.116) | no POI geometry in the yaml; `ins_output_location: POI1` therefore means a zero POI lever arm |
-| `setSignalHealthOverride`, `setTimingSystem`, `setSmoothingInterval`, `setDiffCorrUsage` | receiver defaults (`none`, `auto`, no smoothing, `LowLatency`) after the reset |
-| any `setIP*`, `setEthernetMode`, `setIPServices`, `setPortFirewall` | network; the platform reaches the receiver only by its IP |
-| SBF block-name validation | appendix B lists 113 blocks plus 20 groups; an unknown name is rejected by the receiver with the offending command in the log |
+| `exeCopyConfigFile, Current, Boot` (p. 69) | The driver configuration is volatile; `Boot` stays under operator control. |
+| Long `login` form (p. 18), `setUserAccessLevel` (p. 90) | Accounts are provisioned outside the driver; the long form could overwrite `Boot`. |
+| `factoryReset` (p. 86), `exeResetReceiver, …, Config` (p. 79) | The first erases the accounts and all user settings except IP settings; the second reboots and erases `Current` and `Boot`, accounts included. |
+| `lstCurrentUser` (p. 84) | A failed login already answers `$R?` (p. 87). |
+| `setINSPOILeverArm` (p. 116) | The YAML has no POI geometry; `POI1` output uses the receiver default lever arm. |
+| `setSignalHealthOverride`, `setTimingSystem`, `setSmoothingInterval`, `setDiffCorrUsage` | The receiver defaults (`none`, `auto`, no smoothing, `LowLatency`) apply. |
+| `setIP…`, `setEthernetMode`, `setIPServices`, `setPortFirewall` | The rig reaches the receiver only by its IP; IP settings are permanent and survive step 2 (p. 21, p. 68). |
 
-## Account provisioning
+## Time outputs
 
-`device.user` / `device.password` in `config/config-asterx.yaml` is the
-dedicated driver account (level `User`, p.90). It must be 1..16 characters
-(`login` UserName (16), Password (32/2), p.87), must not be `RxAdmin`, and may
-only use the receiver's command-line charset (p.64) — in particular no `,` or
-`"`, which would split the command, and no empty value, which would *delete*
-the account (p.17).
+The receiver is the rig's time source, so its time outputs (step 4) are written first after step 2.
+The shipped YAML enables `setPPSParameters, sec1, Low2High, 0.00, GPS, 60, 5.000000`, the NTP and
+PTP servers and NMEA `ZDA` on `COM1` every second; the driver verifies them only by readback.
 
-Provisioning is never needed: the long login form creates the account when the
-receiver has none, and after the step-2 reset that is always the case.
+## Warm-up gate
 
-## Side effects of the account re-creation (step 3)
+Rig readiness (`Session::Configured()`) requires both conditions, checked on every SBF block and
+every 3 s:
 
-At that moment no full-control account exists, so the receiver executes
-`setUserAccessLevel, User1, <user>, <password>, User` **and**
-`exeCopyConfigFile, Current, Boot` (p.18): `Boot` becomes "defaults + the
-driver account", other users' accounts and saved settings are gone, and the
-account lands in `User1` — on every bring-up.
+- `receiver.warmup.min_recording_s` of host monotonic time since the write queue accepted the first
+  nonempty SBF block; blocks received during configuration count, and nothing restarts this clock;
+- if `require_finetime` is true, `RxState` bit 6 (FINETIME) of `ReceiverStatus` (block 4014,
+  p. 374) in a block received after the sequence completed on the current connection.
 
-## Recovery
+The shipped YAML uses 90 s without FINETIME; 0 s without FINETIME opens the gate when the sequence
+completes. The former key `min_uptime_s` is rejected as unknown. `AsterxDriverApp::Init()` blocks
+until the gate opens, and drivers are initialized sequentially with AsteRx first (`main.cpp`,
+`common/src/session_runner.cpp`), so the other drivers start after the warm-up while SBF is already
+recorded. The rig-level no-data watchdog is armed when the gate opens.
 
-* Anonymous users have full control over COM and USB by default
-  (`setDefaultAccessLevel`, p.85) — a serial/USB console can always run
-  `setUserAccessLevel`.
-* Ethernet-over-USB always answers on `192.168.3.1` (p.15, cannot be changed).
-* `login, <user>, <password>, RxAdmin, S3pt3ntr10` over TCP/IP re-creates the
-  first account when none exists (p.18).
-* `factoryReset` (p.86) as the last resort: keeps `setEthernetMode`,
-  `setIPSettings` and `setIPPortSettings`.
+## Recording
 
-## Credentials in logs and recordings
+Every SBF block that SsnRx delivers is enqueued unchanged, in arrival order, from connection to
+shutdown, including blocks received during configuration and blocks with unknown IDs; blocks that
+arrive during backoff or shutdown are ignored.
 
-Only the NTRIP password (a remote credential) is redacted from log lines
-(`redact_cmd()`); the receiver's own account is local to the sensor and
-appears in clear. The receiver's `Commands` SBF block records entered
-commands, but they are only ever entered before `setSBFOutput` enables
-streams on this connection, so none of them reach the `.sbf` files.
+- Files: `<session>/asterx/<file_prefix>-<YYYYMMDDTHHMMSSZ>-<n>.sbf` (host UTC at file open, `n`
+  from 1). A new file starts before a block that would exceed `rotation.max_bytes`, kept below
+  2 GiB because `sbf2rin` refuses larger inputs, and after `rotation.max_interval_s`; reconnects
+  never start a new file. Files are flushed and closed on rotation and shutdown, without `fsync`.
+- Write queue: `Session::OnSbfBlock` only enqueues on the Qt thread that reads the socket, and an
+  `SbfWriteQueue` thread writes, so a disk stall does not block the reader. A block that does not
+  fit in `output.write_queue_mb` is refused and the run ends.
+- Live CSV (`asterx_driver/src/sbf_live_recorder.cpp`): if `output.live_csv` is true,
+  `live_insnavgeod.csv` (blocks 4226, 4230) and `live_receiverstatus.csv` (4014) beside the `.sbf`
+  files feed the GUI, flushed at most every 250 ms and at each link loss; a CSV failure disables
+  only that file.
 
-## Open points (first run on hardware)
+## Failure policy and reconnects
 
-* **Reply binding.** The Session compares the echoed command *name*, not the
-  full text, because a receiver that normalises whitespace would otherwise
-  reject every reply. If the log shows `Reply echoes '…' while '…' is
-  outstanding`, the receiver is answering out of order — capture the trace log
-  before changing the check.
-* **`getCN0Mask` / `getElevationMask`.** Both answer with one line per signal
-  or engine and only the first is compared, because the GPS P-code mask is
-  fixed at 1 dB-Hz by the receiver (p.94) and would fail an all-lines check.
-  If the first line turns out not to be the one we set, compare all lines
-  except the P-code entry rather than dropping the check.
-* `lstAntennaInfo, Overview` larger than 256 KiB would not be captured; the
-  driver then fails when a type ≠ `Unknown` is configured.
-* Explicit satellite/signal lists naming a constellation the receiver is not
-  permitted for may answer `$R?` (fatal by design); `all` is known-good.
-* If the post-reset listing shows a line the receiver generates itself (not
-  sent by the driver), add its command name to a documented allow-list constant
-  rather than relaxing the check.
+| Event | Before the first complete sequence | Warm-up | After the gate opens |
+|---|---|---|---|
+| Connect timeout (5 s), connection closed, communication error, no SBF for 3 s | fatal | reconnect | fatal |
+| `$R?`, command timeout (15 s), readback, listing, antenna or capability mismatch | fatal | reconnect | – |
+| SBF CRC or length error | recording incomplete | recording incomplete | fatal |
+| `ReceiverStatus.UpTime` decreases (receiver reset, p. 373) | not evaluated | recording incomplete | fatal |
+| Write-queue overflow or write failure | fatal | fatal | fatal |
+| Recovery deadline (60 s) exceeded | – | fatal | – |
+
+A reconnect closes the socket, waits 5 s, connects with a new SsnRx instance and re-runs the full
+sequence while the write queue and current file stay open. The 60 s recovery deadline starts at the
+first warm-up failure and stops only when the gate opens. After the gate opens a gap cannot be
+recovered, so the session shuts down and emits `FatalError`, which stops the whole rig.
+
+The events in the table increment `recording_errors`, also when warm-up recovers (the deadline
+always follows a counted failure); bytes discarded by SsnRx while resynchronizing are only counted.
+A nonzero `recording_errors` sets `known_acquisition_incomplete` in `FinalStatistics()` and marks
+the driver as failed at shutdown.
+
+## Shutdown
+
+`Session::Shutdown()` is idempotent. It stops all timers, closes the TCP connection, drains the
+write queue, joins the writer thread and closes all files; a failed final flush or close counts as a
+recording error and emits `FatalError`. No command is sent, so the driver settings stay in `Current`
+until the next step 2 or a power cycle, which loads `Boot` (p. 68).
+
+## Limitations
+
+Not verified on hardware:
+
+- authorization and the account after `exeCopyConfigFile, Boot, Current`; after the earlier
+  `RxDefault` reset the receiver answered later commands with `Not authorized!`;
+- reply binding by command name, and comparing only the first line of `getCN0Mask` and
+  `getElevationMask` (the GPS P-code mask is fixed at 1 dB-Hz, p. 94);
+- listings over 256 KiB, lists naming constellations the receiver may not use, and
+  receiver-generated lines in `Current`, each of which would fail startup;
+- whether closing the socket stops the `IPxx` output, and whether the `Commands` SBF block (shipped
+  stream 9) writes entered commands, including credentials, into the `.sbf` files;
+- firmware compatibility (the version is not read), sustained throughput and queue headroom.

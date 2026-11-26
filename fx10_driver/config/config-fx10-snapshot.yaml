@@ -54,7 +54,7 @@ features:
     raw: []                             # tool timing overrides are appended and read back after these entries
 
 
-# --- Output (eBUS RAW; offline conversion belongs to amiga_decoders) ---
+# --- Output (eBUS RAW; offline conversion belongs to PhenomateDecoders) ---
 output:
     flush_interval_mb: 64               # 0..4096
     wavelengths:

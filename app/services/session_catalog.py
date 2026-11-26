@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .run_status import SCHEMA
+from .run_status import HISTORY_SCHEMAS
 from ..constants import DRIVERS, SESSION_DIR_RE
 
 _SLOTS = asyncio.Semaphore(2)
@@ -31,7 +31,7 @@ def _session(path: Path, active: Path | None) -> Session:
     name = path.name
     try:
         doc = json.loads((path / "raw" / "drivers.json").read_bytes())
-        if not isinstance(doc, dict) or doc.get("status_schema") != SCHEMA:
+        if not isinstance(doc, dict) or doc.get("status_schema") not in HISTORY_SCHEMAS:
             raise ValueError("Unsupported run manifest version")
         run = doc["run"]
         if run["timestamp"] != name:

@@ -14,7 +14,7 @@ namespace {
 device:
     ip: "192.0.2.10"
     port: 28784
-    user: "amiga"
+    user: "phenomate"
     password: "secret"
 receiver:
     warmup: { min_recording_s: 1200, require_finetime: true }
@@ -77,7 +77,7 @@ TEST_CASE("config: the complete schema loads") {
     const auto cfg = LoadAppConfigText(kBase);
     CHECK(cfg.host == "192.0.2.10");
     CHECK(cfg.ctrl_port == 28784);
-    CHECK(cfg.receiver.user == "amiga");
+    CHECK(cfg.receiver.user == "phenomate");
     CHECK(cfg.receiver.password == "secret");
     CHECK(cfg.receiver.warmup.min_recording_s == 1200);
     CHECK(cfg.receiver.warmup.require_finetime);
@@ -153,7 +153,7 @@ TEST_CASE("config: unknown keys are errors naming the key and the accepted set")
 
 TEST_CASE("config: required keys, blank and null values") {
     // A key without a value is a Null node whose as<string>() would be the literal "null"
-    const auto blank = ErrorOf(Replaced("user: \"amiga\"", "user:"));
+    const auto blank = ErrorOf(Replaced("user: \"phenomate\"", "user:"));
     CHECK(Mentions(blank, "device.user: has an invalid value"));
     CHECK_FALSE(Mentions(blank, "null"));
 
@@ -170,7 +170,7 @@ TEST_CASE("config: required keys, blank and null values") {
 
 TEST_CASE("config: omitted optional blocks keep the defaults") {
     const auto cfg = LoadAppConfigText(R"yaml(
-device: { ip: "192.0.2.10", user: amiga, password: secret }
+device: { ip: "192.0.2.10", user: phenomate, password: secret }
 receiver:
     sbf_streams:
         - { id: 8, blocks: [ Status ] }
@@ -216,9 +216,9 @@ TEST_CASE("config: invalid values are rejected with the key path") {
     CHECK_FALSE(ErrorOf(Replaced("theta_x_deg: 0.0", "theta_x_deg: 181.0")).empty());
     CHECK(Mentions(ErrorOf(Replaced("z: 0.3 }", "z: 101 }")), "antenna_lever_arm_m.z"));
     // p.87 credential limits
-    CHECK_FALSE(ErrorOf(Replaced("user: \"amiga\"", "user: \"seventeen_chars_x\"")).empty());
-    CHECK_FALSE(ErrorOf(Replaced("user: \"amiga\"", "user: \"RxAdmin\"")).empty());
-    CHECK_FALSE(ErrorOf(Replaced("user: \"amiga\"", "user: \"rxadmin\"")).empty());
+    CHECK_FALSE(ErrorOf(Replaced("user: \"phenomate\"", "user: \"seventeen_chars_x\"")).empty());
+    CHECK_FALSE(ErrorOf(Replaced("user: \"phenomate\"", "user: \"RxAdmin\"")).empty());
+    CHECK_FALSE(ErrorOf(Replaced("user: \"phenomate\"", "user: \"rxadmin\"")).empty());
 }
 
 TEST_CASE("config: stream rules") {

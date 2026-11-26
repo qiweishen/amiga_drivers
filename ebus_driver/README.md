@@ -1,176 +1,441 @@
-# 统一 eBUS 驱动与 RAW 格式
+# eBUS camera runtime and RAW format
 
-GOX 与 FX10 共用 `EbusCameraDriver`、接收线程、写盘线程和 `RawRecorder`。
-`gox_config.cpp` 与 `fx10_config.cpp` 保留各自的 YAML、GenICam 配置顺序、
-回读、PTP、触发、快门和健康检查。两个设备目录保留配置与工具入口，不再实现采集或写盘循环。
+`ebus_driver/` contains the acquisition engine shared by the JAI Go-X and Specim FX10e camera
+profiles and the SDK-free `ebus-raw` recorder. The engine uses the Pleora eBUS SDK 6.5.1
+(`.devcontainer/Dockerfile` installs 6.5.1-6797). Device configuration is described in
+[gox_driver/docs/DEVICE_CONFIG.md](../gox_driver/docs/DEVICE_CONFIG.md) and
+[fx10_driver/docs/DEVICE_CONFIG.md](../fx10_driver/docs/DEVICE_CONFIG.md); this document covers
+the lifecycle, buffering, failure policy and on-disk format common to both.
 
-## 生命周期与所有权
+## Scope
 
-`Init` 连接设备，执行 profile 准备动作，打开 stream，应用配置，按实际 PayloadSize
-分配有界 SDK 缓冲和应用缓冲，发布设备元数据，注册共享 SensorSync。
-`Run` 启动两个 worker，执行 profile 的开始前动作，发送 AcquisitionStart，
-打开接收门闩并 Arm SensorSync；所有相机注册后才可能启动共享触发。
+| Component | Sources | Build target | Role |
+|---|---|---|---|
+| RAW format | `ebus_driver/src/raw_format.cpp`, `ebus_driver/include/ebus_driver/raw_format.h` | `ebus_raw` (no SDK) | Header serialization, CRC-32C |
+| RAW recorder | `ebus_driver/src/raw_recorder.cpp`, `ebus_driver/include/ebus_driver/raw_recorder.h` | `ebus_raw` | Segments, events, synchronization, completion |
+| Block-ID accounting | `ebus_driver/include/ebus_driver/block_ids.h` | header-only | GVSP block-ID gaps and anomalies |
+| Camera engine | `ebus_driver/src/camera_driver.cpp`, `ebus_driver/include/ebus_driver/camera_driver.h` | `ebus_camera` | `EbusCameraDriver`: lifecycle, workers, failure policy |
+| Go-X profile | `ebus_driver/src/gox_config.cpp` | `gox_device_config` (`gox_driver/CMakeLists.txt`) | `MakeGoxCameras`, `LoadGoxCameras` |
+| FX10 profile | `ebus_driver/src/fx10_config.cpp` | `fx10_device_config` (`fx10_driver/CMakeLists.txt`) | `MakeFx10Camera`, `LoadFx10Camera` |
+| Tool helpers | `ebus_driver/include/ebus_driver/tool_support.h` | header-only | Snapshot and stream orchestration |
+| Tests | `ebus_driver/tests/test_raw.cpp`, `ebus_driver/tests/test_block_ids.cpp` | `ebus_raw_tests` (CTest `ebus.raw`) | doctest unit tests of the recorder and block IDs |
 
-GOX 仅在 `ptp.enabled: true` 时创建 PTP 管理对象、启用并等待同步。
-关闭 PTP 时仍允许外部触发采集，也允许关闭触发后的 freerun 采集；PTP 与外部触发
-均关闭时记录 warning，不因此拒绝启动。设备元数据将 PTP 记为未启用、未同步，
-普通遥测、触发计数和温度检查继续执行，不依赖 PTP 对象存在。
+`main.cpp` (PhenomateDrivers) creates one `EbusCameraDriver` per enabled Go-X camera and one for
+the FX10; `jai_snapshot`, `fx10_snapshot` and `fx10_reference` use the same engine. Recordings are
+read by the GUI (`app/decoder/ebus/`) and by the separate offline project PhenomateDecoders.
 
-接收线程先读取 SDK 状态及主机接收时间，检查有效范围，把
-`PvBuffer::GetDataPointer()` 的 `GetAcquiredSize()` 字节复制到独立拥有的内存，
-随后 requeue SDK buffer，再交给有界写盘队列。写盘线程不访问 SDK 对象。
-这里的原始数据是 **SDK 交付层 payload**，不是以太网/GVSP 抓包；
-SDK 在交付前的重组或处理不能由此逆向恢复。
+The recorded level is the SDK buffer: the `GetAcquiredSize()` bytes the SDK delivers after GVSP
+reassembly, not a packet capture. Packet headers and any SDK processing before delivery cannot be
+recovered from a recording. The engine does not unpack, crop, strip padding, chunk data or status
+lines, demosaic, calibrate or synthesize pixels; the camera's `PixelFormat`, ROI and binning
+settings determine the information content.
 
-停止顺序为 Disarm → AcquisitionStop → 限时接收排空 → join 接收 →
-队列排空并 join 写盘 → 最后健康/触发/stream 核对 → stream 关闭和设备释放 →
-RAW 最终落盘与结果汇总。停止命令、排空期限、I/O、关闭或对账失败均使失败状态保持。
-停止后的接收排空有五秒上限；超限报告失败，不能视作所有设备在途数据均已记录。
+## Lifecycle and ownership
 
-每台相机一组 worker、一套队列和一个目录。SDK 与应用 payload 内存受预算约束，
-实际队列容量及收缩情况写入 device.json；JSON/SDK 内部开销不在该预算内。
-接收 socket 单独按配置请求容量。依据本地 eBUS 6.5.1 的 PvStreamGEV.h，
-请求超过 Linux rmem_max 时，SDK 已自动降至该上限并返回 INVALID_PARAMETER；
-驱动告警后继续，在 Open 后读取实际容量，不再用原请求值拒绝降级结果。
-元数据保留请求值、SDK 返回、可读取的 rmem_max 快照及实际回读；
-回读不可用时保持 null，回读为零或其他 SDK 错误仍使启动失败。
-回读可能含内核 bookkeeping，不能直接等同 payload 容量；驱动不修改系统参数。
-满队列停止会话，保存已接纳数据并记录被拒 buffer 的身份，不覆盖旧记录。
-异常/不完整 buffer 在范围安全时保留原字节和状态；无法证明范围安全时仅记录拒绝事件。
-max_frames 统计有效 image buffer，停止排空中的额外有效帧记为明确的 limit_excluded 事件。
+`EbusCameraDriver` implements `common::IDriverApp` and is single-use: `Init` and `Run` each run
+once, and `Shutdown` is idempotent and also runs from the destructor. A failed `Init` returns
+`false`; the caller still calls `Shutdown`, which releases whatever was acquired.
 
-## 新产物与兼容
-
-每台相机目录只有三个主要产物：
-
-- `device.json`：`ebus-device-eBUS_SDK_v<SDK version>`，实际回读、设备身份、编译时 SDK 版本、配置来源、
-  profile、缓冲预算和时间语义；运行时 SDK 版本未查询则为 null。
-- `seg_00001.raw`、后续分段：`ebus-raw-eBUS_SDK_v<SDK version>`，每条记录自带完整 JSON 元数据与 payload。
-- `events.jsonl`：初始化、开始前动作结果、健康采样、拒绝/排除、分段关闭、
-  SensorSync 核对、最终统计和 session_end。
-
-两个格式标识的版本均来自编译时 Pleora SDK 的 `PvVersion.h` 中的
-`NVERSION_STRING`，与 `sdk.header_version` 一致。例如 SDK `6.5.1.6797` 生成
-`ebus-device-eBUS_SDK_v6.5.1.6797` 和 `ebus-raw-eBUS_SDK_v6.5.1.6797`。
-这个后缀记录编译所用 SDK 头文件版本，不代表已查询运行时 SDK，也不使用
-AmigaDrivers 项目版本。RAW 文件头的数字布局版本独立保存，当前仍为 `1`。
-
-`device.json` 只在 Init 完成配置后写一次，保存设备身份、配置请求及回读、SDK、
-缓冲配置和记录语义。Run 不再重新读取并复制整份设备元数据。
-开始前动作的结果直接写入 `profile_start.actions`：GOX 的 `trigger_counter` 保存
-复位是否尝试/确认、基线采样是否执行及基线值；device.json 中该块仅保留配置时的绑定结果。
-FX10 的 `shutter_preparation` 保存快门脉冲写入结果及每次写入后的设备回读值，`missed_triggers` 保存计数基线和绑定结果；
-device.json 中的 `profile.shutter_request` 仅表示配置意图，快门命令确认与节点值回读都不等于机械位置已验证。
-基线读不到时保持 null。`profile_start` 表示开始前动作已返回，实际采集启动另由
-`acquisition_started` 记录；任一步骤失败仍沿原异常路径结束会话。
-最终设备读数在 `device_health` 的 stop 事件，落盘完成状态与计数对账保留在 `session_end`。
-旧记录中的 `profile_start_metadata.device` 不迁写；现有读取端不依赖该重复快照，
-继续分别读取 device.json 和 session_end。
-bytes/records 是记录数，valid_frames 是有效图像数，不能混用。
-设备 timestamp 保留 SDK 原整数，单位、纪元无法确认时写 unverified；
-主机 realtime/monotonic 是接收诊断时间，不是曝光时间，也不证明跨设备同步。
-外触发且由共享 SensorSync 控制时核对帧数与曝光边沿；freerun 的采集窗口与
-观察日志窗口不同，只检查日志完整性，帧/边沿数量对应关系明确记为 unknown。
-
-GOX 不启用 chunk 数据：真机 bring-up 写 `GevSCCFGExtendedChunkData=1` 报
-"parameter not writable"，eBUS Player 也显示该节点不可改；而不开扩展模式时，chunk
-payload 类型 SDK 不支持（PvPayloadType.h）。写入计划因此不写 `GevSCCFGExtendedChunkData`
-和 `ChunkModeActive`，保持 UserSetLoad Default 之后的出厂状态；device.json 的 transport
-仍回读这两项作为证据。帧与触发的对应靠 SensorSync 日志（触发与曝光边沿）和 Counter0。
-
-新记录无需 idx 文件才能恢复布局。接收时不解包、不去 padding/Chunk、不 debayer、
-不删除 FX10 status line、不做反射率校正，也不插入丢行补零。
-相机端 PixelFormat、ROI、binning、AIE 等配置仍决定实际输出的信息量。
-FX10 的旧 max_lines 对新 RAW 按 SDK 记录数轮转，max_mb 包含记录元数据；
-原有 on_gap 不再控制补零，缺口作为记录元数据/事件保留并触发失败。
-GOX 的 record_align、queue_on_full、on_buffer_error 继续接受旧 YAML，
-但采用统一 RAW 策略；device.json 明确保存请求值与实际策略。统计周期继续按配置生效。
-
-GUI 数据处理位于 `app/decoder/`，不属于 C++ 采集驱动依赖。
-`ebus/` 读取统一 RAW 并解码像素，`fx10/` 处理预览 DN 数据立方体和光谱，
-`gox/` 处理 Go-X 快照与实时图像。相机读取端只接受
-`ebus-raw-eBUS_SDK_v<SDK version>` 及匹配的设备元数据标识，仍单独核对二进制布局。
-旧 `-v1` 和无版本后缀的标识不兼容；已移除旧 GOX jai-raw-seg 和旧 FX10 ENVI
-读取路径，已有采集文件不迁写。
-`asterx/` 读取当前 AsteRx CSV 遥测，不使用相机 RAW 格式；app 中没有 LMS payload 解码器。
-`app/services/` 负责调度与控制，`app/ui/` 负责展示。
-FX10 快照、白/暗参考及实时光谱和均值均使用 DN，坐标范围依据 PixelFormat 满量程；
-不作 0–1 归一化或反射率换算。图像显示编码的亮度缩放不改变 RAW 或光谱 DN。
-GOX 快照保留原始 RAW，GUI 预览 JPEG 和直方图在内存生成，不另存 PNG。
-采集工具名称 jai_snapshot、fx10_snapshot、fx10_reference 及 YAML 入口保留。
-本项目负责设备驱动、原始数据流落盘和 GUI 临时展示。离线导出、格式转换及
-离线校准由 `amiga_decoders` 承接；这里不提供 RAW 检查/导出命令行工具、
-ENVI 导出器或色卡校准工具。不支持的 PFNC 仍可原样采集，GUI 预览明确拒绝
-未知解码规则。
-
-FX10 白/暗参考现在是 **两次独立连接的采集阶段**：同一不可变配置分别应用，
-暗场开始前核对 serial/model、几何、PixelFormat、明确的成像回读与校准引用。
-结果标记 `connection_scope="separate verified phases"`；这不证明未公开相机状态、
-机械快门位置或物理白板位置一致。任一阶段失败不会发布成功参考结果。
-
-## 二进制布局
-
-所有整数为 little endian；不写 C++ 结构体内存，不做对齐填充。
-CRC 使用 CRC32C/Castagnoli。每段按完整记录轮转，单条超过容量时独占一段。
-
-| 文件头偏移 | 类型/长度 | 字段 |
+| Phase | Step | Action |
 |---|---|---|
-| 0 | 8 bytes | EBUSRAW 后接 NUL |
-| 8 | u16 | version=1 |
-| 10 | u16 | header_size=64 |
-| 12 | u32 | flags=0 |
-| 16 | u64 | 创建主机 realtime ns |
-| 24 | u64 | segment_index，从 1 开始 |
-| 32 | 28 bytes | reserved=0 |
-| 60 | u32 | 对前 60 字节的 CRC32C |
+| Init | 1 | Require `id` and `kind`; bootstrap the eBUS environment; resolve `mac` by discovery (`common::Ebus::FindCamera`), otherwise use `ip`. |
+| Init | 2 | `PvDeviceGEV::Connect` with control access; profile `prepare` hook. |
+| Init | 3 | Open the stream: socket receive buffer, `PvStreamGEV::Open`, packet size (configured, or negotiated with a 1476 B fallback), `SetStreamDestination`, profile `configure_stream` hook. |
+| Init | 4 | Profile `configure` hook. |
+| Init | 5 | Select the block-ID mode from the `GevGVSPExtendedIDMode` readback (profile fallback when the node is absent; an unrecognized value fails). |
+| Init | 6 | Read `PayloadSize`; allocate and queue the SDK buffers; allocate the application pool. |
+| Init | 7 | Open the recorder: camera directory, `device.json`, `events.jsonl`, `seg_00001.raw`. |
+| Init | 8 | Register with the shared `common::SensorSyncHub` when enabled; event `prepared`. |
+| Run | 9 | Start the writer thread, then the receiver thread, which waits on a start gate. |
+| Run | 10 | Profile `before_start` hook; event `profile_start` with its result. |
+| Run | 11 | Fail if `PayloadSize` changed; `StreamEnable`; `AcquisitionStart`; open the start gate; `Arm` SensorSync; event `acquisition_started`; health sample `start`. |
+| Run | 12 | Monitor every 100 ms until a stop or failure (see "Failure policy"). |
+| Stop | 13 | `Disarm` SensorSync; `AcquisitionStop`; let the receiver drain and join it; close the queue; join the writer after it has emptied the queue. |
+| Shutdown | 14 | Health sample `stop` and trigger accounting; `stream_final_statistics`; SensorSync quality. |
+| Shutdown | 15 | `StreamDisable`; `AbortQueuedBuffers`; retrieve the aborted buffers (at most 5 s); `PvStreamGEV::Close`; free the SDK buffers; destroy the profile hooks; `Disconnect`. |
+| Shutdown | 16 | Compare records written with buffers admitted; event `capture_final`; close the recorder (`session_end`). |
 
-每条记录为 48-byte prefix + UTF-8 JSON + payload：
+Step 13 runs at the end of `Run`; `Shutdown` repeats it as a no-op or performs it after a partial
+start. The SDK owns a `PvBuffer` only while it is queued. The receiver copies the acquired bytes
+into a pooled `RawBuffer` and requeues the `PvBuffer` before it publishes the copy; an RAII guard
+requeues it on every other path. The writer receives `RawBuffer` ownership through the queue,
+appends it and returns the slot to the pool without touching SDK objects.
 
-| 记录前缀偏移 | 类型/长度 | 字段 |
+### Profile hooks
+
+`DeviceHooks` (`ebus_driver/include/ebus_driver/camera_driver.h`) carries the device-specific
+steps; their content is described in the device documents.
+
+| Hook | Called | Go-X (`ebus_driver/src/gox_config.cpp`) | FX10 (`ebus_driver/src/fx10_config.cpp`) |
+|---|---|---|---|
+| `prepare` | Init, after connect | Factory user-set load; PTP enable and lock wait when `ptp.enabled` | Factory preparation; `.pvcfg` restore |
+| `configure_stream` | Stream open | `network.receiver_tuning` writes | Not set |
+| `configure` | Init, after stream open | Apply plan; require `GevGVSPExtendedIDMode` On and the required `PixelFormat` and `SensorDigitizationBits`; Counter0 binding | Acquisition settings; geometry; wavelengths; `Counter1_EventSource` binding |
+| `metadata` | Init, once | Device report, `profile`, `legacy_output_options`, `trigger_counter` | Device metadata, `profile`, `timing`, `legacy_output_options`, `factory_preparation` |
+| `before_start` | Run | Counter0 reset and baseline (`trigger_counter`) | Shutter open, or closed for a dark reference (`shutter_preparation`); missed-trigger baseline (`missed_triggers`) |
+| `sample` | Health samples | Telemetry, PTP state, Counter0 checks; `triggered_frames` when every reading is valid | Temperatures, missed-trigger delta |
+
+### Profile options
+
+| Option | Engine default | Go-X | FX10 |
+|---|---|---|---|
+| `recording.directory` | none | `<output>/<id>` | `<output>` as passed by the caller |
+| `recording.segment_bytes` | 2048 MiB | `output.segment_size_mb` MiB | `recording.rotation.max_mb` MiB; 0 = unlimited |
+| `recording.segment_records` | 0 (no limit) | 0 | `recording.rotation.max_lines` |
+| `recording.flush_bytes` | 64 MiB | `output.flush_interval_mb` MiB | `recording.flush_interval_mb` MiB |
+| `sdk_buffers` | 16 | `network.buffer_count`, or automatic from the rate | `network.buffer_count`, or 16 |
+| `queue_frames` | 0 (derived) | `output.queue_max_frames`, or automatic from the rate | 0 |
+| `max_buffer_memory_mb` | 512 | 512 | `network.max_buffer_memory_mb` |
+| `retrieve_timeout_ms` | 1000 | 1000 | `network.retrieve_timeout_ms` |
+| `stall_budget_s` | 2 | 2 | `network.stall_budget_s` |
+| `expected_rate_hz` | 1 | `acquisition.frame_rate_hz`, or 1 | `acquisition.frame_rate_hz` |
+| `max_frames`, `max_duration_s` | 0 (unlimited) | `output.*` | `recording.*` |
+| `telemetry_interval_s` | 5 | 5 | 60 |
+| `statistics_interval_s` | 2.5 | `logging.stats_interval_s` | `logging.stats_interval_s` |
+| `extended_block_ids` (fallback) | false | true | false |
+| `local_ip` | empty (SDK chooses) | `network.local_ip` | empty |
+| `expect_data` | true | false only for an external trigger without SensorSync | same rule |
+| `pulse_hz` | 0 | `frame_rate_hz` for an external trigger with SensorSync, else 0 | same rule |
+
+## Buffers, queue and workers
+
+`socket_rx_buffer_mb` MiB is requested with `SetUserModeSocketRxBufferSize` before
+`PvStreamGEV::Open`. `INVALID_PARAMETER` means the SDK capped the request at the host
+`net.core.rmem_max`, as documented in the SDK's `PvStreamGEV.h`; the engine then logs a warning,
+records `/proc/sys/net/core/rmem_max` and continues. After `Open` the size is read back; zero, a
+value below an uncapped request, or an error other than `NOT_SUPPORTED` fails Init. The readback
+may include kernel bookkeeping and is not a payload capacity; the engine never changes host
+settings.
+
+| Quantity | Rule |
+|---|---|
+| Slots | `floor(max_buffer_memory_mb × 2^20 / PayloadSize)`; fewer than 8 fails Init. |
+| SDK buffers | `min(max(4, sdk_buffers), GetQueuedBufferMaximum() if nonzero, slots − 4)`, each `PvBuffer::Alloc(PayloadSize)`; fewer than 4 fails Init. |
+| Recording queue | `min(wanted, slots − SDK buffers − 2)`; `wanted` is `queue_frames`, or `max(2, ceil(expected_rate_hz × stall_budget_s))` when it is 0; a `wanted` below 2 fails Init. |
+| Application pool | Queue capacity + 2 `RawBuffer` slots, each reserving `PayloadSize` bytes. |
+
+The budget covers payload allocations only; SDK internals and JSON metadata are outside it.
+`device.json` `runtime` records the counts, `payload_buffer_bytes`, `estimated_queue_stall_seconds`
+(queue capacity / `expected_rate_hz`) and whether the SDK count or the queue was clamped. Init also
+rejects non-finite or out-of-range timing options, including `retrieve_timeout_ms` outside
+1–10 000.
+
+The receiver calls `RetrieveBuffer` with `retrieve_timeout_ms` and retries on timeout. After
+`AcquisitionStop` it drains with a 200 ms timeout and ends after 1 s without a buffer or on
+`ABORTED`; a drain longer than 5 s in total fails the session. Each retrieved buffer is classified
+in this order:
+
+| Condition | Action |
+|---|---|
+| Unsafe extent: `GetAcquiredSize()` > `PayloadSize`, or a null data pointer with nonzero size | No byte is read; event row `unsafe_buffer_rejected`; session fails. |
+| Valid frame after `max_frames` valid frames were admitted | Event row `limit_excluded_buffer`; no failure. |
+| No free pool slot, or the queue is full | Event row `queue_rejected_buffer`; session fails; admitted buffers still drain. |
+| Otherwise | Bytes copied, `PvBuffer` requeued, `RawBuffer` queued for the writer. |
+
+The writer pops until the queue is closed and empty. After its first append error it stops writing
+and counts the failed buffer and every later one as `write_unconfirmed`.
+
+`BlockIds` (`ebus_driver/include/ebus_driver/block_ids.h`) takes its mode from configuration,
+never from observed IDs. In 16-bit mode valid IDs cycle through 1–65 535, the forward distance from
+the expected ID is the gap, and a distance above 32 767 is an anomaly. In 64-bit mode an ID not
+greater than the previous one is an anomaly and the gap is the difference minus one. ID 0, and IDs
+above 65 535 in 16-bit mode, are anomalies; an anomaly does not move the baseline.
+
+## Failure policy
+
+`Fail` latches the driver failure (`IDriverApp::RequestFailure`), requests a stop and keeps the
+first message as the error; there is no retry or reconnect. `Stop` ends the session without
+failure. In PhenomateDrivers one failed driver stops the rig (`common/src/session_runner.cpp`).
+
+| Condition | Recorded as | Result |
 |---|---|---|
-| 0 | 4 bytes | EBFR |
-| 4 | u32 | prefix_size=48 |
-| 8 | u32 | metadata_size，最多 1 MiB |
-| 12 | u32 | flags=0 |
-| 16 | u64 | payload_size |
-| 24 | u64 | sequence，每相机跨分段连续，从 0 开始 |
-| 32 | u32 | metadata CRC32C |
-| 36 | u32 | payload CRC32C |
-| 40 | u32 | 前 40 字节 CRC32C |
-| 44 | u32 | reserved=0 |
+| SDK operation error on a buffer | Record, `operation_ok: false` | Fails |
+| Block-ID gap | Record, `gap_before` > 0 (the frame itself may be valid) | Fails |
+| Block-ID anomaly | Record, `block_id_anomaly: true` | Fails |
+| Image payload incomplete or its extent unproven | Record, `valid_frame: false` | Fails |
+| Non-image payload | Record, `image: null`; counter `non_image_payloads` | No failure by itself |
+| Unsafe extent; pool or queue exhausted | Event row (see above) | Fails |
+| `QueueBuffer` or `RetrieveBuffer` error (other than timeout, or `ABORTED` after stop) | Log | Fails |
+| `BlocksDropped` stream counter increases | Log | Fails |
+| Control link disconnected | Log | Fails |
+| Profile health sample reports a failure | `device_health.failure` | Fails |
+| SensorSync error, log idle > 15 s, participants not armed within 30 s | Log | Fails |
+| Shared SensorSync session ended | Reason | Stops |
+| `max_duration_s` (from just before `AcquisitionStart`) or `max_frames` reached | Reason | Stops |
+| RAW append error | `write_unconfirmed` for it and every later buffer | Fails |
+| Event write error | Log | Fails |
+| Receive drain > 5 s; `AcquisitionStop` failed or link down at stop | Counter, log | Fails |
+| Completed SDK buffer found at teardown | Event `undrained_sdk_buffer` | Fails |
+| No valid frame although `expect_data` | Log | Fails |
+| Trigger counter differs from valid frames + gaps (bounded external trigger) | `trigger_counter_accounting` | Fails |
+| SensorSync edge accounting incomplete | `sensor_sync_quality` | Fails |
+| Records written ≠ buffers admitted, or `write_unconfirmed` > 0 | Log | Fails |
+| `StreamDisable`, `AbortQueuedBuffers`, stream close or `Disconnect` error | Log | Fails |
 
-JSON 含 block_id、device_timestamp_raw、host_realtime_ns、host_monotonic_ns、
-acquired_size、payload_type、operation_result/name/ok、chunk_count、chunks、
-valid_frame、block_id_anomaly、gap_before 和 image。
-chunks 是 SDK 在 requeue 前解析出的 chunk 列表，每项为 `{"id": <ChunkID>, "data": [<字节>...]}`，
-字节不作解释，同样的字节仍保留在 payload 尾部；范围不安全、SDK 报告操作错误或无法取出某个
-chunk 时为 null。
-此前写入的记录没有该键，读取端应视为缺失而不是错误。
-image 为 null 或包含 PixelFormat 数值、宽高、ROI offset、padding、
-image_size/effective_image_size、相对整个 payload 的 payload_offset 及缺行/overrun 标志。
-payload_offset 无法证明时为 null，读取端不得猜测。
+`MicrosSinceLastData()` returns the time since the last valid buffer; before the first one it
+counts from `AcquisitionStart`, or from the SensorSync session start. It returns no value when
+`expect_data` is false, before acquisition, or while a registered camera waits for the SensorSync
+session. The rig's no-data guard and the tools' 10 s starvation check use it.
 
-## 完成与恢复边界
+## Statistics and counters
 
-写入计数表示 write 完整返回，不表示逐记录已持久化。按配置周期 fdatasync，
-分段及最终关闭也执行同步；目录创建和元数据发布采取不覆盖已有文件的方式。
-磁盘错误保持失败；写入半条记录尽力截回完整前缀，截断失败仍可由长度及 CRC 定位损坏尾部。
-文件系统/设备对 fsync 的实际保证不由静态代码证明。
+Every `statistics_interval_s` (0 disables) the engine logs, under module `GoX` or `FX10`:
 
-实时读取允许最后文件暂时存在半条记录；完成会话的读取必须验证完整记录、
-序号、CRC 和 session_end 的计数/complete。无最终事件或损坏尾部不得当作完整成功会话；
-恢复只能取明确完整的前缀。相机会话结果还须结合主程序 drivers.json 或工具最终结果，
-因为最后事件写成后仍可能发生关闭/持久化失败。目录的存在或一张可预览图像不证明采集成功。
+```text
+[Statistics] [<id>] up=<s>s rate=<r> Hz  fps=<f>  frames=<n> buffers=<m> lost=<g> queue=<q>/<cap>
+```
 
-## 本次验证状态与后续检查
+| Field | Meaning |
+|---|---|
+| `up` | Whole seconds since the `AcquisitionStart` command |
+| `rate` | Valid frames observed per second over the interval |
+| `fps` | Valid frames written per second over the interval; read by `app/services/driver_stats.py` (contract in `tools/check_contracts.py`) |
+| `frames`, `buffers` | Valid frames written; records written |
+| `lost` | Sum of block-ID gaps |
+| `queue` | Current queue depth / capacity |
 
-本次仅修改源码并做文本级静态核对，未执行 Git、依赖安装、CMake、C++ 编译/测试、
-Python 项目脚本或硬件操作。增加了 RAW 布局/轮转/CRC/失败锁存、BlockID
-及 Python 当前 RAW 格式、旧格式拒绝、DN 光谱和损坏输入的测试源码，尚未运行。
+`capture_final.counters` and `FinalStatistics().counters` hold:
 
-需要在另行允许的环境执行构建及测试，再用实际设备验证：两种相机快照及长时吞吐；
-双相机共同 Arm/任一路失败；SIGINT、AcquisitionStop 失败与断链；满队列和磁盘错误；
-packed 像素、padding、Chunk、错误 buffer、16/64 位 ID；白/暗独立阶段匹配；
-GUI 的 `ebus-raw` 解码、旧格式拒绝与 FX10 DN 展示；GOX 的 transport 回读
-ChunkModeActive 为关闭、每帧 chunk_count 为 0，以及 GUI 预览正常。
-静态核对不能证明硬件行为或无丢帧。
+| Counter | Meaning |
+|---|---|
+| `buffers_retrieved`, `buffers_admitted` | Buffers returned by `RetrieveBuffer`; buffers queued for the writer |
+| `valid_frames_observed`, `valid_frames_admitted` | Valid frames retrieved (including limit exclusions); valid frames queued |
+| `operation_errors`, `non_image_payloads`, `invalid_images` | Buffers with an SDK operation error, a non-image payload, an incomplete image |
+| `frames_lost_gap`, `block_id_gap_events`, `block_id_anomalies` | Missing block IDs; gap occurrences; anomalous IDs |
+| `recording_queue_drops`, `unsafe_buffers`, `frames_limit_excluded` | Rejected or excluded buffers (event rows) |
+| `write_unconfirmed`, `requeue_errors` | Buffers not confirmed written; failed requeues |
+| `retrieve_timeouts`, `aborted_buffers` | `RetrieveBuffer` timeouts; buffers with an `ABORTED` operation result |
+| `stream_blocks_dropped`, `drain_budget_exhausted` | Last SDK `BlocksDropped` value; drains that exceeded 5 s |
+
+`FinalStatistics()` returns `schema_version` 1, `driver` `unified-ebus`, `kind`, `camera_id`,
+`initialized`, `acquisition_started`, `shutdown_complete`, `clean`, `failed`, `reason`, `error`,
+`counters`, `frames_written`, `records_written`, `trigger_counter`, `sensor_sync` and `recording`
+(the recorder summary). PhenomateDrivers stores it in `drivers.json`; the tools derive their exit
+status from it.
+
+## Output files
+
+Each camera writes one directory, which must not exist before Init.
+
+| File | Content |
+|---|---|
+| `device.json` | Device metadata, 2-space indented JSON, written once during Init |
+| `events.jsonl` | One compact JSON object per line; `fdatasync` after every line |
+| `seg_NNNNN.raw` | RAW segments, `seg_%05llu.raw`, numbered from 1 |
+| `device.json.part` | Present only if publication of `device.json` was interrupted |
+
+## RAW binary layout
+
+The layout is defined in `ebus_driver/src/raw_format.cpp` and `ebus_driver/src/raw_recorder.cpp`.
+All integers are little-endian and serialized byte by byte; no C++ structure is written and there
+is no alignment padding. A segment is a file header followed by zero or more contiguous records; a
+record is never split across segments.
+
+CRC-32C (Castagnoli) uses the reflected polynomial `0x82F63B78`, initial value `0xFFFFFFFF` and a
+final XOR with `0xFFFFFFFF`; `Crc32c("123456789")` is `0xE3069283`. SSE4.2 instructions are used
+when the CPU supports them.
+
+File header (`kFileHeaderSize` = 64, `MakeFileHeader`; Python `struct` format `<8sHHIQQ28sI`):
+
+| Offset | Size | Type | Field | Value |
+|---|---|---|---|---|
+| 0 | 8 | bytes | magic | `EBUSRAW\0` |
+| 8 | 2 | u16 | version | 1 (`kVersion`) |
+| 10 | 2 | u16 | header_size | 64 |
+| 12 | 4 | u32 | flags | 0 |
+| 16 | 8 | u64 | created_realtime_ns | `CLOCK_REALTIME` at segment creation |
+| 24 | 8 | u64 | segment_index | 1-based; equals the file-name number |
+| 32 | 28 | bytes | reserved | 0 |
+| 60 | 4 | u32 | header_crc | CRC-32C of bytes 0–59 |
+
+Record = 48-byte prefix + `metadata_size` bytes of UTF-8 JSON + `payload_size` bytes of payload.
+Record prefix (`kRecordHeaderSize` = 48, `MakeRecordHeader`; Python format `<4sIIIQQIIII`):
+
+| Offset | Size | Type | Field | Value |
+|---|---|---|---|---|
+| 0 | 4 | bytes | magic | `EBFR` |
+| 4 | 4 | u32 | prefix_size | 48 |
+| 8 | 4 | u32 | metadata_size | ≥ 2 (a JSON object); at most 1 MiB (`kMaxMetadataSize` = 1 048 576) |
+| 12 | 4 | u32 | flags | 0 |
+| 16 | 8 | u64 | payload_size | Equals metadata `acquired_size` |
+| 24 | 8 | u64 | sequence | 0-based, contiguous across the segments of one camera |
+| 32 | 4 | u32 | metadata_crc | CRC-32C of the metadata bytes |
+| 36 | 4 | u32 | payload_crc | CRC-32C of the payload bytes |
+| 40 | 4 | u32 | prefix_crc | CRC-32C of prefix bytes 0–39 |
+| 44 | 4 | u32 | reserved | 0 |
+
+Before an append, the recorder opens a new segment if the current one already holds a record and
+either `segment_records` (when nonzero) is reached or the record would extend the file beyond
+`segment_bytes`. The limit counts the file header and complete records; a record larger than the
+limit occupies a segment alone, so such a segment exceeds `segment_bytes`. Metadata larger than
+1 MiB fails the append.
+
+### Record metadata
+
+Records written to segments have `record_kind` `buffer`. The metadata is serialized compactly;
+readers must not depend on key order.
+
+| Key | Type | Content |
+|---|---|---|
+| `record_kind` | string | `buffer` |
+| `block_id` | u64 | `PvBuffer::GetBlockID()` |
+| `device_timestamp_raw` | u64 | `PvBuffer::GetTimestamp()`, unscaled; unit and epoch unverified |
+| `host_realtime_ns`, `host_monotonic_ns` | u64 | `CLOCK_REALTIME` and `CLOCK_MONOTONIC` sampled right after `RetrieveBuffer`; reception time, not exposure time |
+| `acquired_size` | u64 | `GetAcquiredSize()`; equals the prefix `payload_size` |
+| `payload_type` | u32 | `PvPayloadType` value |
+| `operation_result`, `operation_ok`, `operation_name` | u32, bool, string | `PvResult` code of the buffer operation |
+| `chunk_count` | u32 | `GetChunkCount()` |
+| `chunks` | array or null | `[{"id": <chunk ID>, "data": [<byte>, ...]}]` read before requeue; the same bytes remain in the payload tail; null when the extent is unsafe, the operation failed or a listed chunk cannot be read |
+| `valid_frame` | bool | See below |
+| `block_id_anomaly` | bool | Anomaly from `BlockIds` |
+| `gap_before` | u64 | Block IDs missing before this buffer |
+| `image` | object or null | Null for a non-image payload or when the SDK provides no image |
+
+`image` contains `pixel_format` (PFNC code), `width`, `height`, `offset_x`, `offset_y` (ROI offsets
+in pixels, not byte offsets), `padding_x`, `padding_y`, `image_size`, `effective_image_size`,
+`payload_offset`, `partial_line_missing`, `full_line_missing` and `data_overrun`. `payload_offset`
+is the byte offset of the SDK image pointer within the payload; it is null unless the image lies
+within the acquired bytes, and readers must not guess it. `valid_frame` is true only when the
+operation succeeded, the extent is safe, the block ID is not anomalous, and the image has a known
+`payload_offset`, nonzero dimensions and sizes, `effective_image_size` ≤ `image_size` and no
+missing-line or overrun flag.
+
+## Device metadata (`device.json`)
+
+`device.json` is written once, during Init after configuration and allocation, and never rewritten.
+The profile `metadata` hook supplies the device-specific content (see the device documents); the
+engine then sets the keys below, replacing any profile value.
+
+| Key | Content |
+|---|---|
+| `format` | `ebus-device-eBUS_SDK_v<version>` |
+| `recording_format` | `ebus-raw-eBUS_SDK_v<version>` |
+| `kind`, `id` | `gox` or `fx10`; the camera id (`fx10` for the FX10) |
+| `sdk` | `name` (`Pleora eBUS`), `header_version`, `header_version_source`, `runtime_version` (always null), `runtime_version_status` |
+| `runtime` | Socket buffer request, SDK result, `rmem_max` snapshot and readback; stream local IP and port; `packet_size` (`GevSCPSPacketSize` readback after configuration); `payload_capacity_bytes`; buffer counts, clamps and budget scope; `queue_full_policy`; `block_id_mode`, `block_id_mode_source`, `extended_block_ids_readback` |
+| `recording_contract` | Text statements of payload, chunk, timestamp, processing and limit semantics; `device_timestamp_unit` and `device_timestamp_epoch` are `unverified` |
+| `sensor_sync` | `enabled`, `channel`, `pulse_rate_hz`, `observations_file`, `association_verified` (always false) |
+
+`<version>` is `NVERSION_STRING` from the SDK's `PvVersion.h` at build time (`SdkHeaderVersion()`,
+e.g. `6.5.1.6797`) and equals `sdk.header_version`. It identifies the SDK headers, not the runtime
+library or the PhenomateDrivers version; the runtime SDK version is not queried. The binary layout
+version (file header `version`) is independent of it.
+
+## Events (`events.jsonl`)
+
+Events emitted by the engine carry `camera_id`, `host_realtime_ns` and `host_monotonic_ns`.
+`session_start`, `segment_closed` and `session_end` are emitted by the recorder and carry no
+`camera_id`; `segment_closed` carries no time. Events raised before the recorder opens appear only
+in the log.
+
+| Event | Emitted | Fields |
+|---|---|---|
+| `session_start` | Recorder open | `format` |
+| `prepared` | End of Init | `acquisition_started: false` |
+| `initialization_interrupted` | Stop during Init, after the recorder opened | `detail` |
+| `profile_start` | Run, after `before_start` | `actions` (profile results) |
+| `acquisition_started` | After `AcquisitionStart` was acknowledged | `command_begin_monotonic_ns`, `command_ack_monotonic_ns` |
+| `device_health` | Start, every `telemetry_interval_s`, stop | `phase` (`start`, `capture`, `stop`), `values`, `failure` (empty when healthy) |
+| (no `event` key) | Receive worker | Full record metadata with `record_kind` `unsafe_buffer_rejected` (plus `payload_capacity_bytes`, `reason`), `limit_excluded_buffer` or `queue_rejected_buffer` |
+| `segment_closed` | Rotation and close | `file`, `bytes` (including the header), `records`, `closed_clean` |
+| `trigger_counter_accounting` | Stop health sample | `accounting`: `status` (`unavailable`, `counts_match`, `count_mismatch`, `count_overflow`), `triggered_frames`, `source_bounded`, `valid_observed_frames`, `gap_missing_frames`, `emitted_frames`, `counts_match`, `association_verified` |
+| `stream_final_statistics` | Shutdown | `values`: every `PvStream` parameter as a string, null if unreadable |
+| `sensor_sync_quality` | Shutdown, when registered with SensorSync | `quality` (see below) |
+| `undrained_sdk_buffer` | Stream teardown | `block_id`, `operation_name` |
+| `capture_final` | Shutdown, before recorder close | `counters`, `reason`, `acquisition_started`, `failed` |
+| `session_end` | Recorder close | Recorder summary, `complete`, `reason`, `host_realtime_ns` |
+
+Trigger accounting is bounded when the SensorSync session started and is healthy and `pulse_hz` > 0;
+then the profile's `triggered_frames` must equal valid frames observed plus block-ID gaps. FX10
+samples never provide `triggered_frames`, so its status is `unavailable`. `sensor_sync_quality`
+holds the result of `common::InspectSensorSync` plus frame counts; for freerun cameras
+(`pulse_hz` = 0) it checks log integrity only, with `status` `observation_window_only` and
+`counts_reconciled` null, because the capture and log windows differ. `status` `not_started` means
+the session never started, which fails a camera that acquired.
+
+The recorder summary in `session_end` contains `format`, `directory`, `records_written`,
+`frames_written` and `valid_frames_written` (equal values), `payload_bytes_written`,
+`segments_created`, `failed` and `count_semantics`.
+
+## Completion and recovery
+
+| Mechanism | Behavior |
+|---|---|
+| Directory and files | `Open` refuses an existing camera directory; segments and `events.jsonl` use `O_EXCL`; `device.json` is written as `device.json.part`, synchronized, linked to its final name and unlinked. |
+| Segment creation | Header written, `fdatasync`, directory `fsync`. The parent directory is synchronized once after the first segment. |
+| Records | `fdatasync` whenever `flush_bytes` of unsynchronized data accumulate (0 disables), and when a segment closes. A written count means `write()` returned for the whole record, not that it is durable. |
+| Append error | The segment is truncated to the last complete record; if truncation fails, a torn tail remains, delimited by the prefix lengths and CRCs. The recorder latches the failure and rejects later appends. |
+| Event write error | The partial line is truncated and synchronized; if that fails, the event stream is closed and no further event, including `session_end`, is written. |
+| Close | Synchronize and close the last segment (`segment_closed`), `fsync` the directory, write `session_end`, close `events.jsonl`. |
+
+`session_end.complete` is true only when Init and `AcquisitionStart` succeeded, the driver has not
+failed and the recorder has not latched a failure. All segment and directory synchronization
+precedes `session_end`; closing `events.jsonl` follows it. A close error after a complete
+`session_end` is therefore visible only in the driver result (`drivers.json`, tool exit status).
+
+After a crash or power loss a directory can hold `device.json.part`, an `events.jsonl` without
+`session_end`, and a last segment that lost data written after its latest `fdatasync` or ends in a
+torn record. Only the CRC-valid record prefix is recoverable. This repository provides no recovery
+or export tool; offline conversion belongs to PhenomateDecoders.
+
+## Tools support
+
+`ebus_driver/include/ebus_driver/tool_support.h` provides the shared orchestration of
+`jai_snapshot` and `fx10_snapshot` (`RunSnapshot`, `RunStream`); `fx10_reference` uses its signal
+flag, `TimestampedPath` and `Count` with its own `EbusCameraDriver` per phase. Tool options and
+modes are described in the device documents.
+
+| Item | Behavior |
+|---|---|
+| Signals | SIGINT and SIGTERM set `ebus_driver::tool::signal`. |
+| Stop predicate | Signal, or no valid data for 10 s (`MicrosSinceLastData()` ≥ 10 000 000 µs). |
+| Sequence | `Init`, `Run` if `Init` succeeded, `Shutdown`, then `FinalStatistics()`. |
+| `TimestampedPath` | `<parent>/<stem>_<YYYYmmddTHHMMSSZ>_<nanoseconds within the second>`, absolute. |
+| Stream mode | No frame target; a signal after a successful `Init` ends the stream normally. |
+
+The last stdout line is `SNAPSHOT: OK <camera directory>` (exit 0) or
+`SNAPSHOT: FAIL <code> <reason>`:
+
+| Code | Condition |
+|---|---|
+| 2 | Invalid arguments or configuration (raised by the tool itself) |
+| 3 | `Init` failed |
+| 5 | Starvation, driver failure, exception, or fewer valid frames written than requested |
+| 7 | No valid frame written |
+| 130 | Signal during a snapshot, or during a stream before `Init` succeeded |
+
+For the focus-assist streams, `jai_snapshot --stream-s` writes one record per segment
+(`segment_records` = 1) and `fx10_snapshot --stream-s` rotates by line count. The GUI keeps the
+three newest segments while streaming and deletes all segments when the stream ends
+(`app/services/focus_stream.py`), so a stream directory is never a complete session.
+
+## Compatibility
+
+The GUI reader (`app/decoder/ebus/recording.py`, `pixels.py`, `pfnc.py`) applies these rules.
+PhenomateDecoders defines its own acceptance rules.
+
+| Check | Accepted |
+|---|---|
+| `device.json` | `sdk.header_version` of four dot-separated integers; `format` = `ebus-device-eBUS_SDK_v` + that version; `recording_format` = `ebus-raw-eBUS_SDK_v` + that version; `kind` `gox` or `fx10`; string `id`. Unsuffixed or `-v1` identities and the former `jai-raw-seg` and FX10 ENVI recordings are rejected. |
+| File header | Magic, `version` 1, `header_size` 64, `flags` 0, zero reserved bytes, `segment_index` ≥ 1, header CRC. |
+| Record prefix | Magic, `prefix_size` 48, `flags` 0, `reserved` 0, `metadata_size` > 0, prefix CRC, metadata CRC. |
+| Metadata | `record_kind` `buffer`; integer `block_id`, `device_timestamp_raw`, `host_realtime_ns`, `acquired_size`; `acquired_size` = `payload_size`; `image` key present; `valid_frame` consistent with `operation_ok`, `block_id_anomaly` and the image flags. Other keys, including `chunks`, are ignored. |
+| Payload CRC | Checked only when `read_payload(..., verify_crc=True)` is requested; previews do not request it by default. |
+| Finalized session | Every `events.jsonl` line newline-terminated; last `session_end` with `complete: true` and the device's `recording_format`; segments numbered 1..n without gaps; sequence contiguous from 0; `records_written`, `valid_frames_written`, `payload_bytes_written` and `segments_created` equal to the scanned values; a torn tail is rejected. |
+| Live reads | `newest_valid_record` and `latest_records` scan the newest two or three segments, skip segments without a complete record and ignore a torn trailing record. |
+| Pixel decoding | Valid frames with a known `payload_offset`; PFNC Mono8, Mono10, Mono12, Mono10Packed, Mono12Packed, BayerRG8 and BayerRG12Packed; `effective_image_size` = packed row bytes × `height`, `image_size` = (row bytes + `padding_x`) × `height` + `padding_y`, and the image slice within the payload. Other formats are recorded but not decoded. |
+
+Adding metadata keys keeps these readers compatible; removing or retyping a checked key, or changing
+the binary layout without a new header `version`, does not.
+
+## Limitations
+
+Not verified on hardware, or not established by the source code:
+
+- The SDK semantics of `GetImageSize`, `GetEffectiveImageSize`, `GetPaddingX` and `GetPaddingY`
+  that the GUI layout check assumes, and chunk extraction (Go-X chunk mode stays off).
+- The unit and epoch of `device_timestamp_raw`; any association of host times with exposure.
+- The `NVERSION_STRING` of the installed 6.5.1 headers; the reader requires four numeric fields.
+- Socket buffer capping on the target host; the handling follows the SDK header documentation.
+- Sustained throughput, queue headroom against disk stalls, and the 1 s and 5 s drain bounds.
+- Durability of `fdatasync` and `fsync` on the target file system, and recovery after a real crash.

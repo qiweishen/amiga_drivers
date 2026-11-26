@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run an X11 program in the running amiga-drivers-dev container on the display
+# Run an X11 program in the running phenomate-drivers-dev container on the display
 # of the calling shell: an `ssh -Y` session to the headless edge computer
 # (DISPLAY=localhost:10.0 or similar; windows open on the SSH client), or a
 # local desktop session. Run on the Docker host, again after every SSH login.
@@ -8,7 +8,7 @@
 #   .devcontainer/x11-exec.sh bash -c '"$EBUS_SDK_ROOT"/bin/eBUSPlayer'
 set -euo pipefail
 
-container=amiga-drivers-dev
+container=phenomate-drivers-dev
 xauth_in_container=/tmp/.x11.xauth  # XAUTHORITY in docker-compose.yml
 
 if [[ -e /.dockerenv ]]; then

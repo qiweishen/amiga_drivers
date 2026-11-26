@@ -18,7 +18,7 @@ add_executable(common_tests
         test_util.cpp
 )
 
-target_link_libraries(common_tests PRIVATE amiga_common)
+target_link_libraries(common_tests PRIVATE phenomate_common)
 
 # SYSTEM: keep warnings from firing inside the vendored doctest header
 target_include_directories(common_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rd_party)

@@ -387,9 +387,9 @@ class RawCapturePathTests(unittest.IsolatedAsyncioTestCase):
             request = gox_tools.SnapshotRequest("192.0.2.10", 10.0, 1.0)
             process = SimpleNamespace(returncode=0)
             with ExitStack() as stack:
-                # The container sets AMIGA_CONFIG_ROOT=/workspace; keep the boundary check
+                # The container sets PHENOMATE_CONFIG_ROOT=/workspace; keep the boundary check
                 # active, rooted at this test's directory instead of the environment's.
-                stack.enter_context(patch.dict(os.environ, {"AMIGA_CONFIG_ROOT": temporary}))
+                stack.enter_context(patch.dict(os.environ, {"PHENOMATE_CONFIG_ROOT": temporary}))
                 spawn = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "spawn",
                                                          new_callable=AsyncMock, return_value=process))
                 communicate = stack.enter_context(patch.object(gox_tools.snapshot_tool.tool_jobs, "communicate",

@@ -16,7 +16,7 @@ namespace common {
             bool quiet = false; // Suppress below-warn messages from the console
         };
 
-        void Init(const Config &config, const std::string &logger_name = "AmigaDriver");
+        void Init(const Config &config, const std::string &logger_name = "PhenomateDrivers");
 
         // Console (stderr) messages dropped because the pipe reader did not keep up.
         // Only ever non-zero when stderr is not a terminal (nonblocking_stderr_sink.h);

@@ -21,7 +21,7 @@
 #include <thread>
 
 #include "logger.h"
-#include "ebus/sdk_error.h" // common/ (amiga_ebus)
+#include "ebus/sdk_error.h" // common/ (phenomate_ebus)
 #include <PvVersion.h> // version macro verified in the bundled eBUS 6.5.1 SDK
 
 

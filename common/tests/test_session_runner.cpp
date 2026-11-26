@@ -26,7 +26,7 @@ namespace {
             static std::atomic<unsigned> next{0};
             const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
             path = std::filesystem::temp_directory_path() /
-                ("amiga_session_runner_" + std::to_string(stamp) + "_" + std::to_string(next.fetch_add(1)));
+                ("phenomate_session_runner_" + std::to_string(stamp) + "_" + std::to_string(next.fetch_add(1)));
             if (!std::filesystem::create_directory(path)) throw std::runtime_error("test directory already exists");
         }
         ~RunDirectory() {
@@ -40,13 +40,13 @@ namespace {
     struct ScopedStatusFile {
         std::optional<std::string> previous;
         explicit ScopedStatusFile(const std::filesystem::path &path) {
-            if (const char *value = std::getenv("AMIGA_STATUS_FILE")) previous = value;
-            if (::setenv("AMIGA_STATUS_FILE", path.c_str(), 1) != 0)
+            if (const char *value = std::getenv("PHENOMATE_STATUS_FILE")) previous = value;
+            if (::setenv("PHENOMATE_STATUS_FILE", path.c_str(), 1) != 0)
                 throw std::runtime_error("cannot isolate test status path");
         }
         ~ScopedStatusFile() {
-            if (previous) ::setenv("AMIGA_STATUS_FILE", previous->c_str(), 1);
-            else ::unsetenv("AMIGA_STATUS_FILE");
+            if (previous) ::setenv("PHENOMATE_STATUS_FILE", previous->c_str(), 1);
+            else ::unsetenv("PHENOMATE_STATUS_FILE");
         }
     };
 

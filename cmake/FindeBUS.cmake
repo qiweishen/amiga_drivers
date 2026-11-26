@@ -130,7 +130,7 @@ if(NOT TARGET eBUS::eBUS)
     )
     # RPATH to the SDK + GenICam lib dirs for every target that links this,
     # transitively (ebus_discover, ebus_set_ip, jai_snapshot, fx10_snapshot,
-    # AmigaDrivers): the binaries run without sourcing set_puregev_env.sh.
+    # PhenomateDrivers): the binaries run without sourcing set_puregev_env.sh.
     set_property(TARGET eBUS::eBUS APPEND PROPERTY INTERFACE_LINK_OPTIONS
         "-Wl,-rpath,${EBUS_LIB_DIR}")
     if(NOT EBUS_GENICAM_LIB_DIR STREQUAL "")

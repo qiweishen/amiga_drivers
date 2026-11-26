@@ -16,7 +16,7 @@ def acquire() -> None:
     if _file is not None:
         return
     # Every GUI server in the container must share this stable lock inode.
-    path = Path(os.environ.get("AMIGA_CONTROL_LOCK", str(RUNTIME_DIR / "controller.lock")))
+    path = Path(os.environ.get("PHENOMATE_CONTROL_LOCK", str(RUNTIME_DIR / "controller.lock")))
     handle = path.open("a+")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)

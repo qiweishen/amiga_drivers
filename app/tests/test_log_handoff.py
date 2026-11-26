@@ -12,7 +12,7 @@ class LogHandoffTests(unittest.TestCase):
         self.buffer.subscribe(lambda line: self.visible.append(line.raw))
 
     def test_startup_pipe_copy_is_not_replayed_to_subscribers(self):
-        startup = parse_line("[10:28:43] [info] [MainApp]: Starting Amiga Drivers")
+        startup = parse_line("[10:28:43] [info] [MainApp]: Starting Phenomate Drivers")
         self.buffer.append_stderr(startup)
         self.buffer.append_session(startup)
         self.assertEqual(self.visible, [startup.raw])
@@ -20,7 +20,7 @@ class LogHandoffTests(unittest.TestCase):
 
     def test_stderr_only_diagnostic_survives_file_handoff(self):
         diagnostic = parse_line("loader diagnostic", fallback_module="stderr")
-        startup = parse_line("[10:28:43] [info] [MainApp]: Starting Amiga Drivers")
+        startup = parse_line("[10:28:43] [info] [MainApp]: Starting Phenomate Drivers")
         self.buffer.append_stderr(diagnostic)
         self.buffer.append_stderr(startup)
         self.buffer.append_session(startup)

@@ -15,8 +15,8 @@
 #include "app_config.h"
 #include "apply_plan.h"
 #include "device_json.h"
-#include "ebus/discovery.h" // common/ (amiga_ebus)
-#include "ebus/sdk_error.h" // common/ (amiga_ebus)
+#include "ebus/discovery.h" // common/ (phenomate_ebus)
+#include "ebus/sdk_error.h" // common/ (phenomate_ebus)
 
 namespace gox::ebus {
     // The SDK plumbing shared with fx10 lives in common/ (namespace

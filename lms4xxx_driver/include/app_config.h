@@ -95,7 +95,7 @@ namespace lms4xxx {
         NetworkConfig network;
     };
 
-    // Complete CoLa B telegram recorder (docs/FORMAT_RAW.md)
+    // Complete CoLa B telegram recorder (docs/DEVICE_CONFIG.md, "Recording format")
     struct OutputConfig {
         std::size_t queue_max_frames = 512; // receive thread -> write thread
         std::size_t max_file_bytes = 1ULL * 1024 * 1024 * 1024; // raw bytes per split (0 = no split)

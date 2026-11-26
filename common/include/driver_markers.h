@@ -5,7 +5,7 @@
 
 namespace common::Markers {
     // Module tokens: the "[Module]:" tag of every log line
-    // Diagnostics/statistics display only; lifecycle comes from amiga-run-v1.
+    // Diagnostics/statistics display only; lifecycle comes from phenomate-run-v1.
     inline constexpr std::string_view kModuleMain = "MainApp";
     inline constexpr std::string_view kModuleAsterx = "AsteRxApp";
     inline constexpr std::string_view kModuleFx10 = "FX10App";
@@ -32,7 +32,7 @@ namespace common::Markers {
     inline constexpr std::string_view kLmsShutdownInstTpl = "LiDAR instance [{}] driver shutdown completely";
 
     // Rig-level diagnostics. Only a finalized manifest establishes the result.
-    inline constexpr std::string_view kStartingDrivers = "Starting Amiga Drivers";
+    inline constexpr std::string_view kStartingDrivers = "Starting Phenomate Drivers";
     inline constexpr std::string_view kReceivedSignalTpl = "Received signal {}, shutting down all drivers...";
     inline constexpr std::string_view kAllDriversShutDown = "All drivers shut down";
 

@@ -1,6 +1,6 @@
 """Bounded session-log tail for diagnostics and write-rate statistics.
 
-Lifecycle state comes exclusively from the amiga-run-v1 manifest.
+Lifecycle state comes exclusively from the phenomate-run-v1 manifest.
 """
 
 from __future__ import annotations

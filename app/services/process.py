@@ -18,10 +18,10 @@ from .asterx_live import LIVE as ASTERX_LIVE
 from .driver_stats import STATS
 from .log_buffer import BUFFER, parse_line
 from .session_tailer import TAILER
-from ..constants import BIN_AMIGA, MAIN_CONFIG
+from ..constants import BIN_PHENOMATE, MAIN_CONFIG
 from ..state import STATE, ProcState, RecordingSnapshot
 
-PROCESS_NAME = "AmigaDrivers"
+PROCESS_NAME = BIN_PHENOMATE.name
 _ACTIVE = (ProcState.STARTING, ProcState.RUNNING, ProcState.STOPPING)
 
 
@@ -119,7 +119,7 @@ class AcquisitionController:
     async def preflight(self) -> list[str]:
         errors: list[str] = []
         try:
-            if not os.access(BIN_AMIGA, os.X_OK):
+            if not os.access(BIN_PHENOMATE, os.X_OK):
                 errors.append("Acquisition program not found; build it first")
             if await runtime.pgrep(PROCESS_NAME):
                 errors.append("Another acquisition process is already running")
@@ -166,7 +166,7 @@ class AcquisitionController:
             self._update(enables_at_start=dict(settings["enables"]))
             STATE.sensors = run_status.sensor_statuses(settings["enables"], config_store.lms_instance_names())
             spawning = True
-            self._proc = await runtime.spawn([str(BIN_AMIGA), str(MAIN_CONFIG)])
+            self._proc = await runtime.spawn([str(BIN_PHENOMATE), str(MAIN_CONFIG)])
             self._watcher_task = self._background(self._watch(self._proc, generation))
             # A Stop that arrived during spawn finds the child through its own worker.
             return not self._state.stop_requested

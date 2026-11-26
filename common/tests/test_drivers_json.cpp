@@ -18,7 +18,7 @@ TEST_CASE(
 
     "DriversJson: running document then atomic finalize"
 ) {
-    const auto dir = std::filesystem::temp_directory_path() / "amiga_drivers_json_test";
+    const auto dir = std::filesystem::temp_directory_path() / "phenomate_drivers_json_test";
     std::filesystem::create_directories(dir);
     const auto path = dir / "drivers.json";
     std::filesystem::remove(path);

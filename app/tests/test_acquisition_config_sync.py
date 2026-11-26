@@ -105,7 +105,7 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
         self.stack.enter_context(patch.object(config_store, "SNAPSHOT_CONFIG", self.paths["gox"][1]))
         self.stack.enter_context(patch.object(config_store, "FX10_SNAPSHOT_CONFIG", self.paths["fx10"][1]))
         self.require_owner = self.stack.enter_context(patch.object(config_store.control_owner, "require"))
-        self.stack.enter_context(patch.dict(os.environ, {"AMIGA_CONFIG_ROOT": str(self.root)}))
+        self.stack.enter_context(patch.dict(os.environ, {"PHENOMATE_CONFIG_ROOT": str(self.root)}))
 
     def write_pair(self, sensor, formal, snapshot):
         for path, text in zip(self.paths[sensor], (formal, snapshot)):
@@ -329,7 +329,7 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
     def test_publishing_backups_replaces_symlinks_without_writing_their_targets(self):
         outside = Path(self.stack.enter_context(TemporaryDirectory()))
         sentinel = outside / "unrelated.txt"
-        sentinel_bytes = b"unrelated file outside AMIGA_CONFIG_ROOT must stay intact\n"
+        sentinel_bytes = b"unrelated file outside PHENOMATE_CONFIG_ROOT must stay intact\n"
         sentinel.write_bytes(sentinel_bytes)
         for sensor in ("gox", "fx10"):
             with self.subTest(sensor=sensor):
@@ -361,7 +361,7 @@ class AcquisitionConfigSyncTests(unittest.TestCase):
 
     def test_snapshot_path_must_remain_inside_allowed_configuration_root(self):
         # The formal profiles stay allowed; only the snapshot profiles are outside.
-        with patch.dict(os.environ, {"AMIGA_CONFIG_ROOT": str(self.root / "formal")}):
+        with patch.dict(os.environ, {"PHENOMATE_CONFIG_ROOT": str(self.root / "formal")}):
             for sensor in ("gox", "fx10"):
                 with self.subTest(sensor=sensor), self.assertRaises(ValueError):
                     self.apply(sensor)

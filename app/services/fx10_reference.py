@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import atomic_json, camera_operations, config_store, fx10_exposure, reference_storage, runtime, tool_jobs
-from ..constants import BIN_FX10_REFERENCE, FX10_SNAPSHOT_CONFIG
+from ..constants import BIN_FX10_REFERENCE, BIN_PHENOMATE, FX10_SNAPSHOT_CONFIG
 from ..decoder import fx10
 from ..decoder.ebus import recording as raw_recording
 
@@ -262,7 +262,7 @@ async def _collect() -> ReferenceResult:
     progress = _Progress()
     try:
         # camera_operations already excludes this GUI's recording; this also catches one started elsewhere.
-        if await runtime.pgrep("AmigaDrivers"):
+        if await runtime.pgrep(BIN_PHENOMATE.name):
             raise RuntimeError("Stop the main recording before collecting references")
         config = config_store.checked_snapshot_path(FX10_SNAPSHOT_CONFIG)
         output_root = await asyncio.to_thread(reference_storage.tmp_root)

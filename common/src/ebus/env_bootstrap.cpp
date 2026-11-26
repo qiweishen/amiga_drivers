@@ -7,12 +7,12 @@
 #include "logger.h"
 
 // Compile-time GenICam env constants baked from the root cmake/FindeBUS.cmake
-// results (target_compile_definitions on amiga_ebus, common/CMakeLists.txt).
-#ifndef AMIGA_EBUS_GENICAM_ENV_NAME
-#define AMIGA_EBUS_GENICAM_ENV_NAME "GENICAM_ROOT_V3_4"
+// results (target_compile_definitions on phenomate_ebus, common/CMakeLists.txt).
+#ifndef PHENOMATE_EBUS_GENICAM_ENV_NAME
+#define PHENOMATE_EBUS_GENICAM_ENV_NAME "GENICAM_ROOT_V3_4"
 #endif
-#ifndef AMIGA_EBUS_GENICAM_ROOT
-#define AMIGA_EBUS_GENICAM_ROOT ""
+#ifndef PHENOMATE_EBUS_GENICAM_ROOT
+#define PHENOMATE_EBUS_GENICAM_ROOT ""
 #endif
 
 
@@ -22,8 +22,8 @@ namespace {
 
 namespace common::Ebus {
     void BootstrapEnv() {
-        constexpr const char *name = AMIGA_EBUS_GENICAM_ENV_NAME;
-        constexpr const char *root = AMIGA_EBUS_GENICAM_ROOT;
+        constexpr const char *name = PHENOMATE_EBUS_GENICAM_ENV_NAME;
+        constexpr const char *root = PHENOMATE_EBUS_GENICAM_ROOT;
         if (name[0] == '\0') {
             return; // built without SDK detection; nothing to bootstrap
         }

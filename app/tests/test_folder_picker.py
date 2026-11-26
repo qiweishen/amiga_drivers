@@ -43,7 +43,7 @@ class FolderBrowserTests(unittest.TestCase):
         self.directory = Path(self.stack.enter_context(TemporaryDirectory())).resolve()
         self.root = self.directory / "recordings"
         self.root.mkdir()
-        self.stack.enter_context(patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(self.root)}))
+        self.stack.enter_context(patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": str(self.root)}))
         self.stack.enter_context(patch.object(folder_picker.config_store, "REPO_ROOT", self.root))
 
     def test_missing_initial_uses_nearest_existing_parent_without_creating_it(self):
@@ -70,7 +70,7 @@ class FolderBrowserTests(unittest.TestCase):
                 self.assertEqual(folder_picker.initial_directory(str(value)), self.root)
 
     def test_unset_data_root_is_project_root_not_filesystem_root(self):
-        with patch.dict(os.environ, {"AMIGA_DATA_ROOT": ""}):
+        with patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": ""}):
             listing = folder_picker.list_directory(str(self.root))
             self.assertEqual(listing.root, self.root)
             self.assertEqual(listing.path, self.root)
@@ -122,7 +122,7 @@ class FolderBrowserTests(unittest.TestCase):
         regular_file = self.directory / "file-root"
         regular_file.write_text("not a directory", encoding="utf-8")
         for root in (self.directory / "missing-root", regular_file):
-            with patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(root)}):
+            with patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": str(root)}):
                 for operation in (folder_picker.initial_directory, folder_picker.list_directory,
                                   folder_picker.checked_selection):
                     with self.subTest(root=root, operation=operation.__name__), self.assertRaises(RuntimeError):
@@ -155,7 +155,7 @@ class FolderBrowserTests(unittest.TestCase):
         hidden_root = hidden_parent / ".recordings"
         child = hidden_root / "field"
         child.mkdir(parents=True)
-        with patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(hidden_root)}):
+        with patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": str(hidden_root)}):
             listing = folder_picker.list_directory(str(hidden_root))
             self.assertEqual(listing.root, hidden_root)
             self.assertEqual(listing.directories, (child,))

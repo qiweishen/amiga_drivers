@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the remaining C++/GUI statistics-display contract.
 
-Lifecycle and final results come only from amiga-run-v1; human-readable log
+Lifecycle and final results come only from phenomate-run-v1; human-readable log
 messages are not a control protocol. This check covers fps fields, module routing
 and multi-instance tags used by app.services.driver_stats.
 """

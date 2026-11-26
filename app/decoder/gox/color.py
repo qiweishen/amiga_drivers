@@ -3,7 +3,7 @@
 This module neither reads nor writes files. ``frame_exposure_from_device``
 interprets an already-loaded device.json document. Applying a calibration to
 other frames (exposure-ratio scaling, batch correction) is done offline by
-amiga_decoders; this app only fits, stores (``ColorCalibration.to_dict`` into
+PhenomateDecoders; this app only fits, stores (``ColorCalibration.to_dict`` into
 reference.json) and previews it.
 
 ``exposure_time_us`` means the actual integration time: the ExposureTime

@@ -50,7 +50,7 @@ async def spawn(args: list[str]) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *args, cwd=REPO_ROOT,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "AMIGA_STATUS_FILE": str(RUNTIME_DIR / "acquisition.json")},
+        env={**os.environ, "PHENOMATE_STATUS_FILE": str(RUNTIME_DIR / "acquisition.json")},
         start_new_session=True,
     )
 
@@ -59,14 +59,24 @@ async def gated_tool(args: list[str]) -> asyncio.subprocess.Process:
     # The PID survives exec; tool_jobs journals it before sending GO.
     gate = 'printf "%s\\n" "$$"; IFS= read -r permit && [ "$permit" = GO ] && exec "$@"'
     return await asyncio.create_subprocess_exec(
-        "/bin/sh", "-c", gate, "amiga-tool", *args, cwd=REPO_ROOT,
+        "/bin/sh", "-c", gate, "phenomate-tool", *args, cwd=REPO_ROOT,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
 
 
+# `pgrep -x` matches the kernel process name, which keeps only the first 15
+# bytes of the executable name; a longer pattern ("PhenomateDrivers" has 16)
+# would never match.
+_COMM_LEN = 15
+
+
+def _pgrep_args(name: str) -> list[str]:
+    return ["pgrep", "-x", name[:_COMM_LEN]]
+
+
 async def pgrep(name: str) -> bool:
-    res = await exec_(["pgrep", "-x", name], timeout=5)
+    res = await exec_(_pgrep_args(name), timeout=5)
     if res.code not in (0, 1):
         raise RuntimeError(f"Cannot inspect {name}: {res.stderr.strip() or res.code}")
     return res.code == 0
@@ -96,7 +106,7 @@ def process_identity(pid: int) -> ProcessIdentity:
 
 
 async def running_process(name: str) -> ProcessIdentity | None:
-    result = await exec_(["pgrep", "-x", name], timeout=5)
+    result = await exec_(_pgrep_args(name), timeout=5)
     if result.code == 1:
         return None
     pids = result.stdout.split()

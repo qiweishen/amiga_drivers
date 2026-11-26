@@ -27,11 +27,11 @@
 #include "time_util.h"
 #include "utility.h"
 
-#ifndef AMIGA_DRIVERS_VERSION
-#define AMIGA_DRIVERS_VERSION "unknown"
+#ifndef PHENOMATE_DRIVERS_VERSION
+#define PHENOMATE_DRIVERS_VERSION "unknown"
 #endif
-#ifndef AMIGA_DRIVERS_GIT_SHA
-#define AMIGA_DRIVERS_GIT_SHA "unknown"
+#ifndef PHENOMATE_DRIVERS_GIT_SHA
+#define PHENOMATE_DRIVERS_GIT_SHA "unknown"
 #endif
 
 
@@ -53,7 +53,7 @@ namespace {
 
         // Init logging system
         const std::string log_file = config.data_folder_path / fmt::format("log_{}.log", config.timestamp);
-        common::Logger::Init({log_file, false}, "AmigaDrivers");
+        common::Logger::Init({log_file, false}, "PhenomateDrivers");
     }
 
 
@@ -79,7 +79,7 @@ namespace {
         common::DriversJson drivers_json(main_config.data_folder_path / "drivers.json");
         drivers_json.SetMeta(main_config.operator_name, main_config.field_name);
         drivers_json.SetRun(main_config.timestamp, main_config.output_directory);
-        drivers_json.SetVersion(AMIGA_DRIVERS_VERSION, AMIGA_DRIVERS_GIT_SHA);
+        drivers_json.SetVersion(PHENOMATE_DRIVERS_VERSION, PHENOMATE_DRIVERS_GIT_SHA);
 
 
         try {

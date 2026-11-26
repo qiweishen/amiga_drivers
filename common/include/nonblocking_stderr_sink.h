@@ -2,7 +2,7 @@
 
 // Console sink that never blocks the logging thread.
 //
-// stderr of the AmigaDrivers process is a pipe held by the web GUI (or by
+// stderr of the PhenomateDrivers process is a pipe held by the web GUI (or by
 // `docker exec`). If that reader stalls, a blocking write would stall every
 // driver thread that logs — the acquisition threads included — and the queues
 // behind them would overflow. On a non-TTY stderr the descriptor is switched to

@@ -353,7 +353,7 @@ TEST_CASE("Commands: ValidationRejectsBadCredentials") {
     CHECK_THROWS_AS(asterx::ValidateReceiverSettings(settings), asterx::ConfigError);
     settings.user = "RxAdmin";
     CHECK_THROWS_AS(asterx::ValidateReceiverSettings(settings), asterx::ConfigError);
-    settings.user = "amiga,1"; // ',' separates command arguments
+    settings.user = "phenomate,1"; // ',' separates command arguments
     CHECK_THROWS_AS(asterx::ValidateReceiverSettings(settings), asterx::ConfigError);
     settings.user = "seventeen_chars_x"; // login UserName is limited to 16 (p.87)
     CHECK(settings.user.size() == 17u);
@@ -380,7 +380,7 @@ TEST_CASE("Commands: ParsesConfigListingAsSsnRxDeliversIt") {
             "$R; lstConfigFile, Current\r\n"
             "$-- BLOCK 1 / 1\r\n"
             "  #setIPSettings, Static, 10.95.2.102, 255.255.255.0, 10.95.2.1, , 0.0.0.0, 0.0.0.0, 0\r\n"
-            "  setUserAccessLevel, User1, \"amiga\", \"Xy12ab\", User\r\n"
+            "  setUserAccessLevel, User1, \"phenomate\", \"Xy12ab\", User\r\n"
             "  setSBFOutput, Stream1, IP12, ExtSensorMeas, OnChange\r\n"
             "  setElevationMask, all, 15\r\n";
     const auto lines = asterx::ParseConfigFileListing(listing);
@@ -444,7 +444,7 @@ TEST_CASE("Commands: VerifyConfigListingAcceptsOursRejectsForeign") {
 
     std::vector<asterx::ConfigLine> ok{
         {true, "setIPSettings", "#setIPSettings, DHCP"},
-        {false, "setUserAccessLevel", "setUserAccessLevel, User1, amiga, pw, User"},
+        {false, "setUserAccessLevel", "setUserAccessLevel, User1, phenomate, pw, User"},
         {false, "setsbfoutput", "setsbfoutput, Stream1, IP12, ExtSensorMeas, OnChange"},
     };
     CHECK_NOTHROW(asterx::VerifyConfigListing(ok, whitelist));

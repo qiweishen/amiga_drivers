@@ -6,8 +6,8 @@ import urllib.request
 
 
 def main() -> None:
-    host = os.environ.get("AMIGA_GUI_HOST", "0.0.0.0")
-    port = os.environ.get("AMIGA_GUI_PORT", "8619")
+    host = os.environ.get("PHENOMATE_GUI_HOST", "0.0.0.0")
+    port = os.environ.get("PHENOMATE_GUI_PORT", "8619")
     # Probe wildcard listeners through loopback; preserve explicit bind addresses.
     host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
     if ":" in host:

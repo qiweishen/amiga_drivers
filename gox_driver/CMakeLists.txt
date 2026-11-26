@@ -4,7 +4,7 @@ add_library(gox_config_core STATIC
     src/app_config.cpp src/apply_plan.cpp src/buffering.cpp src/device_json.cpp
     src/ptp_status.cpp src/user_set.cpp)
 target_include_directories(gox_config_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(gox_config_core PUBLIC amiga_common)
+target_link_libraries(gox_config_core PUBLIC phenomate_common)
 target_compile_options(gox_config_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(gox_device_config STATIC
@@ -13,7 +13,7 @@ add_library(gox_device_config STATIC
 # Do not expose ambiguous app_config.h / ebus/... names to other profiles.
 target_include_directories(gox_device_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/ebus_driver/include)
-target_link_libraries(gox_device_config PRIVATE gox_config_core amiga_ebus eBUS::eBUS)
+target_link_libraries(gox_device_config PRIVATE gox_config_core phenomate_ebus eBUS::eBUS)
 target_compile_options(gox_device_config PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(jai_snapshot tools/snapshot_main.cpp)

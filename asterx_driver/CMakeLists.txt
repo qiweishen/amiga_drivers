@@ -1,6 +1,6 @@
 ################################################################################
 # AsteRx RBi3 Pro+ Driver (Septentrio raw IMU + dual-antenna GNSS recorder)
-# This is a subdirectory of the top-level AmigaDrivers project.
+# This is a subdirectory of the top-level PhenomateDrivers project.
 
 
 ################################################################################
@@ -35,7 +35,7 @@ target_compile_options(ssnrx PRIVATE -w)
 
 
 ################################################################################
-# Driver Library (consumed by the unified AmigaDrivers executable and tests)
+# Driver Library (consumed by the unified PhenomateDrivers executable and tests)
 add_library(asterx_lib STATIC
         src/app_config.cpp
         src/commands.cpp
@@ -64,7 +64,7 @@ target_link_libraries(asterx_lib PUBLIC
         # session.h exposes QObject/QTimer in its public interface
         Qt5::Core
         # Shared common library provides spdlog, yaml-cpp, Threads
-        amiga_common
+        phenomate_common
 )
 
 

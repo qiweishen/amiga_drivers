@@ -51,7 +51,7 @@ void AsterxDriverApp::QtThreadMain(asterx::AppConfig cfg) {
     // At most ONE QCoreApplication per process
     // If another Qt-based driver is ever added, hoist the app object and share
     static int qt_argc = 1; // must outlive the app object (Qt keeps references)
-    static char qt_arg0[] = "AmigaDrivers-AsteRx";
+    static char qt_arg0[] = "PhenomateDrivers-AsteRx";
     static char *qt_argv[] = {qt_arg0, nullptr};
     QCoreApplication app(qt_argc, qt_argv);
 

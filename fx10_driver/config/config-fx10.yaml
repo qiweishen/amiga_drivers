@@ -59,7 +59,7 @@ features:
         -   { name: LineSource, type: enum, value: ExposureActive }
 
 
-# --- Output (eBUS RAW; offline conversion belongs to amiga_decoders) ---
+# --- Output (eBUS RAW; offline conversion belongs to PhenomateDecoders) ---
 output:
     rotation:
         max_lines: 0                    # RAW SDK records; 0 = no count-based rotation

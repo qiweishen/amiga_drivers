@@ -42,7 +42,7 @@ class MainConfigFieldTests(unittest.TestCase):
         self.stack.enter_context(patch.object(config_store, "STATE", self.state))
         self.stack.enter_context(patch.object(config_store, "get", return_value=ConfigFile("main", "Main", self.path)))
         self.require_owner = self.stack.enter_context(patch.object(config_store.control_owner, "require"))
-        self.stack.enter_context(patch.dict(os.environ, {"AMIGA_DATA_ROOT": ""}))
+        self.stack.enter_context(patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": ""}))
 
     def contents(self):
         return self.path.read_text(encoding="utf-8")
@@ -163,7 +163,7 @@ class MainConfigFieldTests(unittest.TestCase):
 
     def test_output_path_respects_shared_root_and_does_not_create_a_directory(self):
         allowed = self.directory / "new recording directory"
-        with patch.dict(os.environ, {"AMIGA_DATA_ROOT": str(self.directory)}):
+        with patch.dict(os.environ, {"PHENOMATE_DATA_ROOT": str(self.directory)}):
             with self.assertRaises(ValueError):
                 config_store.set_main_fields({"Output Directory": str(self.directory.parent / "outside")},
                                              expected_values={"Output Directory": "./data"})

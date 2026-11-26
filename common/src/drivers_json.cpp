@@ -74,7 +74,7 @@ namespace common {
 
 
     DriversJson::DriversJson(std::string path) : path_(std::move(path)), start_(std::chrono::steady_clock::now()) {
-        if (const char *value = std::getenv("AMIGA_STATUS_FILE"); value && *value) {
+        if (const char *value = std::getenv("PHENOMATE_STATUS_FILE"); value && *value) {
             control_path_ = value;
         }
         std::string stat, boot, ticks;
@@ -85,7 +85,7 @@ namespace common {
             std::istringstream fields(stat.substr(end + 1));
             for (int field = 3; field <= 22 && fields; ++field) fields >> ticks;
         }
-        doc_["status_schema"] = "amiga-run-v1";
+        doc_["status_schema"] = "phenomate-run-v1";
         doc_["process"] = {{"pid", ::getpid()}, {"start_ticks", ticks}, {"boot_id", boot}};
         doc_["lifecycle"] = {{"phase", "initializing"}, {"configuration_read", false},
                               {"sensors", nlohmann::ordered_json::object()}, {"revision", 0}};

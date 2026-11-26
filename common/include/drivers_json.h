@@ -16,7 +16,7 @@ namespace common {
         // Run header; call before WriteRunning()
         void SetRun(const std::string &timestamp, const std::string &output_directory);
 
-        // Build identity of the whole AmigaDrivers process (project version +
+        // Build identity of the whole PhenomateDrivers process (project version +
         // caller-supplied revision baked at configure time); call before WriteRunning()
         void SetVersion(const std::string &version, const std::string &git_sha);
 
